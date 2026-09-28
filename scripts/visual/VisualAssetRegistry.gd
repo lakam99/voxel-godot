@@ -31,8 +31,11 @@ var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
 var last_errors: Array[String] = []
 var loaded := false
+var generation_revision := 0
 
 func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
+    generation_revision += 1
+    loaded = false
     assets_by_id.clear()
     assets_by_family.clear()
     scene_cache.clear()
@@ -98,26 +101,13 @@ func cache_asset_scenes() -> bool:
             last_errors.append("%s missing file %s" % [asset_id, absolute_path])
             ok = false
             continue
-        var document := GLTFDocument.new()
-        var state := GLTFState.new()
-        var import_error := document.append_from_file(absolute_path, state)
-        if import_error != OK:
-            last_errors.append("%s GLB import failed: %s" % [asset_id, str(import_error)])
-            ok = false
-            continue
-        var root := document.generate_scene(state)
-        if root == null:
-            last_errors.append("%s GLB generated no scene" % asset_id)
-            ok = false
-            continue
-        root.name = asset_id
-        apply_render_policy(root, asset_id)
-        root.set_meta("render_policy_preapplied", true)
-        var packed := PackedScene.new()
-        var pack_error := packed.pack(root)
-        root.free()
-        if pack_error != OK:
-            last_errors.append("%s PackedScene pack failed: %s" % [asset_id, str(pack_error)])
+        # Runtime GLBs are project assets. Keep the importer-owned PackedScene
+        # and hydrate nodes from it on the main thread; repacking a generated
+        # GLTF tree retains transient render resources after its source tree is
+        # freed, which produces invalid RIDs in the headless dummy renderer.
+        var packed := ResourceLoader.load(resource_path, "PackedScene", ResourceLoader.CACHE_MODE_REUSE) as PackedScene
+        if packed == null:
+            last_errors.append("%s imported PackedScene load failed: %s" % [asset_id, resource_path])
             ok = false
             continue
         scene_cache[asset_id] = packed
@@ -135,6 +125,16 @@ func read_text(path: String) -> String:
 
 func is_ready() -> bool:
     return loaded
+
+func generation_receipt() -> Dictionary:
+    # Lifecycle only: public asset dictionaries/resources are mutable, so a
+    # native capture must copy and validate the relevant payload separately.
+    return {
+        "owner_id": get_instance_id(),
+        "revision": generation_revision,
+        "ready": loaded,
+        "catalog": environment_catalog.generation_receipt() if environment_catalog != null else {}
+    }
 
 func asset_count() -> int:
     return assets_by_id.size()
@@ -281,6 +281,13 @@ func instantiate_asset(asset_id: String) -> Node3D:
     var scene := scene_cache.get(asset_id) as PackedScene
     if scene == null:
         return null
+    # Imported GLB meshes are renderer presentation, not world or collision
+    # authority. Godot's dummy renderer can load and retain the importer-owned
+    # PackedScene, but hydrating that scene may hand an imported ArrayMesh RID to
+    # an incompatible dummy mesh owner. Preserve deterministic asset selection
+    # and source identity headlessly without asking the renderer to publish it.
+    if not imported_scene_visual_publication_supported(DisplayServer.get_name()):
+        return headless_imported_scene_proxy(asset_id, scene)
     var instance := scene.instantiate()
     var node := instance as Node3D
     if node == null:
@@ -292,6 +299,20 @@ func instantiate_asset(asset_id: String) -> Node3D:
     if not bool(node.get_meta("render_policy_preapplied", false)):
         apply_render_policy(node, asset_id)
     return node
+
+static func imported_scene_visual_publication_supported(display_server_name: String) -> bool:
+    return display_server_name.strip_edges().to_lower() != "headless"
+
+func headless_imported_scene_proxy(asset_id: String, scene: PackedScene) -> Node3D:
+    var proxy := Node3D.new()
+    proxy.name = "HeadlessImportedVisualProxy"
+    proxy.set_meta("visual_source", "generated_asset")
+    proxy.set_meta("visual_asset_id", asset_id)
+    proxy.set_meta("headless_visual_proxy", true)
+    proxy.set_meta("visual_publication", "headless_imported_scene_proxy")
+    proxy.set_meta("imported_scene_resource_path", scene.resource_path if scene != null else "")
+    apply_render_policy(proxy, asset_id)
+    return proxy
 
 func apply_render_policy(node: Node3D, asset_id: String) -> void:
     var asset: Dictionary = assets_by_id.get(asset_id, {})
@@ -336,6 +357,8 @@ func apply_render_policy_recursive(node: Node, family: String, shadow_policy: in
         if WIND_TREE_FAMILIES.has(family):
             apply_tree_wind_materials(mesh_instance)
             mesh_instance.extra_cull_margin = TREE_WIND_CULL_MARGIN
+        if family == "bush":
+            apply_bush_materials(mesh_instance)
     for child in node.get_children():
         apply_render_policy_recursive(child, family, shadow_policy, visibility_end)
 
@@ -347,6 +370,28 @@ func apply_tree_wind_materials(mesh_instance: MeshInstance3D) -> void:
         if source_material == null:
             source_material = mesh_instance.mesh.surface_get_material(surface_index)
         mesh_instance.set_surface_override_material(surface_index, shared_tree_wind_material(source_material))
+
+
+func apply_bush_materials(mesh_instance: MeshInstance3D) -> void:
+    if mesh_instance.mesh == null:
+        return
+    for surface_index in range(mesh_instance.mesh.get_surface_count()):
+        var source_material := mesh_instance.get_surface_override_material(surface_index)
+        if source_material == null:
+            source_material = mesh_instance.mesh.surface_get_material(surface_index)
+        var role := "leaf_primary"
+        if source_material != null:
+            role = String(source_material.resource_name).to_lower()
+        var material := StandardMaterial3D.new()
+        material.resource_name = role
+        material.roughness = 0.92
+        if "trunk" in role or "stem" in role:
+            material.albedo_color = Color(0.18, 0.075, 0.025)
+        elif "secondary" in role:
+            material.albedo_color = Color(0.13, 0.255, 0.085)
+        else:
+            material.albedo_color = Color(0.19, 0.34, 0.115)
+        mesh_instance.set_surface_override_material(surface_index, material)
 
 func shared_tree_wind_material(source_material: Material) -> ShaderMaterial:
     var role := "tree_default"
@@ -467,10 +512,13 @@ func rock_scale_for_biome(biome: String) -> float:
     return float(profile.get("rock_scale")) if profile else 1.0
 
 func disable_asset_for_test(asset_id: String) -> void:
-    if asset_id != "":
+    if asset_id != "" and not disabled_asset_ids.has(asset_id):
+        generation_revision += 1
         disabled_asset_ids[asset_id] = true
 
 func clear_test_disabled_assets() -> void:
+    if not disabled_asset_ids.is_empty():
+        generation_revision += 1
     disabled_asset_ids.clear()
 
 func stable_index(text: String, modulo: int) -> int:

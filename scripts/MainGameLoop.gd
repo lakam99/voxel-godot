@@ -1,5 +1,9 @@
 extends "res://scripts/MainSetupScene.gd"
 
+const LOCAL_LIGHT_FILL_VISIBLE_LIMIT := 48
+const LOCAL_LIGHT_SOURCE_VISIBLE_LIMIT := 12
+const LOCAL_LIGHT_SOURCE_SHADOW_LIMIT := 4
+
 func update_sky(delta: float) -> void:
     var monitor = runtime_perf_monitor
     var freeze_intro_night := advance_world_clock(delta)
@@ -44,7 +48,10 @@ func update_sky(delta: float) -> void:
         var weather_start: int = monitor.begin_section("sky_weather") if monitor != null else Time.get_ticks_usec()
         var biome := biome_at_world(observer)
         var weather_state: Dictionary
-        if freeze_intro_night:
+        if launch_options.forceClearWeather:
+            weather_system.force_weather("clear", 0.0, 0.0, observer, day)
+            weather_state = weather_system.snapshot()
+        elif freeze_intro_night:
             weather_system.force_weather("rain", 0.88, 0.94, observer)
             weather_state = weather_system.snapshot()
         else:
@@ -117,6 +124,11 @@ func update_fire_light_day_factor(day: float) -> void:
             light.set_day_factor(day)
 
 func update_local_light_rig_lod(delta: float) -> void:
+    # The dummy headless renderer has no valid light/shadow RID ownership.
+    # Runtime and visual acceptance exercise this policy in headed Forward+;
+    # headless gameplay fixtures must leave renderer-only state untouched.
+    if DisplayServer.get_name().to_lower() == "headless":
+        return
     local_light_lod_elapsed += delta
     if local_light_lod_elapsed < 0.25:
         return
@@ -125,7 +137,7 @@ func update_local_light_rig_lod(delta: float) -> void:
         update_terrain_local_light_uniforms()
         return
     var observer := player.global_position
-    var candidates := []
+    var fill_candidates := []
     for light_value in get_tree().get_nodes_in_group("local_light_rig_fill"):
         if not is_instance_valid(light_value):
             continue
@@ -139,15 +151,49 @@ func update_local_light_rig_lod(delta: float) -> void:
         var distance := observer.distance_to(light.global_position)
         var max_distance := float(light.get_meta("rig_lod_distance", 56.0))
         if distance <= max_distance:
-            candidates.append({ "light": light, "distance": distance })
+            fill_candidates.append({ "light": light, "distance": distance })
         elif light.has_method("set_lod_visible"):
             light.set_lod_visible(false)
-    candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
-    var max_active := 48
-    for index in range(candidates.size()):
-        var light := candidates[index]["light"] as Light3D
+    fill_candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
+    for index in range(fill_candidates.size()):
+        var light := fill_candidates[index]["light"] as Light3D
         if light != null and light.has_method("set_lod_visible"):
-            light.set_lod_visible(index < max_active)
+            light.set_lod_visible(index < LOCAL_LIGHT_FILL_VISIBLE_LIMIT)
+
+    # Omni shadows render the scene once per cube face. Keep the warm source
+    # lights around the player, but limit shadow ownership to the nearest few
+    # sources so streamed towns and the citadel cannot multiply the entire
+    # shadow pass by every retained torch and lantern.
+    var source_candidates := []
+    for light_value in get_tree().get_nodes_in_group("local_light_rig_source"):
+        if not is_instance_valid(light_value):
+            continue
+        var light := light_value as Light3D
+        if light == null:
+            continue
+        var distance := observer.distance_to(light.global_position)
+        var max_distance := float(light.get_meta("rig_lod_distance", 56.0))
+        if distance <= max_distance:
+            source_candidates.append({ "light": light, "distance": distance })
+        else:
+            if light.has_method("set_lod_visible"):
+                light.set_lod_visible(false)
+            if light.has_method("set_lod_shadow_enabled"):
+                light.set_lod_shadow_enabled(false)
+            else:
+                light.shadow_enabled = false
+    source_candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
+    for index in range(source_candidates.size()):
+        var light := source_candidates[index]["light"] as Light3D
+        if light == null:
+            continue
+        if light.has_method("set_lod_visible"):
+            light.set_lod_visible(index < LOCAL_LIGHT_SOURCE_VISIBLE_LIMIT)
+        var enable_shadow := shadows_enabled and index < LOCAL_LIGHT_SOURCE_SHADOW_LIMIT
+        if light.has_method("set_lod_shadow_enabled"):
+            light.set_lod_shadow_enabled(enable_shadow)
+        else:
+            light.shadow_enabled = enable_shadow and bool(light.get_meta("casts_shadow_when_enabled", false))
     update_terrain_local_light_uniforms()
 
 func update_terrain_local_light_uniforms() -> void:

@@ -151,7 +151,7 @@ func unlock_all_crafting_groups_for_tests() -> void: pass
 func _sync_inventory_totals() -> void: pass
 func save_world(show_message := true) -> bool: return false
 func try_load_world(show_message := false) -> bool: return false
-func start_new_game(show_message := true) -> bool: return false
+func try_load_world_staged(show_message := false, snapshot_override: Dictionary = {}) -> bool: return false
 func reset_runtime_world_state(reload_world := true) -> void: pass
 func create_save_snapshot() -> Dictionary: return {}
 func apply_save_snapshot(snapshot: Dictionary) -> bool: return false
@@ -275,7 +275,7 @@ func _unhandled_input(event: InputEvent) -> void: pass
 func select_hotbar_delta(delta: int) -> int: return 0
 func update_hud_frame(delta: float) -> void: pass
 func update_hud(message: String = "", throttled: bool = false) -> void: pass
-func show_action_message(message: String) -> void: pass
+func show_action_message(message: String, passive := false) -> void: pass
 func hud_refresh_stats() -> Dictionary: return {}
 func update_exploration_state(cell: Vector2i, biome: String) -> void: pass
 func discover_landmarks_near(position: Vector3, radius: float = CELL * 8.0) -> int: return 0
@@ -305,6 +305,8 @@ func map_marker_summary(points: Array) -> String: return ""
 func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array: return []
 func map_color_for_sample(biome: String, height: float) -> Color: return Color.WHITE
 func invalidate_navigation_marker_cache() -> void: pass
+func register_navigation_marker_block(_cell: Vector3i, _body: Node3D, _block_type: String) -> void: pass
+func unregister_navigation_marker_block(_cell: Vector3i, _body: Node = null) -> void: pass
 func _on_ui_slot_clicked(index: int) -> void: pass
 func _on_ui_slot_moved(from_index: int, to_index: int) -> void: pass
 func _on_craft_requested(recipe_id: String) -> void: pass
@@ -334,7 +336,7 @@ func apply_runtime_settings() -> void: pass
 func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> void: pass
 func apply_local_light_shadows(root: Node = null) -> void: pass
 func update_performance_overlay(delta: float) -> void: pass
-func debug_performance_state() -> Dictionary: return {}
+func debug_performance_state(_include_scene_inventory := true, _include_npc_debug := true) -> Dictionary: return {}
 func count_nodes_with_meta(node: Node, key: String, expected: String = "") -> int: return 0
 func count_visual_nodes(node: Node) -> int: return 0
 func count_physics_bodies(node: Node) -> int: return 0
@@ -415,6 +417,7 @@ func spawn_detail_batch(parent: Node3D, detail_type: String, transforms: Array) 
 func detail_material(detail_type: String) -> Material: return null
 func detail_mesh(detail_type: String) -> Mesh: return null
 func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator): return null
+func make_tree_from_runtime_request(parent: Node3D, prop_id: String, position: Vector3, biome: String, runtime_request: Dictionary, rotation_y: float) -> Dictionary: return {}
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator): return null
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array: return []
 func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator): return null

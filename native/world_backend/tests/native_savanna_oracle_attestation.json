@@ -1,0 +1,40 @@
+{
+  "schema": "native-tree-oracle-attestation-config/v1",
+  "family": "savanna",
+  "nativeEnvironment": "VWB_NATIVE_SAVANNA_ORACLE",
+  "authoritySources": [
+    "scripts/environment/TreeSpawnService.gd",
+    "scripts/environment/tree_grammars/MathematicalTreePocRecipeBuilder.gd",
+    "scripts/environment/tree_grammars/MathematicalTreePocSavannaRecipeBuilder.gd"
+  ],
+  "nativeAuthoritySources": [
+    "native/world_backend/core/native_conifer_raw_runtime_reducer.cpp",
+    "native/world_backend/core/native_conifer_raw_runtime_reducer.hpp",
+    "native/world_backend/core/native_conifer_worker_recipe.cpp",
+    "native/world_backend/core/native_conifer_worker_recipe.hpp",
+    "native/world_backend/core/native_savanna_recipe.cpp",
+    "native/world_backend/core/native_savanna_recipe.hpp",
+    "native/world_backend/core/native_savanna_worker_recipe.cpp",
+    "native/world_backend/core/native_savanna_worker_recipe.hpp",
+    "native/world_backend/core/native_tree_artifact.cpp",
+    "native/world_backend/core/native_tree_artifact.hpp",
+    "native/world_backend/core/native_tree_worker_text_admission.hpp",
+    "native/world_backend/source-manifest.json",
+    "native/world_backend/tests/native_conifer_worker_recipe_tests.cpp",
+    "native/world_backend/tests/native_savanna_oracle_observation.cpp",
+    "native/world_backend/tests/native_savanna_worker_recipe_tests.cpp",
+    "native/world_backend/tests/native_tree_artifact_tests.cpp"
+  ],
+  "raw": {
+    "godotScript": "res://native/world_backend/tests/native_savanna_recipe_oracle.gd",
+    "godotPrefix": "VWB_SAVANNA_ORACLE:",
+    "nativePrefix": "VWB_NATIVE_SAVANNA_ORACLE:",
+    "expectedCases": 4
+  },
+  "worker": {
+    "godotScript": "res://native/world_backend/tests/native_savanna_worker_recipe_oracle.gd",
+    "godotPrefix": "VWB_SAVANNA_WORKER_ORACLE:",
+    "nativePrefix": "VWB_NATIVE_SAVANNA_WORKER_ORACLE:",
+    "expectedCases": 7
+  }
+}

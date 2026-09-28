@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runToolMain } from '../lib/voxel-tool-runtime.mjs';
+import { runSourceAudit } from '../lib/npc-source-audit.mjs';
 
-await runToolMain('npc/assert-npc-legacy-pathfinding-clean');
+await runSourceAudit('npc/assert-npc-legacy-pathfinding-clean');

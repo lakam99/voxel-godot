@@ -66,6 +66,10 @@ var recovery_policy
 var plan_executor
 var simulation_lod
 var route_authority_v2
+var _pending_prop_unloads: Dictionary = {}
+var _pending_door_unloads: Dictionary = {}
+var _last_route_service_owned_actor_count := 0
+var _last_route_service_invocation_count := 0
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -120,16 +124,47 @@ func setup(system_node: Node, main_node: Node) -> void:
 	})
 
 func _physics_process(delta: float) -> void:
+	# Keep physics attribution aggregate and constant-cost. In particular, do not
+	# publish a duration for every actor: the headed observation only needs the
+	# callback/stage totals plus truthful actor/service counts.
+	var monitor = performance_monitor()
+	var callback_start: int = monitor.begin_section("npc_physics_callback") if monitor != null else 0
 	if route_authority_v2 != null:
-		route_authority_v2.begin_frame()
-	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
-	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
+		route_authority_v2.begin_frame(Engine.get_process_frames())
+	var stage_start: int = monitor.begin_section("npc_physics_navigation_changes") if monitor != null else 0
+	_process_navigation_changes_with_monitor(
+		NAV_CHANGE_EVENTS_PER_PHYSICS_TICK,
+		NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK,
+		monitor
+	)
+	if monitor != null:
+		monitor.end_section("npc_physics_navigation_changes", stage_start)
+	stage_start = monitor.begin_section("npc_physics_tile_build") if monitor != null else 0
+	_build_navigation_tiles_with_monitor(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK, monitor)
+	if monitor != null:
+		monitor.end_section("npc_physics_tile_build", stage_start)
+	stage_start = monitor.begin_section("npc_physics_dirty_regions") if monitor != null else 0
 	process_navmesh_dirty_regions(1)
+	if monitor != null:
+		monitor.end_section("npc_physics_dirty_regions", stage_start)
+	stage_start = monitor.begin_section("npc_physics_traffic") if monitor != null else 0
 	advance_traffic(delta)
+	if monitor != null:
+		monitor.end_section("npc_physics_traffic", stage_start)
+	stage_start = monitor.begin_section("npc_physics_route_service") if monitor != null else 0
 	service_active_route_work(delta)
+	if monitor != null:
+		monitor.end_section("npc_physics_route_service", stage_start)
+		monitor.observe_gauge("npc_physics_owned_actor_count", float(_last_route_service_owned_actor_count))
+		monitor.observe_gauge("npc_physics_route_service_invocation_count", float(_last_route_service_invocation_count))
+		monitor.increment_counter("npc_physics_callbacks", 1)
+		monitor.increment_counter("npc_physics_owned_actor_count", _last_route_service_owned_actor_count)
+		monitor.increment_counter("npc_physics_route_service_invocation_count", _last_route_service_invocation_count)
+		monitor.end_section("npc_physics_callback", callback_start)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
+		if navmesh_world != null: navmesh_world.finish_publication_for_owner_exit()
 		_clear_navmesh_world()
 
 func clear() -> void:
@@ -172,6 +207,7 @@ func shutdown_for_process_exit() -> void:
 	# clear() deliberately reconstructs services for an in-session world reset.
 	# Process exit has the opposite contract: release the navigation map and all
 	# service references without allocating a fresh routing graph.
+	if navmesh_world != null: navmesh_world.finish_publication_for_owner_exit()
 	contexts_by_instance_id.clear()
 	contexts_by_stable_id.clear()
 	blackboards_by_stable_id.clear()
@@ -277,6 +313,8 @@ func generated_navigation_adapter():
 	return pathing.get("navigation_world")
 
 func begin_update_frame() -> void:
+	if route_authority_v2 != null:
+		route_authority_v2.begin_frame(Engine.get_process_frames())
 	if plan_executor != null and plan_executor.has_method("begin_update_frame"):
 		plan_executor.begin_update_frame()
 
@@ -342,6 +380,8 @@ func physics_route_service_owns_motion(entry: Dictionary) -> bool:
 
 
 func service_active_route_work(delta: float) -> void:
+	_last_route_service_owned_actor_count = 0
+	_last_route_service_invocation_count = 0
 	if plan_executor == null or npc_system == null:
 		return
 	var entries = npc_system.get("npcs")
@@ -353,12 +393,16 @@ func service_active_route_work(delta: float) -> void:
 		var entry: Dictionary = entry_value
 		if not physics_route_service_owns_motion(entry):
 			continue
+		_last_route_service_owned_actor_count += 1
 		if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
 			record_motion_skipped(entry, "topology_hold")
 			continue
 		if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
 			record_motion_skipped(entry, "abstract")
 			continue
+		# This counts executor invocations, including calls that truthfully report
+		# no movement advance. It is not a completed-motion counter.
+		_last_route_service_invocation_count += 1
 		var result: Dictionary = plan_executor.advance_physics_route_service(entry, delta)
 		if bool(result.get("advanced", false)):
 			record_motion_update(entry, result)
@@ -503,6 +547,8 @@ func home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
 	return perception_service.home_interior_status(entry, position)
 
 func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
+	if plan_executor != null and plan_executor.has_method("clear_trader_fallback_target_selection"):
+		plan_executor.clear_trader_fallback_target_selection(entry, reason)
 	release_npc_traffic_reservations(entry, reason)
 	var body := entry.get("body") as Node
 	release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
@@ -518,9 +564,36 @@ func cancel_active_route_request(entry: Dictionary, reason := "order_replaced") 
 	var request_id := String(active.get("requestId", ""))
 	if request_id == "":
 		return {"ok": true, "cancelled": false, "reason": "missing_request_id"}
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_request"):
+		plan_executor.evict_route_candidate_cache_for_request(request_id)
 	var result: Dictionary = route_authority_v2.cancel_request(request_id, reason)
 	result["cancelled"] = bool(result.get("ok", false))
 	return result
+
+func cancel_and_evict_route_work_for_actor(entry: Dictionary, reason := "actor_demoted") -> Dictionary:
+	# LOD demotion is actor-scoped. Cancel the retained authority request first,
+	# then evict the substrate's actor-unique candidate/search jobs in O(1).
+	var cancellation := {"ok": true, "cancelled": false, "reason": "no_active_request"}
+	if route_authority_v2 != null:
+		var active: Dictionary = route_authority_v2.runtime_for_entry(entry)
+		var request_id := String(active.get("requestId", ""))
+		if request_id != "":
+			cancellation = route_authority_v2.cancel_request(request_id, reason)
+			cancellation["cancelled"] = bool(cancellation.get("ok", false))
+	var evicted := 0
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_actor"):
+		evicted = int(plan_executor.evict_route_candidate_cache_for_actor(entry))
+	var evicted_approach := 0
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("cancel_approach_cell_certification"):
+		evicted_approach = int(generated_world.cancel_approach_cell_certification(entry))
+	return {
+		"ok": bool(cancellation.get("ok", false)),
+		"cancelled": bool(cancellation.get("cancelled", false)),
+		"evictedJobs": evicted,
+		"evictedApproachJobs": evicted_approach,
+		"reason": reason
+	}
 
 func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 	if simulation_lod == null:
@@ -534,6 +607,10 @@ func unregister_npc(body: Node) -> void:
 	var context = contexts_by_instance_id.get(instance_id)
 	if context == null:
 		return
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_actor"):
+		plan_executor.evict_route_candidate_cache_for_actor(context.stable_id)
+	if route_authority_v2 != null and route_authority_v2.has_method("unregister_actor"):
+		route_authority_v2.unregister_actor(context.stable_id, "actor_unregistered")
 	if simulation_lod != null:
 		simulation_lod.unregister_actor(context.stable_id, "actor_unregistered")
 	contexts_by_instance_id.erase(instance_id)
@@ -600,7 +677,8 @@ func notify_terrain_edited(cell: Vector2i, old_height: float, new_height: float)
 	var origin := Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5, min_y, float(cell.y) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5)
 	var bounds := AABB(origin, Vector3(NpcConstantsScript.CELL_SIZE, max_y - min_y, NpcConstantsScript.CELL_SIZE))
 	var object_id := "terrain:%d,%d" % [cell.x, cell.y]
-	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds,
+		NavigationChangeBusScript.terrain_capture_tile_keys_for_bounds(bounds))
 	telemetry.increment(&"change_terrain_edit")
 
 func notify_terrain_cells_edited(cells: Array) -> int:
@@ -619,11 +697,12 @@ func notify_terrain_cells_edited(cells: Array) -> int:
 			bounds_by_tile[tile_key] = bounds
 	for tile_key_value in bounds_by_tile.keys():
 		var tile_key := String(tile_key_value)
+		var edit_bounds: AABB = bounds_by_tile[tile_key]
 		change_bus.emit_change(
 			NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT,
 			"terrain_tile:%s" % tile_key,
-			bounds_by_tile[tile_key],
-			[tile_key]
+			edit_bounds,
+			NavigationChangeBusScript.terrain_capture_tile_keys_for_bounds(edit_bounds)
 		)
 		telemetry.increment(&"change_terrain_edit")
 	return bounds_by_tile.size()
@@ -642,6 +721,44 @@ func notify_chunk_loaded(chunk_key: Vector2i) -> void:
 	var object_id := "chunk:%d,%d" % [chunk_key.x, chunk_key.y]
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED, object_id, _bounds_for_chunk(chunk_key), [NavigationChangeBusScript.tile_key_for_chunk(chunk_key)])
 	telemetry.increment(&"change_chunk_loaded")
+
+func notify_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
+	if smart_objects == null or not is_instance_valid(prop):
+		return {"status":"failed", "reason":"missing_prop_owner"}
+	var result: Dictionary = smart_objects.notify_object_unloaded("prop:%s" % prop_id, prop)
+	if result.get("status") in ["unregistered", "absent"]:
+		# Static snapshots discover props in the scene tree. Notify only when
+		# the owner actually removes this instance, not during child-by-child
+		# teardown while the same intact body is still discoverable.
+		var bounds := AABB()
+		if prop is Node3D:
+			bounds = AABB((prop as Node3D).global_position - Vector3.ONE * NpcConstantsScript.CELL_SIZE * 0.5, Vector3.ONE * NpcConstantsScript.CELL_SIZE)
+		var instance_id := prop.get_instance_id()
+		if _pending_prop_unloads.has(instance_id): return result
+		_pending_prop_unloads[instance_id] = {"propId":prop_id, "bounds":bounds, "registry":weakref(smart_objects)}
+		var callback := Callable(self, "_on_streamed_prop_exiting").bind(instance_id)
+		if prop.is_inside_tree():
+			prop.tree_exiting.connect(callback, CONNECT_ONE_SHOT)
+		else:
+			_on_streamed_prop_exiting(instance_id)
+	return result
+
+func requires_physical_streaming(entry: Dictionary) -> bool:
+	return simulation_lod == null or simulation_lod.requires_physical_streaming(entry)
+
+func _on_streamed_prop_exiting(instance_id: int) -> void:
+	if not _pending_prop_unloads.has(instance_id): return
+	var pending: Dictionary = _pending_prop_unloads[instance_id]
+	_pending_prop_unloads.erase(instance_id)
+	var registry: WeakRef = pending.registry
+	var prop_id: String = pending.propId
+	var bounds: AABB = pending.bounds
+	# A world reset or same-ID replacement must not inherit an old exit event.
+	if registry.get_ref() == null or not is_same(registry.get_ref(), smart_objects): return
+	var registration = smart_objects.registrations.get("prop:%s" % prop_id)
+	if registration != null and is_instance_valid(registration.node) and registration.node.get_instance_id() != instance_id: return
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_PROP_REMOVED, "prop:%s" % prop_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	telemetry.increment(&"change_prop_removed")
 
 func notify_chunk_unloaded(chunk_key: Vector2i) -> void:
 	var object_id := "chunk:%d,%d" % [chunk_key.x, chunk_key.y]
@@ -686,6 +803,47 @@ func notify_door_registered(door: Node) -> void:
 			bounds = AABB(position - Vector3.ONE * 0.5, Vector3.ONE)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED, object_id, bounds, [tile_key])
 	telemetry.increment(&"change_door_registered")
+
+func notify_door_unregistered(door: Node) -> Dictionary:
+	if smart_objects == null or not is_instance_valid(door):
+		return {"status":"failed", "reason":"missing_door_owner"}
+	var instance_id := door.get_instance_id()
+	if not _pending_door_unloads.has(instance_id):
+		var receipt: Dictionary = smart_objects.unregister_door(door)
+		if receipt.get("status") != "unregistered": return receipt
+		_pending_door_unloads[instance_id] = {"receipt":receipt, "registry":weakref(smart_objects), "navigation":weakref(navmesh_world) if navmesh_world != null else null}
+	var pending: Dictionary = _pending_door_unloads[instance_id]
+	if not is_same(pending.registry.get_ref(), smart_objects):
+		return {"status":"failed", "reason":"door_retirement_registry_changed"}
+	var result: Dictionary = pending.receipt
+	var portal_id := String(result.portalId)
+	if bool(result.portalRemoved):
+		# A partial failure retains its exact original portal identity. Never
+		# erase a replacement registered under that ID while a retry was pending.
+		if door_portals.portals.has(portal_id):
+			return {"status":"failed", "reason":"door_retirement_portal_replaced"}
+		if pending.navigation != null:
+			var navigation = pending.navigation.get_ref()
+			if navigation == null or not is_same(navigation, navmesh_world):
+				return {"status":"failed", "reason":"door_retirement_navigation_changed"}
+			var retired: Dictionary = navigation.forget_door_portal(portal_id)
+			if retired.get("status") not in ["forgotten", "absent"]:
+				return {"status":"pending_budget", "reason":"door_navigation_retirement_pending", "portalId":portal_id}
+			result["navigationRetirement"] = retired
+	else:
+		var portal = door_portals.portals.get(portal_id)
+		if portal != null and not portal.leaf_nodes.is_empty():
+			_publish_door_portal_to_navmesh(portal.leaf_nodes[0])
+	# Use ordinary structural invalidation, not a door-state toggle: the leaf's
+	# collision is leaving the world. The streaming owner frees it after this ack.
+	var bounds := AABB()
+	if door.has_meta("cell"):
+		bounds = _bounds_for_cell(door.get_meta("cell"))
+	elif door is Node3D:
+		bounds = AABB((door as Node3D).global_position - Vector3.ONE * 0.5, Vector3.ONE)
+	notify_structure_metadata_changed(portal_id, bounds, {"reason":"door_streamed_out"})
+	_pending_door_unloads.erase(instance_id)
+	return result
 
 func register_door(door: Node, metadata := {}) -> String:
 	if smart_objects == null:
@@ -929,7 +1087,9 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 	return revision
 
 func process_navigation_changes(max_events := -1, max_object_ids := -1) -> Array:
-	var monitor = main.get("runtime_perf_monitor") if main != null else null
+	return _process_navigation_changes_with_monitor(max_events, max_object_ids, performance_monitor())
+
+func _process_navigation_changes_with_monitor(max_events: int, max_object_ids: int, monitor) -> Array:
 	var bus_start: int = monitor.begin_section("nav_change_bus_process") if monitor != null else Time.get_ticks_usec()
 	var events: Array = navigation_world.process_change_bus(max_events, max_object_ids) if navigation_world != null else []
 	if monitor != null:
@@ -965,12 +1125,46 @@ func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 	return navmesh_world.process_dirty_regions(max_jobs)
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
-	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+	var tile_key := String(snapshot.get("tileKey", ""))
+	var publication_snapshot := snapshot
+	var has_geometry := snapshot.get("surfaces") is Array or snapshot.get("buildingSurfaces") is Array
+	if not bool(snapshot.get("unloaded", false)) and not has_geometry and String(snapshot.get("publicationStatus", "ready")) == "ready":
+		if tile_key == "":
+			return {"status":"rejected","reason":"missing_tile_key","queued":false}
+		# LOD prefetch runs in the actor loop. Preserve its metadata demand for
+		# the retained tile service, but let the budgeted publication queue resolve
+		# authoritative geometry instead of generating or installing it here.
+		var demand: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+		return {"status":"pending","reason":"publication_queued","tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority),"navigationWorld":demand}
+	if publication_snapshot.is_empty() or String(publication_snapshot.get("publicationStatus", "ready")) != "ready":
+		return {"status":publication_snapshot.get("publicationStatus", "pending"),"reason":publication_snapshot.get("reason", "source_pending"),"tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority)}
+	if not bool(publication_snapshot.get("unloaded", false)) and not (publication_snapshot.get("surfaces") is Array or publication_snapshot.get("buildingSurfaces") is Array):
+		return {"status":"pending","reason":"missing_snapshot_geometry","tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority)}
+	var result: Dictionary = navigation_world.request_tile(publication_snapshot, priority, profile) if navigation_world != null else {}
 	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
-		navmesh_world.register_tile_snapshot(snapshot)
+		var publication: Dictionary = navmesh_world.register_tile_snapshot(publication_snapshot)
+		if not (String(publication.get("status", "")) == "installed" and bool(publication.get("installed", false))) and String(publication.get("status", "")) != "empty":
+			publication["queued"] = _queue_navigation_tile_demand(tile_key, priority)
+			return publication
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
+
+func _queue_navigation_tile_demand(tile_key: String, priority: int) -> bool:
+	# Use the existing publication queue: it retries against the same generated
+	# source owner, including when preparation or installation is asynchronous.
+	if tile_key == "" or npc_system == null:
+		return false
+	var pathing = npc_system.get("pathing")
+	if pathing == null:
+		return false
+	if pathing.has_method("ensure_ready"):
+		pathing.ensure_ready()
+	var authority = pathing.get("route_planner")
+	var publisher = authority.get("delegate") if authority != null else null
+	if publisher == null or not publisher.has_method("queue_navmesh_tile_publish"):
+		return false
+	return bool(publisher.queue_navmesh_tile_publish(tile_key, priority > 0))
 
 func _publish_door_portal_to_navmesh(door: Node, extra := {}) -> void:
 	if not _navmesh_backend_active() or navmesh_world == null or door_portals == null:
@@ -1003,16 +1197,22 @@ func snapshot_has_transient_lifecycle_state(snapshot: Dictionary) -> bool:
 	return simulation_lod.snapshot_has_transient_state(snapshot) if simulation_lod != null else false
 
 func build_navigation_tiles(max_jobs := 1) -> Array:
+	return _build_navigation_tiles_with_monitor(max_jobs, performance_monitor())
+
+func _build_navigation_tiles_with_monitor(max_jobs: int, monitor) -> Array:
 	if navigation_world == null:
 		return []
 	var started := Time.get_ticks_usec()
 	var built: Array = navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
 	var duration_usec := Time.get_ticks_usec() - started
 	telemetry.record_duration(&"navigation_build_work", duration_usec, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
-	if main != null and main.get("runtime_perf_monitor") != null:
-		main.get("runtime_perf_monitor").observe_duration("navigation_tile_build", float(duration_usec) / 1000.0)
+	if monitor != null:
+		monitor.observe_duration("navigation_tile_build", float(duration_usec) / 1000.0)
 	telemetry.observe_navigation_stats(navigation_world.stats())
 	return built
+
+func performance_monitor():
+	return main.get("runtime_perf_monitor") if main != null else null
 
 func navigation_backend_summary() -> Dictionary:
 	var summary: Dictionary = navigation_backend_config.to_summary() if navigation_backend_config != null else NavigationBackendConfigScript.default_config().to_summary()

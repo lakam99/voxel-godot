@@ -8,6 +8,7 @@ class_name LandmarkFurnishingPlanner
 const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 const CottageFurnishingPlannerScript := preload("res://scripts/buildings/CottageFurnishingPlanner.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
+const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
 
 
 static func build(blueprint, furnishing_seed: int):
@@ -15,6 +16,7 @@ static func build(blueprint, furnishing_seed: int):
 	var plan = FurnishingPlanScript.new("furnishing.%s.%d" % [blueprint_id, furnishing_seed], furnishing_seed, blueprint_id)
 	if blueprint == null:
 		return plan
+	plan.set_protected_access_reservations(InteriorFurnishingLayoutScript.access_reservations(blueprint.rooms))
 	var rooms := rooms_by_role(blueprint.rooms)
 	var public_hall: Dictionary = rooms.get("public_hall", {}) as Dictionary
 	var archive: Dictionary = rooms.get("notice_archive", {}) as Dictionary
@@ -115,6 +117,7 @@ static func build(blueprint, furnishing_seed: int):
 		CottageFurnishingPlannerScript.place_catalogued_in_zones(plan, occupied, civic_store, "store_floor_crates_right", "crate_stack", [Vector2(0.80, 0.60), Vector2(0.76, 0.76)], rng, Vector2(0.025, 0.035))
 		CottageFurnishingPlannerScript.place_catalogued_in_zones(plan, occupied, civic_store, "store_floor_barrels_left", "barrel_stack", [Vector2(0.20, 0.82), Vector2(0.28, 0.66)], rng, Vector2(0.025, 0.030))
 		CottageFurnishingPlannerScript.place_catalogued_in_zones(plan, occupied, civic_store, "store_floor_barrels_right", "barrel_stack", [Vector2(0.80, 0.82), Vector2(0.72, 0.66)], rng, Vector2(0.025, 0.030))
+	BuildingInteriorProgramScript.apply_to_plan(blueprint, plan)
 	return plan
 
 

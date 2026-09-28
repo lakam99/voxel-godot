@@ -91,6 +91,7 @@ func run() -> void:
 	test_world_bottom_is_solid()
 	test_generated_surface_overburden_is_solid()
 	test_air_has_generated_solid_boundaries()
+	test_known_navigation_surface_boundary()
 	test_removed_production_api_absent()
 	save_report()
 	quit(0 if all_passed() else 1)
@@ -112,6 +113,31 @@ func test_sample_determinism() -> void:
 		stable = stable and JSON.stringify(first_signature) == JSON.stringify(second_signature)
 		signatures.append(first_signature)
 	add_result("underground_sample_determinism", stable, JSON.stringify(signatures))
+
+func test_known_navigation_surface_boundary() -> void:
+	var column := Vector3i(7, 0, 7)
+	var surface_y: float = world_generation.surface_y_for_cell(column)
+	var projection: Dictionary = world_generation.navigation_surface_projection_at_known_height(column, surface_y)
+	var volume = world_generation.terrain_volume_service
+	var solid_cell: Vector3i = projection.get("solidCell", Vector3i.ZERO)
+	var air_cell: Vector3i = projection.get("airCell", Vector3i.ZERO)
+	var passed: bool = projection.get("status") == "ready" and bool(projection.get("found", false)) \
+		and bool(projection.get("walkable", false)) and solid_cell.y + 1 == air_cell.y \
+		and is_equal_approx(float((projection.get("position", Vector3.ZERO) as Vector3).y), surface_y) \
+		and int(projection.get("volumeRevision", -1)) == int(volume.revision) \
+		and bool((projection.get("occupancy", {}) as Dictionary).get("walkableAir", false))
+	add_result("navigation_known_surface_boundary_is_exact_and_revision_bound", passed, JSON.stringify(sanitize(projection)))
+	var old_revision := int(volume.revision)
+	var ceiling_state := {
+		"material": "stone", "biome": "plains", "solid": true, "density": 1.0,
+		"fluid": "", "light": {"sky": 0, "block": 0},
+		"metadata": {"source": "navigation_boundary_contract", "terrainMeshAffects": true, "saveDelta": false}
+	}
+	world_generation.apply_box_edit(air_cell + Vector3i(0, 1, 0), air_cell + Vector3i(0, 1, 0), ceiling_state, "navigation_boundary_mismatch")
+	var stale_boundary: Dictionary = world_generation.navigation_surface_projection_at_known_height(column, surface_y)
+	add_result("navigation_known_surface_boundary_rejects_changed_headroom", int(volume.revision) > old_revision \
+		and stale_boundary.get("status") == "mismatch" and not bool(stale_boundary.get("found", true)),
+		JSON.stringify(sanitize(stale_boundary)))
 
 func test_underground_air_exists() -> void:
 	var found: Dictionary = world_generation.call("find_underground_air_sample", SEARCH_RADIUS, 4, 30)

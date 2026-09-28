@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -1733,6 +1734,73 @@ def asset_metadata(spec, obj, relative_path):
     return metadata
 
 
+def rock_glb_geometry(glb_path):
+    """Exact exported glTF-space bounds, tied to the bytes the game imports."""
+    data = glb_path.read_bytes()
+    if len(data) < 28 or struct.unpack_from("<III", data, 0) != (0x46546C67, 2, len(data)):
+        raise RuntimeError(f"Invalid rock GLB header: {glb_path}")
+    offset = 12
+    document = None
+    binary = None
+    while offset < len(data):
+        if offset + 8 > len(data):
+            raise RuntimeError(f"Truncated rock GLB chunk: {glb_path}")
+        length, chunk_type = struct.unpack_from("<II", data, offset)
+        offset += 8
+        if offset + length > len(data):
+            raise RuntimeError(f"Rock GLB chunk exceeds file: {glb_path}")
+        chunk = data[offset:offset + length]
+        if chunk_type == 0x4E4F534A and document is None:
+            document = json.loads(chunk.decode("utf-8"))
+        elif chunk_type == 0x004E4942 and binary is None:
+            binary = chunk
+        offset += length
+    if document is None or binary is None:
+        raise RuntimeError(f"Rock GLB missing JSON or binary: {glb_path}")
+    scenes = document.get("scenes", [])
+    nodes = document.get("nodes", [])
+    meshes = document.get("meshes", [])
+    if len(scenes) != 1 or scenes[0].get("nodes") != [0] or len(nodes) != 1 \
+            or nodes[0].get("mesh") != 0 or len(meshes) != 1 \
+            or any(key in nodes[0] for key in ("translation", "rotation", "scale", "matrix", "children")):
+        raise RuntimeError(f"Rock GLB needs an exact scene-transform receipt: {glb_path}")
+    minimum = [math.inf] * 3
+    maximum = [-math.inf] * 3
+    vertex_count = 0
+    primitives = meshes[0].get("primitives", [])
+    for primitive in primitives:
+        accessor = document["accessors"][primitive["attributes"]["POSITION"]]
+        view = document["bufferViews"][accessor["bufferView"]]
+        if accessor.get("componentType") != 5126 or accessor.get("type") != "VEC3" \
+                or "sparse" in accessor or view.get("buffer") != 0 or accessor.get("count", 0) <= 0:
+            raise RuntimeError(f"Unsupported rock POSITION accessor: {glb_path}")
+        stride = view.get("byteStride", 12)
+        start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+        end = start + (accessor["count"] - 1) * stride + 12
+        if stride < 12 or start < 0 or end > len(binary) \
+                or end > view.get("byteOffset", 0) + view["byteLength"]:
+            raise RuntimeError(f"Rock POSITION exceeds GLB buffer view: {glb_path}")
+        local_min = [math.inf] * 3
+        local_max = [-math.inf] * 3
+        for index in range(accessor["count"]):
+            values = struct.unpack_from("<fff", binary, start + index * stride)
+            for axis, value in enumerate(values):
+                if not math.isfinite(value):
+                    raise RuntimeError(f"Nonfinite rock POSITION: {glb_path}")
+                local_min[axis] = min(local_min[axis], value)
+                local_max[axis] = max(local_max[axis], value)
+                minimum[axis] = min(minimum[axis], value)
+                maximum[axis] = max(maximum[axis], value)
+        if accessor.get("min") != local_min or accessor.get("max") != local_max:
+            raise RuntimeError(f"Rock accessor bounds differ from vertex bytes: {glb_path}")
+        vertex_count += accessor["count"]
+    if vertex_count == 0:
+        raise RuntimeError(f"Rock GLB contains no POSITION vertices: {glb_path}")
+    return {"schema": "rock-glb-geometry/v1", "glbSha256": hashlib.sha256(data).hexdigest(),
+            "min": minimum, "max": maximum, "vertexCount": vertex_count,
+            "primitiveCount": len(primitives), "identitySceneTransform": True}
+
+
 def export_glb(obj, filepath):
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
@@ -2005,6 +2073,8 @@ def main():
         export_glb(obj, glb_path)
         relative_path = Path("assets/visual/generated/environment") / glb_path.name
         metadata = asset_metadata(spec, obj, str(relative_path))
+        if spec["family"] == "rock":
+            metadata["rockGeometry"] = rock_glb_geometry(glb_path)
         triangle_limit = int(metadata["triangleLimit"])
         if metadata["triangleCount"] <= 0 or metadata["triangleCount"] > triangle_limit:
             raise RuntimeError(f"{spec['id']} triangle count outside allowed range: {metadata['triangleCount']}")

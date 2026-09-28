@@ -364,14 +364,16 @@ func weather_roll(cell: Vector2i) -> float:
     var phase := float(seed_hash % 997) * 0.017 + float(cell.x) * 0.073 - float(cell.y) * 0.061
     return sin(elapsed * 0.055 + phase) * 0.5 + 0.5
 
-func force_weather(next_kind: String, next_intensity: float, next_cloud_cover: float, observer: Vector3) -> void:
+func force_weather(next_kind: String, next_intensity: float, next_cloud_cover: float, observer: Vector3, day_factor: float = -1.0) -> void:
     kind = next_kind
     intensity = clampf(next_intensity, 0.0, 1.0)
     cloud_cover = clampf(next_cloud_cover, 0.0, 1.0)
     target_intensity = intensity
     target_cloud_cover = cloud_cover
-    update_clouds(0.0, observer, 1.0)
-    update_stars(observer, 0.0)
+    # Existing scripted callers retain their presentation; a session weather
+    # override supplies the actual clock so clear weather does not imply night.
+    update_clouds(0.0, observer, 1.0 if day_factor < 0.0 else clampf(day_factor, 0.0, 1.0))
+    update_stars(observer, 0.0 if day_factor < 0.0 else clampf(day_factor, 0.0, 1.0))
     update_precipitation(0.016, observer)
 
 func set_particle_quality(value: float) -> void:

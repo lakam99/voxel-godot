@@ -54,3 +54,7 @@ environment_daylight={
 [rendering]
 
 environment/defaults/default_clear_color=Color(0.66, 0.84, 0.87, 1)
+
+[voxel]
+
+threads/count/ratio_over_max=0.25

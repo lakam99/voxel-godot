@@ -26,7 +26,8 @@ func navigation_map_state() -> Dictionary:
     var heading := deg_to_rad(heading_degrees())
     var cache_cell := Vector2i(int(floor(float(player_cell.x) / 2.0)) * 2, int(floor(float(player_cell.y) / 2.0)) * 2)
     var hostile_count: int = hostile_system.enemies.size() if hostile_system else 0
-    var cache_key := "%d,%d:%d:%s:%d:%d" % [cache_cell.x, cache_cell.y, roundi(radius), str(map_visible), blocks.size(), hostile_count]
+    var marker_revision := navigation_marker_index.revision() if navigation_marker_index != null else 0
+    var cache_key := "%d,%d:%d:%s:%d:%d" % [cache_cell.x, cache_cell.y, roundi(radius), str(map_visible), marker_revision, hostile_count]
     var sample_key := map_sample_key_for(player_cell, radius) if map_visible else ""
     if cache_key == navigation_map_state_cache_key and navigation_map_state_cache_elapsed < navigation_map_state_cache_interval and not navigation_map_state_cache.is_empty():
         var cached_state: Dictionary = navigation_map_state_cache.duplicate(false)
@@ -46,7 +47,6 @@ func navigation_map_state() -> Dictionary:
         add_map_point(points, "town", "Town", Vector2(float(town.get("centerX", 0)) * CELL - player.global_position.x, float(town.get("centerZ", 0)) * CELL - player.global_position.z), 4.8, radius)
     var marker_scan_start := Time.get_ticks_usec()
     append_navigation_marker_points(points, radius)
-    append_nearby_navigation_marker_points(points, radius)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.observe_duration("hud_navigation_marker_scan", profiled_ms(marker_scan_start))
     if hostile_system:
@@ -230,34 +230,54 @@ func map_sample_key_for(center_cell: Vector2i, radius: float) -> String:
 
 func invalidate_navigation_marker_cache() -> void:
     block_stats_cache_dirty = true
-    navigation_marker_cache_source_key = ""
-    navigation_marker_cache = []
-    navigation_marker_scan_source_key = ""
-    navigation_marker_scan_keys = []
-    navigation_marker_scan_index = 0
-    navigation_marker_scan_seen = {}
+    if navigation_marker_index != null:
+        navigation_marker_index.live_entries(blocks)
     navigation_map_state_cache_key = ""
     navigation_map_state_cache = {}
     navigation_map_state_cache_elapsed = navigation_map_state_cache_interval
 
+func register_navigation_marker_block(cell: Vector3i, body: Node3D, block_type: String) -> void:
+    if navigation_marker_index == null:
+        return
+    var marker := navigation_marker_for(body, block_type)
+    navigation_marker_index.register(cell, body, marker)
+    navigation_map_state_cache_key = ""
+    navigation_map_state_cache = {}
+
+func unregister_navigation_marker_block(cell: Vector3i, body: Node = null) -> void:
+    if navigation_marker_index == null:
+        return
+    navigation_marker_index.unregister(cell, body)
+    navigation_map_state_cache_key = ""
+    navigation_map_state_cache = {}
+
 func append_navigation_marker_points(points: Array, radius: float) -> void:
-    var source_key := navigation_marker_source_key()
-    if source_key != navigation_marker_cache_source_key:
-        advance_navigation_marker_cache(source_key)
-    for marker_value in navigation_marker_cache:
+    if navigation_marker_index == null:
+        return
+    var seen := {}
+    for marker_value in navigation_marker_index.live_entries(blocks):
         if points.size() >= 28:
             break
         if not (marker_value is Dictionary):
             continue
-        var marker: Dictionary = marker_value
-        var marker_key := String(marker.get("key", ""))
-        var body := marker.get("body") as Node3D
+        var indexed: Dictionary = marker_value
+        var body := indexed.get("body") as Node3D
         if body == null or not is_instance_valid(body):
             continue
+        var marker: Dictionary = indexed.get("marker", {})
+        var cell: Vector3i = indexed.get("cell", Vector3i.ZERO)
+        if blocks.get(cell) != body:
+            continue
+        var block_type := String(body.get_meta("block_type", ""))
+        var marker_key := String(marker.get("key", "%s:%s" % [block_type, str(cell)]))
+        if marker_key != "" and seen.has(marker_key):
+            continue
+        if marker_key != "":
+            seen[marker_key] = true
         add_map_point(
             points,
             String(marker.get("kind", "structure")),
-            String(marker.get("label", "Marker")),
+            String(marker.get("label", ItemCatalogScript.label(block_type))),
             Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z),
             float(marker.get("size", 3.3)),
             radius,
@@ -272,41 +292,7 @@ func append_nearby_navigation_marker_points(points: Array, radius: float) -> Dic
         var key := String((point_value as Dictionary).get("key", ""))
         if key != "":
             added[key] = true
-    if player == null or blocks.is_empty():
-        return added
-    var center := Vector2i(world_to_cell(player.global_position.x), world_to_cell(player.global_position.z))
-    var scan_radius_cells := ceili(minf(radius, CELL * 14.0) / CELL)
-    var center_y := roundi(player.global_position.y / CELL)
-    for z in range(center.y - scan_radius_cells, center.y + scan_radius_cells + 1):
-        for x in range(center.x - scan_radius_cells, center.x + scan_radius_cells + 1):
-            for y in range(center_y - 8, center_y + 9):
-                var block_key := Vector3i(x, y, z)
-                var body := blocks.get(block_key) as Node3D
-                if body == null or not is_instance_valid(body) or not body.has_meta("block_type"):
-                    continue
-                var offset := Vector2(body.global_position.x - player.global_position.x, body.global_position.z - player.global_position.z)
-                if offset.length() > radius:
-                    continue
-                var block_type := String(body.get_meta("block_type"))
-                var marker := navigation_marker_for(body, block_type)
-                if marker.is_empty():
-                    continue
-                var marker_key := String(marker.get("key", "%s:%s" % [block_type, str(block_key)]))
-                if marker_key != "" and added.has(marker_key):
-                    continue
-                if marker_key != "":
-                    added[marker_key] = true
-                add_map_point(
-                    points,
-                    String(marker.get("kind", "structure")),
-                    String(marker.get("label", ItemCatalogScript.label(block_type))),
-                    offset,
-                    float(marker.get("size", 3.3)),
-                    radius,
-                    marker_key
-                )
-                if points.size() >= 28:
-                    return added
+    append_navigation_marker_points(points, radius)
     return added
 
 func navigation_marker_source_key() -> String:
@@ -407,10 +393,8 @@ func _on_resume_requested() -> void:
     update_hud("Resumed")
 
 func _on_new_game_requested() -> void:
-    if has_method("start_new_game_staged"):
-        await call("start_new_game_staged", true)
-    else:
-        start_new_game(true)
+    if not await start_new_game_staged(true):
+        return
     if inventory_system:
         inventory_system.clear()
         _sync_inventory_totals()
@@ -604,7 +588,7 @@ func award_place_xp(block_type: String) -> void:
         award_progression("placed %s" % ItemCatalogScript.label(block_type), 2)
 
 func _on_teleport_requested(value: String) -> void:
-    if teleport_to(value):
+    if await teleport_to(value):
         if hud:
             hud.set_teleport_open(false)
         Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)

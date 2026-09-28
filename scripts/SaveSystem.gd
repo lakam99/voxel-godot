@@ -7,7 +7,11 @@ const ACTIVE_SEED_KEY := "__activeSeed"
 var path := "user://voxel_biome_world_saves.json"
 var async_save_thread: Thread = null
 var last_async_save_result := {}
+# Compatibility total: file read plus JSON decode, matching the historic field.
 var last_json_read_parse_ms := 0.0
+var last_json_file_read_ms := 0.0
+var last_json_decode_ms := 0.0
+var last_json_read_bytes := 0
 var last_json_stringify_write_ms := 0.0
 var async_jobs_started := 0
 var async_jobs_completed := 0
@@ -133,12 +137,18 @@ func stats() -> Dictionary:
         "asyncCompleted": async_jobs_completed,
         "asyncFailed": async_jobs_failed,
         "lastReadParseMs": last_json_read_parse_ms,
+        "lastReadFileMs": last_json_file_read_ms,
+        "lastJsonDecodeMs": last_json_decode_ms,
+        "lastReadBytes": last_json_read_bytes,
         "lastStringifyWriteMs": last_json_stringify_write_ms,
         "lastAsync": last_async_save_result.duplicate(true)
     }
 
 func _read_json_file(read_path: String) -> Dictionary:
     var started := Time.get_ticks_usec()
+    last_json_file_read_ms = 0.0
+    last_json_decode_ms = 0.0
+    last_json_read_bytes = 0
     if not FileAccess.file_exists(read_path):
         last_json_read_parse_ms = float(Time.get_ticks_usec() - started) / 1000.0
         return {}
@@ -146,9 +156,14 @@ func _read_json_file(read_path: String) -> Dictionary:
     if file == null:
         last_json_read_parse_ms = float(Time.get_ticks_usec() - started) / 1000.0
         return {}
+    last_json_read_bytes = file.get_length()
+    var file_read_started := Time.get_ticks_usec()
     var text := file.get_as_text()
     file.close()
+    last_json_file_read_ms = float(Time.get_ticks_usec() - file_read_started) / 1000.0
+    var decode_started := Time.get_ticks_usec()
     var parsed: Variant = JSON.parse_string(text)
+    last_json_decode_ms = float(Time.get_ticks_usec() - decode_started) / 1000.0
     last_json_read_parse_ms = float(Time.get_ticks_usec() - started) / 1000.0
     if parsed is Dictionary:
         return parsed

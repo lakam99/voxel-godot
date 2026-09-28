@@ -3,12 +3,20 @@ extends "res://scripts/MainDiscoveryFlow.gd"
 const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
+const STREAMING_CHUNK_RETIREMENTS_PER_FRAME := 1
 const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 1
 const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 3
 const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
 const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
 const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
 const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
+const STREAMING_TERRAIN_MESH_GAMEPLAY_FRAME_BUDGET_MS := 1.5
+# A 64-cell gameplay slice is one third of the loading slice. It keeps useful
+# cursor progress while bounding the source-sampling atom independently of the
+# timer check that follows each sampled cell.
+const STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS := 64
+const STREAMING_TERRAIN_MESH_LOADING_MAX_CELLS := 192
+const GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC := 6000
 const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
 const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
 const STREAMING_SOLID_PLACEHOLDER_STEP_CELLS := 4
@@ -174,7 +182,7 @@ func use_or_place() -> void:
                 held_item.play_use("interact")
             return
         var block := interaction_block_from_collider(collider)
-        if block and block.has_meta("kind") and String(block.get_meta("kind")) == "block":
+        if block and (String(block.get_meta("kind", "")) == "block" or (String(block.get_meta("block_type", "")) == "door" and block.has_meta("door_portal_id"))):
             var block_type := String(block.get_meta("block_type"))
             if block_type == "door":
                 var door_result = request_player_door_use(block, player, "player")
@@ -451,7 +459,7 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
 
 func ensure_voxel_terrain_authority() -> bool:
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
-        if String(voxel_terrain_runtime.get("configured_seed")) == seed_text:
+        if voxel_terrain_runtime.generation_context_current():
             return bool(voxel_terrain_runtime.get("authority_ready"))
         push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
         return false
@@ -476,18 +484,55 @@ func report_voxel_authority_failure_once(source: String) -> void:
 func voxel_terrain_authority_active() -> bool:
     return voxel_terrain_runtime != null \
         and is_instance_valid(voxel_terrain_runtime) \
+        and voxel_terrain_runtime.generation_context_current() \
         and bool(voxel_terrain_runtime.get("authority_ready"))
 
 func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
-    if not voxel_terrain_authority_active():
+    var started_usec := Time.get_ticks_usec()
+    if voxel_terrain_runtime == null or not is_instance_valid(voxel_terrain_runtime) \
+        or not bool(voxel_terrain_runtime.get("authority_ready")):
         return {"passed": false, "reason": "voxel_terrain_authority_unavailable"}
     if not voxel_terrain_runtime.has_method("collision_proof_for_motion"):
         return {"passed": false, "reason": "voxel_collision_motion_api_missing"}
-    return voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
+    var result: Dictionary = voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_external_duration("player_motion_preflight",float(Time.get_ticks_usec()-started_usec)/1000.0)
+    return result
 
 func update_voxel_authority_chunks(force: bool) -> void:
+    var monitor = runtime_perf_monitor
+    var publication_frame_started_usec := Time.get_ticks_usec()
+    # Ordinary traversal stays on the bounded gameplay schedule even if a HUD
+    # overlay is owned by an unrelated operation.  Only explicit loading and
+    # relocation lifecycles may switch publication to their loading cadence.
+    var shared_gameplay_schedule := not force and not startup_loading_active \
+        and not runtime_loading_active and streaming_loading_request_owner.is_empty()
+    if shared_gameplay_schedule:
+        gameplay_publication_frame_token = Engine.get_process_frames()
+        gameplay_publication_frame_started_usec = publication_frame_started_usec
+        gameplay_publication_lane = posmod(gameplay_publication_lane + 1, 4)
+        gameplay_publication_deadline_usec = publication_frame_started_usec + GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC
+    else:
+        gameplay_publication_frame_token = -1
+        gameplay_publication_frame_started_usec = 0
+        gameplay_publication_lane = -1
+        gameplay_publication_deadline_usec = 0
+    npc_navigation_publication_permitted = true
+    # Claim the Citadel's existing bounded share before broad streaming demand can
+    # consume the whole frame envelope. The terrain child calls the same method
+    # later, but the frame token admits exactly one claim. This preserves the
+    # shared 6 ms deadline/4 ms subordinate cap while preventing a resident
+    # revisit packet from starving indefinitely behind unrelated chunk work.
+    if shared_gameplay_schedule and structure_system!=null and player!=null:
+        var citadel_cell:=Vector2i(world_to_cell(player.position.x),world_to_cell(player.position.z))
+        advance_citadel_publication_shared(Rect2i(citadel_cell-Vector2i(2,2),Vector2i(5,5)),true)
     var center := world_to_chunk(player.position.x, player.position.z)
-    var needed := {}
+    var demand_start: int = monitor.begin_section("streaming_region_demand") if monitor != null else 0
+    update_streaming_region_demand()
+    if monitor != null:
+        monitor.end_section("streaming_region_demand", demand_start)
+    var retained_start: int = monitor.begin_section("streaming_retained_chunks") if monitor != null else 0
+    var needed: Dictionary = world_streaming.retained_gameplay_chunks() if streaming_active else {}
     for dz in range(-render_distance, render_distance + 1):
         for dx in range(-render_distance, render_distance + 1):
             var chunk_key := Vector2i(center.x + dx, center.y + dz)
@@ -498,30 +543,111 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 create_chunk(chunk_key.x, chunk_key.y)
             else:
                 queue_chunk_load(chunk_key)
+    for chunk_key: Vector2i in needed:
+        if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
+    if monitor != null:
+        monitor.end_section("streaming_retained_chunks", retained_start)
     if not force:
         process_pending_chunk_loads(center)
+    var unload_start: int = monitor.begin_section("streaming_chunk_retirement") if monitor != null else 0
+    var retired_chunks := 0
     for key_value in chunks.keys():
+        if not force and retired_chunks>=STREAMING_CHUNK_RETIREMENTS_PER_FRAME:
+            break
         var key: Vector2i = key_value
         if needed.has(key):
             continue
+        voxel_terrain_runtime.release_gameplay_chunk(key)
         chunks[key].queue_free()
         chunks.erase(key)
+        retired_chunks += 1
+    if monitor != null:
+        monitor.end_section("streaming_chunk_retirement", unload_start)
+    var prune_start: int = monitor.begin_section("streaming_request_prune") if monitor != null else 0
     prune_stale_pending_chunk_loads(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
     queue_dirty_terrain_volume_chunk_refreshes()
-    var fluid_refreshes := process_pending_chunk_terrain_refreshes(center)
-    var fluid_assets_applied := apply_completed_terrain_meshing_jobs(center)
-    if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
-        process_pending_terrain_meshing_jobs(center)
-    if not force:
+    if monitor != null:
+        monitor.end_section("streaming_request_prune", prune_start)
+    var publication_start: int = monitor.begin_section("streaming_terrain_publication") if monitor != null else 0
+    var publication_time_available := not shared_gameplay_schedule or (
+        gameplay_publication_lane == 1
+        and Time.get_ticks_usec() < gameplay_publication_deadline_usec
+    )
+    var fluid_refreshes := 0
+    var fluid_assets_applied := 0
+    if publication_time_available:
+        fluid_refreshes = process_pending_chunk_terrain_refreshes(center)
+        fluid_assets_applied = apply_completed_terrain_meshing_jobs(center)
+        if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
+            process_pending_terrain_meshing_jobs(center)
+    elif monitor != null:
+        monitor.increment_counter("gameplay_publication_terrain_deferred")
+    if monitor != null:
+        monitor.end_section("streaming_terrain_publication", publication_start)
+    var deferred_start: int = monitor.begin_section("streaming_deferred_world_work") if monitor != null else 0
+    var deferred_time_available := not shared_gameplay_schedule or (
+        gameplay_publication_lane == 2
+        and Time.get_ticks_usec() < gameplay_publication_deadline_usec
+    )
+    if not force and deferred_time_available:
         if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
             process_streaming_structure_work()
         if pending_chunk_loads.is_empty():
             process_pending_chunk_prop_spawns()
+    elif not force and monitor != null:
+        monitor.increment_counter("gameplay_publication_world_work_deferred")
     elif structure_system != null:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         structure_system.update_around(center_cell)
+    if monitor != null:
+        monitor.end_section("streaming_deferred_world_work", deferred_start)
+    npc_navigation_publication_permitted = not shared_gameplay_schedule or (
+        gameplay_publication_lane == 3
+        and Time.get_ticks_usec() + 1000 < gameplay_publication_deadline_usec
+    )
     last_center_chunk = center
+    if shared_gameplay_schedule and monitor != null:
+        var orchestration_usec := Time.get_ticks_usec()-publication_frame_started_usec
+        monitor.observe_external_duration("gameplay_publication_orchestration",float(orchestration_usec)/1000.0)
+        monitor.observe_gauge("gameplay_publication_remaining_usec",maxi(0,gameplay_publication_deadline_usec-Time.get_ticks_usec()))
+        if orchestration_usec>GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC:
+            gameplay_publication_overrun_count+=1
+            monitor.increment_counter("gameplay_publication_budget_overrun")
+
+## The only ordinary-gameplay claim for Citadel publication. Main establishes
+## one frame token/deadline before any lane work; a child callback may consume
+## at most the unspent remainder once, never a fresh private 4 ms allowance.
+## This claim is available on every gameplay frame. At low render rates a
+## lane-2-only claim starves cheap incremental atoms for seconds even though the
+## other lanes leave most of the shared envelope unused.
+func advance_citadel_publication_shared(observer_bounds: Rect2i, allow_dispatch: bool) -> Dictionary:
+    if structure_system==null: return {}
+    var explicit_loading := startup_loading_active or runtime_loading_active or not streaming_loading_request_owner.is_empty()
+    if explicit_loading:
+        return structure_system.advance_citadel_publication(observer_bounds,allow_dispatch,StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC)
+    var frame := Engine.get_process_frames()
+    if gameplay_publication_frame_token!=frame or gameplay_publication_citadel_claimed_frame==frame:
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_deferred")
+        return structure_system.citadel_publication.stats()
+    var remaining := maxi(0,gameplay_publication_deadline_usec-Time.get_ticks_usec())
+    if remaining<=0:
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_budget_exhausted")
+        return structure_system.citadel_publication.stats()
+    var granted := mini(StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC,remaining)
+    gameplay_publication_citadel_claimed_frame=frame
+    var started := Time.get_ticks_usec()
+    var result: Dictionary=structure_system.advance_citadel_publication(observer_bounds,allow_dispatch,granted)
+    var elapsed := Time.get_ticks_usec()-started
+    gameplay_publication_max_atom_usec=maxi(gameplay_publication_max_atom_usec,elapsed)
+    if runtime_perf_monitor!=null:
+        runtime_perf_monitor.observe_external_duration("gameplay_publication_citadel",float(elapsed)/1000.0)
+        runtime_perf_monitor.observe_gauge("gameplay_publication_citadel_grant_usec",granted)
+        runtime_perf_monitor.observe_gauge("gameplay_publication_total_elapsed_usec",Time.get_ticks_usec()-gameplay_publication_frame_started_usec)
+    if Time.get_ticks_usec()>gameplay_publication_deadline_usec:
+        gameplay_publication_overrun_count+=1
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_overrun")
+    return result
 
 func process_streaming_structure_work() -> int:
     if structure_system == null:
@@ -563,9 +689,12 @@ func process_pending_chunk_loads(center: Vector2i) -> int:
         var chunk_key := nearest_pending_chunk_load(center)
         if chunk_key == Vector2i(999999, 999999):
             break
-        pending_chunk_loads.erase(chunk_key)
         if chunks.has(chunk_key):
+            pending_chunk_loads.erase(chunk_key)
             continue
+        if voxel_terrain_runtime != null and voxel_terrain_runtime.admit_gameplay_chunk(chunk_key).status != "ready":
+            break # Keep the exact request until its authoritative ground is ready.
+        pending_chunk_loads.erase(chunk_key)
         create_chunk(chunk_key.x, chunk_key.y, true, should_defer_streaming_chunk_collision(chunk_key, center))
         created += 1
     if monitor != null:
@@ -578,6 +707,8 @@ func nearest_pending_chunk_load(center: Vector2i) -> Vector2i:
     var best_distance := 2147483647
     for key_value in pending_chunk_loads.keys():
         var key: Vector2i = key_value
+        if voxel_terrain_runtime != null and voxel_terrain_runtime.admit_gameplay_chunk(key).status != "ready":
+            continue
         var distance := absi(key.x - center.x) + absi(key.y - center.y)
         if distance < best_distance:
             best = key
@@ -875,12 +1006,41 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
             if terrain_meshing_service.has_method("completed_job_count"):
                 monitor.increment_counter("terrain_meshing_completed_queue_depth", int(terrain_meshing_service.completed_job_count()))
         return 0
+    var terrain_mesh_budget_ms := STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS
+    var terrain_mesh_max_cells := STREAMING_TERRAIN_MESH_LOADING_MAX_CELLS
+    if gameplay_publication_deadline_usec > 0:
+        var remaining_publication_usec := maxi(0, gameplay_publication_deadline_usec - Time.get_ticks_usec())
+        # TerrainVolumeService deliberately floors a non-empty slice at 0.1 ms.
+        # If less than that remains, retain the resumable job for the next terrain
+        # lane instead of granting work beyond the shared gameplay deadline.
+        if remaining_publication_usec < 100:
+            if monitor != null:
+                monitor.increment_counter("terrain_meshing_jobs_deferred_publication_budget")
+            return 0
+        terrain_mesh_budget_ms = minf(
+            STREAMING_TERRAIN_MESH_GAMEPLAY_FRAME_BUDGET_MS,
+            float(remaining_publication_usec) / 1000.0
+        )
+        terrain_mesh_max_cells = STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS
     var queue_start: int = monitor.begin_section("terrain_meshing_job_queue") if monitor != null else Time.get_ticks_usec()
-    var result: Dictionary = terrain_meshing_service.process_jobs(
-        STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
-        STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS,
-        center
-    )
+    var result: Dictionary
+    if gameplay_publication_deadline_usec > 0:
+        result = terrain_meshing_service.process_jobs(
+            STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
+            terrain_mesh_budget_ms,
+            center,
+            terrain_mesh_max_cells,
+            gameplay_publication_deadline_usec,
+            STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS
+        )
+    else:
+        # Loading retains the service defaults: 192 terrain cells and the
+        # independent 2048-cell exact-fluid allowance.
+        result = terrain_meshing_service.process_jobs(
+            STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
+            terrain_mesh_budget_ms,
+            center
+        )
     var processed := int(result.get("processed", 0))
     var work_count := processed
     if work_count <= 0 and int(result.get("payloadCells", 0)) > 0:
@@ -1614,6 +1774,9 @@ func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := fal
     var chunk_key := Vector2i(cx, cz)
     if chunks.has(chunk_key):
         return
+    if voxel_terrain_runtime.admit_gameplay_chunk(chunk_key).status != "ready":
+        queue_chunk_load(chunk_key)
+        return
     var monitor = runtime_perf_monitor
     var create_start: int = monitor.begin_section("chunk_create") if monitor != null else Time.get_ticks_usec()
     var chunk := Node3D.new()
@@ -1839,6 +2002,10 @@ func clear_chunk_asset_cache() -> void:
         terrain_meshing_service.clear_jobs(false)
 
 func _exit_tree() -> void:
+    if is_instance_valid(npc_system):
+        var autonomy = npc_system.get("autonomy_system")
+        var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+        if navigation != null: navigation.finish_publication_for_owner_exit()
     if terrain_meshing_service != null and terrain_meshing_service.has_method("clear_jobs"):
         terrain_meshing_service.clear_jobs(true)
 

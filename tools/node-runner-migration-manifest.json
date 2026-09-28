@@ -1,0 +1,767 @@
+{
+  "schema": "node-runner-migration/v1",
+  "baselineCommit": "e09cc95b6211ecfb7de1fcf9902406b0cb176a5d",
+  "scope": "Historical PowerShell source hashes for port review; executable entry points are Node.js only.",
+  "runners": [
+    {
+      "original": "tools/assert-test-evidence-report.ps1",
+      "node": "tools/assert-test-evidence-report.mjs",
+      "sha256": "5325f8b69b1de92518eead464f1b0822e039d5e70a60fa1c19bb591842e80852"
+    },
+    {
+      "original": "tools/blender/build-animated-assets.ps1",
+      "node": "tools/blender/build-animated-assets.mjs",
+      "sha256": "8f4274e2b863be81375ed503da9cb2324b2a02a7171b9c195db555f3dd73ed1e"
+    },
+    {
+      "original": "tools/blender/build-cave-assets.ps1",
+      "node": "tools/blender/build-cave-assets.mjs",
+      "sha256": "ac65ca030772d72a5a483125e4d13eefdf0e86df853b9914428b1ba2aa9cca20"
+    },
+    {
+      "original": "tools/blender/build-character-assets.ps1",
+      "node": "tools/blender/build-character-assets.mjs",
+      "sha256": "7b9b38298865b77b7a7195a154c7dcc2c89b8c5cb376f685260e59eb002c4423"
+    },
+    {
+      "original": "tools/blender/build-environment-assets.ps1",
+      "node": "tools/blender/build-environment-assets.mjs",
+      "sha256": "70c70958d1d6536ee60df757380b54f7afb03b6bd6b7b90579e5de3b5f5bd173"
+    },
+    {
+      "original": "tools/blender/build-static-item-assets.ps1",
+      "node": "tools/blender/build-static-item-assets.mjs",
+      "sha256": "94e1591303905a4a8a36f5de55b884dfb602a01dcd058bc1ee4a32e88152b166"
+    },
+    {
+      "original": "tools/blender/find-blender.ps1",
+      "node": "tools/blender/find-blender.mjs",
+      "sha256": "2dea849d83d5b2bb2d61d88e8865b2d8f17634854ef1761917d7928b2e732eb0"
+    },
+    {
+      "original": "tools/build-native-terrain-meshing.ps1",
+      "node": "tools/build-native-terrain-meshing.mjs",
+      "sha256": "4f58ccd6dc0a3c44a9cb98711672d30b49cedb1f6a044f4c7c701a7a42d19e35"
+    },
+    {
+      "original": "tools/dependencies/install-voxel-tools.ps1",
+      "node": "tools/dependencies/install-voxel-tools.mjs",
+      "sha256": "b70b84c9b4f8c0e3fd17fad425ad98212354a4eaa94e63d06ebc42853162c787"
+    },
+    {
+      "original": "tools/invoke-owned-game-window.ps1",
+      "node": "tools/invoke-owned-game-window.mjs",
+      "sha256": "48b45cb9bc3f85d3cae184c512ed96cab4f59e127fbae58b14eefcb4bf23f7fa"
+    },
+    {
+      "original": "tools/npc/assert-npc-acceptance-runner-clean.ps1",
+      "node": "tools/npc/assert-npc-acceptance-runner-clean.mjs",
+      "sha256": "30ffede3e914e4a3899bc1af50794fe0d236a0e92d7403f6e53eefb0d97daabd"
+    },
+    {
+      "original": "tools/npc/assert-npc-legacy-pathfinding-clean.ps1",
+      "node": "tools/npc/assert-npc-legacy-pathfinding-clean.mjs",
+      "sha256": "35c588d2f66bbcb474bc1c88c4e2a7d11f2c7b4e8b52e63e0a70ef8f74a3b06d"
+    },
+    {
+      "original": "tools/npc/assert-npc-route-state-writers.ps1",
+      "node": "tools/npc/assert-npc-route-state-writers.mjs",
+      "sha256": "99eaee760218631f40b35ba0726798570295bef3e8fe9981ee05b5dbeae48b54"
+    },
+    {
+      "original": "tools/npc/audit-npc-navmesh-backend.ps1",
+      "node": "tools/npc/audit-npc-navmesh-backend.mjs",
+      "sha256": "f4a0ec244c88cb5563cfc1eacc05cae2bbf0d5ac41615082f646d796daee9f05"
+    },
+    {
+      "original": "tools/npc/run-actual-gameplay-mira-porch-regression.ps1",
+      "node": "tools/npc/run-actual-gameplay-mira-porch-regression.mjs",
+      "sha256": "9e2984f3d5463d16667d04df69be41613228ab656c185b1c3b88d4ed23ec9b17"
+    },
+    {
+      "original": "tools/npc/run-all-npc-tests.ps1",
+      "node": "tools/npc/run-all-npc-tests.mjs",
+      "sha256": "0696fb7f94f340d45299361bdf2ac38edae61fe0ab0d60591a0112254fe651e5"
+    },
+    {
+      "original": "tools/npc/run-npc-avoidance-tests.ps1",
+      "node": "tools/npc/run-npc-avoidance-tests.mjs",
+      "sha256": "d4cd23c60053da6828fa25708e149e0bb8a406abf4643d7e3eab27452f8bbfc8"
+    },
+    {
+      "original": "tools/npc/run-npc-behavior-tests.ps1",
+      "node": "tools/npc/run-npc-behavior-tests.mjs",
+      "sha256": "a7860e779a369eb2737d5fcc8246c7a7cf645148d54ba0092b2b7496633036bd"
+    },
+    {
+      "original": "tools/npc/run-npc-contract-tests.ps1",
+      "node": "tools/npc/run-npc-contract-tests.mjs",
+      "sha256": "cb071db901a93215909364531bfa5510795f589de783bd249335c52eddd57da7"
+    },
+    {
+      "original": "tools/npc/run-npc-door-tests.ps1",
+      "node": "tools/npc/run-npc-door-tests.mjs",
+      "sha256": "f38ab74c8f0ae1205625436548bb322572bd52294e6b021bb0ffcfa141537c8d"
+    },
+    {
+      "original": "tools/npc/run-npc-go-home-visual-playtest.ps1",
+      "node": "tools/npc/run-npc-go-home-visual-playtest.mjs",
+      "sha256": "d7947ceb00d3da80259b8bdd271b91a19384a6104810f457ff143f45b1d3112f"
+    },
+    {
+      "original": "tools/npc/run-npc-interaction-tests.ps1",
+      "node": "tools/npc/run-npc-interaction-tests.mjs",
+      "sha256": "dd6dbaa77951cbed0af8758b17aef53965a6b62a16fecc7325d30f6875d2ea7a"
+    },
+    {
+      "original": "tools/npc/run-npc-motor-tests.ps1",
+      "node": "tools/npc/run-npc-motor-tests.mjs",
+      "sha256": "90dd5d49a445469b29dfbf870a4148bcfa942cd1d508c3245cc4138e939e87d0"
+    },
+    {
+      "original": "tools/npc/run-npc-nav-world-tests.ps1",
+      "node": "tools/npc/run-npc-nav-world-tests.mjs",
+      "sha256": "c0e667050b80d08a4c4f7aa4cd47c210c82baec1326431436693e5fb565b395e"
+    },
+    {
+      "original": "tools/npc/run-npc-observation-tests.ps1",
+      "node": "tools/npc/run-npc-observation-tests.mjs",
+      "sha256": "c2e9ec808ac3edae2b51941fd507aacc372c4f3bde84a5c552a409b89f877d62"
+    },
+    {
+      "original": "tools/npc/run-npc-repair-tests.ps1",
+      "node": "tools/npc/run-npc-repair-tests.mjs",
+      "sha256": "e7df39aa3249b0e1dfb8b6fce08caf1ff663f9673ddb5eae505db8385f4e5018"
+    },
+    {
+      "original": "tools/npc/run-npc-route-tests.ps1",
+      "node": "tools/npc/run-npc-route-tests.mjs",
+      "sha256": "7a50b84c15302675bf8b1aff470263760e8d523b0622e4cb1d2198386e83b128"
+    },
+    {
+      "original": "tools/npc/run-npc-scenario-tests.ps1",
+      "node": "tools/npc/run-npc-scenario-tests.mjs",
+      "sha256": "3c5d31c2f7362b0480c489a974529d5f5e53614034bf85f2b26e79bd050ffdb8"
+    },
+    {
+      "original": "tools/npc/run-npc-soak-tests.ps1",
+      "node": "tools/npc/run-npc-soak-tests.mjs",
+      "sha256": "e3b2233dcae127fb083bd6a16f7924014c20e8884b532404f6df9b17a6033770"
+    },
+    {
+      "original": "tools/npc/run-npc-streaming-save-tests.ps1",
+      "node": "tools/npc/run-npc-streaming-save-tests.mjs",
+      "sha256": "c3a5de02487bebd710a29361df8cdc357142398b3b579455d590807451ea198e"
+    },
+    {
+      "original": "tools/npc/run-npc-suite.ps1",
+      "node": "tools/npc/run-npc-suite.mjs",
+      "sha256": "a50cec85774db41ff97250b59212a29aaadc37c731a4cc982ff726f090c99c81"
+    },
+    {
+      "original": "tools/npc/run-npc-town-job-cycle-visual-playtest.ps1",
+      "node": "tools/npc/run-npc-town-job-cycle-visual-playtest.mjs",
+      "sha256": "f5a0af45dd176b29db377082813ff3e5d9b76103f64087a222ca4c4b4488a7b2"
+    },
+    {
+      "original": "tools/npc/run-npc-traffic-tests.ps1",
+      "node": "tools/npc/run-npc-traffic-tests.mjs",
+      "sha256": "b8f622d27332c9f271e320ee03af3154253b2df7e216c227d273c2fdd869b0b0"
+    },
+    {
+      "original": "tools/npc/run-real-tutorial-playthrough-no-flags.ps1",
+      "node": "tools/npc/run-real-tutorial-playthrough-no-flags.mjs",
+      "sha256": "696d866b84810cb72b7db5cd6edbf8a4bd91f69c01df60837c6d703b0137a73c"
+    },
+    {
+      "original": "tools/npc/run-real-tutorial-playthrough.ps1",
+      "node": "tools/npc/run-real-tutorial-playthrough.mjs",
+      "sha256": "392b5ac8556b1a44b65300f89e0034c286fa92214e559e3c14806e070e286b83"
+    },
+    {
+      "original": "tools/npc/run-resource-lifecycle-visual-playtest.ps1",
+      "node": "tools/npc/run-resource-lifecycle-visual-playtest.mjs",
+      "sha256": "aa865ae3cf5dec5acbea3c5912c1db82d3e2d2f1bc55a6eb2c2d2ec93cf49c7a"
+    },
+    {
+      "original": "tools/npc/run-tutorial-save-continue-playtest.ps1",
+      "node": "tools/npc/run-tutorial-save-continue-playtest.mjs",
+      "sha256": "af22b47181f1039a355a1411da42d4d33d5123869ea601d46a0c63dc3aedd400"
+    },
+    {
+      "original": "tools/npc/test-npc-acceptance-guard.ps1",
+      "node": "tools/npc/test-npc-acceptance-guard.mjs",
+      "sha256": "e00e4d895a8b3db2225a3ae544ed37f57c2caec0dbc4fe061647d30d16cb194e"
+    },
+    {
+      "original": "tools/run-all-test-runners.ps1",
+      "node": "tools/run-all-test-runners.mjs",
+      "sha256": "f006f274644025ae2376a30fd5bb044f52d5a1acbfbc10f486e043b66d384fce"
+    },
+    {
+      "original": "tools/run-biome-environment-catalog-contract-tests.ps1",
+      "node": "tools/run-biome-environment-catalog-contract-tests.mjs",
+      "sha256": "278ee9601334b34943b6efc991cb708caea53b59f128d5dcc995514031b693f1"
+    },
+    {
+      "original": "tools/run-biome-region-field-contract-tests.ps1",
+      "node": "tools/run-biome-region-field-contract-tests.mjs",
+      "sha256": "51929601beb6121083073bf33a8ae4ec0f2de98d94f2d32493bca33f32c82bd3"
+    },
+    {
+      "original": "tools/run-building-contract.ps1",
+      "node": "tools/run-building-contract.mjs",
+      "sha256": "de32f993583b49d7d7f5943ea561c1273cc39bbd36521edffd541e12b620da83"
+    },
+    {
+      "original": "tools/run-building-interior-program-contract.ps1",
+      "node": "tools/run-building-interior-program-contract.mjs",
+      "sha256": "90b383140b0fad78736a96433a12afd0faf6648ece28eaa24465ab719af550a4"
+    },
+    {
+      "original": "tools/run-building-publication-ownership-contract.ps1",
+      "node": "tools/run-building-publication-ownership-contract.mjs",
+      "sha256": "e17be60d7d08c319486cae2de896c02a9124e5d607fdb0db9899c8f7630de55b"
+    },
+    {
+      "original": "tools/run-building-publication-preparation-contract.ps1",
+      "node": "tools/run-building-publication-preparation-contract.mjs",
+      "sha256": "a223003a68f6a912cd02617e385ad550215b85c47b10f756358f5c05cdb1832e"
+    },
+    {
+      "original": "tools/run-building-publication-source-contract.ps1",
+      "node": "tools/run-building-publication-source-contract.mjs",
+      "sha256": "b81a740f0b4a9730803e4195d9a0d89eb4c8e82bf6618f03451d02a196324884"
+    },
+    {
+      "original": "tools/run-building-publication-worker-contract.ps1",
+      "node": "tools/run-building-publication-worker-contract.mjs",
+      "sha256": "b016b3b95cc2ebfd2f8aa6e6edfc92afeabba30798d6bd3dbafd0af544ed67ef"
+    },
+    {
+      "original": "tools/run-building-route-diagnostic-cancellation-contract.ps1",
+      "node": "tools/run-building-route-diagnostic-cancellation-contract.mjs",
+      "sha256": "35f4709db1feaa96f232684fefb4842265bf6b0d91d265812812803f2e4247be"
+    },
+    {
+      "original": "tools/run-building-scene-publication-contract.ps1",
+      "node": "tools/run-building-scene-publication-contract.mjs",
+      "sha256": "42637d3ed6bd91358348aa2da2ac2bbd8c7dc2ee0d1a4ad906d16eda5f81677e"
+    },
+    {
+      "original": "tools/run-building-validation-cancellation-contract.ps1",
+      "node": "tools/run-building-validation-cancellation-contract.mjs",
+      "sha256": "fa852a31f0ecf3f8f42234d4ba1d1f95324ceb11899610e716101460cd5c3613"
+    },
+    {
+      "original": "tools/run-canopy-asset-import-contract-tests.ps1",
+      "node": "tools/run-canopy-asset-import-contract-tests.mjs",
+      "sha256": "dadeb2057ed3cde7445a707abe5e2d04caaeca86519b6db6246ec867d3f240f6"
+    },
+    {
+      "original": "tools/run-canopy-release-playtest.ps1",
+      "node": "tools/run-canopy-release-playtest.mjs",
+      "sha256": "9c03002bae058bdc5dfcd94f8ca53863308f4a199714d8ae670b9a110c8605b0"
+    },
+    {
+      "original": "tools/run-canopy-runtime-contract-tests.ps1",
+      "node": "tools/run-canopy-runtime-contract-tests.mjs",
+      "sha256": "4745b6d92e4b531bc2bc0af26de0ca10c6a9f87530ba68466724d7dc15ba3ae3"
+    },
+    {
+      "original": "tools/run-castle-poc.ps1",
+      "node": "tools/run-castle-poc.mjs",
+      "sha256": "9649b9846f735646dc893e056806a6c214b667eb22316a4b33c1c5f13fe043f4"
+    },
+    {
+      "original": "tools/run-castle-walkthrough.ps1",
+      "node": "tools/run-castle-walkthrough.mjs",
+      "sha256": "38d60c6a2acca41566c395dff487998250946fe4854c6981d02f8b689b3e7ca6"
+    },
+    {
+      "original": "tools/run-citadel-candidate-recipe-diagnostic.ps1",
+      "node": "tools/run-citadel-candidate-recipe-diagnostic.mjs",
+      "sha256": "50817677da357b038768d7a31b5936ad0f4019449baafd03c3799ea0ae1ab8b8"
+    },
+    {
+      "original": "tools/run-citadel-candidate-teleport-playtest.ps1",
+      "node": "tools/run-citadel-candidate-teleport-playtest.mjs",
+      "sha256": "507c7fea764ed71e6db505bcd0aab96c2ac528ee3b2f1694d3f0ac2a09f839fc"
+    },
+    {
+      "original": "tools/run-citadel-completion-cancellation-contract.ps1",
+      "node": "tools/run-citadel-completion-cancellation-contract.mjs",
+      "sha256": "a0d2abfbb0257f1f4dd5a0473bfb6155392422f76ce215a5d9c2722f42cb8cae"
+    },
+    {
+      "original": "tools/run-citadel-compound-cancellation-contract.ps1",
+      "node": "tools/run-citadel-compound-cancellation-contract.mjs",
+      "sha256": "556abefbe68a3f447cc4dc121ce01c7d490f97e6c1339299e4ade64f3cecc122"
+    },
+    {
+      "original": "tools/run-citadel-landscape-cancellation-contract.ps1",
+      "node": "tools/run-citadel-landscape-cancellation-contract.mjs",
+      "sha256": "738991cceba3c8e69ee9a46c60ad55ac4b642fc9c3d8ccc3cbfa97fba6d89760"
+    },
+    {
+      "original": "tools/run-citadel-main-menu-diagnostic.ps1",
+      "node": "tools/run-citadel-main-menu-diagnostic.mjs",
+      "sha256": "541b9a40e916f248da8b4c5233ca2a9c500744d996c4700781d9bc8df1421d5d"
+    },
+    {
+      "original": "tools/run-citadel-native-admission-contract.ps1",
+      "node": "tools/run-citadel-native-admission-contract.mjs",
+      "sha256": "88ca707298f9f4d6407b403fc556f32a6c2e2e072baaa2231765c5e3085b7b35"
+    },
+    {
+      "original": "tools/run-citadel-profile-snapshot-contract.ps1",
+      "node": "tools/run-citadel-profile-snapshot-contract.mjs",
+      "sha256": "0a2e4583c93648b8569a7e4a114af473f26d3258fd276aaf8fb506a96952f2eb"
+    },
+    {
+      "original": "tools/run-citadel-publication-preflight.ps1",
+      "node": "tools/run-citadel-publication-preflight.mjs",
+      "sha256": "d1e92070b43dc142e9340acdf42b7ca6794aff3e3f1958a97c7486cd2a515486"
+    },
+    {
+      "original": "tools/run-citadel-publication-service-contract.ps1",
+      "node": "tools/run-citadel-publication-service-contract.mjs",
+      "sha256": "170568149a51caec597e35c18d1cedb12ad822e8c5b641e92822cfaf25b2600f"
+    },
+    {
+      "original": "tools/run-citadel-recipe-preparation-contract.ps1",
+      "node": "tools/run-citadel-recipe-preparation-contract.mjs",
+      "sha256": "a5dc6f40bacbf459cd00dedf5c7d9f59c637f91c46a172a744e84219df4e03ca"
+    },
+    {
+      "original": "tools/run-citadel-retained-paving-cancellation-contract.ps1",
+      "node": "tools/run-citadel-retained-paving-cancellation-contract.mjs",
+      "sha256": "529bb0bc5ae238e34e863d555075ededff65d7e54d4be5f3f769a626951403a9"
+    },
+    {
+      "original": "tools/run-citadel-retained-paving-composer-contract.ps1",
+      "node": "tools/run-citadel-retained-paving-composer-contract.mjs",
+      "sha256": "2b439d4fc983e001863174fd9656df2f05633ca145b2e776115ad0d89943e03d"
+    },
+    {
+      "original": "tools/run-citadel-sign-completion-contract.ps1",
+      "node": "tools/run-citadel-sign-completion-contract.mjs",
+      "sha256": "f67ab77a022d13b6e27bfedad9c060d7b775ed324c6473c29dd8b1146cfc4324"
+    },
+    {
+      "original": "tools/run-citadel-sign-socket-bounds-contract.ps1",
+      "node": "tools/run-citadel-sign-socket-bounds-contract.mjs",
+      "sha256": "5d81be63001c60f85f905d98aa5849ddff1fede68882b4b3109f1dcb8934a4f5"
+    },
+    {
+      "original": "tools/run-citadel-site-build-queue-contract.ps1",
+      "node": "tools/run-citadel-site-build-queue-contract.mjs",
+      "sha256": "3af62b2ea326edb5fffeb2408c572d9f3c8b822284e10063807564e1b8b67ff6"
+    },
+    {
+      "original": "tools/run-citadel-site-selection-contract.ps1",
+      "node": "tools/run-citadel-site-selection-contract.mjs",
+      "sha256": "d14e5a8176fb291bf0216650fbcefee5f444783de40acaee08675a0183fc6b5a"
+    },
+    {
+      "original": "tools/run-citadel-structural-composer-contract.ps1",
+      "node": "tools/run-citadel-structural-composer-contract.mjs",
+      "sha256": "3c9ef3633695bf1525fee9127de56e69e03ddd832b52b002f24fd92215b27eb2"
+    },
+    {
+      "original": "tools/run-citadel-structural-composer-two-phase-contract.ps1",
+      "node": "tools/run-citadel-structural-composer-two-phase-contract.mjs",
+      "sha256": "6e1fcc080d540a9dc17358118b363ee9e83b3dba612ba9a639f9bcaad8bb2033"
+    },
+    {
+      "original": "tools/run-citadel-terrain-admission-contract.ps1",
+      "node": "tools/run-citadel-terrain-admission-contract.mjs",
+      "sha256": "9b362eea92733d7232d9a4296950ca20fe592e5f2f6be5bd9b77728762da1683"
+    },
+    {
+      "original": "tools/run-citadel-terrain-bootstrap-contract.ps1",
+      "node": "tools/run-citadel-terrain-bootstrap-contract.mjs",
+      "sha256": "69cc12781f6f02116dee9513e8493ef3e8c62b4f485787dcdd36ec876bb63588"
+    },
+    {
+      "original": "tools/run-citadel-town-inputs-contract.ps1",
+      "node": "tools/run-citadel-town-inputs-contract.mjs",
+      "sha256": "7a43fbf3a0b394ed2e99f999ee566c3055cc3577efb88ba91696a3b0bfa46002"
+    },
+    {
+      "original": "tools/run-citadel-visual-preservation.ps1",
+      "node": "tools/run-citadel-visual-preservation.mjs",
+      "sha256": "4d41edbb4b3ec75b6bfd60cefdcc0406d9905b39178408b2238ceb007ecfe0d2"
+    },
+    {
+      "original": "tools/run-combat-target-policy-contract.ps1",
+      "node": "tools/run-combat-target-policy-contract.mjs",
+      "sha256": "1a6c5d829b0d3d78ba13eae3453f25088d31f609f4f015039464b9910ae49733"
+    },
+    {
+      "original": "tools/run-cottage-construction-contract.ps1",
+      "node": "tools/run-cottage-construction-contract.mjs",
+      "sha256": "6f4c36b96ae98f707c8be7054af9e9015c7bacf6d625da88dbb3b83af29f1fa6"
+    },
+    {
+      "original": "tools/run-cottage-furnishing-layout-contract.ps1",
+      "node": "tools/run-cottage-furnishing-layout-contract.mjs",
+      "sha256": "fe1f26044d3b8ef6c9990ef5b5b67d3003170d1206f07e732036a19793fbc737"
+    },
+    {
+      "original": "tools/run-cottage-material-poc.ps1",
+      "node": "tools/run-cottage-material-poc.mjs",
+      "sha256": "64e1bc29e1d1bc3474c7ab9b7f6e0cef4717fc3d8014b4147e2c483ef3e4d705"
+    },
+    {
+      "original": "tools/run-crafting-gate-tests.ps1",
+      "node": "tools/run-crafting-gate-tests.mjs",
+      "sha256": "412a716c37c20dde9239ead1cafac353da6a070d24b518897c21381c84e2f8f3"
+    },
+    {
+      "original": "tools/run-digging-visual-playtest.ps1",
+      "node": "tools/run-digging-visual-playtest.mjs",
+      "sha256": "e36614815f93c1ea6265c5905f97c223d06db824e4ac7697a7bc0a84d0f5c262"
+    },
+    {
+      "original": "tools/run-environment-wind-contract-tests.ps1",
+      "node": "tools/run-environment-wind-contract-tests.mjs",
+      "sha256": "8b5086b439fc56c0e34f5ef1c0f5de849ac9a508e8d76b131426cc0a99d45091"
+    },
+    {
+      "original": "tools/run-environment-wind-visual-playtest.ps1",
+      "node": "tools/run-environment-wind-visual-playtest.mjs",
+      "sha256": "e3f13bc5884d8fb73ee586c84c38282749c095524cde95f5cf05f242b1be3179"
+    },
+    {
+      "original": "tools/run-exact-fluid-mesh-contract.ps1",
+      "node": "tools/run-exact-fluid-mesh-contract.mjs",
+      "sha256": "64eb27826717e6348085139cbe57c01f4aadf8b0f4149efb7962f6b9b58f33f9"
+    },
+    {
+      "original": "tools/run-exact-fluid-payload-contract.ps1",
+      "node": "tools/run-exact-fluid-payload-contract.mjs",
+      "sha256": "3d01f483964ab9166c4810c923ae16fa6f777cae764d679b638058fc370d9908"
+    },
+    {
+      "original": "tools/run-furnished-cottage-poc.ps1",
+      "node": "tools/run-furnished-cottage-poc.mjs",
+      "sha256": "b48636c2177eba453da5262e105129b06647d0016f73a0ec2a5992f2d006061f"
+    },
+    {
+      "original": "tools/run-furnished-cottage-walkthrough.ps1",
+      "node": "tools/run-furnished-cottage-walkthrough.mjs",
+      "sha256": "2804eeba22de87a48d4fec2373fa1782933c2dc5dd94516e77b1c3685593276c"
+    },
+    {
+      "original": "tools/run-godot-scene-watchdog.ps1",
+      "node": "tools/run-godot-scene-watchdog.mjs",
+      "sha256": "340d9225c8fbe6f9fe8afbfb2e6b1a3d7ff43ca1caf598b251ff85dd2d197976"
+    },
+    {
+      "original": "tools/run-hostile-motion-arena.ps1",
+      "node": "tools/run-hostile-motion-arena.mjs",
+      "sha256": "9e1855c15ea8050b4d91d1ffa4fdc0ef758bfc153a967a53812a6d153eb1ba65"
+    },
+    {
+      "original": "tools/run-hostile-motion-combat-playtest.ps1",
+      "node": "tools/run-hostile-motion-combat-playtest.mjs",
+      "sha256": "3e742bba67f390cbb612056400c8cdddfed839c61b4b8f2686b1d0c6fc6e5172"
+    },
+    {
+      "original": "tools/run-household-sign-placement-contract.ps1",
+      "node": "tools/run-household-sign-placement-contract.mjs",
+      "sha256": "2dd294f0be62b49ac593dfc23424d764bbe1c68d091ed44cdfacdfe620794b48"
+    },
+    {
+      "original": "tools/run-landmark-building-grammar-contract.ps1",
+      "node": "tools/run-landmark-building-grammar-contract.mjs",
+      "sha256": "06e499a1d2ccbaf0fec66f0e7cbea1a011b2b8b70d2420113a69767d540eefd1"
+    },
+    {
+      "original": "tools/run-landmark-furnishing-contract.ps1",
+      "node": "tools/run-landmark-furnishing-contract.mjs",
+      "sha256": "062a2ad34fc7e3544a0493bfbcc44f32b4d0ddf02def4186a89092cd2d4e571b"
+    },
+    {
+      "original": "tools/run-light-shadow-visual-playtest.ps1",
+      "node": "tools/run-light-shadow-visual-playtest.mjs",
+      "sha256": "9484b52cfe21716472090778747bce814760d60eb256b23e87f3910acb012fd5"
+    },
+    {
+      "original": "tools/run-main-menu-continue-readiness-smoke.ps1",
+      "node": "tools/run-main-menu-continue-readiness-smoke.mjs",
+      "sha256": "219f8b58ab7581371b29861c71f5550b8dea8b3225caa42a4d91d2f5acef6289"
+    },
+    {
+      "original": "tools/run-main-menu-startup-readiness-smoke.ps1",
+      "node": "tools/run-main-menu-startup-readiness-smoke.mjs",
+      "sha256": "3b6c8b5204c55dff599d51b49829d7764e27c703a0165bb87cfe75f505154dcb"
+    },
+    {
+      "original": "tools/run-manor-poc.ps1",
+      "node": "tools/run-manor-poc.mjs",
+      "sha256": "54464f764d96f522c91838749b270f73062bf1d68622a078edc5484be0349b3b"
+    },
+    {
+      "original": "tools/run-manor-walkthrough.ps1",
+      "node": "tools/run-manor-walkthrough.mjs",
+      "sha256": "23d507b94fd94281eda28b1f07668789cf8693b9a9b8e92f5f40635271edf4c9"
+    },
+    {
+      "original": "tools/run-mathematical-tree-poc.ps1",
+      "node": "tools/run-mathematical-tree-poc.mjs",
+      "sha256": "42c282f02b770c1a702f794e3819d84fbec4d7197b0ceb3b5d4a165af8a74f3a"
+    },
+    {
+      "original": "tools/run-motion-rig-contract.ps1",
+      "node": "tools/run-motion-rig-contract.mjs",
+      "sha256": "31db63bb73260bc633486bd3dcde1bc8049c3a6d2ba97be94a3e143d1a43bb3b"
+    },
+    {
+      "original": "tools/run-normal-runtime-performance-pass.ps1",
+      "node": "tools/run-normal-runtime-performance-pass.mjs",
+      "sha256": "4027ef752c9bd1a4ee4d6e1716c6b14804e8d7bfa97c0df96fcecc5d8cf6d705"
+    },
+    {
+      "original": "tools/run-npc-biped-poc.ps1",
+      "node": "tools/run-npc-biped-poc.mjs",
+      "sha256": "3ef514c9e0e7ae2060bdc356e9c34616a14613d66264daac39328be819cd3fc3"
+    },
+    {
+      "original": "tools/run-npc-biped-recipe-contract.ps1",
+      "node": "tools/run-npc-biped-recipe-contract.mjs",
+      "sha256": "7b48260c7c190afab2d8a4da88d3d04b4eb7905d091c357a7db792c3266f34b9"
+    },
+    {
+      "original": "tools/run-npc-navigation-tests.ps1",
+      "node": "tools/run-npc-navigation-tests.mjs",
+      "sha256": "f33e5e3105854e44eb55f0eedd790b89a9e55090aae9be97ac6efe6ac02bbf51"
+    },
+    {
+      "original": "tools/run-player-motion-combat-playtest.ps1",
+      "node": "tools/run-player-motion-combat-playtest.mjs",
+      "sha256": "e6d48651674df61cdccc8fa21a0580b91f38509fd42cf85835ad6e4914666072"
+    },
+    {
+      "original": "tools/run-playtest.ps1",
+      "node": "tools/run-playtest.mjs",
+      "sha256": "fb96b76cd32e5a092d415a8023f156fb42fbe2d40cd2e1005527754505517523"
+    },
+    {
+      "original": "tools/run-prepared-tree-publication-contract.ps1",
+      "node": "tools/run-prepared-tree-publication-contract.mjs",
+      "sha256": "88abb92981a08213d32b7a16d9fa89912d05ba1be8f8a2b3eeef88219a1e20b5"
+    },
+    {
+      "original": "tools/run-procedural-motion-poc.ps1",
+      "node": "tools/run-procedural-motion-poc.mjs",
+      "sha256": "632806ba0b2c240c057997530ddca266f12455f2416e61bbb267288b312318d8"
+    },
+    {
+      "original": "tools/run-procedural-tree-interaction-matrix.ps1",
+      "node": "tools/run-procedural-tree-interaction-matrix.mjs",
+      "sha256": "d80136290534dfd55d9bce45f5d8127551a5c70dd5657e7721e7975e0119abae"
+    },
+    {
+      "original": "tools/run-procedural-tree-performance-benchmark.ps1",
+      "node": "tools/run-procedural-tree-performance-benchmark.mjs",
+      "sha256": "1226fec6536dbfd479a3dbc2618ba6a86430d59944af96f2232f7ebb9dcda24f"
+    },
+    {
+      "original": "tools/run-project-compile-smoke.ps1",
+      "node": "tools/run-project-compile-smoke.mjs",
+      "sha256": "4c4bc6ec45f8c16fe40c6293ec05697878d7a5d006351a50dc8742c2d22e1d0c"
+    },
+    {
+      "original": "tools/run-provisional-terrain-visual-playtest.ps1",
+      "node": "tools/run-provisional-terrain-visual-playtest.mjs",
+      "sha256": "0dab04be004671fdc1adf1eb8ce0fb42e43c177b6796a08963e75aefa15e37b5"
+    },
+    {
+      "original": "tools/run-retained-surface-bearing-contract.ps1",
+      "node": "tools/run-retained-surface-bearing-contract.mjs",
+      "sha256": "98ee9bdac1f583b653dfeffac85207c7928f638228871cb352cfd6631e561760"
+    },
+    {
+      "original": "tools/run-runtime-performance-observation.ps1",
+      "node": "tools/run-runtime-performance-observation.mjs",
+      "sha256": "dc83a23411fe36a5f6eb4ad340027966d8a778cb6fd58571f07a40a6e996c8c8"
+    },
+    {
+      "original": "tools/run-seeded-cottage-recipe-contract.ps1",
+      "node": "tools/run-seeded-cottage-recipe-contract.mjs",
+      "sha256": "b2423ec1013c2ef45b314b966566742775f6d1030ed8979e5ab22095bb9fdf63"
+    },
+    {
+      "original": "tools/run-startup-loading-readiness-contract-tests.ps1",
+      "node": "tools/run-startup-loading-readiness-contract-tests.mjs",
+      "sha256": "0c453ebd57a866de7cffdd5bdf7b2a0693b8bcc4b548ec77877a5432bfca4820"
+    },
+    {
+      "original": "tools/run-structure-town-manifest-contract-tests.ps1",
+      "node": "tools/run-structure-town-manifest-contract-tests.mjs",
+      "sha256": "8732444a3ab18a6abf33a61a42bd9f0d74f314e2227f84685adc747a61077032"
+    },
+    {
+      "original": "tools/run-terrain-block-light-batch-contract.ps1",
+      "node": "tools/run-terrain-block-light-batch-contract.mjs",
+      "sha256": "98f3bf9d28fb767d647b3bbb0b3522f478b1762e28a929002e9006271b203ff8"
+    },
+    {
+      "original": "tools/run-terrain-meshing-bounds-contract.ps1",
+      "node": "tools/run-terrain-meshing-bounds-contract.mjs",
+      "sha256": "cf409444980fd8bf4461ef2138e8211e3b757670c740fab2b1a6771687aba201"
+    },
+    {
+      "original": "tools/run-town-ground-visual-playtest.ps1",
+      "node": "tools/run-town-ground-visual-playtest.mjs",
+      "sha256": "bd08dc80d34354b7e50eac1b0e7894265fff2059a1b21cf92f5530bf326f567d"
+    },
+    {
+      "original": "tools/run-town-hall-poc.ps1",
+      "node": "tools/run-town-hall-poc.mjs",
+      "sha256": "3eca8080dc16c6bdd79660c00cafed4bdfcecd7714e1475a21a7773b8f5ba801"
+    },
+    {
+      "original": "tools/run-town-hall-walkthrough.ps1",
+      "node": "tools/run-town-hall-walkthrough.mjs",
+      "sha256": "f821932acc8110238a9f3d2ef431a60e3202a0c71162fed56cb84862d5404f89"
+    },
+    {
+      "original": "tools/run-town-runtime-manifest-contract-tests.ps1",
+      "node": "tools/run-town-runtime-manifest-contract-tests.mjs",
+      "sha256": "fde88cd902b6bdf8ce3c5a0150099300c598d29325a6b5731f11da2b2f7124cc"
+    },
+    {
+      "original": "tools/run-tree-chunk-batch-prototype.ps1",
+      "node": "tools/run-tree-chunk-batch-prototype.mjs",
+      "sha256": "3d902d77760f5bfa28cb9ca1cf9220ec40884d46e3051d6b324397551f75a4ca"
+    },
+    {
+      "original": "tools/run-tree-publication-queue-contract.ps1",
+      "node": "tools/run-tree-publication-queue-contract.mjs",
+      "sha256": "50699b30a12c4cad748e96473545623a08f75257a61696f708ba227247d66621"
+    },
+    {
+      "original": "tools/run-tree-spawn-performance.ps1",
+      "node": "tools/run-tree-spawn-performance.mjs",
+      "sha256": "5f4984527be26ad1f881cc9fb497f19b07f9f2fe90d6fa21264ff7b6172fc713"
+    },
+    {
+      "original": "tools/run-tutorial-actor-registration-contract-tests.ps1",
+      "node": "tools/run-tutorial-actor-registration-contract-tests.mjs",
+      "sha256": "84bce4f054e066067a21cb490bb3c95dbfa444304690a3214a814b1022aca6b4"
+    },
+    {
+      "original": "tools/run-tutorial-generic-order-contract-tests.ps1",
+      "node": "tools/run-tutorial-generic-order-contract-tests.mjs",
+      "sha256": "48e5271071f7c0d8b6439753141b4993e1683274ccf51b637948553e32d2510c"
+    },
+    {
+      "original": "tools/run-tutorial-save-compatibility-contract-tests.ps1",
+      "node": "tools/run-tutorial-save-compatibility-contract-tests.mjs",
+      "sha256": "4d4032be275fde26cbbc16cadc103f88ce1cae91736df4ce52bce047b55549b0"
+    },
+    {
+      "original": "tools/run-underground-fluid-render-tests.ps1",
+      "node": "tools/run-underground-fluid-render-tests.mjs",
+      "sha256": "787ac8e0b99df9fb85b105b7417e1dd62f2929b686c4db984252194b6403534f"
+    },
+    {
+      "original": "tools/run-underground-generation-tests.ps1",
+      "node": "tools/run-underground-generation-tests.mjs",
+      "sha256": "45705263cda038f0fc85549a036e6e17bb835138a3e7e1e4a1ec64386cb07b1b"
+    },
+    {
+      "original": "tools/run-underground-interactive-playtest.ps1",
+      "node": "tools/run-underground-interactive-playtest.mjs",
+      "sha256": "ca7062e42bf97b100f1d08db53d75c1e053f2743bad309e4c0172abe2b9e32a2"
+    },
+    {
+      "original": "tools/run-underground-visual-playtest.ps1",
+      "node": "tools/run-underground-visual-playtest.mjs",
+      "sha256": "56d7cce2bf97476a4407e239d404f808155530cdd51dea9cc8281e40595611f7"
+    },
+    {
+      "original": "tools/run-underground-volume-audit.ps1",
+      "node": "tools/run-underground-volume-audit.mjs",
+      "sha256": "d3d4301635dc30a618baa8eca88700d94d496d65586f0277cf96c39b67437e85"
+    },
+    {
+      "original": "tools/run-underground-volume-contract-tests.ps1",
+      "node": "tools/run-underground-volume-contract-tests.mjs",
+      "sha256": "4180d1da53eeec35b14e6ab5ee50128cc213be106ad753ac61c1bcc84a95e318"
+    },
+    {
+      "original": "tools/run-visual-captures.ps1",
+      "node": "tools/run-visual-captures.mjs",
+      "sha256": "67f9c283f5329efc40e97f193755469f5d9859fb13b63d2b82b9e5e413b1efc0"
+    },
+    {
+      "original": "tools/run-vox43-fresh-world-traversal.ps1",
+      "node": "tools/run-vox43-fresh-world-traversal.mjs",
+      "sha256": "005bb0704b2deabc06045a3e291bb3a1b38109988dfda5167fd2074d429fba5c"
+    },
+    {
+      "original": "tools/run-vox43-known-save-visual-playtest.ps1",
+      "node": "tools/run-vox43-known-save-visual-playtest.mjs",
+      "sha256": "21e42ebf3ceab41591acf6db494b047ec1270d2360087388ea613332d08c0571"
+    },
+    {
+      "original": "tools/run-vox43-surface-cave-visual.ps1",
+      "node": "tools/run-vox43-surface-cave-visual.mjs",
+      "sha256": "156fc620a2e5836689cef4d77ea54699c13addd239535e6503ce3472bdb72b23"
+    },
+    {
+      "original": "tools/run-vox43-underground-fluid-visual.ps1",
+      "node": "tools/run-vox43-underground-fluid-visual.mjs",
+      "sha256": "08f126e4a7732cade7fad250a0223d212b44a9ef977a7d75e5b7a62074d456e0"
+    },
+    {
+      "original": "tools/run-vox55-terrain-scope-survey.ps1",
+      "node": "tools/run-vox55-terrain-scope-survey.mjs",
+      "sha256": "110922cbdc59fee1ca89896557f20272b544a4ffe0e552e3604530887f88f9cc"
+    },
+    {
+      "original": "tools/run-voxel-terrain-collision-publication.ps1",
+      "node": "tools/run-voxel-terrain-collision-publication.mjs",
+      "sha256": "daab8f337338f0fcdf08411aa446a2f0bad7b102840a488bd823cdd2bec3246f"
+    },
+    {
+      "original": "tools/run-voxel-terrain-save-parity.ps1",
+      "node": "tools/run-voxel-terrain-save-parity.mjs",
+      "sha256": "a4da2ee3e6414a0fa5ec8e27cc96452d327609bafa3e23a765bde47a9a492be5"
+    },
+    {
+      "original": "tools/run-voxel-tools-backend-smoke.ps1",
+      "node": "tools/run-voxel-tools-backend-smoke.mjs",
+      "sha256": "805b863250c50b21b6d17acc18397c427f488108d971e9736a3c6f1e65bfcae3"
+    },
+    {
+      "original": "tools/run-wolf-behavior-contract.ps1",
+      "node": "tools/run-wolf-behavior-contract.mjs",
+      "sha256": "6e0a3d6f0ffb20174407bd3aefa27985e5b495d13d45e07b4e41551082b623e8"
+    },
+    {
+      "original": "tools/run-world-signature.ps1",
+      "node": "tools/run-world-signature.mjs",
+      "sha256": "46bbbde51d923baeb51b5f674e52b2dee411a0d4fcccecfdbe68540501c4f8f1"
+    },
+    {
+      "original": "tools/story/run-story-playtest.ps1",
+      "node": "tools/story/run-story-playtest.mjs",
+      "sha256": "d51c2b50ee9cb796fbb4ee824f7195bb09d8fc08dc200fd5d6635814c1fb03ea"
+    },
+    {
+      "original": "tools/test-candidate-recipe-error-watcher.ps1",
+      "node": "tools/test-candidate-recipe-error-watcher.mjs",
+      "sha256": "95236cb817d9898ae693d7de466dfa23328dd6f36f8ab970f5612c4b5b56b02f"
+    },
+    {
+      "original": "tools/test-evidence-registry-self-test.ps1",
+      "node": "tools/test-evidence-registry-self-test.mjs",
+      "sha256": "3cb9ad12e58ec1791670cf04ab3b0b4c63092fd56af1d75e2feb442ee4986691"
+    }
+  ]
+}

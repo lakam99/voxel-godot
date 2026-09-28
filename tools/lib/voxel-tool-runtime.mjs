@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
+import { runGodotProcess } from './godot-process.mjs';
 
 const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(runtimeDirectory, '..', '..');
@@ -40,7 +41,7 @@ const optionAliases = new Map([
 
 function canonicalOptionName(rawName) {
   const normalizedName = rawName.replace(/^-+/, '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-  return optionAliases.get(normalizedName) ?? rawName.replace(/^-+/, '').replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+  return optionAliases.get(normalizedName) ?? rawName.replace(/^-+/, '').replace(/^[A-Z]/, letter => letter.toLowerCase()).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
 export function parseArguments(argv) {
@@ -113,9 +114,9 @@ function commandPath(command) {
 }
 
 function sconsInvocation() {
-  for (const command of ['scons', 'scons.exe']) {
+  for (const command of process.platform === 'win32' ? ['scons.exe', 'scons'] : ['scons']) {
     const executable = commandPath(command);
-    if (executable) return { executable, argumentsList: [] };
+    if (executable && !(process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable))) return { executable, argumentsList: [] };
   }
   for (const command of process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']) {
     const executable = commandPath(command);
@@ -151,6 +152,7 @@ export function findGodot(explicitPath) {
     ['GODOT_EXE', 'GODOT_BIN'],
     ['godot', 'godot4', 'Godot'],
     [
+      'C:/Users/arkam/Desktop/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stable_win64_console.exe',
       '/Applications/Godot.app/Contents/MacOS/Godot',
       '/Applications/Godot 4.app/Contents/MacOS/Godot'
     ],
@@ -186,7 +188,7 @@ export async function clearPngFiles(directory) {
 }
 
 export async function readJson(candidate) {
-  return JSON.parse(await readFile(candidate, 'utf8'));
+  return JSON.parse((await readFile(candidate, 'utf8')).replace(/^\uFEFF/, ''));
 }
 
 export async function writeJson(candidate, value) {
@@ -246,47 +248,8 @@ function sameStringSet(left, right) {
 }
 
 export async function validateEvidence(options) {
-  const reportPath = resolveProjectPath(options.reportPath);
-  if (!(await exists(reportPath))) throw new Error(`Evidence report missing for ${options.runnerId}: ${reportPath}`);
-  const report = await readJson(reportPath);
-  const evidenceLevel = options.evidenceLevel ?? 'unit';
-  const acceptanceClaims = splitValues(options.acceptanceClaims);
-  const requiredScreenshots = splitValues(options.requiredScreenshots);
-  const errors = [];
-  if (report.evidenceLevel && report.evidenceLevel !== evidenceLevel) errors.push(`report evidenceLevel '${report.evidenceLevel}' does not match '${evidenceLevel}'`);
-  if (Array.isArray(report.acceptanceClaims) && report.acceptanceClaims.length && !sameStringSet(report.acceptanceClaims, acceptanceClaims)) errors.push('report acceptanceClaims do not match runner claims');
-  if (acceptanceClaims.length && evidenceLevel !== 'acceptance_visual') errors.push('acceptanceClaims are only allowed for acceptance_visual runners');
-  const requiresScan = acceptanceClaims.length > 0 || asBoolean(options.requireForbiddenCallSelfScan);
-  if (requiresScan && report?.forbiddenCallSelfScan?.status !== 'passed') errors.push('acceptance report must include forbiddenCallSelfScan.status == passed');
-  const requiresVisualProof = evidenceLevel === 'acceptance_visual' || asBoolean(options.requireVisualProof);
-  const screenshotDirectory = options.screenshotDir ? resolveProjectPath(options.screenshotDir) : '';
-  if (requiresVisualProof) {
-    if (evidenceLevel === 'acceptance_visual' && !acceptanceClaims.length) errors.push('acceptance_visual runner must declare acceptance claims');
-    if (!requiredScreenshots.length) errors.push('visual-evidence runner must declare required screenshots');
-    for (const screenshot of requiredScreenshots) {
-      const screenshotPath = isAbsolute(screenshot) ? screenshot : screenshotDirectory ? join(screenshotDirectory, screenshot) : '';
-      if (!screenshotPath || !(await exists(screenshotPath))) errors.push(`required screenshot missing: ${screenshotPath || screenshot}`);
-    }
-    const captureCount = [report.captures, report.visualCaptures].reduce((count, value) => count + (Array.isArray(value) ? value.length : value ? 1 : 0), 0);
-    if (!captureCount) errors.push('visual-evidence report must include captures or visualCaptures');
-    const timelineCount = ['timeline', 'timelineTail', 'miraTimeline', 'doorStateTimeline'].reduce((count, key) => count + (Array.isArray(report[key]) ? report[key].length : report[key] ? 1 : 0), 0);
-    if (!timelineCount) errors.push('visual-evidence report must include timeline proof');
-  }
-  report.evidenceLevel = evidenceLevel;
-  report.acceptanceClaims = acceptanceClaims;
-  report.testIntegrity = {
-    registryId: options.runnerId,
-    registryPath: options.registryPath ? resolveProjectPath(options.registryPath) : '',
-    evidenceLevel,
-    liveGameplayAcceptance: acceptanceClaims.length > 0,
-    requiredScreenshots,
-    validationStatus: errors.length ? 'failed' : 'passed',
-    validationErrors: errors,
-    stampedUtc: timestamp()
-  };
-  await writeJson(reportPath, report);
-  if (errors.length) throw new Error(`Evidence validation failed for ${options.runnerId}: ${errors.join('; ')}`);
-  return { runnerId: options.runnerId, reportPath, evidenceLevel, acceptanceClaims, status: 'passed' };
+  const { validateEvidence: validate } = await import('./evidence-validation.mjs');
+  return validate(options, { cwd: projectRoot });
 }
 
 const scriptTools = {
@@ -308,7 +271,15 @@ const scriptTools = {
   'run-motion-rig-contract': ['res://scripts/testing/combat/MotionRigContractRunner.gd', 'VOXEL_MOTION_RIG_CONTRACT_REPORT'],
   'run-procedural-tree-performance-benchmark': ['res://scripts/testing/ProceduralTreePerformanceBenchmarkRunner.gd', 'VOXEL_PROCEDURAL_TREE_PERFORMANCE_REPORT'],
   'run-project-compile-smoke': ['res://scripts/testing/ProjectCompileSmokeRunner.gd', 'VOXEL_PROJECT_COMPILE_REPORT'],
+  'run-runtime-performance-observation-contract-tests': ['res://scripts/testing/RuntimePerformanceObservationContractRunner.gd', 'VOXEL_RUNTIME_PERF_CONTRACT_REPORT'],
   'run-seeded-cottage-recipe-contract': ['res://scripts/testing/buildings/SeededCottageRecipeContractRunner.gd', 'VOXEL_SEEDED_COTTAGE_RECIPE_CONTRACT_REPORT'],
+  'run-surface-prop-tree-rng-contract': ['res://scripts/testing/SurfacePropTreeRngCompatibilityContractRunner.gd', 'VOXEL_SURFACE_PROP_TREE_RNG_CONTRACT_REPORT'],
+  'run-surface-rock-recipe-contract': ['res://scripts/testing/SurfaceRockRecipeContractRunner.gd', 'VOXEL_SURFACE_ROCK_RECIPE_REPORT'],
+  'run-surface-prop-spawn-projection-oracle': ['res://scripts/testing/SurfacePropSpawnProjectionOracle.gd', 'VOXEL_SURFACE_PROP_SPAWN_PROJECTION_REPORT'],
+  'run-surface-prop-chunk-transform-contract': ['res://scripts/testing/SurfacePropChunkTransformContractRunner.gd', 'VOXEL_SURFACE_PROP_CHUNK_TRANSFORM_REPORT'],
+  'run-surface-structure-exclusion-oracle': ['res://scripts/testing/native_world/SurfaceStructureExclusionOracle.gd', 'VOXEL_SURFACE_STRUCTURE_EXCLUSION_REPORT'],
+  'run-biome-environment-snapshot-oracle': ['res://scripts/testing/BiomeEnvironmentSnapshotOracle.gd', 'VOXEL_BIOME_ENVIRONMENT_SNAPSHOT_REPORT'],
+  'run-surface-tree-seed-semantics-contract': ['res://scripts/testing/SurfaceTreeSeedSemanticsContractRunner.gd', 'VOXEL_SURFACE_TREE_SEED_SEMANTICS_REPORT'],
   'run-startup-loading-readiness-contract-tests': ['res://scripts/testing/StartupLoadingReadinessContractRunner.gd', 'VOXEL_STARTUP_READINESS_CONTRACT_REPORT'],
   'run-structure-town-manifest-contract-tests': ['res://scripts/testing/StructureTownManifestContractRunner.gd', 'VOXEL_STRUCTURE_TOWN_MANIFEST_REPORT'],
   'run-terrain-block-light-batch-contract': ['res://scripts/testing/TerrainBlockLightBatchContractRunner.gd', 'VOXEL_TERRAIN_BLOCK_LIGHT_BATCH_REPORT'],
@@ -446,7 +417,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
     await clearPngFiles(screenshotDir);
   }
   const runToken = randomUUID().replaceAll('-', '');
-  const environment = { ...process.env };
+  const environment = { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1' };
   if (requiresReport) environment[reportEnvironment] = reportPath;
   if (parsed.options.seed !== undefined) environment.VOXEL_TEST_SEED = String(parsed.options.seed);
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
@@ -469,7 +440,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
   if (isVisual) godotArguments.push('--fixed-fps', '60', '--resolution', '1280x720');
   godotArguments.push('--path', projectRoot, isScript ? '--script' : '--scene', target);
   if (!isScript && parsed.passthrough.length) godotArguments.push('--', ...parsed.passthrough);
-  const execution = await runProcess(godot, godotArguments, {
+  const execution = await runGodotProcess(godot, godotArguments, {
     env: environment,
     timeoutSeconds: asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, isVisual ? 90 : 0)
   });
@@ -490,7 +461,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
 
 function sceneArgumentOptions(options) {
   const forwarded = [];
-  const excluded = new Set(['godotExe', 'reportPath', 'progressPath', 'screenshotPath', 'screenshotDir', 'traceDir', 'artifactDir', 'timeoutSeconds', 'watchdogSeconds', 'headless', 'visible', 'help']);
+  const excluded = new Set(['godotExe', 'reportPath', 'progressPath', 'screenshotPath', 'screenshotDir', 'traceDir', 'artifactDir', 'timeoutSeconds', 'watchdogSeconds', 'headless', 'visible', 'help', 'acceptance', 'diagnostic', 'routePlanDetailedTiming']);
   for (const [key, value] of Object.entries(options)) {
     if (excluded.has(key) || value === undefined || value === false) continue;
     const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
@@ -500,8 +471,53 @@ function sceneArgumentOptions(options) {
   return forwarded;
 }
 
+export function runtimePerformanceObservationArguments(root, scene, options = {}) {
+  const args = ['--path', root];
+  if (options.resolution !== undefined) {
+    const resolution = String(options.resolution);
+    if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
+    args.push('--resolution', resolution, '--windowed');
+  }
+  if (scene) args.push('--scene', scene);
+  return args;
+}
+
+export function headedToolEnvironment(baseEnvironment, toolId) {
+  const environment = { ...baseEnvironment };
+  delete environment.VOXEL_RUNTIME_PERF_LAUNCH_MODE;
+  delete environment.VOXEL_ROUTE_PLAN_DETAILED_TIMING;
+  if (toolId === 'run-runtime-performance-observation')
+    environment.VOXEL_RUNTIME_PERF_LAUNCH_MODE = 'ordinary_realtime_project_pacing';
+  return environment;
+}
+
+export function runtimePerformanceOwnedLifecycle(summary = {}) {
+  const zeroOwnedWork = summary.authoritativeZeroProven === true
+    && summary.finalMembershipKnown === true
+    && Array.isArray(summary.finalJobMemberPids)
+    && summary.finalJobMemberPids.length === 0;
+  const naturalShutdown = summary.rootExited === true && summary.timedOut === false
+    && summary.forcedCleanup === false && summary.cleanupUnresolved === false;
+  return {
+    zeroOwnedWork,
+    naturalShutdown,
+    passed: zeroOwnedWork && naturalShutdown && summary.cleanupPassed === true,
+    cleanupPassed: summary.cleanupPassed === true,
+    authoritativeZeroProven: summary.authoritativeZeroProven === true,
+    finalMembershipKnown: summary.finalMembershipKnown === true,
+    finalJobMemberPids: Array.isArray(summary.finalJobMemberPids) ? summary.finalJobMemberPids : null,
+    rootExited: summary.rootExited === true,
+    timedOut: summary.timedOut === true,
+    forcedCleanup: summary.forcedCleanup === true,
+    cleanupUnresolved: summary.cleanupUnresolved === true,
+    watchdogSummaryPath: summary.summaryPath ?? null
+  };
+}
+
 async function runHeadedTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
+  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.seed !== undefined)
+    throw new Error('Normal runtime performance chooses its seed through New Game; omit -Seed.');
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
   const [scene, reportEnvironment, progressEnvironment, screenshotEnvironment, configuredReport, configuredProgress, configuredScreenshots] = config;
@@ -510,18 +526,27 @@ async function runHeadedTool(toolId, rawArgs) {
   const screenshotDir = screenshotEnvironment ? resolveProjectPath(parsed.options.screenshotDir, configuredScreenshots) : '';
   const traceDir = toolId === 'npc/run-npc-observation-tests' ? resolveProjectPath(parsed.options.traceDir, 'artifacts/npc/traces/npc-observation') : '';
   const guard = headedAcceptanceGuards[toolId];
+  let acceptanceGuardReport = null;
+  let acceptanceGuardReportPath = '';
   if (guard) {
     const [runnerPath, allowedPatterns] = guard;
     const guardReportPath = resolveProjectPath(undefined, `artifacts/node-tools/npc-acceptance-guards/${toolId.replaceAll('/', '-')}.json`);
-    await runAcceptanceRunnerAudit(['--runner-path', runnerPath, '--report-path', guardReportPath, '--test-id', `${toolId.replaceAll('/', '_')}_guard`, ...(allowedPatterns.length ? ['--allowed-shortcut-pattern', allowedPatterns.join(';')] : [])]);
-    const guardReport = await readJson(guardReportPath);
-    if (!guardReport.passed) throw new Error(`NPC acceptance runner guard failed: ${guardReportPath}`);
+    const guardReport = await runAcceptanceRunnerAudit(['--runner-path', runnerPath, '--report-path', guardReportPath, '--test-id', `${toolId.replaceAll('/', '_')}_guard`, ...(allowedPatterns.length ? ['--allowed-shortcut-pattern', allowedPatterns.join(';')] : [])]);
+    await writeJson(guardReportPath, guardReport);
+    if (guardReport.status !== 'passed') throw new Error(`NPC acceptance runner guard failed: ${guardReportPath}`);
+    acceptanceGuardReport = guardReport;
+    acceptanceGuardReportPath = guardReportPath;
   }
   await Promise.all([ensureDirectory(dirname(reportPath)), ensureDirectory(dirname(progressPath)), screenshotDir ? ensureDirectory(screenshotDir) : Promise.resolve(), traceDir ? ensureDirectory(traceDir) : Promise.resolve()]);
   await Promise.all([removeFile(reportPath), removeFile(progressPath), screenshotDir ? clearPngFiles(screenshotDir) : Promise.resolve()]);
   const runToken = randomUUID().replaceAll('-', '');
+  const runtimePerformanceObservation = toolId === 'run-runtime-performance-observation';
+  if (runtimePerformanceObservation && asBoolean(parsed.options.acceptance) && asBoolean(parsed.options.diagnostic))
+    throw new Error('Choose either --acceptance or --diagnostic, not both.');
+  const runtimePerformanceAcceptance = runtimePerformanceObservation && asBoolean(parsed.options.acceptance);
   const environment = {
-    ...process.env,
+    ...headedToolEnvironment(process.env, toolId),
+    VOXEL_DISABLE_AUDIO_PLAYBACK: '1',
     VOXEL_PLAYTEST: '1',
     VOXEL_TEST_SEED: String(parsed.options.seed ?? 'atlas-1492'),
     [reportEnvironment]: reportPath,
@@ -531,8 +556,27 @@ async function runHeadedTool(toolId, rawArgs) {
     VOXEL_GIT_BRANCH: gitValue(['branch', '--show-current']),
     VOXEL_GIT_COMMIT: gitValue(['rev-parse', 'HEAD'])
   };
+  if (runtimePerformanceObservation) {
+    environment.VOXEL_RUNTIME_PERF_ACCEPTANCE = runtimePerformanceAcceptance ? '1' : '0';
+    if (asBoolean(parsed.options.routePlanDetailedTiming))
+      environment.VOXEL_ROUTE_PLAN_DETAILED_TIMING = '1';
+    if (runtimePerformanceAcceptance && parsed.options.scenario === undefined)
+      environment.VOXEL_RUNTIME_PERF_SCENARIO = 'Gate5Town32Npc';
+    if (parsed.options.resolution !== undefined)
+      environment.VOXEL_RUNTIME_PERF_RESOLUTION = String(parsed.options.resolution);
+  }
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
   if (traceDir) environment.VOXEL_NPC_OBSERVATION_TRACE_DIR = traceDir;
+  // Normal-runtime measurement must use ordinary startup and frame timing.
+  if (toolId === 'run-normal-runtime-performance-pass') {
+    delete environment.VOXEL_PLAYTEST;
+    delete environment.VOXEL_TEST_SEED;
+  }
+  if (toolId === 'npc/run-npc-observation-tests') {
+    environment.VOXEL_NPC_TEST_SEED = String(parsed.options.seed ?? 'atlas-1492');
+    environment.VOXEL_NPC_TEST_RUN_TOKEN = runToken;
+    environment.VOXEL_NPC_TEST_WATCHDOG_SECONDS = String(asNumber(parsed.options.watchdogSeconds, 45));
+  }
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
   if (parsed.options.scenario !== undefined) {
     environment.VOXEL_NPC_OBSERVATION_SCENARIO = String(parsed.options.scenario);
@@ -553,6 +597,7 @@ async function runHeadedTool(toolId, rawArgs) {
     environment.VOXEL_CANOPY_RELEASE_REQUIRED_AGE_BAND = String(parsed.options.requiredAgeBand ?? '');
   }
   if (toolId === 'npc/run-real-tutorial-playthrough' || toolId === 'npc/run-real-tutorial-playthrough-no-flags') {
+    environment.VOXEL_REAL_TUTORIAL_GOD_MODE = '1';
     environment.VOXEL_REAL_TUTORIAL_REAL_BOOT = '1';
     environment.VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED = asBoolean(parsed.options.visible) ? '1' : '0';
     environment.VOXEL_REAL_TUTORIAL_MIRA_HOME_ONLY = asBoolean(parsed.options.miraHomeOnly) ? '1' : '0';
@@ -561,14 +606,41 @@ async function runHeadedTool(toolId, rawArgs) {
     if (toolId.endsWith('no-flags')) environment.VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE = '1';
   }
   const godot = await findGodot(parsed.options.godotExe);
-  const godotArguments = ['--fixed-fps', '60', '--path', projectRoot];
-  if (scene) godotArguments.push('--scene', scene);
+  const godotArguments = runtimePerformanceObservation
+    ? runtimePerformanceObservationArguments(projectRoot, scene, parsed.options)
+    : toolId === 'run-normal-runtime-performance-pass'
+      ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
+  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.resolution !== undefined) {
+    const resolution = String(parsed.options.resolution);
+    if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
+    godotArguments.push('--resolution', resolution);
+    godotArguments.push('--windowed');
+    environment.VOXEL_NORMAL_RUNTIME_PERF_RESOLUTION = resolution;
+  }
+  if (['npc/run-npc-observation-tests','npc/run-real-tutorial-playthrough'].includes(toolId) && !asBoolean(parsed.options.visible)) godotArguments.unshift('--headless');
+  if (scene && !runtimePerformanceObservation) godotArguments.push('--scene', scene);
   const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];
   if (forwarded.length) godotArguments.push('--', ...forwarded);
-  const execution = await runProcess(godot, godotArguments, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300) });
+  const execution = await runGodotProcess(godot, godotArguments, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300) });
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);
   const report = await readJson(reportPath);
   if (report.runToken && report.runToken !== runToken) throw new Error(`Stale report token from ${toolId}`);
+  // The guard is wrapper-owned evidence. A runner cannot truthfully attest to a
+  // static audit that was performed before it launched, so attach the actual
+  // passed audit here rather than requiring each scene to fabricate one.
+  if (acceptanceGuardReport) {
+    report.forbiddenCallSelfScan = acceptanceGuardReport;
+    report.forbiddenCallSelfScanReportPath = acceptanceGuardReportPath;
+  }
+  if (runtimePerformanceObservation) {
+    report.ownedProcessLifecycle = runtimePerformanceOwnedLifecycle({ ...execution.summary, summaryPath: execution.summaryPath });
+    if (!report.ownedProcessLifecycle.passed) {
+      report.passed = false;
+      report.failureCount = Number(report.failureCount ?? 0) + 1;
+      report.ownedProcessLifecycleFailure = 'owned process did not reach natural zero-membership shutdown';
+    }
+  }
+  if (acceptanceGuardReport || runtimePerformanceObservation) await writeJson(reportPath, report);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (execution.code !== 0 || !reportPassed(report)) process.exitCode = 1;
 }
@@ -600,12 +672,12 @@ export async function runNpcSuite(rawArgs) {
     VOXEL_GIT_BRANCH: gitValue(['branch', '--show-current']), VOXEL_GIT_COMMIT: gitValue(['rev-parse', 'HEAD'])
   };
   const godot = await findGodot(parsed.options.godotExe);
-  const execution = await runProcess(godot, ['--fixed-fps', '60', '--headless', '--path', projectRoot, '--scene', 'res://scenes/testing/npc/NpcAutonomyTest.tscn'], {
+  const execution = await runGodotProcess(godot, ['--fixed-fps', '60', '--headless', '--path', projectRoot, '--scene', 'res://scenes/testing/npc/NpcAutonomyTest.tscn'], {
     env: environment, timeoutSeconds: asNumber(parsed.options.watchdogSeconds, 45)
   });
   if (!(await exists(reportPath))) throw new Error(`Missing NPC suite report: ${reportPath}`);
   const report = await readJson(reportPath);
-  if (report.runToken && report.runToken !== runToken) throw new Error(`Stale NPC suite report: ${reportPath}`);
+  if (report.runToken !== runToken) throw new Error(`Missing or stale NPC suite token: ${reportPath}`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (execution.code !== 0 || !reportPassed(report)) process.exitCode = 1;
 }
@@ -639,15 +711,18 @@ export async function runPlaytest(rawArgs, mode = 'playtest') {
     VOXEL_PLAYTEST_REPORT: reportPath, VOXEL_PLAYTEST_PROGRESS: progressPath,
     VOXEL_PLAYTEST_SCREENSHOT: screenshotPath, VOXEL_PLAYTEST_RUN_TOKEN: runToken
   };
+  if (parsed.options.watchdogSeconds !== undefined)
+    environment.VOXEL_PLAYTEST_WATCHDOG_SECONDS = String(asNumber(parsed.options.watchdogSeconds, 240));
   if (parsed.options.only) environment.VOXEL_PLAYTEST_ONLY = String(parsed.options.only);
   const godot = await findGodot(parsed.options.godotExe);
   const argumentsList = ['--fixed-fps', '60'];
   if (!asBoolean(parsed.options.visible)) argumentsList.push('--headless');
   argumentsList.push('--path', projectRoot, '--scene', target);
-  const execution = await runProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 1800) });
+  const execution = await runGodotProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 1800) });
   if (!(await exists(reportPath))) throw new Error(`Missing playtest report: ${reportPath}`);
   const report = await readJson(reportPath);
-  if (report.runToken && report.runToken !== runToken) throw new Error(`Stale playtest report: ${reportPath}`);
+  if (!isNavigation && report.runToken !== runToken) throw new Error(`Missing or stale playtest token: ${reportPath}`);
+  if (isNavigation && report.runToken && report.runToken !== runToken) throw new Error(`Stale navigation token: ${reportPath}`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (execution.code !== 0 || !reportPassed(report)) process.exitCode = 1;
 }
@@ -665,7 +740,7 @@ export async function runVisualCaptures(rawArgs) {
   const argumentsList = [];
   if (asBoolean(parsed.options.headless)) argumentsList.push('--headless');
   argumentsList.push('--path', projectRoot, '--scene', 'res://scenes/VisualCapture.tscn');
-  const execution = await runProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 900) });
+  const execution = await runGodotProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 900) });
   if (!(await exists(reportPath))) throw new Error(`Missing visual capture report: ${reportPath}`);
   const expectedCases = asBoolean(parsed.options.canopy)
     ? ['canopy_plains_midday', 'canopy_forest_midday', 'canopy_taiga_midday', 'canopy_swamp_rain', 'canopy_savanna_midday', 'canopy_forest_storm', 'canopy_forest_night_torch', 'canopy_forest_traversal_line', 'canopy_town_edge_midday']
@@ -693,13 +768,18 @@ export async function runWorldSignature(rawArgs) {
   if (!asBoolean(parsed.options.updateBaseline) && (spawnSync('git', ['-C', projectRoot, 'diff', '--quiet', '--', baselineRelativePath]).status !== 0 || spawnSync('git', ['-C', projectRoot, 'diff', '--cached', '--quiet', '--', baselineRelativePath]).status !== 0)) throw new Error(`World signature baseline has uncommitted changes: ${baselineRelativePath}`);
   await ensureDirectory(dirname(outputPath));
   await removeFile(outputPath);
-  const environment = { ...process.env, VOXEL_WORLD_SIGNATURE_OUTPUT: outputPath, VOXEL_TEST_SEED: seed };
+  const environment = {
+    ...process.env,
+    VOXEL_DISABLE_AUDIO_PLAYBACK: '1',
+    VOXEL_WORLD_SIGNATURE_OUTPUT: outputPath,
+    VOXEL_TEST_SEED: seed
+  };
   if (asBoolean(parsed.options.updateBaseline)) environment.VOXEL_WORLD_SIGNATURE_UPDATE_BASELINE = '1';
   const godot = await findGodot(parsed.options.godotExe);
-  const argumentsList = ['--fixed-fps', '60'];
+  const argumentsList = ['--fixed-fps', '60', '--audio-driver', 'Dummy'];
   if (!asBoolean(parsed.options.visible)) argumentsList.push('--headless');
   argumentsList.push('--path', projectRoot, '--scene', 'res://scenes/WorldSignature.tscn');
-  const execution = await runProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 900) });
+  const execution = await runGodotProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 900) });
   if (!(await exists(outputPath))) throw new Error(`Missing world signature: ${outputPath}`);
   if (asBoolean(parsed.options.updateBaseline)) {
     await ensureDirectory(dirname(baselinePath));
@@ -756,71 +836,12 @@ async function runWorkflow(toolId, rawArgs) {
     await runPlaytest(['--report-path', join(artifactDir, 'report.json'), '--screenshot-path', join(artifactDir, 'final.png'), '--only', only, ...(asBoolean(parsed.options.visible) ? ['--visible'] : [])]);
     return;
   }
-  if (toolId === 'run-procedural-tree-interaction-matrix') {
-    const artifactDir = resolveProjectPath(parsed.options.artifactDir, 'artifacts/vegetation/procedural-tree-interaction-matrix');
-    const cases = [['broadleaf-mature', 'forest', 'broadleaf', 'mature'], ['broadleaf-old', 'forest', 'broadleaf', 'old'], ['conifer-mature', 'taiga', 'conifer', 'mature'], ['conifer-old', 'taiga', 'conifer', 'old'], ['savanna-mature', 'savanna', 'savanna', 'mature'], ['savanna-old', 'savanna', 'savanna', 'old']];
-    const results = [];
-    for (const [key, biome, architecture, ageBand] of cases) {
-      const caseDir = join(artifactDir, key);
-      await runTool('run-canopy-release-playtest', ['--artifact-dir', caseDir, '--target-biome', biome, '--target-architecture', architecture, '--required-age-band', ageBand, '--watchdog-seconds', String(asNumber(parsed.options.watchdogSeconds, 420))]);
-      results.push({ key, biome, architecture, ageBand, artifactDir: caseDir });
-    }
-    await writeJson(join(artifactDir, 'interaction-matrix.json'), { runnerId: 'procedural_tree_family_age_interaction_matrix', evidenceLevel: 'headed_gameplay_acceptance', passed: true, caseCount: results.length, cases: results, finishedUtc: timestamp() });
-    return;
-  }
-  if (toolId === 'run-underground-volume-audit') {
-    const reportPath = resolveProjectPath(parsed.options.reportPath, 'artifacts/underground-volume-audit.json');
-    const required = ['scripts/WorldGenerationSystem.gd', 'scripts/TerrainVolumeService.gd', 'scripts/TerrainMeshingService.gd'];
-    const results = await Promise.all(required.map(async (relativePath) => ({ file: relativePath, exists: await exists(join(projectRoot, relativePath)) })));
-    const failureCount = results.filter((result) => !result.exists).length;
-    const report = { runnerId: 'underground_volume_audit', evidenceLevel: 'static_audit', passed: failureCount === 0, failureCount, results, finishedUtc: timestamp() };
-    await writeJson(reportPath, report);
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    if (failureCount) process.exitCode = 1;
-    return;
-  }
   throw new Error(`No workflow configuration registered for ${toolId}`);
 }
 
 async function runAggregate(toolId, rawArgs) {
-  const parsed = parseArguments(rawArgs);
-  const registryPath = resolveProjectPath(parsed.options.registryPath, toolId === 'run-all-test-runners' ? 'tools/test-runner-registry.json' : 'tools/npc/npc-suite-registry.json');
-  const registry = await readJson(registryPath);
-  const collection = registry.runners ?? registry.suites ?? [];
-  const reportPath = resolveProjectPath(parsed.options.reportPath, toolId === 'run-all-test-runners' ? 'artifacts/test-runners/all-test-runners-report.json' : `artifacts/npc/reports/all-npc-${String(parsed.options.timeMode ?? 'Both').toLowerCase()}.json`);
-  const started = Date.now();
-  const results = [];
-  for (const runner of collection) {
-    const command = String(runner.command ?? '').replace(/^\.\\/, '').replaceAll('\\', '/').replace(/\.ps1$/i, '.mjs');
-    const argumentsList = [...(runner.args ?? [])];
-    const seedIndex = argumentsList.findIndex((argument) => canonicalOptionName(argument) === 'seed');
-    if (parsed.options.seed !== undefined && seedIndex >= 0) argumentsList[seedIndex + 1] = String(parsed.options.seed);
-    const runnerPath = command === 'node'
-      ? String(argumentsList.shift() ?? '').replace(/^\.\\/, '').replaceAll('\\', '/')
-      : join(projectRoot, command);
-    const invocation = command === 'node' ? [runnerPath, ...argumentsList] : [runnerPath, ...argumentsList];
-    const startedRunner = Date.now();
-    const execution = await runProcess(process.execPath, invocation, { timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 0) }).catch((error) => ({ code: 1, error: error.message }));
-    const declaredReport = runner.reportPath ? resolveProjectPath(runner.reportPath) : '';
-    let evidenceValid = !declaredReport;
-    let evidenceError = '';
-    if (declaredReport && await exists(declaredReport)) {
-      try {
-        await validateEvidence({ reportPath: declaredReport, runnerId: runner.id, evidenceLevel: runner.evidenceLevel, acceptanceClaims: runner.acceptanceClaims, requiredScreenshots: runner.requiredScreenshots, screenshotDir: runner.screenshotDir, registryPath, requireForbiddenCallSelfScan: runner.requiresForbiddenCallSelfScan, requireVisualProof: runner.requiresVisualProof });
-        evidenceValid = true;
-      } catch (error) {
-        evidenceError = error.message;
-      }
-    }
-    const passed = execution.code === 0 && evidenceValid;
-    results.push({ id: runner.id, command: runner.command, args: argumentsList, exitCode: execution.code, passed, durationSeconds: Number(((Date.now() - startedRunner) / 1000).toFixed(3)), reportPath: declaredReport, evidenceLevel: runner.evidenceLevel ?? '', evidenceValid, evidenceError });
-    if (!passed && asBoolean(parsed.options.stopOnFailure)) break;
-  }
-  const failureCount = results.filter((result) => !result.passed).length;
-  const report = { schemaVersion: 2, runnerId: toolId, evidenceLevel: 'integration', acceptanceClaims: [], startedUtc: new Date(started).toISOString(), finishedUtc: timestamp(), durationSeconds: Number(((Date.now() - started) / 1000).toFixed(3)), resultCount: results.length, failureCount, results, testIntegrity: { registryId: toolId, registryPath, evidenceLevel: 'integration', liveGameplayAcceptance: false, validationStatus: failureCount ? 'failed' : 'passed', stampedUtc: timestamp() } };
-  await writeJson(reportPath, report);
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (failureCount) process.exitCode = 1;
+  const { runAggregate: aggregate } = await import('./aggregate-runner.mjs');
+  return aggregate(toolId, rawArgs);
 }
 
 async function listFilesRecursively(directory) {
@@ -830,105 +851,50 @@ async function listFilesRecursively(directory) {
 }
 
 async function runAcceptanceRunnerAudit(rawArgs) {
-  const parsed = parseArguments(rawArgs);
-  const runnerPath = resolveProjectPath(parsed.options.runnerPath);
-  const reportPath = resolveProjectPath(parsed.options.reportPath, 'artifacts/npc/reports/npc-acceptance-runner-audit.json');
-  const allowed = splitValues(parsed.options.allowedShortcutPattern);
-  if (!(await exists(runnerPath))) throw new Error(`Acceptance runner source does not exist: ${runnerPath}`);
-  const rules = [
-    ['direct_tutorial_door_progress', /\bon_door_opened\b/], ['direct_tutorial_interaction', /\binteract_with\b/],
-    ['direct_tutorial_completion', /\bcomplete_step\b/], ['direct_block_progress', /\bon_block_placed\b/],
-    ['direct_sleep_or_bed_progress', /\b(on_bed_used|sleep_at_bed)\b/], ['inventory_grant', /\binventory_system\.add_item\s*\(/],
-    ['direct_npc_movement_helper', /\bmove_npc\b/], ['direct_door_service', /\b(request_door_state|request_crossing)\b/],
-    ['fake_inside_home_metadata', /set_meta\s*\(\s*["']npc_inside_home["']/], ['fake_scripted_arrival_metadata', /set_meta\s*\(\s*["']npc_scripted_arrived["']/],
-    ['actor_transform_write', /\b(player|body|npc_body|actor|mira_body|rowan_body|niko_body|sera_body)\.global_position\s*=/],
-    ['safe_place_npc', /\bsafe_place_npc\b/], ['source_scan_acceptance', /\bread_text\s*\(/],
-    ['fixed_post_load_startup_delay', /\bawait\s+wait_physics_frames\s*\(\s*STARTUP_FRAMES\s*\)/]
-  ];
-  const lines = (await readFile(runnerPath, 'utf8')).split(/\r?\n/);
-  const violations = [];
-  lines.forEach((line, index) => {
-    if (allowed.some((pattern) => new RegExp(pattern).test(line))) return;
-    for (const [id, pattern] of rules) if (pattern.test(line)) violations.push({ ruleId: id, lineNumber: index + 1, line: line.trim() });
-  });
-  const report = { runnerId: String(parsed.options.testId ?? 'npc_acceptance_runner_static_guard'), evidenceLevel: 'static_audit', passed: violations.length === 0, failureCount: violations.length, runnerPath, violations, finishedUtc: timestamp() };
-  await writeJson(reportPath, report);
-  if (asBoolean(parsed.options.passThruJson) || true) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (violations.length) process.exitCode = 1;
+  const { runAcceptanceRunnerAudit: audit } = await import('./npc-source-audit.mjs');
+  return audit(rawArgs);
 }
 
 async function runSourceAudit(toolId, rawArgs) {
-  const parsed = parseArguments(rawArgs);
-  const reportPath = resolveProjectPath(parsed.options.reportPath, `artifacts/npc/reports/${toolId.replace('/', '-')}.json`);
-  const scriptsDirectory = join(projectRoot, 'scripts');
-  const files = (await listFilesRecursively(scriptsDirectory)).filter((candidate) => candidate.endsWith('.gd') && !candidate.includes('/testing/'));
-  const rules = toolId === 'npc/assert-npc-route-state-writers'
-    ? [{ id: 'route_state_writes', pattern: /\b(route_state|routeState)\s*=/g, allowed: /NpcRouteAuthorityV2|NpcRouteCoordinatorAdapter|NpcRouteLeaseExecutor/ }]
-    : toolId === 'npc/assert-npc-legacy-pathfinding-clean'
-      ? [{ id: 'legacy_pathfinding_shortcut', pattern: /generated_cell_bridge|exact_home_collision_lattice|composed_door_route|partial_endpoint_success/gi, allowed: /^$/ }]
-      : [{ id: 'navmesh_backend_default', pattern: /legacy_static_body_adapter/gi, allowed: /docs|testing/ }];
-  const findings = [];
-  for (const filePath of files) {
-    const relativePath = filePath.slice(projectRoot.length + 1).replaceAll('\\', '/');
-    const content = await readFile(filePath, 'utf8');
-    for (const rule of rules) {
-      const matches = [...content.matchAll(rule.pattern)];
-      if (matches.length && !rule.allowed.test(relativePath)) findings.push({ ruleId: rule.id, file: relativePath, count: matches.length });
-    }
-  }
-  const report = { runnerId: toolId.replace('/', '_'), evidenceLevel: 'static_audit', passed: findings.length === 0, failureCount: findings.length, findings, scannedFileCount: files.length, finishedUtc: timestamp() };
-  await writeJson(reportPath, report);
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (findings.length) process.exitCode = 1;
+  const { runSourceAudit: audit } = await import('./npc-source-audit.mjs');
+  return audit(toolId, rawArgs);
 }
 
 async function runStaticTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
-  if (toolId === 'assert-test-evidence-report') {
-    const result = await validateEvidence(parsed.options);
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return;
-  }
   if (toolId === 'npc/assert-npc-acceptance-runner-clean') return runAcceptanceRunnerAudit(rawArgs);
   if (['npc/assert-npc-legacy-pathfinding-clean', 'npc/assert-npc-route-state-writers', 'npc/audit-npc-navmesh-backend'].includes(toolId)) return runSourceAudit(toolId, rawArgs);
-  if (toolId === 'npc/run-npc-scenario-tests') return runTool('npc/run-npc-observation-tests', rawArgs);
-  if (toolId === 'npc/run-tutorial-save-continue-playtest') {
-    const parsedArgs = parseArguments(rawArgs);
-    const baseReport = resolveProjectPath(parsedArgs.options.reportPath, 'artifacts/npc/reports/tutorial-save-continue.json');
-    await runTool('npc/run-actual-gameplay-mira-porch-regression', ['--report-path', baseReport, ...rawArgs]);
-    return;
-  }
   if (toolId === 'npc/test-npc-acceptance-guard') {
-    const reportPath = resolveProjectPath(parsed.options.reportPath, 'artifacts/test-runners/npc-acceptance-guard-self-test.json');
-    const report = { runnerId: 'npc_acceptance_guard_self_test', evidenceLevel: 'static_audit', passed: true, failureCount: 0, resultCount: 1, results: [{ name: 'node_acceptance_guard_available', passed: true }], finishedUtc: timestamp() };
-    await writeJson(reportPath, report);
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    return;
+    const { runAcceptanceGuardSelfTest } = await import('./npc-acceptance-guard-self-test.mjs');
+    return runAcceptanceGuardSelfTest(rawArgs);
   }
-  if (toolId === 'test-evidence-registry-self-test') {
-    const reportPath = resolveProjectPath(parsed.options.reportPath, 'artifacts/test-runners/test-evidence-registry-self-test.json');
-    const registry = await readJson(join(projectRoot, 'tools/test-runner-registry.json'));
-    const invalid = (registry.runners ?? []).filter((runner) => !runner.id || !runner.evidenceLevel);
-    const report = { runnerId: 'test_evidence_registry_self_test', evidenceLevel: 'static_audit', passed: invalid.length === 0, failureCount: invalid.length, invalidRunners: invalid.map((runner) => runner.id ?? ''), finishedUtc: timestamp() };
-    await writeJson(reportPath, report);
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    if (invalid.length) process.exitCode = 1;
-    return;
+  if (['assert-test-evidence-report', 'test-evidence-registry-self-test'].includes(toolId)) {
+    const { runEvidenceStaticTool } = await import('./evidence-cli.mjs');
+    return runEvidenceStaticTool(toolId, rawArgs, { cwd: projectRoot });
   }
   if (toolId === 'build-native-terrain-meshing') {
+    if (!['cl', 'clang', 'clang++', 'gcc', 'g++'].some(command => commandPath(command))) {
+      process.stderr.write('No C++ compiler found on PATH. Continuing so SCons can attempt platform toolchain discovery; install MSVC Build Tools, clang, or gcc if the build fails.\n');
+    }
     const platform = String(parsed.options.platform ?? (process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux'));
     const architecture = String(parsed.options.architecture ?? defaultNativeArchitecture(platform));
     const target = String(parsed.options.target ?? 'template_debug');
     if (platform === 'macos' && architecture !== 'universal') throw new Error('macOS terrain meshing builds must use --architecture universal so the GDExtension runs on both Apple Silicon and Intel Macs.');
     const nativeDirectory = join(projectRoot, 'native/terrain_meshing');
     const godotCppDirectory = join(nativeDirectory, 'godot-cpp');
+    const godotCppRevision = (await readFile(join(nativeDirectory, 'godot-cpp-revision.txt'), 'utf8')).trim();
+    if (!/^[0-9a-f]{40}$/.test(godotCppRevision)) throw new Error('Invalid pinned godot-cpp revision.');
     if (asBoolean(parsed.options.fetchGodotCpp) && !(await exists(godotCppDirectory))) {
-      const clone = await runProcess('git', ['clone', '--depth', '1', '--branch', String(parsed.options.godotCppBranch ?? '4.5'), 'https://github.com/godotengine/godot-cpp.git', godotCppDirectory]);
+      const clone = await runProcess('git', ['clone', '--depth', '1', '--branch', String(parsed.options.godotCppBranch ?? '4.6'), 'https://github.com/godotengine/godot-cpp.git', godotCppDirectory]);
       if (clone.code !== 0) throw new Error('Failed to fetch godot-cpp bindings. Pass --godot-cpp-branch with a valid Godot compatibility branch.');
+      const fetch = await runProcess('git', ['fetch', '--depth', '1', 'origin', godotCppRevision], { cwd: godotCppDirectory });
+      if (fetch.code !== 0) throw new Error('Failed to fetch the pinned godot-cpp revision.');
+      const checkout = await runProcess('git', ['checkout', '--detach', godotCppRevision], { cwd: godotCppDirectory });
+      if (checkout.code !== 0) throw new Error('Failed to select the pinned godot-cpp revision.');
     }
     const scons = sconsInvocation();
     if (!scons) throw new Error('Missing SCons. Install it with Homebrew or Python before building the terrain meshing GDExtension.');
-    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${parsed.options.apiVersion ?? '4.5'}`, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
+    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${parsed.options.apiVersion ?? '4.6'}`, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
     if (build.code !== 0) throw new Error(`SCons failed while building the terrain meshing GDExtension (exit code ${build.code}).`);
     const outputDirectory = join(projectRoot, 'addons/terrain_meshing_backend/bin');
     await ensureDirectory(outputDirectory);
@@ -981,34 +947,30 @@ async function runStaticTool(toolId, rawArgs) {
   throw new Error(`No static Node implementation registered for ${toolId}`);
 }
 
-async function runInteractiveTool(rawArgs) {
-  const parsed = parseArguments(rawArgs);
-  const godot = await findGodot(parsed.options.godotExe);
-  const environment = { ...process.env };
-  if (parsed.options.seed !== undefined) environment.VOXEL_TEST_SEED = String(parsed.options.seed);
-  if (parsed.options.searchRadius !== undefined) environment.VOXEL_UNDERGROUND_INTERACTIVE_SEARCH_RADIUS = String(parsed.options.searchRadius);
-  if (parsed.options.minDepthCells !== undefined) environment.VOXEL_UNDERGROUND_INTERACTIVE_MIN_DEPTH_CELLS = String(parsed.options.minDepthCells);
-  if (parsed.options.maxDepthCells !== undefined) environment.VOXEL_UNDERGROUND_INTERACTIVE_MAX_DEPTH_CELLS = String(parsed.options.maxDepthCells);
-  if (parsed.options.launchInfoPath !== undefined) environment.VOXEL_UNDERGROUND_INTERACTIVE_LAUNCH_INFO = resolveProjectPath(parsed.options.launchInfoPath);
-  const result = await runProcess(godot, ['--path', projectRoot], { env: environment });
-  if (result.code !== 0) process.exitCode = result.code;
-}
-
 export async function runTool(toolId, rawArgs = process.argv.slice(2)) {
   if (rawArgs.includes('--help') || rawArgs.includes('-Help')) {
     process.stdout.write(`Usage: node tools/${toolId}.mjs [options]\n`);
     return;
+  }
+  if (['npc/run-npc-scenario-tests', 'npc/run-tutorial-save-continue-playtest', 'npc/run-real-tutorial-playthrough-no-flags'].includes(toolId)) {
+    const workflows = await import('./npc-workflows.mjs');
+    return toolId === 'npc/run-npc-scenario-tests' ? workflows.runScenarios(rawArgs)
+      : workflows.runProductionTutorial(rawArgs, toolId === 'npc/run-tutorial-save-continue-playtest');
+  }
+  if (['run-underground-interactive-playtest','run-procedural-tree-interaction-matrix','run-underground-volume-audit','run-canopy-release-playtest'].includes(toolId)) {
+    const workflows = await import('./legacy-workflow-ports.mjs');
+    return toolId === 'run-underground-interactive-playtest' ? workflows.runUndergroundInteractive(rawArgs)
+      : workflows.runLegacyWorkflow(toolId, rawArgs);
   }
   if (scriptTools[toolId] || sceneTools[toolId] || visualTools[toolId]) return runConfiguredGodot(toolId, rawArgs);
   if (toolId === 'run-playtest') return runPlaytest(rawArgs);
   if (toolId === 'run-npc-navigation-tests') return runPlaytest(rawArgs, 'navigation');
   if (toolId === 'run-visual-captures') return runVisualCaptures(rawArgs);
   if (toolId === 'run-world-signature') return runWorldSignature(rawArgs);
-  if (toolId === 'run-underground-interactive-playtest') return runInteractiveTool(rawArgs);
   if (headedTools[toolId]) return runHeadedTool(toolId, rawArgs);
   if (toolId === 'npc/run-npc-suite') return runNpcSuite(rawArgs);
-  if (toolId.startsWith('npc/run-npc-') && toolId.endsWith('-tests')) return runNpcFocused(toolId, rawArgs);
   if (toolId === 'run-all-test-runners' || toolId === 'npc/run-all-npc-tests') return runAggregate(toolId, rawArgs);
+  if (toolId.startsWith('npc/run-npc-') && toolId.endsWith('-tests')) return runNpcFocused(toolId, rawArgs);
   if (toolId.startsWith('blender/')) return runBlenderTool(toolId, rawArgs);
   if (workflowToolIds.has(toolId)) return runWorkflow(toolId, rawArgs);
   if (staticToolIds.has(toolId)) return runStaticTool(toolId, rawArgs);

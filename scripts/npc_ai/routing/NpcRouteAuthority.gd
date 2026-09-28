@@ -46,10 +46,10 @@ func setup(system_node, main_node, navigation_world, route_delegate) -> void:
 	collision_probe = CollisionProbeServiceScript.new()
 	collision_probe.setup(system, main)
 
-func begin_frame() -> void:
+func begin_frame(allow_publication := true) -> void:
 	probe_samples_used_this_frame = 0
 	if delegate != null and delegate.has_method("begin_frame"):
-		delegate.begin_frame()
+		delegate.begin_frame(allow_publication)
 
 func invalidate() -> void:
 	route_generations.clear()

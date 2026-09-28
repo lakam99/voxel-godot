@@ -20,9 +20,15 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	add_child(main)
+	# Explicit diagnostic setup only; use the inherited failure report/cleanup.
+	if not await main.wait_for_startup_loading_complete(240.0, true):
+		if is_instance_valid(main):
+			startup_failure_result = main.get("startup_loading_failure_result").duplicate(true)
+		add_result("provisional_visual_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
+		finish(1)
+		return
 	main.set_process(false)
 	main.set_physics_process(false)
-	await wait_process_frames(2)
 	bind_scene_nodes()
 	if main == null or world_generation == null:
 		add_result("provisional_visual_scene_ready", false, "main/world_generation missing")

@@ -1,0 +1,2051 @@
+{
+  "schema": "n3-effective-terrain-goldens/v1",
+  "oracleSchema": "n3-effective-terrain-oracle/v1",
+  "querySet": {
+    "schema": "n3-effective-terrain-query-set/v1",
+    "id": "atlas-1492-effective-terrain-parity-v3-bottom-projection"
+  },
+  "description": "Independent fixed Godot production-semantics queries for the N3 native effective-terrain differential, including a CitadelSiteField-valid atlas-1492 candidate and a bottom-stratum raw-world projection witness, with manifests, terrain profiles, and expected results rebuilt by production GDScript.",
+  "world": {
+    "seed": "atlas-1492",
+    "cellSize": 1.35,
+    "townOverrides": [
+      {
+        "region": [
+          -1,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          0,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          1,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          -1,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          0,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          1,
+          0
+        ],
+        "hasTown": true,
+        "center": [
+          280,
+          0
+        ],
+        "radius": 24,
+        "level": 10
+      },
+      {
+        "region": [
+          -1,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          0,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          1,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          2,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          2,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          2,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          6,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          7,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          8,
+          -1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          6,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          7,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          8,
+          0
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          6,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          7,
+          1
+        ],
+        "hasTown": false
+      },
+      {
+        "region": [
+          8,
+          1
+        ],
+        "hasTown": false
+      }
+    ],
+    "ordinaryStructurePolicy": {
+      "regionCells": 140,
+      "spawnChance": 0.26
+    },
+    "siteProfiles": [
+      {
+        "siteId": "citadel-site-v1:10:atlas-1492:1,-3",
+        "candidateRegion": [
+          1,
+          -3
+        ],
+        "centerCell": [
+          3236,
+          -5431
+        ],
+        "recipeSeed": 1298433643,
+        "sourceSignature": "e0e68865f4ee518e2df7c18f394bab1e9d7643334879984058a94c03a76cf825",
+        "coreCells": [
+          3232,
+          -5435,
+          9,
+          9
+        ],
+        "envelopeCells": [
+          3214,
+          -5453,
+          45,
+          45
+        ],
+        "reservationCells": [
+          3233,
+          -5434,
+          7,
+          7
+        ],
+        "apronCells": 18,
+        "initialLevel": 0,
+        "level": 18.9,
+        "levelBits": "6766666666e63240",
+        "manifestFixture": {
+          "blueprintId": "n3-oracle-candidate-ground-v1",
+          "furnishingPlanId": "n3-oracle-candidate-furnishing-v1",
+          "style": "citadel",
+          "parts": [
+            {
+              "id": "n3_oracle_candidate_foundation",
+              "kind": "foundation",
+              "position": [
+                0,
+                0.5,
+                0
+              ],
+              "size": [
+                5.4,
+                1,
+                5.4
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "mutations": [
+      {
+        "kind": "durable",
+        "cell": [
+          10,
+          4,
+          10
+        ],
+        "reason": "n3_oracle_explicit_air",
+        "state": {
+          "blockId": "air",
+          "material": "air",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -0.25,
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "metadata": {
+            "source": "n3_oracle_durable_air"
+          }
+        }
+      },
+      {
+        "kind": "durable",
+        "cell": [
+          11,
+          4,
+          10
+        ],
+        "reason": "n3_oracle_underlay",
+        "state": {
+          "blockId": "stone",
+          "material": "stone",
+          "biome": "underground",
+          "solid": true,
+          "density": 2.5,
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "metadata": {
+            "source": "n3_oracle_underlay"
+          }
+        }
+      },
+      {
+        "kind": "sceneOverlay",
+        "cell": [
+          11,
+          4,
+          10
+        ],
+        "reason": "n3_oracle_overlay",
+        "state": {
+          "blockId": "torch",
+          "material": "air",
+          "biome": "plains",
+          "solid": false,
+          "density": -0.75,
+          "fluid": "",
+          "light": {
+            "sky": 5,
+            "block": 13
+          },
+          "metadata": {
+            "source": "scene_block",
+            "renderedBySceneBlock": true,
+            "terrainMeshAffects": false
+          }
+        }
+      },
+      {
+        "kind": "durable",
+        "cell": [
+          12,
+          4,
+          10
+        ],
+        "reason": "n3_oracle_lava",
+        "state": {
+          "blockId": "lava",
+          "material": "lava",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -1,
+          "fluid": "lava",
+          "light": {
+            "sky": 0,
+            "block": 9
+          },
+          "metadata": {
+            "source": "n3_oracle_lava"
+          }
+        }
+      }
+    ]
+  },
+  "queries": {
+    "surfaceColumns": [
+      {
+        "ordinal": 0,
+        "id": "natural-ocean-threshold",
+        "input": {
+          "cell": [
+            15104,
+            -65536
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            15104,
+            -65536
+          ],
+          "sourceCell": [
+            15104,
+            -65536
+          ],
+          "referenceSurfaceY": 11.016000000000002,
+          "referenceSurfaceYBits": "d678e92631082640",
+          "deformedSurfaceY": 11.016000000000002,
+          "deformedSurfaceYBits": "d678e92631082640",
+          "volumeSurfaceY": 10.8,
+          "volumeSurfaceYBits": "9a99999999992540",
+          "surfaceBiome": "ocean"
+        }
+      },
+      {
+        "ordinal": 1,
+        "id": "natural-beach-threshold",
+        "input": {
+          "cell": [
+            -30208,
+            -65536
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -30208,
+            -65536
+          ],
+          "sourceCell": [
+            -30208,
+            -65536
+          ],
+          "referenceSurfaceY": 11.934000000000001,
+          "referenceSurfaceYBits": "92ed7c3f35de2740",
+          "deformedSurfaceY": 11.934000000000001,
+          "deformedSurfaceYBits": "92ed7c3f35de2740",
+          "volumeSurfaceY": 12.15,
+          "volumeSurfaceYBits": "cdcccccccc4c2840",
+          "surfaceBiome": "beach"
+        }
+      },
+      {
+        "ordinal": 2,
+        "id": "town-core",
+        "input": {
+          "cell": [
+            280,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            280,
+            0
+          ],
+          "sourceCell": [
+            280,
+            0
+          ],
+          "referenceSurfaceY": 10,
+          "referenceSurfaceYBits": "0000000000002440",
+          "deformedSurfaceY": 10,
+          "deformedSurfaceYBits": "0000000000002440",
+          "volumeSurfaceY": 9.450000000000001,
+          "volumeSurfaceYBits": "6766666666e62240",
+          "surfaceBiome": "town"
+        }
+      },
+      {
+        "ordinal": 3,
+        "id": "town-radius-inclusive",
+        "input": {
+          "cell": [
+            304,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            304,
+            0
+          ],
+          "sourceCell": [
+            304,
+            0
+          ],
+          "referenceSurfaceY": 10,
+          "referenceSurfaceYBits": "0000000000002440",
+          "deformedSurfaceY": 10,
+          "deformedSurfaceYBits": "0000000000002440",
+          "volumeSurfaceY": 9.450000000000001,
+          "volumeSurfaceYBits": "6766666666e62240",
+          "surfaceBiome": "town"
+        }
+      },
+      {
+        "ordinal": 4,
+        "id": "town-apron-first-cell",
+        "input": {
+          "cell": [
+            305,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            305,
+            0
+          ],
+          "sourceCell": [
+            305,
+            0
+          ],
+          "referenceSurfaceY": 10.046111111180123,
+          "referenceSurfaceYBits": "6f0025e09b172440",
+          "deformedSurfaceY": 10.046111111180123,
+          "deformedSurfaceYBits": "6f0025e09b172440",
+          "volumeSurfaceY": 9.450000000000001,
+          "volumeSurfaceYBits": "6766666666e62240",
+          "surfaceBiome": "ocean"
+        }
+      },
+      {
+        "ordinal": 5,
+        "id": "town-apron-outer-probe",
+        "input": {
+          "cell": [
+            328,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            328,
+            0
+          ],
+          "sourceCell": [
+            328,
+            0
+          ],
+          "referenceSurfaceY": 23.134065953723017,
+          "referenceSurfaceYBits": "56bf762552223740",
+          "deformedSurfaceY": 23.134065953723017,
+          "deformedSurfaceYBits": "56bf762552223740",
+          "volumeSurfaceY": 22.950000000000003,
+          "volumeSurfaceYBits": "3433333333f33640",
+          "surfaceBiome": "swamp"
+        }
+      },
+      {
+        "ordinal": 6,
+        "id": "site-core-production-profile",
+        "input": {
+          "cell": [
+            3236,
+            -5431
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            3236,
+            -5431
+          ],
+          "sourceCell": [
+            3236,
+            -5431
+          ],
+          "referenceSurfaceY": 18.900000000000002,
+          "referenceSurfaceYBits": "6766666666e63240",
+          "deformedSurfaceY": 18.900000000000002,
+          "deformedSurfaceYBits": "6766666666e63240",
+          "volumeSurfaceY": 18.900000000000002,
+          "volumeSurfaceYBits": "6766666666e63240",
+          "surfaceBiome": "plains"
+        }
+      },
+      {
+        "ordinal": 7,
+        "id": "site-apron",
+        "input": {
+          "cell": [
+            3245,
+            -5431
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            3245,
+            -5431
+          ],
+          "sourceCell": [
+            3245,
+            -5431
+          ],
+          "referenceSurfaceY": 19.117,
+          "referenceSurfaceYBits": "cba145b6f31d3340",
+          "deformedSurfaceY": 19.117,
+          "deformedSurfaceYBits": "cba145b6f31d3340",
+          "volumeSurfaceY": 18.900000000000002,
+          "volumeSurfaceYBits": "6766666666e63240",
+          "surfaceBiome": "plains"
+        }
+      },
+      {
+        "ordinal": 8,
+        "id": "direct-column-no-float-remap",
+        "input": {
+          "cell": [
+            1960,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            1960,
+            0
+          ],
+          "sourceCell": [
+            1960,
+            0
+          ],
+          "referenceSurfaceY": 16.438759706916294,
+          "referenceSurfaceYBits": "0e02608e52703040",
+          "deformedSurfaceY": 16.438759706916294,
+          "deformedSurfaceYBits": "0e02608e52703040",
+          "volumeSurfaceY": 16.200000000000003,
+          "volumeSurfaceYBits": "3433333333333040",
+          "surfaceBiome": "swamp"
+        }
+      },
+      {
+        "ordinal": 9,
+        "id": "negative-direct-column",
+        "input": {
+          "cell": [
+            -1960,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -1960,
+            0
+          ],
+          "sourceCell": [
+            -1960,
+            0
+          ],
+          "referenceSurfaceY": 20.803546021577638,
+          "referenceSurfaceYBits": "c2812b31b5cd3440",
+          "deformedSurfaceY": 20.803546021577638,
+          "deformedSurfaceYBits": "c2812b31b5cd3440",
+          "volumeSurfaceY": 20.25,
+          "volumeSurfaceYBits": "0000000000403440",
+          "surfaceBiome": "forest"
+        }
+      }
+    ],
+    "cellCenters": [
+      {
+        "ordinal": 0,
+        "id": "natural-surface-material",
+        "input": {
+          "cell": [
+            -20,
+            12,
+            -2
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -20,
+            12,
+            -2
+          ],
+          "sourceCell": [
+            -20,
+            12,
+            -2
+          ],
+          "positionBits": [
+            "9a99d2c1",
+            "00008741",
+            "9a9901c0"
+          ],
+          "material": "mud",
+          "blockId": "mud",
+          "biome": "swamp",
+          "solid": true,
+          "density": 1.0260000000000034,
+          "densityBits": "e022dbf97e6af03f",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 1,
+        "id": "natural-water-fluid",
+        "input": {
+          "cell": [
+            -125,
+            3,
+            -128
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -125,
+            3,
+            -128
+          ],
+          "sourceCell": [
+            -125,
+            3,
+            -128
+          ],
+          "positionBits": [
+            "331328c3",
+            "33339740",
+            "00202cc3"
+          ],
+          "material": "water",
+          "blockId": "water",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -2.134883101903866,
+          "densityBits": "5eae7b973d1401c0",
+          "fluid": "water",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 2,
+        "id": "natural-lava-fluid",
+        "input": {
+          "cell": [
+            -56,
+            -56,
+            -128
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -56,
+            -56,
+            -128
+          ],
+          "sourceCell": [
+            -56,
+            -56,
+            -128
+          ],
+          "positionBits": [
+            "9ad995c2",
+            "9ad995c2",
+            "00202cc3"
+          ],
+          "material": "lava",
+          "blockId": "lava",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -0.0995929345631894,
+          "densityBits": "a08fdc2cec7eb9bf",
+          "fluid": "lava",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 3,
+        "id": "natural-bedrock-light",
+        "input": {
+          "cell": [
+            0,
+            -64,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            0,
+            -64,
+            0
+          ],
+          "sourceCell": [
+            0,
+            -64,
+            0
+          ],
+          "positionBits": [
+            "cdcc2c3f",
+            "3373abc2",
+            "cdcc2c3f"
+          ],
+          "material": "bedrock",
+          "blockId": "bedrock",
+          "biome": "deep_underground",
+          "solid": true,
+          "density": 5.4,
+          "densityBits": "9a99999999991540",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 4,
+        "id": "town-shaped-cell",
+        "input": {
+          "cell": [
+            280,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            280,
+            7,
+            0
+          ],
+          "sourceCell": [
+            280,
+            7,
+            0
+          ],
+          "positionBits": [
+            "6656bd43",
+            "00002241",
+            "cdcc2c3f"
+          ],
+          "material": "water",
+          "blockId": "water",
+          "biome": "town",
+          "solid": false,
+          "density": -0.125,
+          "densityBits": "000000000000c0bf",
+          "fluid": "water",
+          "light": {
+            "sky": 15,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 5,
+        "id": "site-shaped-cell",
+        "input": {
+          "cell": [
+            3236,
+            13,
+            -5431
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            3236,
+            13,
+            -5431
+          ],
+          "sourceCell": [
+            3236,
+            13,
+            -5431
+          ],
+          "positionBits": [
+            "338a8845",
+            "cdcc9141",
+            "6619e5c5"
+          ],
+          "material": "grass",
+          "blockId": "grass",
+          "biome": "plains",
+          "solid": true,
+          "density": 0.6749996185302756,
+          "densityBits": "e0cccccc9899e53f",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 6,
+        "id": "durable-explicit-air",
+        "input": {
+          "cell": [
+            10,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            10,
+            4,
+            10
+          ],
+          "sourceCell": [
+            10,
+            4,
+            10
+          ],
+          "positionBits": [
+            "cdcc6241",
+            "6666c240",
+            "cdcc6241"
+          ],
+          "material": "air",
+          "blockId": "air",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -0.25,
+          "densityBits": "000000000000d0bf",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 7,
+        "id": "scene-overlay-wins",
+        "input": {
+          "cell": [
+            11,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            11,
+            4,
+            10
+          ],
+          "sourceCell": [
+            11,
+            4,
+            10
+          ],
+          "positionBits": [
+            "66667841",
+            "6666c240",
+            "cdcc6241"
+          ],
+          "material": "air",
+          "blockId": "torch",
+          "biome": "plains",
+          "solid": false,
+          "density": -0.75,
+          "densityBits": "000000000000e8bf",
+          "fluid": "",
+          "light": {
+            "sky": 5,
+            "block": 13
+          },
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 8,
+        "id": "durable-lava-state",
+        "input": {
+          "cell": [
+            12,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            12,
+            4,
+            10
+          ],
+          "sourceCell": [
+            12,
+            4,
+            10
+          ],
+          "positionBits": [
+            "00008741",
+            "6666c240",
+            "cdcc6241"
+          ],
+          "material": "lava",
+          "blockId": "lava",
+          "biome": "underground_air",
+          "solid": false,
+          "density": -1,
+          "densityBits": "000000000000f0bf",
+          "fluid": "lava",
+          "light": {
+            "sky": 0,
+            "block": 9
+          },
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 9,
+        "id": "positive-center-float-remap",
+        "input": {
+          "cell": [
+            12427799,
+            0,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            12427799,
+            0,
+            0
+          ],
+          "sourceCell": [
+            12427800,
+            0,
+            0
+          ],
+          "positionBits": [
+            "9d00804b",
+            "cdcc2c3f",
+            "cdcc2c3f"
+          ],
+          "material": "stone",
+          "blockId": "stone",
+          "biome": "underground",
+          "solid": true,
+          "density": 1.3168199467808492,
+          "densityBits": "ad4ee2cab111f53f",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 10,
+        "id": "negative-center-round-trip-control",
+        "input": {
+          "cell": [
+            -1960,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "requestedCell": [
+            -1960,
+            7,
+            0
+          ],
+          "sourceCell": [
+            -1960,
+            7,
+            0
+          ],
+          "positionBits": [
+            "335525c5",
+            "00002241",
+            "cdcc2c3f"
+          ],
+          "material": "stone",
+          "blockId": "stone",
+          "biome": "underground",
+          "solid": true,
+          "density": 1.4139353090645754,
+          "densityBits": "d97871a17a9ff63f",
+          "fluid": "",
+          "light": {
+            "sky": 0,
+            "block": 0
+          },
+          "generated": true,
+          "edited": false
+        }
+      }
+    ],
+    "latticeNumeric": [
+      {
+        "ordinal": 0,
+        "id": "natural-lattice-surface",
+        "input": {
+          "cell": [
+            -20,
+            13,
+            -2
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "0000d8c1",
+            "67668c41",
+            "cdcc2cc0"
+          ],
+          "requestedCell": [
+            -20,
+            13,
+            -2
+          ],
+          "sourceCell": [
+            -20,
+            13,
+            -3
+          ],
+          "density": 0.3509988486766815,
+          "densityBits": "000000e0c376d63f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 17.900999069213867,
+          "surfaceYBits": "000000e0a7e63140",
+          "material": "mud",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 1,
+        "id": "natural-lattice-cave",
+        "input": {
+          "cell": [
+            -33,
+            -2,
+            -5
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "333332c2",
+            "cdcc2cc0",
+            "0000d8c0"
+          ],
+          "requestedCell": [
+            -33,
+            -2,
+            -5
+          ],
+          "sourceCell": [
+            -33,
+            -3,
+            -5
+          ],
+          "density": -0.6017665863037109,
+          "densityBits": "00000000ac41e3bf",
+          "solid": false,
+          "undergroundAirVoid": true,
+          "marker": "underground_air",
+          "surfaceY": 16.52603530883789,
+          "surfaceYBits": "00000040aa863040",
+          "material": "air",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 2,
+        "id": "town-lattice",
+        "input": {
+          "cell": [
+            280,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "0000bd43",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            280,
+            7,
+            0
+          ],
+          "sourceCell": [
+            280,
+            6,
+            0
+          ],
+          "density": 0.5500001907348633,
+          "densityBits": "000000009a99e13f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 10,
+          "surfaceYBits": "0000000000002440",
+          "material": "grass",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 3,
+        "id": "site-lattice",
+        "input": {
+          "cell": [
+            3236,
+            13,
+            -5431
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "cd848845",
+            "67668c41",
+            "cd1ee5c5"
+          ],
+          "requestedCell": [
+            3236,
+            13,
+            -5431
+          ],
+          "sourceCell": [
+            3236,
+            13,
+            -5432
+          ],
+          "density": 1.3499988317489624,
+          "densityBits": "000000609899f53f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 18.899999618530273,
+          "surfaceYBits": "0000006066e63240",
+          "material": "grass",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 4,
+        "id": "durable-air-lattice",
+        "input": {
+          "cell": [
+            10,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00005841",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            10,
+            4,
+            10
+          ],
+          "sourceCell": [
+            10,
+            4,
+            10
+          ],
+          "density": -0.25,
+          "densityBits": "000000000000d0bf",
+          "solid": false,
+          "undergroundAirVoid": true,
+          "marker": "underground_air",
+          "surfaceY": 23.409000396728516,
+          "surfaceYBits": "00000040b4683740",
+          "material": "air",
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 5,
+        "id": "overlay-mesh-air-lattice",
+        "input": {
+          "cell": [
+            11,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "9a996d41",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            11,
+            4,
+            10
+          ],
+          "sourceCell": [
+            11,
+            4,
+            10
+          ],
+          "density": 2.5,
+          "densityBits": "0000000000000440",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 22.950000762939453,
+          "surfaceYBits": "0000004033f33640",
+          "material": "stone",
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 6,
+        "id": "positive-page-remap-lattice",
+        "input": {
+          "cell": [
+            1960,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00602545",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            1960,
+            7,
+            0
+          ],
+          "sourceCell": [
+            1959,
+            6,
+            0
+          ],
+          "density": 1.2097125053405762,
+          "densityBits": "00000080fb5af33f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 16.617090225219727,
+          "surfaceYBits": "000000a0f99d3040",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 7,
+        "id": "negative-page-remap-lattice",
+        "input": {
+          "cell": [
+            -1960,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "006025c5",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            -1960,
+            7,
+            0
+          ],
+          "sourceCell": [
+            -1960,
+            6,
+            0
+          ],
+          "density": 1.2759790420532227,
+          "densityBits": "00000000696af43f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 20.803546905517578,
+          "surfaceYBits": "00000040b5cd3440",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 8,
+        "id": "positive-extreme-remap-lattice",
+        "input": {
+          "cell": [
+            16777219,
+            0,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "d0ccac4b",
+            "00000000",
+            "00000000"
+          ],
+          "requestedCell": [
+            16777219,
+            0,
+            0
+          ],
+          "sourceCell": [
+            16777220,
+            0,
+            0
+          ],
+          "density": 1.7408360242843628,
+          "densityBits": "000000e076dafb3f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 17.900999069213867,
+          "surfaceYBits": "000000e0a7e63140",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 9,
+        "id": "negative-extreme-remap-lattice",
+        "input": {
+          "cell": [
+            -16777219,
+            0,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "d0ccaccb",
+            "00000000",
+            "00000000"
+          ],
+          "requestedCell": [
+            -16777219,
+            0,
+            0
+          ],
+          "sourceCell": [
+            -16777221,
+            0,
+            0
+          ],
+          "density": 2.9780988693237305,
+          "densityBits": "0000008025d30740",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 14.687999725341797,
+          "surfaceYBits": "0000008041602d40",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 10,
+        "id": "high-coordinate-material-remap-witness",
+        "input": {
+          "cell": [
+            24855320,
+            -32,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "3f00004c",
+            "cdcc2cc2",
+            "00000000"
+          ],
+          "requestedCell": [
+            24855320,
+            -32,
+            0
+          ],
+          "sourceCell": [
+            24855321,
+            -33,
+            0
+          ],
+          "density": 0.19766268134117126,
+          "densityBits": "000000c0024dc93f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 24.766372680664062,
+          "surfaceYBits": "0000000031c43840",
+          "material": "deepStone",
+          "generated": true,
+          "edited": false
+        }
+      }
+    ],
+    "worldNumeric": [
+      {
+        "ordinal": 0,
+        "id": "fractional-natural-world",
+        "input": {
+          "position": [
+            -44.1,
+            -2.7,
+            -6.75
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "666630c2",
+            "cdcc2cc0",
+            "0000d8c0"
+          ],
+          "requestedCell": [
+            -33,
+            -3,
+            -5
+          ],
+          "sourceCell": [
+            -33,
+            -3,
+            -5
+          ],
+          "density": -0.6686432957649231,
+          "densityBits": "000000a08665e5bf",
+          "solid": false,
+          "undergroundAirVoid": true,
+          "marker": "underground_air",
+          "surfaceY": 16.52603530883789,
+          "surfaceYBits": "00000040aa863040",
+          "material": "air",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 1,
+        "id": "durable-air-world",
+        "input": {
+          "position": [
+            13.5,
+            5.4,
+            13.5
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00005841",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            10,
+            4,
+            10
+          ],
+          "sourceCell": [
+            10,
+            4,
+            10
+          ],
+          "density": -0.25,
+          "densityBits": "000000000000d0bf",
+          "solid": false,
+          "undergroundAirVoid": true,
+          "marker": "underground_air",
+          "surfaceY": 23.409000396728516,
+          "surfaceYBits": "00000040b4683740",
+          "material": "air",
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 2,
+        "id": "overlay-mesh-air-world",
+        "input": {
+          "position": [
+            14.85,
+            5.4,
+            13.5
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "9a996d41",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            11,
+            4,
+            10
+          ],
+          "sourceCell": [
+            11,
+            4,
+            10
+          ],
+          "density": -1.350000023841858,
+          "densityBits": "000000a09999f5bf",
+          "solid": false,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 22.950000762939453,
+          "surfaceYBits": "0000004033f33640",
+          "material": "air",
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 3,
+        "id": "site-fractional-world",
+        "input": {
+          "position": [
+            4368.6,
+            17.55,
+            -7331.85
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "cd848845",
+            "66668c41",
+            "cd1ee5c5"
+          ],
+          "requestedCell": [
+            3236,
+            12,
+            -5432
+          ],
+          "sourceCell": [
+            3236,
+            12,
+            -5432
+          ],
+          "density": 1.350000023841858,
+          "densityBits": "000000a09999f53f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 18.899999618530273,
+          "surfaceYBits": "0000006066e63240",
+          "material": "dirt",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 4,
+        "id": "positive-high-world-remap",
+        "input": {
+          "position": [
+            2646,
+            9.45,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00602545",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            1959,
+            6,
+            0
+          ],
+          "sourceCell": [
+            1959,
+            6,
+            0
+          ],
+          "density": 1.1618927717208862,
+          "densityBits": "000000e01c97f23f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 16.617090225219727,
+          "surfaceYBits": "000000a0f99d3040",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 5,
+        "id": "negative-high-world-remap",
+        "input": {
+          "position": [
+            -2646,
+            9.45,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "006025c5",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            -1960,
+            6,
+            0
+          ],
+          "sourceCell": [
+            -1960,
+            6,
+            0
+          ],
+          "density": 1.3511296510696411,
+          "densityBits": "000000203a9ef53f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 20.803546905517578,
+          "surfaceYBits": "00000040b5cd3440",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      }
+    ],
+    "surfaceProjectionNumeric": [
+      {
+        "ordinal": 0,
+        "id": "natural-surface-projection",
+        "input": {
+          "cell": [
+            -20,
+            13,
+            -2
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "0000d8c1",
+            "66668c41",
+            "cdcc2cc0"
+          ],
+          "requestedCell": [
+            -20,
+            13,
+            -2
+          ],
+          "sourceCell": [
+            -20,
+            12,
+            -3
+          ],
+          "density": 0.35100075602531433,
+          "densityBits": "000000e0cb76d63f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 17.900999069213867,
+          "surfaceYBits": "000000e0a7e63140",
+          "material": "mud",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 1,
+        "id": "town-surface-projection",
+        "input": {
+          "cell": [
+            280,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "0000bd43",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            280,
+            7,
+            0
+          ],
+          "sourceCell": [
+            280,
+            6,
+            0
+          ],
+          "density": 0.5500001907348633,
+          "densityBits": "000000009a99e13f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 10,
+          "surfaceYBits": "0000000000002440",
+          "material": "grass",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 2,
+        "id": "site-surface-projection",
+        "input": {
+          "cell": [
+            3236,
+            13,
+            -5431
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "cd848845",
+            "66668c41",
+            "cd1ee5c5"
+          ],
+          "requestedCell": [
+            3236,
+            13,
+            -5431
+          ],
+          "sourceCell": [
+            3236,
+            12,
+            -5432
+          ],
+          "density": 1.350000023841858,
+          "densityBits": "000000a09999f53f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 18.899999618530273,
+          "surfaceYBits": "0000006066e63240",
+          "material": "grass",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 3,
+        "id": "durable-air-surface-projection",
+        "input": {
+          "cell": [
+            10,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00005841",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            10,
+            4,
+            10
+          ],
+          "sourceCell": [
+            10,
+            4,
+            10
+          ],
+          "density": -0.25,
+          "densityBits": "000000000000d0bf",
+          "solid": false,
+          "undergroundAirVoid": true,
+          "marker": "underground_air",
+          "surfaceY": 23.409000396728516,
+          "surfaceYBits": "00000040b4683740",
+          "material": "air",
+          "generated": false,
+          "edited": true
+        }
+      },
+      {
+        "ordinal": 4,
+        "id": "overlay-ignored-by-surface-projection",
+        "input": {
+          "cell": [
+            11,
+            4,
+            10
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "9a996d41",
+            "cdccac40",
+            "00005841"
+          ],
+          "requestedCell": [
+            11,
+            4,
+            10
+          ],
+          "sourceCell": [
+            11,
+            4,
+            10
+          ],
+          "density": 2.559675455093384,
+          "densityBits": "00000020377a0440",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 22.950000762939453,
+          "surfaceYBits": "0000004033f33640",
+          "material": "copperOre",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 5,
+        "id": "positive-remap-surface-projection",
+        "input": {
+          "cell": [
+            1960,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "00602545",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            1960,
+            7,
+            0
+          ],
+          "sourceCell": [
+            1959,
+            6,
+            0
+          ],
+          "density": 1.2097125053405762,
+          "densityBits": "00000080fb5af33f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 16.617090225219727,
+          "surfaceYBits": "000000a0f99d3040",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 6,
+        "id": "negative-remap-surface-projection",
+        "input": {
+          "cell": [
+            -1960,
+            7,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "006025c5",
+            "33331741",
+            "00000000"
+          ],
+          "requestedCell": [
+            -1960,
+            7,
+            0
+          ],
+          "sourceCell": [
+            -1960,
+            6,
+            0
+          ],
+          "density": 1.2759790420532227,
+          "densityBits": "00000000696af43f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 20.803546905517578,
+          "surfaceYBits": "00000040b5cd3440",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 7,
+        "id": "high-coordinate-material-remap-witness",
+        "input": {
+          "cell": [
+            24855320,
+            -32,
+            0
+          ]
+        },
+        "expected": {
+          "positionBits": [
+            "3e00004c",
+            "cdcc2cc2",
+            "00000000"
+          ],
+          "requestedCell": [
+            24855320,
+            -32,
+            0
+          ],
+          "sourceCell": [
+            24855318,
+            -33,
+            0
+          ],
+          "density": 0.45671945810317993,
+          "densityBits": "00000040e43add3f",
+          "solid": true,
+          "undergroundAirVoid": false,
+          "marker": "none",
+          "surfaceY": 24.82937240600586,
+          "surfaceYBits": "000000c051d43840",
+          "material": "stone",
+          "generated": true,
+          "edited": false
+        }
+      },
+      {
+        "ordinal": 8,
+        "id": "world-bottom-plus-one-projection-not-bedrock",
+        "input": {
+          "cell": [
+            0,
+            -63,
+            0
+          ]
+        },
+        "expected": {
+          "density": 1.35000002384186,
+          "densityBits": "000000a09999f53f",
+          "edited": false,
+          "generated": true,
+          "marker": "none",
+          "material": "stone",
+          "positionBits": [
+            "00000000",
+            "9a19aac2",
+            "00000000"
+          ],
+          "requestedCell": [
+            0,
+            -63,
+            0
+          ],
+          "solid": true,
+          "sourceCell": [
+            0,
+            -64,
+            0
+          ],
+          "surfaceY": 22.0319995880127,
+          "surfaceYBits": "0000002031083640",
+          "undergroundAirVoid": false
+        }
+      }
+    ]
+  }
+}

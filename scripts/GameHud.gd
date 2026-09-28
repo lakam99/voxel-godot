@@ -109,6 +109,7 @@ var dialogue_context := {}
 var objective_toast_time := 0.0
 var selected_item_time := 0.0
 var notification_time := 0.0
+var notification_priority := 0
 var last_selected_slot_seen := -999
 var last_progression_recent := ""
 var sleep_fade_overlay: ColorRect
@@ -367,13 +368,18 @@ func show_selected_item(item_id: String, count: int) -> void:
     selected_item_label.modulate.a = 1.0
     selected_item_time = 2.1
 
-func show_notification(message: String, duration := 3.0) -> void:
+func show_notification(message: String, duration := 3.0, priority := 0) -> void:
     if notification_label == null or message.strip_edges() == "":
+        return
+    # Passive status may retry while streaming is pending, but must not erase
+    # the response to the player's current action before it can be read.
+    if notification_time > 0.0 and priority < notification_priority:
         return
     notification_label.text = message
     notification_label.visible = true
     notification_label.modulate.a = 1.0
     notification_time = maxf(0.2, duration)
+    notification_priority = priority
 
 func set_hud_scale(value: float) -> void:
     hud_scale = clampf(value, 0.8, 1.4)

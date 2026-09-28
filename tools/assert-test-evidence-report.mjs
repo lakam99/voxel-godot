@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runToolMain } from './lib/voxel-tool-runtime.mjs';
+import { runEvidenceToolMain } from './lib/evidence-cli.mjs';
 
-await runToolMain('assert-test-evidence-report');
+await runEvidenceToolMain('assert-test-evidence-report');

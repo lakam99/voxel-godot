@@ -1,0 +1,745 @@
+extends SceneTree
+
+const OWNER = preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
+const MAIN = preload("res://scripts/MainCore.gd")
+const GAME_MAIN = preload("res://scripts/Main.gd")
+const STRUCTURES = preload("res://scripts/StructureSystem.gd")
+const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
+const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
+const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
+const LOAD_TRANSACTION = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
+const DEMAND_LEASE = preload("res://scripts/terrain/NativeTerrainDemandRequestLease.gd")
+const DEMAND_REPLACEMENT_WORK_LIMIT := 256
+
+var failures: Array[String] = []
+var observations: Array[Dictionary] = []
+
+func check(value: bool, label: String) -> void:
+	if not value: failures.append(label)
+
+func drain_staging_failure(transaction, failure: Dictionary) -> Dictionary:
+	var result: Dictionary = failure.duplicate(true)
+	result["transaction"] = transaction
+	var state := String(transaction.snapshot().get("state", ""))
+	if state == "ownership_error":
+		result["ownerMustBeRetained"] = true
+		return result
+	if state == "committed":
+		# A contradictory post-commit result must not strand the committed owner.
+		var abandoned_backend = transaction.take_backend()
+		abandoned_backend = null
+		result["cleanupComplete"] = transaction.snapshot().get("state") == "transferred"
+		return result
+	if state in ["accepting", "finalize_start_pending", "finalizing", "candidate_ready"]:
+		transaction.cancel()
+	var cleanup: Dictionary = failure
+	for _frame in range(600):
+		var snapshot: Dictionary = transaction.snapshot()
+		if snapshot.get("state") in ["failed", "drained"] \
+				and int(snapshot.get("backendInstanceId", 0)) == 0:
+			result["cleanupComplete"] = true
+			result["cleanup"] = cleanup
+			return result
+		if snapshot.get("state") == "ownership_error":
+			result["ownerMustBeRetained"] = true
+			result["cleanup"] = cleanup
+			return result
+		cleanup = transaction.advance()
+		await process_frame
+	result["reason"] = "stage_failure_cleanup_timeout"
+	result["originalFailure"] = failure
+	result["cleanup"] = cleanup
+	result["ownerMustBeRetained"] = true
+	return result
+
+func stage_committed_backend(main, terrain_volume: Dictionary) -> Dictionary:
+	var save := {"version":2, "seed":String(main.get("seed_text")), "terrain":[],
+		"terrainVolume":terrain_volume}
+	var source: Dictionary = SOURCE.from_main_with_v2_save_snapshot(main, save)
+	if source.get("status") != "ready": return source
+	var transaction = LOAD_TRANSACTION.new()
+	var begun: Dictionary = transaction.start(source.request, 64, source.snapshotOwner)
+	if begun.get("status") != "pending": return await drain_staging_failure(transaction, begun)
+	var last: Dictionary = begun
+	for _frame in range(600):
+		last = transaction.advance()
+		if transaction.snapshot().get("state") == "candidate_ready": break
+		if last.get("status") == "failed":
+			return await drain_staging_failure(transaction, last)
+		await process_frame
+	if transaction.snapshot().get("state") != "candidate_ready":
+		return await drain_staging_failure(transaction,
+			{"status":"failed", "reason":"candidate_timeout", "last":last})
+	var identity: Dictionary = transaction.candidate_source_identity()
+	var committed: Dictionary = transaction.commit(identity)
+	if committed.get("status") != "ready" or committed.get("committed") != true:
+		return await drain_staging_failure(transaction, committed)
+	return {"status":"ready", "transaction":transaction, "receipt":committed,
+		"sourceIdentity":identity, "save":save}
+
+func _init() -> void:
+	call_deferred("run")
+
+func run() -> void:
+	var main = MAIN.new()
+	main.seed_text = "native-owner-source-contract"
+	main.structure_system = STRUCTURES.new()
+	var admission = main.structure_system.citadel_terrain_admission
+	admission.configure(main.seed_text, {}, {"regionCells":main.STRUCTURE_REGION_CELLS,
+		"spawnChance":main.STRUCTURE_SPAWN_CHANCE})
+	main.town_region_cache = {Vector2i(2, -1): {"centerX":2 * main.TOWN_REGION_CELLS,
+		"centerZ":-main.TOWN_REGION_CELLS, "radius":main.TOWN_RADIUS_CELLS,
+		"level":main.WATER_LEVEL + 3.0}}
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,-1,-1), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.25, "fluid":"", "blockId":"owner-contract-edit",
+		"light":{"sky":3,"block":11},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,0,-1), {
+		"material":"air", "biome":"underground_air", "solid":false,
+		"density":-1.0, "fluid":"", "blockId":"owner-above-air",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,1,-1), {
+		"material":"air", "biome":"underground_air", "solid":false,
+		"density":-1.0, "fluid":"", "blockId":"owner-headroom-air",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,-2,-1), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.0, "fluid":"", "blockId":"owner-below-stone",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	var world := Node3D.new()
+	root.add_child(world)
+	var terrain := VoxelTerrain.new()
+	terrain.automatic_loading_enabled = false
+	terrain.mesh_block_size = 16
+	terrain.scale = Vector3.ONE * main.CELL
+	var format := VoxelFormat.new()
+	format.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+	format.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
+	format.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)
+	terrain.set_format(format)
+	var mesher := VoxelMesherTransvoxel.new()
+	mesher.texturing_mode = VoxelMesherTransvoxel.TEXTURES_SINGLE_S4
+	mesher.transitions_enabled = false
+	terrain.mesher = mesher
+	world.add_child(terrain)
+
+	var invalid = OWNER.new()
+	terrain.automatic_loading_enabled = true
+	check(invalid.setup(main, terrain, 71, 10).get("reason") == "manual_terrain_required",
+		"automatic terrain rejected without fallback")
+	check(int(invalid.snapshot().backendInstanceId) == 0, "invalid setup owns no backend")
+	terrain.automatic_loading_enabled = false
+	var shared_volume_before: Dictionary = main.world_generation_system.terrain_volume_service \
+		.save_all_section_deltas()
+	var staged: Dictionary = await stage_committed_backend(main, shared_volume_before)
+	var staged_owner = OWNER.new()
+	var staged_setup: Dictionary = staged_owner.setup_from_committed_transaction(main, terrain,
+		staged.get("transaction"), staged.get("receipt", {}), 71, 10) \
+		if staged.get("status") == "ready" else staged
+	if staged_setup.get("status") != "ready":
+		observations.append({"case":"staged_owner_setup", "staged":staged, "result":staged_setup})
+	check(staged.get("status") == "ready" and staged_setup.get("status") == "ready"
+		and staged.transaction.snapshot().get("state") == "transferred"
+		and int(staged_setup.get("backendInstanceId", 0)) \
+			== int(staged.receipt.get("backendInstanceId", -1))
+		and staged_setup.get("sourceIdentity") == staged.get("sourceIdentity"),
+		"real staged transaction commits and transfers its exact backend to one owner")
+	var staged_primary := {"position":Vector3.ZERO, "distance":0}
+	var staged_viewers: Array[Dictionary] = []
+	var staged_retained: Array[Vector2i] = []
+	var staged_foreground: Array[Vector2i] = [Vector2i(0, 0)]
+	var staged_bounds := Vector2i(0, 128)
+	var staged_demand_lease = DEMAND_LEASE.new()
+	check(staged_demand_lease.acquire(staged_owner, staged_primary, staged_viewers,
+		staged_retained, staged_foreground, staged_bounds, 1),
+		"staged owner demand source lease acquired")
+	var staged_demand: Dictionary = staged_owner.begin_demand_replacement(staged_primary,
+		staged_viewers, staged_retained, staged_foreground, staged_bounds,
+		staged_demand_lease, 1)
+	for _demand_step in range(120):
+		if staged_demand.get("status") != "pending": break
+		staged_demand = staged_owner.advance_demand_replacement()
+	check(staged_demand.get("status") == "ready",
+		"staged owner accepts minimal demand before layout shutdown fixture")
+	staged_demand_lease.release_after_drain()
+	var staged_layout_start: Dictionary = {"status":"pending", "reason":"layout_not_started"}
+	for _layout_setup_step in range(24):
+		staged_layout_start = staged_owner.advance_collision_artifacts()
+		if not staged_owner._artifact_requests._window_layout_job.is_empty(): break
+		if staged_layout_start.get("status") == "failed": break
+	var staged_layout_transaction: Dictionary = staged_owner._planner \
+		.collision_mesh_snapshot_transaction_state()
+	var staged_layout_job: Dictionary = staged_owner._artifact_requests._window_layout_job
+	var staged_layout_token := int(staged_layout_job.get("token", 0))
+	var staged_layout_builder = staged_owner._planner._mesh_layout_builder
+	var staged_publisher = staged_owner._publisher
+	var staged_layout_lease_valid: bool = staged_owner._planner._mesh_layout_lease != null \
+		and staged_owner._planner._mesh_layout_lease.is_valid_for(
+			staged_owner._planner._accepted_plan.get("requiredOrder", []),
+			staged_owner._planner._demand_revision, staged_owner._planner._closure_token)
+	var staged_builder_owns_lease: bool = staged_owner._planner._mesh_layout_builder._job.get("lease") \
+		== staged_owner._planner._mesh_layout_lease
+	observations.append({"case":"staged_layout_stop_fixture",
+		"layoutStart":staged_layout_start,
+		"layoutBuilderState":String(staged_layout_builder._job.get("state", "")),
+		"transaction":staged_layout_transaction,
+		"job":staged_layout_job.duplicate(true),
+		"plannerDemand":staged_owner._planner.diagnostics(),
+		"meshLayoutLeaseValid":staged_layout_lease_valid,
+		"builderOwnsLease":staged_builder_owns_lease})
+	check(staged_demand.get("status") == "ready"
+		and int(staged_demand.get("desiredDataBlocks", 0)) > 0
+		and int(staged_demand.get("requiredMeshBlocks", 0)) == 36,
+		"staged owner admits a bounded multi-step mesh footprint before layout shutdown fixture")
+	check(staged_layout_start.get("status") == "pending"
+		and staged_layout_start.get("reason") == "mesh_layout_work_pending"
+		and not staged_layout_job.is_empty()
+		and staged_layout_token > 0
+		and staged_layout_token == 2
+		and int(staged_layout_start.get("token", 0)) == staged_layout_token
+		and int(staged_layout_start.get("workOps", 0)) == 256
+		and int(staged_layout_start.get("maxWorkOps", 0)) == 256
+		and staged_layout_token == int(staged_layout_transaction.get("token", 0))
+		and staged_layout_transaction.get("kind") == "layout"
+		and staged_layout_transaction.get("status") == "active"
+		and staged_layout_transaction.get("hasPendingRetirement") == false
+		and staged_layout_builder._job.get("state") == "building"
+		and staged_layout_lease_valid
+		and staged_builder_owns_lease,
+		"active ArtifactRequests layout job owns a leased shared-builder transaction")
+	var replay_owner = OWNER.new()
+	var replay: Dictionary = replay_owner.setup_from_committed_transaction(main, terrain,
+		staged.get("transaction"), staged.get("receipt", {}), 72, 10)
+	check(replay.get("status") == "failed"
+		and replay.get("reason") == "committed_transaction_receipt_mismatch"
+		and int(replay_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"transferred transaction cannot be replayed into a second owner")
+	var staged_stopped: Dictionary = staged_owner.stop()
+	var staged_stop_lease = staged_owner._planner._mesh_layout_lease
+	check(staged_stopped.get("status") == "pending"
+		and staged_owner.snapshot().get("state") == "stopping_async"
+		and staged_owner._artifact_requests._window_layout_job.get("cancelling") == true
+		and int(staged_owner._artifact_requests._window_layout_job.get("token", 0))
+			== staged_layout_token
+		and staged_stop_lease != null
+		and not staged_stop_lease.is_valid_for(
+			staged_owner._planner._accepted_plan.get("requiredOrder", []),
+			staged_owner._planner._demand_revision, staged_owner._planner._closure_token)
+		and staged_layout_builder._job.get("state") == "retiring",
+		"active stop cancels the broker-owned mesh-layout transaction before planner drain")
+	var staged_cancel_drain_steps := 0
+	var staged_layout_max_drain_ops := 0
+	for _frame in range(120):
+		if staged_stopped.get("status") == "ready": break
+		await process_frame
+		staged_stopped = staged_owner.drain_step()
+		staged_cancel_drain_steps += 1
+		var artifact_drain_step: Dictionary = staged_stopped.get("artifactStep", {})
+		if artifact_drain_step.has("workOps"):
+			var layout_work_ops := int(artifact_drain_step.get("workOps", -1))
+			staged_layout_max_drain_ops = maxi(staged_layout_max_drain_ops, layout_work_ops)
+			check(layout_work_ops >= 0 and layout_work_ops <= 256
+				and int(artifact_drain_step.get("maxWorkOps", -1)) == 256,
+				"active layout cancellation stays within the builder's 256-op bound")
+	observations.append({"case":"staged_layout_stop_drain",
+		"drainSteps":staged_cancel_drain_steps,
+		"lastDrain":staged_stopped,
+		"owner":staged_owner.snapshot(),
+		"builderTransaction":staged_layout_builder.transaction_state(),
+		"builderJob":staged_layout_builder._job.duplicate(true),
+		"plannerLeaseReleased":staged_owner._planner == null
+			or staged_owner._planner._mesh_layout_lease == null})
+	check(staged_stopped.get("status") == "ready"
+		and staged_stopped.get("drained") == true
+		and staged_owner.snapshot().get("state") == "drained"
+		and int(staged_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"staged owner drains before the direct owner fixture starts")
+	var staged_planner_retirement: Dictionary = staged_stopped.get("plannerRetirement", {})
+	check(staged_planner_retirement.get("meshTransactionDrained") == true
+		and staged_planner_retirement.get("meshLayoutLeaseReleased") == true
+		and staged_planner_retirement.get("demandReplacementDrained") == true
+		and staged_planner_retirement.get("plannerMapsReleased") == true
+		and staged_owner._planner == null
+		and staged_cancel_drain_steps > 0,
+		"terminal owner receipt waits for active layout cancellation and planner retirement")
+	var staged_publisher_receipt: Dictionary = staged_stopped.get("publisherDrain", {})
+	check(staged_publisher_receipt.get("physicalBlocksUnloaded") == true
+		and staged_publisher_receipt.get("nativeWorkersDrained") == true
+		and staged_publisher_receipt.get("remainingDemanded") == 0
+		and staged_publisher_receipt.get("remainingRequested") == 0
+		and staged_publisher_receipt.get("remainingInserted") == 0
+		and staged_publisher_receipt.get("remainingOrphaned") == 0
+		and staged_publisher_receipt.get("terminalWorkerEvent", {}).get("reason") == "no_waiting_source",
+		"publisher receipt records the async no-waiting-source terminal proof")
+	check(staged_publisher.request_stop() == staged_publisher_receipt
+		and staged_publisher.drain_step() == staged_publisher_receipt,
+		"inactive publisher replays its exact async terminal receipt idempotently")
+	check(staged_layout_builder.transaction_state().get("status") == "idle"
+		and staged_layout_builder._job.is_empty()
+		and not staged_layout_builder.has_pending_retirement(),
+		"terminal layout stop leaves the shared builder idle with no retained scratch")
+	var different_main = MAIN.new()
+	different_main.seed_text = main.seed_text
+	different_main.structure_system = STRUCTURES.new()
+	different_main.structure_system.citadel_terrain_admission.configure(
+		different_main.seed_text, {}, {"regionCells":different_main.STRUCTURE_REGION_CELLS,
+			"spawnChance":different_main.STRUCTURE_SPAWN_CHANCE})
+	different_main.town_region_cache = main.town_region_cache.duplicate(true)
+	different_main.world_generation_system = WORLD.new()
+	different_main.world_generation_system.setup(different_main)
+	different_main.world_generation_system.terrain_volume_service.load_section_deltas(
+		shared_volume_before)
+	different_main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(31, 7, -9), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.0, "fluid":"", "blockId":"same-seed-different-save",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	check(different_main.world_generation_system.terrain_volume_service.save_all_section_deltas() \
+		!= shared_volume_before, "isolated same-seed fixture carries different durable content")
+	check(main.world_generation_system.terrain_volume_service.save_all_section_deltas() \
+		== shared_volume_before, "different-save receipt fixture restores shared Main volume")
+	var different_volume: Dictionary = different_main.world_generation_system.terrain_volume_service \
+		.save_all_section_deltas()
+	var different_staged: Dictionary = await stage_committed_backend(different_main, different_volume)
+	var mismatched_owner = OWNER.new()
+	var mismatched: Dictionary = mismatched_owner.setup_from_committed_transaction(main, terrain,
+		different_staged.get("transaction"), staged.get("receipt", {}), 73, 10) \
+		if different_staged.get("status") == "ready" else different_staged
+	check(different_staged.get("status") == "ready"
+		and mismatched.get("status") == "failed"
+		and mismatched.get("reason") == "committed_transaction_receipt_mismatch"
+		and different_staged.transaction.snapshot().get("state") == "committed",
+		"same-seed different-save transaction rejects another backend receipt without consumption")
+	var original_seed := String(main.seed_text)
+	main.seed_text = "native-owner-post-transfer-seed-mismatch"
+	var cleanup_owner = OWNER.new()
+	var cleanup_failure: Dictionary = cleanup_owner.setup_from_committed_transaction(main, terrain,
+		different_staged.get("transaction"), different_staged.get("receipt", {}), 74, 10)
+	main.seed_text = original_seed
+	var cleanup_before: Dictionary = cleanup_owner.snapshot()
+	var cleanup_retirement: Dictionary = cleanup_owner.stop()
+	for _frame in range(600):
+		if cleanup_retirement.get("drained", false) or cleanup_retirement.get("status") == "failed": break
+		await process_frame
+		cleanup_retirement = cleanup_owner.drain_step()
+	check(cleanup_failure.get("status") == "failed"
+		and cleanup_failure.get("reason") == "initialized_backend_source_mismatch"
+		and cleanup_failure.get("cleanupPending") == true
+		and cleanup_before.get("state") == "failed_transfer_retirement"
+		and int(cleanup_before.get("backendInstanceId", 0)) \
+			== int(different_staged.get("receipt", {}).get("backendInstanceId", 0))
+		and cleanup_retirement.get("status") == "ready"
+		and cleanup_retirement.get("drained") == true
+		and cleanup_retirement.get("failedTransferRetired") == true
+		and different_staged.transaction.snapshot().get("state") == "transferred"
+		and int(cleanup_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"post-transfer validation failure boundedly retires the committed backend")
+	different_main.free()
+	var owner = OWNER.new()
+	var owner_saved_volume: Dictionary = {}
+	var stop_active_primary: Dictionary = {}
+	var stop_other_viewers: Array[Dictionary] = []
+	var stop_retained_chunks: Array[Vector2i] = []
+	var stop_foreground_chunks: Array[Vector2i] = []
+	var stop_bounds := Vector2i.ZERO
+	var stop_active_lease = null
+	var stop_queued_primary: Dictionary = {}
+	var stop_queued_lease = null
+	var setup: Dictionary = owner.setup(main, terrain, 71, 10)
+	if setup.get("status") != "ready":
+		observations.append({"case":"direct_owner_setup", "result":setup})
+	check(setup.get("status") == "ready", "atomic direct native owner setup")
+	check(int(setup.get("ownerGeneration", 0)) > 0,
+		"runtime owner receives a positive process-local generation")
+	if setup.get("status") == "ready":
+		var snapshot: Dictionary = owner.snapshot()
+		check(snapshot.state == "active" and int(snapshot.backendInstanceId) != 0,
+			"one live native backend")
+		check(snapshot.backend.get("status") == "ready"
+			and snapshot.backend.get("sourceIdentity") == setup.get("sourceIdentity"),
+			"native source identity shared")
+		var saved: Dictionary = owner.export_terrain_volume_v2()
+		check(saved.get("status") == "ready"
+			and saved.get("terrainVolume") == main.world_generation_system.terrain_volume_service.save_all_section_deltas()
+			and saved.get("sourceIdentity") == setup.get("sourceIdentity")
+			and saved.get("saveSeedText") == main.seed_text,
+			"save facade exports exact native durable volume from shared owner")
+		check(snapshot.publisher.get("active") == true
+			and int(snapshot.planner.get("consumerId", 0)) == 71,
+			"publisher and planner bound")
+		var exported: Dictionary = owner.read_cell(Vector3i(-17,-1,-1))
+		check(exported.get("status") in ["ready", "pending"],
+			"cell source uses native backend without fallback")
+		if exported.get("status") == "ready":
+			check(exported.get("state", {}).get("blockId") == "owner-contract-edit"
+				and exported.get("state", {}).get("solid") == true,
+				"current durable edit visible through native cell source")
+		var occupied_cell := Vector3i(-17,-1,-1)
+		var occupancy: Dictionary = owner.read_occupancy(occupied_cell)
+		var old_occupancy: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(occupied_cell)
+		var occupancy_fields := ["cell", "solid", "air", "material", "biome", "fluid",
+			"light", "floorSolid", "ceilingSolid", "walkableAir"]
+		var occupancy_matches: bool = occupancy.get("status") == "ready"
+		for field in occupancy_fields:
+			occupancy_matches = occupancy_matches and occupancy.get("occupancy", {}).get(field) == old_occupancy.get(field)
+		if not occupancy_matches:
+			observations.append({"nativeOccupancy":occupancy, "scriptOccupancy":old_occupancy})
+		check(occupancy_matches, "three-cell native occupancy matches script source vocabulary")
+		var walkable_cell := Vector3i(-17,0,-1)
+		var walkable: Dictionary = owner.read_occupancy(walkable_cell)
+		var old_walkable: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(walkable_cell)
+		var walkable_matches: bool = walkable.get("status") == "ready" and old_walkable.get("walkableAir") == true
+		for field in occupancy_fields:
+			walkable_matches = walkable_matches and walkable.get("occupancy", {}).get(field) == old_walkable.get(field)
+		check(walkable_matches, "edited air over support has exact native walkable occupancy")
+		var generated_cell := Vector3i(-20,-3,-3)
+		var generated: Dictionary = owner.read_occupancy(generated_cell)
+		var old_generated: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(generated_cell)
+		var generated_matches: bool = generated.get("status") == "ready"
+		for field in occupancy_fields:
+			generated_matches = generated_matches and generated.get("occupancy", {}).get(field) == old_generated.get(field)
+		if not generated_matches:
+			observations.append({"nativeGeneratedOccupancy":generated,
+				"scriptGeneratedOccupancy":old_generated})
+		check(generated_matches, "same-seed generated triple occupancy parity")
+		var numeric: Dictionary = owner.read_numeric_batch(
+			[Vector3(-16.5,-0.5,-0.5) * main.CELL], [Vector3i(-17,-1,-1)])
+		check(numeric.get("status") in ["ready", "pending"],
+			"numeric source shares native backend without fallback")
+		if numeric.get("status") == "ready":
+			check((numeric.get("worldNumeric", []) as Array).size() == 1
+				and (numeric.get("surfaceProjectionNumeric", []) as Array).size() == 1,
+				"native numeric channels remain a complete batch")
+		var edit_cell := Vector3i(-18, -1, -1)
+		var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
+			"solid":true, "density":1.5, "light":Vector2i(2, 9),
+			"metadata":{"saveDelta":true,"source":"terrain_edit"},
+			"blockId":"owner-new-edit", "editReason":"contract"}
+		var native_revision := int(saved.get("nativeRevision", -1))
+		var oversized: Array = []
+		for index in range(64):
+			oversized.append({"kind":"clear", "cell":Vector3i(index * 160, -1, 0)})
+		var rejected_plan: Dictionary = owner.commit_durable_cells("owner:oversized",
+			native_revision, oversized)
+		observations.append({"oversized":rejected_plan.get("reason", ""),
+			"ownerState":owner.snapshot().state})
+		check(rejected_plan.get("status") == "failed"
+			and int(owner.export_terrain_volume_v2().get("nativeRevision", -1)) == native_revision,
+			"unadmittable republication plan rejected before native commit")
+		var stale: Dictionary = owner.commit_durable_cells("owner:stale", native_revision - 1,
+			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
+		check(stale.get("reason") == "native_edit_revision_mismatch",
+			"stale edit rejected before native commit")
+		var committed: Dictionary = owner.commit_durable_cells("owner:edit-1", native_revision,
+			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
+		observations.append({"commit":committed.get("reason", committed.get("status", "")),
+			"ownerState":owner.snapshot().state,
+			"affectedSections":str(committed.get("affectedSections", []))})
+		check(committed.get("status") == "ready"
+			and int(committed.get("nativeRevision", -1)) == native_revision + 1
+			and committed.get("physicalReady") == false
+			and committed.get("publicationPlan", {}).get("status") == "ready"
+			and committed.get("publicationPlan", {}).get("barrier", {}).get("activationEligible") == true,
+			"durable edit returns physical republication plan without readiness")
+		var sections: Array = committed.get("affectedSections", [])
+		var plan: Dictionary = committed.get("publicationPlan", {})
+		var edited_section := Vector3i(-2, -1, -1)
+		check(OWNER.receipt_matches_plan(sections, plan),
+			"real conservative native section receipt covered by preflighted mesh halo")
+		var forged_extra := sections.duplicate()
+		forged_extra.append(Vector3i(100, 0, 0))
+		var forged_missing := sections.duplicate()
+		forged_missing.erase(Vector3i(-3, -2, -2))
+		var forged_duplicate := sections.duplicate()
+		forged_duplicate[0] = forged_duplicate[1]
+		check(not OWNER.receipt_matches_plan(forged_extra, plan)
+			and not OWNER.receipt_matches_plan(forged_duplicate, plan)
+			and not OWNER.receipt_matches_plan(forged_missing, plan),
+			"foreign duplicate and missing neighbor sections rejected")
+		var barrier: Dictionary = plan.get("barrier", {})
+		var window_receipts: Array = []
+		for window in plan.get("subwindows", []):
+			var mesh_receipts: Array = []
+			for mesh_block in window.meshBlocks:
+				mesh_receipts.append({"block":mesh_block, "generation":2, "physicalReady":true})
+			window_receipts.append({"index":window.index, "token":window.token,
+				"nativeRevision":barrier.nativeRevision, "status":"ready",
+				"meshBlockReceipts":mesh_receipts})
+		var candidate := {"ownerInstanceId":owner.get_instance_id(),
+			"sourceIdentity":setup.sourceIdentity, "sourceEpoch":barrier.sourceEpoch,
+			"nativeRevision":barrier.nativeRevision, "barrierIdentity":barrier.identity,
+			"subwindowReceipts":window_receipts}
+		check(owner.inspect_edit_release_candidate(candidate).get("reason")
+			== "production_physical_owner_unbound",
+			"complete synthetic candidate cannot release physical barrier")
+		var wrong_owner := candidate.duplicate(true)
+		wrong_owner.ownerInstanceId = 1
+		var stale_revision := candidate.duplicate(true)
+		stale_revision.nativeRevision = native_revision
+		var wrong_source := candidate.duplicate(true)
+		wrong_source.sourceEpoch = "foreign"
+		check(owner.inspect_edit_release_candidate(wrong_owner).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(stale_revision).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(wrong_source).get("reason") == "edit_release_identity_mismatch",
+			"owner revision and source epoch mismatches rejected")
+		var partial := candidate.duplicate(true)
+		partial.subwindowReceipts.pop_back()
+		var duplicate := candidate.duplicate(true)
+		duplicate.subwindowReceipts.append(window_receipts[0])
+		check(owner.inspect_edit_release_candidate(partial).get("status") == "pending"
+			and owner.inspect_edit_release_candidate(duplicate).get("status") == "failed",
+			"partial candidate waits and duplicate subwindow is rejected")
+		var after_edit: Dictionary = owner.export_terrain_volume_v2()
+		owner_saved_volume = after_edit.get("terrainVolume", {})
+		check(after_edit.get("status") == "ready"
+			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
+			and after_edit.get("terrainVolume") != saved.get("terrainVolume"),
+			"save facade sees the committed native edit")
+		var edited: Dictionary = owner.read_cell(edit_cell)
+		check(edited.get("status") == "ready"
+			and edited.get("state", {}).get("blockId") == "owner-new-edit",
+			"gameplay cell facade sees committed native edit")
+		check(owner.commit_durable_cells("owner:second", native_revision + 1,
+			[{"kind":"clear", "cell":edit_cell}]).get("reason") == "physical_edit_barrier_pending",
+			"second edit retained behind unproven physical barrier")
+		check(int(owner.export_terrain_volume_v2().get("nativeRevision", -1)) == native_revision + 1,
+			"blocked second edit does not advance save owner")
+		var primary := {"position":Vector3.ZERO,"distance":0}
+		var other_viewers: Array[Dictionary] = []
+		var retained_chunks: Array[Vector2i] = []
+		var foreground_chunks: Array[Vector2i] = []
+		var bounds := Vector2i(0, 0)
+		var demand_lease = DEMAND_LEASE.new()
+		check(demand_lease.acquire(owner, primary, other_viewers,
+			retained_chunks, foreground_chunks, bounds, 1),
+			"demand producer retains exact request values")
+		var demand: Dictionary = owner.begin_demand_replacement(primary,
+			other_viewers, retained_chunks, foreground_chunks, bounds, demand_lease, 1)
+		check(demand.get("status") == "pending", "bounded demand replacement admitted")
+		for _demand_step in range(600):
+			if demand.get("status") != "pending": break
+			demand = owner.advance_demand_replacement()
+		check(demand.get("status") == "ready" and demand.get("desiredDataBlocks") == 27,
+			"bounded planner demand admitted into one owner")
+		demand_lease.release_after_drain()
+		stop_active_primary = {"position":Vector3(400, 0, 0), "distance":48}
+		stop_other_viewers = []
+		stop_retained_chunks = []
+		stop_foreground_chunks = []
+		stop_bounds = Vector2i.ZERO
+		stop_active_lease = DEMAND_LEASE.new()
+		check(stop_active_lease.acquire(owner, stop_active_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2),
+			"active stop candidate lease retains its exact source request")
+		var stop_active_begin: Dictionary = owner.begin_demand_replacement(stop_active_primary,
+			stop_other_viewers, stop_retained_chunks, stop_foreground_chunks,
+			stop_bounds, stop_active_lease, 2)
+		var stop_active_partial: Dictionary = owner.advance_demand_replacement()
+		check(stop_active_begin.get("status") == "pending"
+			and stop_active_partial.get("status") == "pending"
+			and int(stop_active_partial.get("workOps", DEMAND_REPLACEMENT_WORK_LIMIT + 1))
+				<= DEMAND_REPLACEMENT_WORK_LIMIT,
+			"owner has a bounded active candidate when shutdown begins")
+		stop_queued_primary = {"position":Vector3(0, 0, 0), "distance":0}
+		stop_queued_lease = DEMAND_LEASE.new()
+		check(stop_queued_lease.acquire(owner, stop_queued_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+			"queued successor lease retains its exact source request")
+		var stop_queued_begin: Dictionary = owner.begin_demand_replacement(stop_queued_primary,
+			stop_other_viewers, stop_retained_chunks, stop_foreground_chunks,
+			stop_bounds, stop_queued_lease, 3)
+		check(stop_queued_begin.get("status") == "pending"
+			and stop_queued_begin.get("reason") == "replacement_supersede_drain_pending"
+			and stop_active_lease.is_valid_for(stop_active_primary, stop_other_viewers,
+				stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2)
+			and stop_queued_lease.is_valid_for(stop_queued_primary, stop_other_viewers,
+				stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+			"successor is queued behind active candidate without premature lease revocation")
+		var tick: Dictionary = owner.advance()
+		check(tick.get("status") in ["ready", "pending"], "owner advances native demand")
+		check(int(owner.snapshot().publisher.get("demanded", 0)) == 27,
+			"publisher received same desired union")
+		observations.append({"backendInstanceId":snapshot.backendInstanceId,
+			"sourceIdentity":setup.get("sourceIdentity"),
+			"saveStatus":saved.get("status"), "saveNativeRevision":saved.get("nativeRevision"),
+			"cellStatus":exported.get("status"), "numericStatus":numeric.get("status"),
+			"tickStatus":tick.get("status"),
+			"nativeRevision":snapshot.backend.get("terrainDeltaRevision")})
+	# Simulate a fatal failure reported by the real site-admission authority after
+	# this owner has been activated and has accepted native demand. The owner must
+	# retain the backend until explicit incremental retirement completes.
+	owner._admission._fatal = "contract_active_advance_failure"
+	var active_failure: Dictionary = owner.advance()
+	observations.append({"activeFailure":active_failure,
+		"ownerState":owner.snapshot().get("state"),
+		"ownerFailure":owner.snapshot().get("failure"),
+		"ownerBackendInstanceId":owner.snapshot().get("backendInstanceId", 0),
+		"admissionFailure":owner._admission.stats().get("failure", "")})
+	check(active_failure.get("status") == "failed"
+		and owner.snapshot().get("state") == "failed"
+		and owner.snapshot().get("failure") == "contract_active_advance_failure"
+		and int(owner.snapshot().get("backendInstanceId", 0)) != 0,
+		"active owner failure preserves original reason and retains resources for cleanup")
+	# A legacy/incomplete owner may have lost its top-level backend reference
+	# while the planner, publisher and artifact services still own live work.
+	# Public stop must route that case through the same receipt-gated drain.
+	owner._backend = null
+	var stop_requested: Dictionary = owner.stop()
+	check(stop_requested.get("status") == "pending",
+		"failed owner with residual services accepts a non-blocking public stop")
+	check(stop_requested.get("failure") == "contract_active_advance_failure"
+		and owner.snapshot().get("state") == "stopping_async",
+		"incomplete legacy owner cannot bypass asynchronous planner cleanup")
+	var stopped: Dictionary = {"status":"pending"}
+	var async_stop_steps := 0
+	for frame in range(600):
+		stopped = owner.drain_step()
+		async_stop_steps += 1
+		if stopped.get("status") == "ready": break
+		check(stopped.get("status") == "pending",
+			"bounded async stop step remains retryable")
+		await process_frame
+	check(stopped.get("status") == "ready" and stopped.get("drained") == true,
+		"one-step drain retires owned native work")
+	check(stopped.get("physicalBlocksUnloaded") == true
+		and stopped.get("nativeWorkersDrained") == true
+		and stopped.get("demandReleased") == true
+		and stopped.get("leasesReleased") == true,
+		"async stop receipt proves physical, worker, demand and lease retirement")
+	var planner_retirement: Dictionary = stopped.get("plannerRetirement", {})
+	var replacement_retirement: Dictionary = planner_retirement.get("replacement", {})
+	check(replacement_retirement.get("hadActiveCandidate") == true
+		and replacement_retirement.get("hadQueuedSuccessor") == true
+		and int(replacement_retirement.get("retiredWorkOps", 0)) > 0
+		and replacement_retirement.get("requestLeasesReleased") == true
+		and planner_retirement.get("demandReplacementDrained") == true
+		and planner_retirement.get("plannerMapsReleased") == true,
+		"terminal owner receipt waits for active/queued candidate drain and planner map release")
+	check(stop_active_lease.retained_owner() == null
+		and stop_queued_lease.retained_owner() == null
+		and not stop_active_lease.is_valid_for(stop_active_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2)
+		and not stop_queued_lease.is_valid_for(stop_queued_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+		"active and queued demand lease references release only after terminal receipt")
+	check(async_stop_steps > 0 and async_stop_steps <= 600,
+		"shutdown progress is spread across bounded owner drain steps")
+	check(owner.snapshot().state == "drained"
+		and int(owner.snapshot().backendInstanceId) == 0,
+		"no retained backend after drain")
+	check(owner.read_cell(Vector3i.ZERO).get("reason") == "owner_not_active",
+		"drained owner does not fall back")
+	check(owner.read_occupancy(Vector3i.ZERO).get("reason") == "owner_not_active",
+		"drained owner rejects occupancy queries")
+	check(owner.export_terrain_volume_v2().get("reason") == "owner_not_active",
+		"drained owner cannot export stale save data")
+	check(owner.commit_durable_cells("owner:drained", 0, []).get("reason") == "owner_not_active",
+		"drained owner rejects edits")
+	main.world_generation_system = null
+	var continued = OWNER.new()
+	var continued_setup: Dictionary = continued.setup(main, terrain, 72, 10,
+		{"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":owner_saved_volume})
+	if continued_setup.get("status") != "ready":
+		observations.append({"case":"continue_owner_setup", "result":continued_setup})
+	check(continued_setup.get("status") == "ready",
+		"Continue owner initializes from explicit saved v2 volume without script owner")
+	check(int(continued_setup.get("ownerGeneration", 0)) > 0
+		and continued_setup.get("ownerGeneration") != setup.get("ownerGeneration"),
+		"sequential runtime owners receive distinct positive generations")
+	if continued_setup.get("status") == "ready":
+		var continued_save: Dictionary = continued.export_terrain_volume_v2()
+		check(continued_save.get("status") == "ready"
+			and continued_save.get("terrainVolume") == owner_saved_volume,
+			"Continue owner round trips exact durable snapshot")
+	var continued_stop: Dictionary = continued.stop()
+	for frame in range(120):
+		if continued_stop.get("status") == "ready": break
+		await process_frame
+		continued_stop = continued.drain_step()
+	check(continued_stop.get("status") == "ready", "Continue owner drains")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	var new_game = OWNER.new()
+	var new_game_setup: Dictionary = new_game.setup(main, terrain, 73, 10)
+	if new_game_setup.get("status") != "ready":
+		observations.append({"case":"new_game_owner_setup", "result":new_game_setup})
+	check(new_game_setup.get("status") == "ready", "New Game owner initializes from empty durable volume")
+	check(int(new_game_setup.get("ownerGeneration", 0)) > 0
+		and new_game_setup.get("ownerGeneration") != continued_setup.get("ownerGeneration"),
+		"owner generation allocator does not reuse a released generation")
+	if new_game_setup.get("status") == "ready":
+		var new_game_volume: Dictionary = new_game.export_terrain_volume_v2().get("terrainVolume", {})
+		check(new_game_volume.get("sections", []) == [], "New Game native save starts with no durable cells")
+	var new_game_stop: Dictionary = new_game.stop()
+	for frame in range(120):
+		if new_game_stop.get("status") == "ready": break
+		await process_frame
+		new_game_stop = new_game.drain_step()
+	check(new_game_stop.get("status") == "ready", "New Game owner drains")
+	var legacy_main = GAME_MAIN.new()
+	legacy_main.seed_text = "native-owner-legacy-continue"
+	legacy_main.seed_hash = legacy_main.hash_string(legacy_main.seed_text)
+	legacy_main.setup_noise()
+	legacy_main.structure_system = STRUCTURES.new()
+	legacy_main.structure_system.citadel_terrain_admission.configure(
+		legacy_main.seed_text, {}, {"regionCells":legacy_main.STRUCTURE_REGION_CELLS,
+			"spawnChance":legacy_main.STRUCTURE_SPAWN_CHANCE})
+	legacy_main.world_generation_system = WORLD.new()
+	legacy_main.world_generation_system.setup(legacy_main)
+	var legacy_column := Vector2i(-13, -11)
+	var legacy_height: float = legacy_main.world_generation_system.surface_y_for_cell(
+		Vector3i(legacy_column.x, 0, legacy_column.y)) - 4.0 * legacy_main.CELL
+	var legacy_save := {"version":2, "seed":legacy_main.seed_text,
+		"terrain":[{"x":legacy_column.x, "z":legacy_column.y, "surfaceY":legacy_height}]}
+	var converting = OWNER.new()
+	var convert_setup: Dictionary = converting.setup(legacy_main, terrain, 74, 10,
+		legacy_save)
+	check(convert_setup.get("status") == "pending"
+		and converting.snapshot().state == "converting"
+		and converting.export_terrain_volume_v2().get("status") != "ready",
+		"historical Continue retains loading request and withholds partial save")
+	var cancelled_convert = OWNER.new()
+	check(cancelled_convert.setup(legacy_main, terrain, 75, 10,
+		legacy_save).get("status") == "pending"
+		and cancelled_convert.stop().get("status") == "ready"
+		and cancelled_convert.snapshot().state == "drained"
+		and cancelled_convert.advance().get("status") == "failed",
+		"cancelled Continue releases conversion and cannot publish a partial owner")
+	var convert_tick: Dictionary = {}
+	for frame in range(300):
+		convert_tick = converting.advance()
+		if converting.snapshot().state == "active" or convert_tick.get("status") == "failed":
+			break
+		await process_frame
+	if convert_tick.get("status") != "ready":
+		observations.append({"case":"legacy_continue_activation", "result":convert_tick,
+			"snapshot":converting.snapshot()})
+	legacy_main.restore_volume_edits(legacy_save.terrain)
+	check(convert_tick.get("status") == "ready"
+		and converting.snapshot().state == "active"
+		and converting.export_terrain_volume_v2().get("terrainVolume", {})
+			== legacy_main.world_generation_system.save_terrain_volume_deltas(),
+		"historical Continue activates one native owner with exact v2 snapshot")
+	var convert_stop: Dictionary = converting.stop()
+	for frame in range(120):
+		if convert_stop.get("status") == "ready": break
+		await process_frame
+		convert_stop = converting.drain_step()
+	check(convert_stop.get("status") == "ready", "converted owner drains")
+	legacy_main.free()
+	world.queue_free()
+	main.free()
+	var report := {"schema":"n3-terrain-runtime-owner-contract/v1",
+		"passed":failures.is_empty(), "evidenceLevel":"real-native-binding-service-contract",
+		"productionCutover":false, "failures":failures, "observations":observations}
+	var path := OS.get_environment("VWB_TERRAIN_OWNER_REPORT")
+	if not path.is_empty():
+		var file := FileAccess.open(path, FileAccess.WRITE)
+		if file != null: file.store_string(JSON.stringify(report, "\t"))
+	quit(0 if report.passed else 1)

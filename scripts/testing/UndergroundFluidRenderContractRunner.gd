@@ -4,6 +4,7 @@ const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const CELL := 1.35
 
 var main: Node3D
+var startup_failure_result: Dictionary = {}
 var world_generation
 var seed := ""
 var report_path := ""
@@ -40,10 +41,15 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	root.add_child(main)
+	# Explicit diagnostic setup only; this is not playable-world readiness.
+	if not await main.wait_for_startup_loading_complete(240.0, true):
+		if is_instance_valid(main):
+			startup_failure_result = main.get("startup_loading_failure_result").duplicate(true)
+		add_result("underground_fluid_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
+		finish()
+		return
 	main.set_process(false)
 	main.set_physics_process(false)
-	await process_frame
-	await process_frame
 	world_generation = main.get("world_generation_system") if main != null else null
 	if world_generation == null:
 		add_result("underground_fluid_render_scene_ready", false, "world_generation missing")
@@ -341,11 +347,9 @@ func failure_count() -> int:
 
 func finish() -> void:
 	save_report()
-	if main != null:
-		var service = main.get("terrain_meshing_service")
-		if service != null and service.has_method("clear_jobs"):
-			service.call("clear_jobs", true)
-		main.queue_free()
+	if is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(0 if all_passed() else 1)
+		return
 	quit(0 if all_passed() else 1)
 
 func save_report() -> void:
@@ -357,6 +361,9 @@ func save_report() -> void:
 		"finished": true,
 		"passed": all_passed(),
 		"evidenceLevel": "integration",
+		"startupScope": "diagnostic_setup_excluded_from_gameplay",
+		"gameplayAcceptance": false,
+		"startupLoadingFailureResult": startup_failure_result,
 		"scope": "Real Main.tscn chunk creation check that generated terrain fluid states produce a non-collision TerrainFluidMesh; not headed visual acceptance.",
 		"resultCount": results.size(),
 		"failureCount": failure_count(),

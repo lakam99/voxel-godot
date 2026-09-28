@@ -5,6 +5,10 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("npc_nav_main_instantiated")
+    if not await wait_for_runtime_loading_complete():
+        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        finish_playtest()
+        return
     if main != null:
         if main.get("tutorial_system") != null:
             var tutorial = main.get("tutorial_system")
@@ -46,11 +50,7 @@ func run() -> void:
         mark_progress("npc_nav_route_core")
         await test_npc_equipment_and_pathing()
 
-    save_optional_screenshot()
-    finished = true
-    save_report()
-    mark_progress("finished")
-    get_tree().quit(1 if failed else 0)
+    finish_playtest()
 
 func hold_existing_ambient_npcs() -> void:
     if main == null:
@@ -99,6 +99,101 @@ func restore_height_fixture(snapshot: Array, centers: Array) -> void:
     invalidate_navigation_fixture()
     mark_progress("npc_nav_restore_height_done")
 
+## The production world is backed by TerrainVolumeService and VoxelTerrain.
+## Legacy column markers can guide old mesh helpers, but they do not change the
+## native collider. Door acceptance therefore builds its pre-act floor through
+## the authoritative volume and waits until real physics observes the result.
+func prepare_authoritative_navigation_floor(center: Vector2i, radius: int, sample_cells: Array[Vector2i]) -> Dictionary:
+    if main == null:
+        return {"ok": false, "reason": "main_missing"}
+    var generation = main.get("world_generation_system")
+    if generation == null or not generation.has_method("apply_box_edit") or not generation.has_method("surface_projection_for_cell"):
+        return {"ok": false, "reason": "terrain_volume_authority_missing"}
+    var reference_y := surface_y_at_cell2(center)
+    # Put the production viewer over the fixture before editing so the native
+    # terrain runtime owns and publishes every affected chunk.
+    if player != null:
+        player.global_position = Vector3(float(center.x) * CELL, reference_y + CELL * 8.0, float(center.y) * CELL)
+        player.velocity = Vector3.ZERO
+        if main.has_method("update_chunks"):
+            main.call("update_chunks", false)
+        await wait_physics_frames(3)
+    var projection: Dictionary = generation.surface_projection_for_cell(
+        Vector3i(center.x, floori(reference_y / CELL), center.y), 32, 96
+    )
+    if not bool(projection.get("found", false)):
+        return {"ok": false, "reason": "terrain_surface_projection_missing"}
+    var solid_cell: Vector3i = projection.get("solidCell", Vector3i(center.x, floori(reference_y / CELL), center.y))
+    var floor_y := solid_cell.y
+    var min_x := center.x - radius
+    var max_x := center.x + radius
+    var min_z := center.y - radius
+    var max_z := center.y + radius
+    # This must participate in surface projection as well as native meshing.
+    # The structure_* namespace intentionally opts out of terrain projection,
+    # so a fixture-owned source is used here.
+    var metadata := {"source": "npc_navigation_fixture", "terrainMeshAffects": true, "saveDelta": false}
+    generation.apply_box_edit(
+        Vector3i(min_x, floor_y, min_z), Vector3i(max_x, floor_y, max_z),
+        {"material": "stone", "biome": "plains", "solid": true, "density": CELL, "fluid": "", "light": {"sky": 0, "block": 0}, "metadata": metadata},
+        "npc_navigation_fixture_floor"
+    )
+    generation.apply_box_edit(
+        Vector3i(min_x, floor_y + 1, min_z), Vector3i(max_x, floor_y + 4, max_z),
+        {"material": "air", "biome": "plains", "solid": false, "density": -CELL, "fluid": "", "light": {"sky": 15, "block": 0}, "metadata": metadata},
+        "npc_navigation_fixture_clearance"
+    )
+    var expected_y := (float(floor_y) + 0.5) * CELL
+    var last_probe := {}
+    var bounds := Rect2i(min_x, min_z, max_x - min_x + 1, max_z - min_z + 1)
+    for frame in range(240):
+        last_probe = authoritative_navigation_floor_probe(sample_cells, expected_y)
+        var runtime = main.get("voxel_terrain_runtime")
+        var runtime_stats: Dictionary = runtime.stats() if runtime != null and runtime.has_method("stats") else {}
+        var readiness: Dictionary = runtime.region_publication_readiness(bounds) if runtime != null and runtime.has_method("region_publication_readiness") else {"status": "failed", "reason": "region_readiness_missing"}
+        if bool(last_probe.get("ok", false)) and String(readiness.get("status", "")) == "ready":
+            last_probe["runtime"] = runtime_stats
+            last_probe["readiness"] = readiness
+            return last_probe
+        if frame % 30 == 0:
+            mark_progress("npc_nav_authoritative_floor_%d" % frame)
+        await wait_physics_frames(1)
+    last_probe["reason"] = "authoritative_floor_collision_timeout"
+    return last_probe
+
+func authoritative_navigation_floor_probe(cells: Array[Vector2i], expected_y: float) -> Dictionary:
+    if main == null or main.get_world_3d() == null:
+        return {"ok": false, "reason": "physics_world_missing"}
+    var heights := {}
+    var min_height := INF
+    var max_height := -INF
+    for cell in cells:
+        var x := float(cell.x) * CELL
+        var z := float(cell.y) * CELL
+        var query := PhysicsRayQueryParameters3D.create(
+            Vector3(x, expected_y + CELL * 6.0, z),
+            Vector3(x, expected_y - CELL * 6.0, z)
+        )
+        query.collision_mask = 2
+        query.collide_with_bodies = true
+        query.collide_with_areas = false
+        var hit: Dictionary = main.get_world_3d().direct_space_state.intersect_ray(query)
+        var collider = hit.get("collider")
+        var normal: Vector3 = hit.get("normal", Vector3.ZERO)
+        if hit.is_empty() or collider == null or String(collider.get_meta("kind", "")) != "terrain" or normal.y < 0.90:
+            return {"ok": false, "reason": "authoritative_floor_not_published", "cell": cell, "hit": hit}
+        var height := float((hit.get("position", Vector3.ZERO) as Vector3).y)
+        heights["%d,%d" % [cell.x, cell.y]] = height
+        min_height = minf(min_height, height)
+        max_height = maxf(max_height, height)
+    return {
+        "ok": not heights.is_empty() and max_height - min_height <= CELL * 0.12,
+        "reason": "" if max_height - min_height <= CELL * 0.12 else "authoritative_floor_not_flat",
+        "heights": heights,
+        "minHeight": min_height,
+        "maxHeight": max_height
+    }
+
 func move_player_to_fixture_cell(cell: Vector2i) -> void:
     if main == null or player == null:
         return
@@ -108,6 +203,75 @@ func move_player_to_fixture_cell(cell: Vector2i) -> void:
     player.set("terrain_grounded", true)
     if main.has_method("update_chunks"):
         main.call("update_chunks", false)
+
+## A publication receipt proves that a region RID and its source geometry were
+## installed. Route acceptance additionally needs the engine map to own the
+## actual endpoints. This bounded headed-fixture gate observes that production
+## boundary after ordinary route demand has queued the tile.
+func wait_for_route_fixture_server_endpoints(points: Array[Vector3], expected_tile_key: String, max_frames := 300) -> Dictionary:
+    var result := {
+        "ok": false,
+        "reason": "navigation_endpoint_owner_timeout",
+        "expectedRegion": "region:chunk:%s" % expected_tile_key,
+        "points": []
+    }
+    if main == null or points.is_empty():
+        result["reason"] = "navigation_endpoint_fixture_missing"
+        return result
+    var npc_system = main.get("npc_system")
+    var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+    var service = autonomy.get("navmesh_world") if autonomy != null else null
+    var pathing = npc_system.get("pathing") if npc_system != null else null
+    if pathing != null and pathing.has_method("ensure_ready"):
+        pathing.ensure_ready()
+    var producer = pathing.get("navigation_world") if pathing != null else null
+    var route_planner = pathing.get("route_planner") if pathing != null else null
+    var publisher = route_planner.get("delegate") if route_planner != null else null
+    var readiness_owner := {"kind":"readiness","id":"headed_route_fixture:%s" % expected_tile_key}
+    if service == null or not service.get("navigation_map") is RID:
+        result["reason"] = "navigation_endpoint_service_missing"
+        return result
+    var expected_region := String(result.expectedRegion)
+    for frame in range(max_frames):
+        # The fixture is the pre-act owner of this publication requirement.
+        # Retain that exact demand if terrain/structure revisions change while
+        # the asynchronous capture, preparation, upload and sync pipeline runs.
+        if publisher != null and publisher.has_method("queue_navmesh_tile_publish"):
+            publisher.queue_navmesh_tile_publish(expected_tile_key,true,readiness_owner)
+        var navigation_map: RID = service.get("navigation_map")
+        var observations: Array = []
+        var source_key := String(producer.navmesh_tile_source_key_for_tile(expected_tile_key)) \
+            if producer != null and producer.has_method("navmesh_tile_source_key_for_tile") else ""
+        var receipt: Dictionary = service.tile_publication_readiness(expected_tile_key, source_key) \
+            if not source_key.is_empty() and service.has_method("tile_publication_readiness") else {}
+        var all_owned: bool = navigation_map.is_valid() and String(receipt.get("status", "")) == "ready"
+        for point in points:
+            var owner := NavigationServer3D.map_get_closest_point_owner(navigation_map, point) if navigation_map.is_valid() else RID()
+            var closest := NavigationServer3D.map_get_closest_point(navigation_map, point) if navigation_map.is_valid() else Vector3.INF
+            var region_id := String(service.get("region_ids_by_rid").get(owner, "")) if owner.is_valid() else ""
+            var distance := point.distance_to(closest) if closest.is_finite() else INF
+            observations.append({"point": point, "closest": closest, "distance": distance, "regionId": region_id, "ownerValid": owner.is_valid()})
+            if not owner.is_valid() or region_id != expected_region or distance > CELL * 0.95:
+                all_owned = false
+        result["points"] = observations
+        result["sourceKey"] = source_key
+        result["receipt"] = {
+            "status": receipt.get("status", ""),
+            "reason": receipt.get("reason", ""),
+            "sourceKey": receipt.get("sourceKey", ""),
+            "sourceRevision": receipt.get("sourceRevision", -1),
+            "installationSerial": receipt.get("installationSerial", 0),
+            "completeSurfaceCoverage": receipt.get("completeSurfaceCoverage", false)
+        }
+        if all_owned:
+            result["ok"] = true
+            result["reason"] = ""
+            result["frames"] = frame
+            return result
+        if frame % 30 == 0:
+            mark_progress("npc_nav_route_endpoint_sync_%03d" % frame)
+        await wait_physics_frames(1)
+    return result
 
 func test_generic_town_npc_navigation() -> void:
     if not main:
@@ -243,7 +407,9 @@ func test_generic_town_npc_navigation() -> void:
     for step in range(generic_job_steps):
         if step % 160 == 0:
             mark_progress("npc_nav_generic_town_jobs_%d" % step)
-        npc_system.update_npcs(0.2, 1.0)
+        # This is headed acceptance: let the production game loop, physics motor,
+        # navigation capture and publication queues advance together once per tick.
+        await wait_physics_frames(1)
         for entry_variant in npc_entries:
             var entry: Dictionary = entry_variant
             if String(entry.get("townKey", "")) != generic_key or not (String(entry.get("job", "")) in ["forage", "wood", "stone"]):
@@ -264,8 +430,6 @@ func test_generic_town_npc_navigation() -> void:
             targeted_forage_done = int(inventory_now.get("berries", 0)) > 0 and hunger_now > 38.0
         if saw_generic_worker_outside and int(stats_now.get("jobRuns", 0)) > job_runs_before and targeted_forage_done:
             break
-        if step % 20 == 19:
-            await wait_physics_frames(1)
 
     var job_stats: Dictionary = npc_system.stats()
     var forager_inventory: Dictionary = generic_forager.get("personalInventory", {}) if not generic_forager.is_empty() else {}
@@ -519,12 +683,23 @@ func test_two_npcs_cross_narrow_door() -> void:
         return
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 64, roundi(player.global_position.z / CELL) + 64)
     var height_snapshot := snapshot_height_fixture()
-    reset_player_on_flat_patch(start_cell, 9)
+    var floor_samples: Array[Vector2i] = [
+        start_cell + Vector2i(1, 0),
+        start_cell + Vector2i(4, 0),
+        start_cell + Vector2i(7, 0)
+    ]
+    var floor_result: Dictionary = await prepare_authoritative_navigation_floor(start_cell, 9, floor_samples)
+    if not bool(floor_result.get("ok", false)):
+        add_result("npc_nav_two_npc_door_crossing", false, "authoritative floor failed %s" % JSON.stringify(floor_result))
+        return
+    var floor_heights: Dictionary = floor_result.get("heights", {})
+    player.global_position = Vector3(float(start_cell.x) * CELL, float(floor_result.get("maxHeight", surface_y_at_cell2(start_cell))) + 0.08, float(start_cell.y) * CELL)
+    player.velocity = Vector3.ZERO
     clear_blocks_near_cell(start_cell, 12)
     clear_props_near_cell(start_cell, 14)
     await wait_physics_frames(3)
 
-    var base_height: float = surface_y_at_cell2(start_cell)
+    var base_height: float = float(floor_result.get("maxHeight", surface_y_at_cell2(start_cell)))
     var wall_y := base_height + CELL * 0.48
     var wall_cell_y := floori(wall_y / CELL) + 1
     var door_cell := Vector3i(start_cell.x + 4, wall_cell_y, start_cell.y)
@@ -539,11 +714,15 @@ func test_two_npcs_cross_narrow_door() -> void:
                 old_block.queue_free()
             blocks.erase(cell)
         var block_type := "door" if cell == door_cell else "stoneBlock"
-        main.call("create_block", cell, block_type, { "world_y": wall_y })
+        var block_options := {"world_y": wall_y}
+        if block_type == "door":
+            block_options["doorPolicy"] = "public_gate"
+            block_options["doorPublicAccess"] = true
+        main.call("create_block", cell, block_type, block_options)
     await wait_physics_frames(3)
 
-    var left_start := Vector3(float(start_cell.x + 1) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
-    var right_start := Vector3(float(start_cell.x + 7) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
+    var left_start := Vector3(float(start_cell.x + 1) * CELL, float(floor_heights.get("%d,%d" % [start_cell.x + 1, start_cell.y], base_height)) + 0.08, float(start_cell.y) * CELL)
+    var right_start := Vector3(float(start_cell.x + 7) * CELL, float(floor_heights.get("%d,%d" % [start_cell.x + 7, start_cell.y], base_height)) + 0.08, float(start_cell.y) * CELL)
     var left_npc := npc_system.create_npc_body("NpcNavDoorLeft", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", left_npc)
     var right_npc := npc_system.create_npc_body("NpcNavDoorRight", "npc") as CharacterBody3D
@@ -555,8 +734,22 @@ func test_two_npcs_cross_narrow_door() -> void:
     else:
         npc_system.add_child(left_npc)
         npc_system.add_child(right_npc)
-    npc_system.safe_place_npc(left_npc, left_start, null, "test_spawn")
-    npc_system.safe_place_npc(right_npc, right_start, null, "test_spawn")
+    var left_placement: Dictionary = npc_system.safe_place_npc(left_npc, left_start, null, "test_spawn")
+    var right_placement: Dictionary = npc_system.safe_place_npc(right_npc, right_start, null, "test_spawn")
+    if not bool(left_placement.get("ok", false)) or not bool(right_placement.get("ok", false)):
+        add_result("npc_nav_two_npc_door_crossing", false, "authoritative spawn failed left=%s right=%s" % [JSON.stringify(left_placement), JSON.stringify(right_placement)])
+        if is_instance_valid(left_npc):
+            left_npc.queue_free()
+        if is_instance_valid(right_npc):
+            right_npc.queue_free()
+        for cell in barrier_cells:
+            if blocks.has(cell):
+                var failed_block := blocks[cell] as Node
+                if failed_block:
+                    failed_block.queue_free()
+                blocks.erase(cell)
+        invalidate_navigation_fixture()
+        return
 
     var town_center := Vector2i(start_cell.x + 4, start_cell.y)
     var left_entry: Dictionary = npc_system.register_npc(left_npc, {
@@ -592,6 +785,10 @@ func test_two_npcs_cross_narrow_door() -> void:
     var reservation_waits_before := int(npc_system.stats().get("reservationWaits", 0))
     var door_opens_before := int(npc_system.stats().get("doorOpens", 0))
     var door_closes_before := int(npc_system.stats().get("doorCloses", 0))
+    var traffic_before := {}
+    if npc_system.get("autonomy_system") != null and npc_system.get("autonomy_system").has_method("stats"):
+        var autonomy_before: Dictionary = npc_system.get("autonomy_system").stats()
+        traffic_before = autonomy_before.get("traffic", {})
     var shared_cell := false
     var both_crossed := false
     var min_separation := INF
@@ -633,20 +830,28 @@ func test_two_npcs_cross_narrow_door() -> void:
     var right_entry_body := right_entry.get("body") as Node3D
     var traffic_state := {}
     var door_portal_summary := {}
+    var pathing_state: Dictionary = pathing.stats() if pathing != null and pathing.has_method("stats") else {}
     if npc_system.get("autonomy_system") != null and npc_system.get("autonomy_system").has_method("stats"):
         var autonomy_stats: Dictionary = npc_system.get("autonomy_system").stats()
         traffic_state = autonomy_stats.get("traffic", {})
         door_portal_summary = autonomy_stats.get("doorPortals", {})
+    # A safe alternating crossing can be granted without either actor ever
+    # entering the wait state. The traffic contract suite separately proves
+    # forced contention and waiting. This live case requires actual reservation
+    # use and release, safe separation, both arrivals, and the door lifecycle.
+    var traffic_used := int(traffic_state.get("granted", 0)) > int(traffic_before.get("granted", 0)) \
+        and int(traffic_state.get("released", 0)) > int(traffic_before.get("released", 0)) \
+        and int(traffic_state.get("activeReservations", 0)) == 0
     add_result(
         "npc_nav_two_npc_door_crossing",
         both_crossed
             and not shared_cell
             and min_separation >= CELL * 0.34
-            and int(stats_after.get("reservationWaits", 0)) > reservation_waits_before
+            and traffic_used
             and int(stats_after.get("doorOpens", 0)) > door_opens_before
             and int(stats_after.get("doorCloses", 0)) > door_closes_before
             and door_closed,
-        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, leftDebug %s, rightDebug %s, leftTiles %s, rightTiles %s, rightEscape %s failedEscape %s capsule %s portalSummary %s, traffic active=%s waiting=%s granted=%s denied=%s released=%s" % [
+        "crossed %s, shared %s, minSep %.2f, left %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, right %.2f cell %s wants %s dist %.2f goal %s body %s actionCount %d activeDoor %s, doorX %.2f, waits %d->%d, door %d/%d -> %d/%d, closed %s, routes %s/%s %s/%s, leftDebug %s, rightDebug %s, leftTiles %s, rightTiles %s, rightEscape %s failedEscape %s capsule %s portalSummary %s, traffic active=%s waiting=%s granted=%s denied=%s released=%s, pathing %s" % [
             str(both_crossed),
             str(shared_cell),
             min_separation,
@@ -690,7 +895,8 @@ func test_two_npcs_cross_narrow_door() -> void:
             str(traffic_state.get("waiting", "")),
             str(traffic_state.get("granted", "")),
             str(traffic_state.get("denied", "")),
-            str(traffic_state.get("released", ""))
+            str(traffic_state.get("released", "")),
+            JSON.stringify(pathing_state)
         ]
     )
 
@@ -830,16 +1036,26 @@ func test_reachability_aware_goal_selection() -> void:
         return
     var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 78, roundi(player.global_position.z / CELL) + 78)
     var height_snapshot := snapshot_height_fixture()
-    reset_player_on_flat_patch(start_cell)
     clear_blocks_near_cell(start_cell, 18)
     clear_props_near_cell(start_cell, 36)
+    var town_radius := 12
+    var wood_cell := start_cell + Vector2i(-2, 0)
+    var stone_cell := start_cell + Vector2i(2, 0)
+    var guard_cell := start_cell + Vector2i(0, 3)
+    var tree_cell := start_cell + Vector2i(6, 0)
+    var rock_cell := start_cell + Vector2i(0, 7)
+    var hostile_cell := start_cell + Vector2i(17, 0)
+    var floor_result: Dictionary = await prepare_authoritative_navigation_floor(
+        start_cell, 20, [start_cell, wood_cell, stone_cell, guard_cell, tree_cell, rock_cell, hostile_cell])
+    if not bool(floor_result.get("ok", false)):
+        add_result("npc_nav_reachability_goal_selection", false,
+            "authoritative goal fixture floor failed %s" % JSON.stringify(floor_result))
+        restore_height_fixture(height_snapshot, [start_cell])
+        return
+    move_player_to_fixture_cell(start_cell + Vector2i(0, -8))
     await wait_physics_frames(3)
 
     var base_height: float = surface_y_at_cell2(start_cell)
-    var town_radius := 12
-    var tree_cell := dry_work_cell(start_cell, 3, town_radius - 3)
-    var rock_cell := dry_work_cell(Vector2i(start_cell.x, start_cell.y + 2), 4, town_radius - 2)
-    var hostile_cell := dry_work_cell(Vector2i(start_cell.x + 2, start_cell.y), town_radius + 5, town_radius + 18)
     var prop_root := main.get("prop_root") as Node
     var rng := RandomNumberGenerator.new()
     rng.seed = 908177
@@ -851,9 +1067,22 @@ func test_reachability_aware_goal_selection() -> void:
 
     var entries: Array[Dictionary] = []
     var bodies: Array[Node3D] = []
-    var wood_entry := make_nav_test_npc(npc_system, "npc-nav-wood-worker", "Wood Worker", "wood", start_cell, town_radius, base_height, Vector2i(start_cell.x - 1, start_cell.y))
-    var stone_entry := make_nav_test_npc(npc_system, "npc-nav-stone-worker", "Stone Worker", "stone", start_cell, town_radius, base_height, Vector2i(start_cell.x + 1, start_cell.y))
-    var guard_entry := make_nav_test_npc(npc_system, "npc-nav-guard-worker", "Guard", "", start_cell, town_radius, base_height, Vector2i(start_cell.x, start_cell.y + 2), true)
+    var wood_entry := make_nav_test_npc(npc_system, "npc-nav-wood-worker", "Wood Worker", "wood", start_cell, town_radius, base_height, wood_cell)
+    var stone_entry := make_nav_test_npc(npc_system, "npc-nav-stone-worker", "Stone Worker", "stone", start_cell, town_radius, base_height, stone_cell)
+    var guard_entry := make_nav_test_npc(npc_system, "npc-nav-guard-worker", "Guard", "", start_cell, town_radius, base_height, guard_cell, true)
+    var placement_failures := []
+    for candidate_entry in [wood_entry, stone_entry, guard_entry]:
+        if candidate_entry.has("fixturePlacementFailure"):
+            placement_failures.append(candidate_entry)
+    if not placement_failures.is_empty():
+        add_result("npc_nav_reachability_goal_selection", false, "authoritative actor placement failed %s" % JSON.stringify(placement_failures))
+        if tree != null and is_instance_valid(tree):
+            tree.queue_free()
+        if rock != null and is_instance_valid(rock):
+            rock.queue_free()
+        restore_height_fixture(height_snapshot, [start_cell])
+        invalidate_navigation_fixture()
+        return
     for entry in [wood_entry, stone_entry, guard_entry]:
         if not entry.is_empty():
             entries.append(entry)
@@ -968,15 +1197,24 @@ func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
-    npc_system.safe_place_npc(body, Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL), null, "test_spawn")
-    return npc_system.register_npc(body, {
+    # Each fixture actor must be placed against the terrain at its own cell.
+    # Reusing the town-center height can reject the spawn on ordinary slopes;
+    # the old test ignored that receipt and then queried resources from the
+    # body's default origin hundreds of metres away.
+    var cell_level := surface_y_at_cell2(cell)
+    var placement: Dictionary = npc_system.safe_place_npc(body, Vector3(float(cell.x) * CELL, cell_level + 0.04, float(cell.y) * CELL), null, "test_spawn")
+    if not bool(placement.get("ok", false)):
+        if is_instance_valid(body):
+            body.queue_free()
+        return {"fixturePlacementFailure": placement, "id": npc_id}
+    var entry: Dictionary = npc_system.register_npc(body, {
         "id": npc_id,
         "name": npc_name,
         "role": "Guard" if can_fight else "Worker",
         "townKey": "npc-nav-reachable-goals",
         "townCenter": town_center,
         "townRadius": town_radius,
-        "level": level,
+        "level": cell_level,
         "homeCell": cell,
         "porchCell": cell,
         "guardCell": Vector2i(town_center.x + town_radius - 2, town_center.y),
@@ -984,6 +1222,8 @@ func make_nav_test_npc(npc_system, npc_id: String, npc_name: String, job: String
         "canFight": can_fight,
         "nightGuard": can_fight
     })
+    entry["fixturePlacement"] = placement
+    return entry
 
 func dry_work_cell(center: Vector2i, min_radius: int, max_radius: int) -> Vector2i:
     for radius in range(min_radius, max_radius + 1):

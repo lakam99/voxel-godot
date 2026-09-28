@@ -5,6 +5,7 @@ const CELL := 1.35
 const CAPTURE_SIZE := Vector2i(1280, 720)
 
 var main: Node3D
+var startup_failure_result: Dictionary = {}
 var world_generation
 var camera: Camera3D
 var light: OmniLight3D
@@ -46,9 +47,15 @@ func run() -> void:
 	main.set("force_underground_volume_debug", true)
 	main.set("visual_quality", {"decorativeDensity": 0.0, "decorativeDetailCap": 0, "particleDensity": 0.0})
 	add_child(main)
+	# Explicit diagnostic setup only; this is not playable-world readiness.
+	if not await main.wait_for_startup_loading_complete(240.0, true):
+		if is_instance_valid(main):
+			startup_failure_result = main.get("startup_loading_failure_result").duplicate(true)
+		add_result("vox43_surface_cave_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
+		finish()
+		return
 	main.set_process(false)
 	main.set_physics_process(false)
-	await wait_frames(2)
 	world_generation = main.get("world_generation_system")
 	if world_generation == null:
 		add_result("vox43_surface_cave_scene_ready", false, {"reason": "world_generation_missing"})
@@ -221,6 +228,9 @@ func finish() -> void:
 		"results": results,
 		"seed": seed,
 		"evidenceLevel": "acceptance_visual",
+		"startupScope": "diagnostic_setup_excluded_from_gameplay",
+		"gameplayAcceptance": false,
+		"startupLoadingFailureResult": startup_failure_result,
 		"acceptanceClaims": ["vox43_fresh_surface_cave_visual"],
 		"requiredScreenshots": ["fresh_surface_cave_entrance.png"],
 		"captures": [capture] if not capture.is_empty() else [],
@@ -237,6 +247,9 @@ func finish() -> void:
 			progress.store_string("finished:%s" % str(report.passed))
 			progress.close()
 	await wait_frames(1)
+	if is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(0 if bool(report.passed) else 1)
+		return
 	get_tree().quit(0 if bool(report.passed) else 1)
 
 func forbidden_call_self_scan() -> Dictionary:

@@ -1,5 +1,10 @@
 #include "terrain_meshing_backend.h"
 
+#include "coordinates.hpp"
+#include "legacy_seed_hash.hpp"
+#include "world_identity.hpp"
+#include "n2_vertical_slice_adapter.h"
+
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -871,6 +876,8 @@ Ref<Material> terrain_material(Object *p_main) {
 
 void TerrainMeshingBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("backend_summary"), &TerrainMeshingBackend::backend_summary);
+	ClassDB::bind_method(D_METHOD("world_backend_core_smoke"), &TerrainMeshingBackend::world_backend_core_smoke);
+	ClassDB::bind_method(D_METHOD("n2_prepare_vertical_slice", "request"), &TerrainMeshingBackend::n2_prepare_vertical_slice);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_mesh);
 	ClassDB::bind_method(D_METHOD("build_chunk_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_surface_data_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_mesh_from_sections);
@@ -879,6 +886,26 @@ void TerrainMeshingBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_fluid_mesh);
 	ClassDB::bind_method(D_METHOD("collision_shape_for_mesh", "mesh"), &TerrainMeshingBackend::collision_shape_for_mesh);
 	ClassDB::bind_method(D_METHOD("build_chunk_assets", "main", "cx", "cz", "include_collision"), &TerrainMeshingBackend::build_chunk_assets);
+}
+
+Dictionary TerrainMeshingBackend::world_backend_core_smoke() const {
+	const auto floor_value = voxel::world_backend::floor_divide(-17, 16);
+	const auto modulo_value = voxel::world_backend::euclidean_modulo(-17, 16);
+	const auto source = voxel::world_backend::legacy_frozen_source_identity(
+		{'a', 't', 'l', 'a', 's', '-', '1', '4', '9', '2'});
+	const auto identity = voxel::world_backend::canonical_source_identity(source);
+	Dictionary result;
+	result["schema"] = "native-world-backend-adapter-smoke/v1";
+	result["floorDivide"] = floor_value.value_or(0);
+	result["euclideanModulo"] = modulo_value.value_or(0);
+	result["emptySeedHash"] = static_cast<int64_t>(voxel::world_backend::legacy_seed_hash({}));
+	result["sourceDigest"] = String(identity.digest_hex().c_str());
+	result["coreLinked"] = true;
+	return result;
+}
+
+Dictionary TerrainMeshingBackend::n2_prepare_vertical_slice(const Dictionary &p_request) const {
+	return prepare_n2_vertical_slice(p_request);
 }
 
 Dictionary TerrainMeshingBackend::backend_summary() const {

@@ -92,7 +92,7 @@ individual symptom:
   `scripts/missions/` own scenario and story composition. Dialogue presents
   state; it does not become the state authority.
 - `scripts/npc_ai/` owns the mature routing/movement stack. Read
-  `MANIFESTO.md` before considering any change there.
+  `docs/architecture/npc-navigation-manifesto.md` before considering any change there.
 
 ## Core Principles
 
@@ -125,6 +125,8 @@ individual symptom:
 
 - Preserve user work. Check `git status --short` before editing.
 - Use `apply_patch` for manual edits.
+- Use the existing Node.js runners and shared process helpers for automation.
+  Do not introduce PowerShell runner replacements or a parallel test framework.
 - Keep changes focused. Avoid broad refactors while fixing gameplay bugs.
 - Do not discard, reset, clean, or rewrite branches unless the user explicitly asks.
 - Do not weaken tests to make a change pass.
@@ -167,31 +169,60 @@ individual symptom:
 - Door/home acceptance must prove the visible sequence: approach the door, open it before crossing, enter a strict interior location, clear the threshold, and close the door after clearance. Stats and metadata may support the claim, but they cannot be the only proof.
 - New headed NPC acceptance runners must call `tools/npc/assert-npc-acceptance-runner-clean.mjs` before launching Godot.
 - Every NPC/pathfinding acceptance claim must include the command, report path, screenshots or trace/timeline evidence when visual behavior matters, and a brief statement of what the test does and does not prove.
+- For startup measurements at a particular location, select the initial spawn
+  before attaching the world and starting terrain streaming. A later teleport
+  measures relocation and competing streaming work, not that location's cold boot.
+  An explicit-spawn diagnostic still does not prove ordinary menu/exploration flow.
+- When an API becomes asynchronous, migrate synthetic fixtures to admitted input
+  and accepted output while preserving their substantive assertions. Do not add a
+  synchronous production fallback to satisfy an old immediate-result fixture.
+  Grammar parsing is not Godot compilation, and compilation is not gameplay proof.
 
 ## Important Plans And Docs
 
-- `MANIFESTO.md`: the pathfinding stability manifesto. Read it before work that
-  could touch NPC routing, generated collision, doors, towns, streaming,
-  navigation publication or pathfinding acceptance. The routing replacement is
-  complete; its code is protected unless pathfinding work is explicitly
-  authorised.
-- `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`,
-  `CODEX_MATURE_NAV_PLAN.md`, and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`:
-  historical implementation/reference material. They become controlling only
-  for explicitly authorised pathfinding work; otherwise use them to preserve
-  contracts, not to restart an old replacement campaign.
-- `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`: controlling sequential plan for making the tutorial town a fully published loading artifact and removing tutorial-specific movement privilege from generic NPC systems. Follow it before changing tutorial-town readiness, tutorial NPC spawning/home assignment, post-knock behavior, or tutorial-owned NPC commands.
-- `Minecraft-Equivalent Terrain Migr.md`: terrain architecture migration context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
-- `CODEX_PERFORMANCE_PLAN.md`: performance roadmap and prior performance constraints. Recheck when touching terrain, chunk streaming, structures, NPC/nav, autosave, or main menu/runtime loading.
-- `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
-- `CODEX_STORY_IMPLEMENTATION_PLAN.md`: story/worldmark roadmap. Follow one phase at a time.
-- `docs/KILOMETRE_BIOME_FIELD.md`: the current single-authority regional-biome
-  contract and its focused verification.
-- `docs/ANIMATED_ASSET_PIPELINE.md`: generated animated asset workflow.
-- `docs/STORY_SUMMARY.md`: narrative brief for story manager context.
-- `docs/VISUAL_*_REPORT.md`: prior visual work and verification notes.
+### Documentation ownership
 
-When executing story work, reread `CODEX_STORY_IMPLEMENTATION_PLAN.md` and follow the requested phase only. Phase reports and commits are part of the expected workflow.
+- The canonical home for all new project documentation is the public
+  [Voxel Biome World documentation repository](https://github.com/lakam99/voxel-godot-docs): architecture notes, design docs, implementation plans, handoffs, phase reports, test/acceptance evidence, performance records, and migration notes all belong there.
+- Do not add new long-form documentation or reports under this game's `docs/`
+  tree. Keep this repository's `AGENTS.md`, concise code-local `README.md` files,
+  and the existing operational references below beside the code; use links to
+  the documentation repository for new supporting material.
+- The operational docs already listed below are grandfathered in this
+  repository and may be maintained in place. Do not create new full-length
+  documents alongside them. If one is deliberately migrated, make the
+  documentation-repository copy canonical and leave only a short pointer here.
+  New reports should cite the game commit/PR and exact test reports or artifacts
+  they describe.
+- The documentation repository is a separate Git repository, not a submodule.
+  Make documentation changes there and publish them to its `main` branch; then
+  update links here if its canonical paths change.
+
+- `docs/architecture/npc-navigation-manifesto.md`: the pathfinding stability
+  manifesto. Read it before work that could touch NPC routing, generated
+  collision, doors, towns, streaming, navigation publication, or pathfinding
+  acceptance. The routing replacement is complete; its code is protected
+  unless pathfinding work is explicitly authorised.
+- Historical pathfinding plans and phase reports are archived in the
+  [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/gameplay/npc-navigation).
+- `docs/roadmaps/tutorial-town-loading.md`: controlling sequential plan for
+  making the tutorial town a fully published loading artifact and removing
+  tutorial-specific movement privilege from generic NPC systems. Follow it
+  before changing tutorial-town readiness, tutorial NPC spawning/home
+  assignment, post-knock behavior, or tutorial-owned NPC commands.
+- `docs/architecture/terrain-authority.md`: terrain architecture context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
+- `docs/roadmaps/performance.md`: performance roadmap and prior performance
+  constraints. Recheck when touching terrain, chunk streaming, structures,
+  NPC/nav, autosave, or main menu/runtime loading.
+- `docs/roadmaps/visual-upgrade.md`: visual polish roadmap.
+- `docs/roadmaps/story-implementation.md`: story/worldmark roadmap. Follow one phase at a time.
+- `docs/world-generation/biome-region-field.md`: the current single-authority regional-biome
+  contract and its focused verification.
+- `docs/pipelines/animated-assets.md`: generated animated asset workflow.
+- `docs/game-design/story/summary.md`: narrative brief for story manager context.
+- Dated visual reports are preserved in the [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/art-direction).
+
+When executing story work, reread `docs/roadmaps/story-implementation.md` and follow the requested phase only. Phase reports and commits are part of the expected workflow.
 
 ## Procedural Ecology And Trees
 
@@ -223,6 +254,11 @@ BiomeRegionField -> BiomeEnvironmentCatalog -> TreeEcologySampler
   deterministic spawn results.
 
 ## Test Commands
+
+All executable tool entry points are Node.js (`node tools/<runner>.mjs`). Do
+not add PowerShell runners or wrappers. Windows Job Object and window APIs
+use the small native helpers under `tools/native/`, compiled directly by Node;
+they must not shell out to PowerShell. See `docs/development/node-test-runners.md`.
 
 Use the bundled Godot console executable paths already encoded in the tool scripts.
 
@@ -324,16 +360,64 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - Smooth terrain rendering must not erase physical density. Block/cell authority is acceptable and often preferred for correctness; smooth the mesh over it rather than replacing volume with thin sheets.
 - Lighting regressions are gameplay-visible. Daylight, skylight, torch/block light, shadows, underground darkness, and translucent/metallic-looking terrain need visual verification when terrain or materials change.
 - When changing terrain generation, chunk meshing, digging, collision, lighting, or underground rules, run relevant visual playtests and inspect screenshots. Metadata-only checks are not enough for leaks, transparency, or material/lighting bugs.
+- Placement height, edited-volume surface projection and the interpolated native
+  collision surface are different contracts. Verify against the authority being
+  tested; do not change generation or widen tolerances merely to match a placement
+  helper. Keep the sampled cells/materials and actual collision hit in the evidence.
 
 ## Runtime And Loading Rules
 
 - The main menu should defer expensive world loading until `New Game` or `Continue` is selected.
+- Prefer the repository's owned-process watchdog runners for every Godot test,
+  especially headed or long-running tests. A failed, timed-out, or visibly
+  broken run must be stopped promptly; do not leave launched processes running
+  after the result is known.
+- Process cleanup is part of test correctness. Record the functional result
+  separately from cleanup, terminate only the runner-owned process job, and
+  require authoritative zero-member evidence before calling the run terminal.
+  Never kill unrelated pre-existing Godot processes by name or PID ancestry.
 - If loading or exiting takes noticeable time, show a loading/progress state and yield work across frames where possible. A frozen window is a bug even if the eventual result is correct.
 - `startup_loading_completed` means the initial playable world is actually ready. For the tutorial town this includes drained required structure operations, a complete validated town manifest, required home/door records, registered NPC home assignments, authoritative terrain collision, and the initial navigation publication needed by those actors.
 - Do not enter playable tutorial state with partial town records and repair them later from dialogue, interaction, or NPC behavior code. Missing required generated records are a loading failure, not an NPC wait state.
 - Loading work may be budgeted across frames, but readiness commands and gameplay intents must never be dropped when a budget or dependency is pending. Either keep loading active or retain an explicit retryable request with bounded telemetry.
 - Tutorial playtests can be smoother than normal gameplay because they may stage or constrain the world differently. Use normal runtime performance passes when diagnosing player-reported gameplay hitches.
 - Treat sprinting/running traversal as a streaming stress test. It is the common path that exposes chunk, terrain, prop, NPC, and autosave spikes.
+- Loading and teardown must gate every execution owner, including independent
+  Node physics callbacks; disabling Main or actor bodies alone may leave shared
+  systems advancing. Keep required preparation work runnable through its explicit
+  loading path, and release gameplay only after current dependencies acknowledge.
+
+## Asynchronous Publication And Ownership
+
+- Distinguish source capture, worker preparation, upload/registration and owner
+  acknowledgement. A queued request, completed worker or visible node alone does
+  not establish that collision, interactions and navigation are usable.
+- Worker inputs must be owned value data with complete source identity. Making an
+  outer Dictionary read-only does not freeze nested containers or remove Nodes,
+  WeakRefs, RIDs and Callables. Use the existing producer admission/immutable
+  artifact contracts instead of trusting arbitrary read-only containers.
+- Bind accepted results to the current world/source revision, weak owner and
+  actual installation. Identical geometry from a replacement owner is not proof
+  that an earlier installation is still current. Validate before cache reuse and
+  again after asynchronous completion.
+- Cache eviction must not lose retained demand or force a valid installation to
+  reconstruct its proof. Conversely, a source-key marker cannot excuse a dirty,
+  unloaded or replaced installation. An authoritative empty result also needs
+  explicit acceptance and invalidation; missing data is never empty success.
+- Deduplication must preserve new urgency: existing background demand can become
+  player-safety work. Keep requests retryable under backpressure, and report the
+  concrete pending dependency, owner/source identity and queue stage with bounded
+  telemetry rather than one ambiguous readiness boolean.
+- Regional dependency closure follows actual intersecting supports, crossings
+  and declared scenario requirements. Do not expand every local request to a
+  whole settlement or landmark by convenience, or omit a real dependency merely
+  to release movement sooner. Optional appearance must not add surprise blockers.
+- Retain the old valid representation until its replacement is complete. Transfer
+  all large payload aliases through the existing cancellation/retirement owner;
+  moving construction to a worker while destroying its last large alias on Main
+  can simply move the hitch to cleanup. Shutdown must drain owned workers.
+- Keep temporary copied scripts and alternate fixtures under an ignored artifact
+  directory with `.gdignore`; otherwise Godot can import duplicate class names.
 
 ## Performance Standards
 
@@ -346,6 +430,31 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - If performance changes touch visual or gameplay systems, run relevant playtests in addition to benchmarks. For tutorial-town, NPC, or navigation-affecting changes, use real visual/playtest runners and inspect screenshots/trace evidence rather than relying only on metadata.
 - Keep performance instrumentation useful and bounded. Add timers/counters for diagnosis, but remove or reduce noisy temporary probes once the spike source is understood.
 - Loading screens, async queues, and budgets must preserve deterministic generation. Do not fix freezes by reordering terrain/town/prop RNG unless the behavior change is intentional and verified.
+- For a multi-minute deterministic generator, first build the smallest pinned
+  replay or failure-only observation that can distinguish competing causes.
+  Make one falsifiable change, run its focused contract, then pay for one full
+  source run. Do not loop the full runner without new evidence or optimize a
+  subsystem that the current evidence has not implicated.
+- Failure instrumentation must be bounded, cancellation-aware, and incapable
+  of changing acceptance. Capture exact producer IDs/categories and source
+  revisions so later work starts at the owning decision rather than repeating
+  broad diagnostics.
+- Measure total frame cadence separately from Main's `_process` duration,
+  rendering CPU/GPU time and worker time. Worker duration is not main-frame CPU
+  cost. Callback-to-callback stage intervals are not exclusive function timings;
+  overlapping phases and maxima from different frames must not be added together.
+- A cooperative budget cannot interrupt one oversized operation. Measure capture,
+  copying/sealing, upload and registration as well as worker computation, and
+  split the measured operation before increasing the budget. Spatial batching
+  must earn its extra draw calls through measured culling benefit.
+- Record initial playable readiness and whole-site completion separately. Compare
+  equivalent readiness contracts, viewport, seed and traversal; report fresh
+  process/empty generated caches separately from warm-cache results. Runner wall
+  time may include setup, inspection, export and shutdown, not just generation.
+- Inspect movement holds, recovery attempts and tail frame times even when a run
+  reaches its destination and all diagnostic checks pass. Batch independent
+  defects found in that snapshot before another full run; do not repeatedly grow
+  tests/reviews while postponing the next production comparison.
 
 ## Key Systems
 
@@ -384,6 +493,98 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - When modifying this boundary, audit New Game and Continue, old saves, random seeds, generated-home variation, dialogue close paths, immediate command acceptance, eventual strict-home arrival, door clearance/close, and normal non-tutorial NPC behavior.
 - Acceptance must include a real main-menu -> New Game headed run with no gameplay-affecting flags. Prove the command is accepted promptly after the visible interaction and that the NPC completes the same generic go-home flow; a synthetic direct `go_home` call is contract evidence only.
 
+## Backlog
+
+### Deterministic terrain-collision tile pipeline
+
+> **Historical backlog note (superseded 2026-09-17):** the implementation and
+> deferral decisions in this subsection predate
+> the [native world-backend migration archive](https://github.com/lakam99/voxel-godot-docs/tree/main/migrations/native-world-backend). The native
+> N0–N9 migration now owns this cutover, including a pure native source core,
+> standalone native coverage, collision-first publication, and deletion of the
+> old production path after validation. Preserve the measurements and safety
+> requirements below, but do not implement a new GDScript-first collision
+> authority or treat the former post-Gate-5 deferral as current policy.
+
+The current `VoxelTerrainRuntime` obtains player terrain collision as a side
+effect of moving broad `VoxelViewer` footprints. This remains acceptable as a
+temporary implementation, but it is not a bounded long-term streaming design.
+The existing native-task threshold is an admission check only: one accepted
+80–96 m viewer can independently enqueue hundreds of Voxel Tools jobs.
+
+Focused normal-runtime evidence is retained at
+`artifacts/world-streaming-maturity/g5/focused-sprint-viewer-workload-attribution-01/report.json`.
+That menu → New Game → ordinary-input run travelled 533.75 m with zero collision
+holds and good measured cadence (12.776 ms p99, 22.608 ms maximum), but startup
+took 103.159 s and native work peaked at 708 queued tasks. Per-request telemetry
+recorded individual viewer peaks from roughly 214 to 708 tasks. A short smooth
+run therefore does not prove that sustained wilderness/Citadel travel has a
+bounded backlog; do not describe the 8-task admission threshold as a hard cap.
+
+The intended replacement is:
+
+```text
+seed + durable edits
+  -> authoritative terrain density/material volume
+  -> deterministic, revisioned collision tiles aligned to native mesh blocks
+  -> bounded collision build/install queue and exact physics receipt
+  -> player/NPC collision consumers
+
+authoritative terrain volume
+  -> independently scheduled render-mesh publication
+```
+
+- Keep terrain volume as the sole authority. Collision tiles and render meshes
+  are derived artifacts, not competing terrain implementations.
+- Prefer 16-cell collision tiles aligned to the current native mesh-block grid.
+  Player motion should request only the tiles intersecting its bounded swept
+  volume, with a hard cap on builds/installations in flight.
+- Key receipts by world/generator identity, tile coordinate, durable edit
+  revision and collision-builder revision. A terrain edit invalidates its tile
+  and required seam neighbours only.
+- Build and compare the new tile path in diagnostic shadow mode first. After
+  source/shape/seam parity and live collision are proven, migrate player motion
+  proof and startup readiness, then disable VoxelTerrain-generated collision so
+  two physical authorities never coexist in production.
+- Preserve generated-structure collision ownership, the protected route/motor/
+  door stack, and navigation publication contracts. Navigation may consume the
+  revisioned terrain artifact but must not gain a second topology authority.
+- Implement the architecture in GDScript first. Move only a measured, pure,
+  deterministic tile-extraction kernel to the existing C++/GDExtension pipeline
+  if profiling shows that extraction remains material after work is localized.
+
+The user explicitly deferred this architectural replacement until after Gate 5.
+The unbounded native-task count and its loading cost are therefore recorded
+technical debt, not a Gate 5 blocker by themselves. This decision does not waive
+physical safety, terrain solidity, clean shutdown, or the requirement to report
+player-visible collision holds honestly during the headed journey. Gate 5 may
+proceed on the current implementation, with the deferred architecture and its
+measured limitations carried into the final handoff.
+
+### Route-finalization occupancy scalability
+
+> **Historical backlog note (superseded 2026-09-17):** the inherited Gate-5
+> tranche cursorized the relevant planning/finalization work. Treat its exact
+> ordering, validator budgets, and LOD eviction as protected behavior. Verify
+> the current contracts before changing anything; N6 may optimize source and
+> approach-candidate spatial indexes, including SmartObjectService indexing,
+> without changing the protected route result/order or live proof semantics;
+> do not reimplement the older atomic design described below. Native N6 may
+> move only the CPU/query boundary defined by the migration handoff and must
+> leave final live collision/occupancy proof with the existing route authority.
+
+Gate 5's 32-NPC workload uses a 48-step cheap-work slice for incremental route
+planning while retaining two collision-backed validation calls per admitted
+planner call. This bounds the measured workload, but the current unversioned
+dynamic-occupancy signature is still collected atomically. More than 48 relevant
+occupied cells can therefore defer finalization without progress. The defined
+32-NPC acceptance workload remains viable, but larger populations or concurrent
+hostile occupancy require an incremental or revisioned occupancy artifact rather
+than another larger per-frame allowance. Also treat `cheapStepsThisCall` as a
+logical-work counter: deferred-frontier selection can scan multiple records in
+one counted step, so headed timing—not the counter alone—must prove the 2 ms atom
+criterion.
+
 ## Known Bugs
 
 - Tutorial town perimeter gate/fence: the game can destroy the perimeter gate, which causes the entire bridge to appear as pickup material. This breaks the perimeter fence repair quest because there is no intact fence/gate structure left for the player to repair. Future fixes should preserve tutorial-town gate, fence, and bridge structures from unintended destruction, cleanup, or resource-drop conversion during the tutorial flow.
@@ -412,7 +613,8 @@ Avoid:
 
 ## NPC And AI Expectations
 
-Pathfinding replacement is complete and protected by `MANIFESTO.md`. Do not
+Pathfinding replacement is complete and protected by
+`docs/architecture/npc-navigation-manifesto.md`. Do not
 modify it during ordinary NPC, tutorial, terrain, loading, performance or world
 generation work. If a task explicitly authorises pathfinding work, begin with
 the manifesto and the relevant historical plan, then tie every acceptance claim
@@ -488,7 +690,13 @@ Use `scripts/story/`, `resources/story/`, `scenes/story/`, and `scenes/story_tes
 
 ## Git Workflow
 
-Current stable branch should be `master` unless the user asks for a feature branch.
+Do not assume the active branch or default branch name. Discover both from Git,
+and confirm that the current worktree is the one named by the task before
+editing or running tests.
+Sibling project directories may be different Git worktrees with different
+branches. A branch name alone does not carry another worktree's uncommitted
+changes. At handoff distinguish committed code, working-tree edits and ignored
+evidence, and identify the exact directory the next agent must retain.
 
 Before major work:
 
@@ -500,12 +708,19 @@ git status --short
 For focused feature branches, use clear names such as:
 
 ```text
-story-worldmarks
-visual-overhaul
-npc-pathing
+codex/story-worldmarks
+codex/visual-overhaul
+codex/npc-pathing
 ```
 
-Commit only when the user asks or when a plan phase requires it. Commit messages should describe the behavior, not just files changed.
+The user has given standing approval to commit completed, verified chunks of
+work regularly. Make a focused commit after each coherent change and its
+applicable checks; do not wait for another commit request or accumulate a large
+uncommitted backlog. State any remaining failures or acceptance limits honestly.
+Stage only the task's files, preserve unrelated work, and leave generated test
+artifacts/import churn out. Commit messages should describe the behavior, not
+just files changed. Report the commit hash at handoff. This does not authorize
+pushing, merging, resetting, cleaning, or rewriting history.
 
 ## Local Files To Avoid Committing Accidentally
 
@@ -528,7 +743,8 @@ Visual baseline artifacts under `artifacts/baselines/` may be intentional tracke
 
 ## Verification Standard
 
-For gameplay changes, run `.\tools\run-playtest.mjs` unless the change is documentation-only or the user explicitly says not to.
+For gameplay changes, run `node tools/run-playtest.mjs` unless the change is
+documentation-only or the user explicitly says not to.
 
 For visual changes, run visual captures when feasible and inspect the output. If a visual issue is viewport-dependent, test at least one normal gameplay viewport and one dark/night case.
 

@@ -3,7 +3,11 @@
 const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
 
 func reset_runtime_world_state(reload_world := true) -> void:
+    if structure_system != null and structure_system.citadel_publication.requires_scene_retirement():
+        push_error("Generated scenes must finish retirement before resetting world registries")
+        return
     playtest_progress("reset_runtime_start")
+    reset_streaming_region_demand()
     if world_edit_followup_queue != null and world_edit_followup_queue.has_method("reset"):
         world_edit_followup_queue.reset()
     world_elapsed = 0.0
@@ -17,6 +21,7 @@ func reset_runtime_world_state(reload_world := true) -> void:
     if subsurface_system and subsurface_system.has_method("reset"):
         subsurface_system.reset()
     removed_props.clear()
+    removed_props_revision += 1
     clear_chunk_asset_cache()
     clear_dropped_pickups()
     wildlife_nodes.clear()
@@ -31,6 +36,7 @@ func reset_runtime_world_state(reload_world := true) -> void:
     clear_all_blocks()
     if structure_system and structure_system.has_method("reset"):
         structure_system.reset()
+        structure_system.citadel_publication.complete_world_reset()
     if story_director and story_director.has_method("reset"):
         story_director.reset()
     if story_world_overlay_system and story_world_overlay_system.has_method("reset"):
@@ -105,37 +111,58 @@ func create_save_snapshot() -> Dictionary:
             "rotationY": player.rotation.y,
             "pitch": float(player.get("pitch"))
         }
-    return {
+    var result := {
         "seed": seed_text,
         "timeOfDay": time_of_day,
-        "weather": weather_system.snapshot() if weather_system else {},
-        "tutorial": tutorial_system.snapshot() if tutorial_system else {},
-        "player": player_state,
-        "inventory": {
+    }
+    var stage_started := runtime_perf_monitor.begin_section("autosave_snapshot_weather_tutorial") if runtime_perf_monitor != null else 0
+    result["weather"] = weather_system.snapshot() if weather_system else {}
+    result["tutorial"] = tutorial_system.snapshot() if tutorial_system else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_weather_tutorial", stage_started)
+    result["player"] = player_state
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_inventory") if runtime_perf_monitor != null else 0
+    result["inventory"] = {
             "slots": inventory_system.snapshot() if inventory_system else [],
             "size": inventory_system.size if inventory_system else ItemCatalogScript.INVENTORY_SIZE,
             "selectedSlot": inventory_system.selected_slot if inventory_system else 0
-        },
-        "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
-        "terrain": snapshot_volume_edits(),
-        "terrainVolume": snapshot_terrain_volume(),
-        "subsurface": snapshot_subsurface(),
-        "removedProps": removed_props.keys(),
-        "survival": survival_system.snapshot() if survival_system else {},
-        "progression": progression_system.snapshot() if progression_system else {},
-        "equipment": equipment_system.snapshot() if equipment_system else {},
-        "objectives": objective_system.snapshot() if objective_system else {},
-        "contracts": contract_system.snapshot() if contract_system else {},
-        "story": story_director.snapshot() if story_director else {},
-        "npcJobFacts": npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else [],
-        "exploration": snapshot_exploration(),
-        "deathCount": death_count,
-        "respawnPoint": vector3_to_array(respawn_point) if respawn_point is Vector3 else [],
-        "beaconCharge": beacon_charge,
-        "beaconRaidStage": beacon_raid_stage,
-        "sanctuaryEstablished": sanctuary_established,
-        "blocks": snapshot_player_blocks()
     }
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_inventory", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_crafting") if runtime_perf_monitor != null else 0
+    result["crafting"] = crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_crafting", stage_started)
+    result["terrain"] = snapshot_volume_edits()
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_terrain_volume") if runtime_perf_monitor != null else 0
+    result["terrainVolume"] = snapshot_terrain_volume()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_terrain_volume", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_subsurface") if runtime_perf_monitor != null else 0
+    result["subsurface"] = snapshot_subsurface()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_subsurface", stage_started)
+    result["removedProps"] = removed_props.keys()
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_systems") if runtime_perf_monitor != null else 0
+    result["survival"] = survival_system.snapshot() if survival_system else {}
+    result["progression"] = progression_system.snapshot() if progression_system else {}
+    result["equipment"] = equipment_system.snapshot() if equipment_system else {}
+    result["objectives"] = objective_system.snapshot() if objective_system else {}
+    result["contracts"] = contract_system.snapshot() if contract_system else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_systems", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_story") if runtime_perf_monitor != null else 0
+    result["story"] = story_director.snapshot() if story_director else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_story", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_npc_jobs") if runtime_perf_monitor != null else 0
+    result["npcJobFacts"] = npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else []
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_npc_jobs", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_exploration") if runtime_perf_monitor != null else 0
+    result["exploration"] = snapshot_exploration()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_exploration", stage_started)
+    result["deathCount"] = death_count
+    result["respawnPoint"] = vector3_to_array(respawn_point) if respawn_point is Vector3 else []
+    result["beaconCharge"] = beacon_charge
+    result["beaconRaidStage"] = beacon_raid_stage
+    result["sanctuaryEstablished"] = sanctuary_established
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_player_blocks") if runtime_perf_monitor != null else 0
+    result["blocks"] = snapshot_player_blocks()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_player_blocks", stage_started)
+    return result
 
 func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if String(snapshot.get("seed", seed_text)) != seed_text:
@@ -204,9 +231,10 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         held_item.refresh_active()
     reset_break_progress()
     save_load_progress("reloading chunks")
-    reload_chunks(startup_loading_active)
+    reload_chunks(startup_loading_active or runtime_loading_active)
     save_load_progress("chunks reloaded")
-    refresh_intro_knock_audio()
+    if not startup_loading_active and not runtime_loading_active:
+        refresh_intro_knock_audio()
     return true
 
 func clear_combat_transients_before_restore() -> void:
@@ -226,7 +254,7 @@ func clear_combat_transients_before_restore() -> void:
         npc_system.clear_combat_transients()
 
 func save_load_progress(message: String) -> void:
-    if startup_loading_active:
+    if startup_loading_active or runtime_loading_active:
         startup_loading_step.emit("Loading save: %s" % message)
 
 func ensure_story_handoff_for_completed_tutorial_save() -> void:
@@ -375,6 +403,7 @@ func restore_subsurface(snapshot_value) -> void:
 
 func restore_removed_props(entries) -> void:
     removed_props.clear()
+    removed_props_revision += 1
     if not (entries is Array):
         return
     for prop_id in entries:
@@ -571,8 +600,12 @@ func reload_chunks(defer_rebuild := false) -> void:
     pending_chunk_prop_spawns.clear()
     pending_chunk_terrain_refreshes.clear()
     pending_chunk_collision_refreshes.clear()
+    pending_generated_volume_exposure_scans.clear()
     last_center_chunk = Vector2i(999999, 999999)
-    if player:
+    # A staged load has not rebound native generation inputs yet. Even the
+    # non-forced update initializes terrain and advances publication; defer it
+    # entirely to bootstrap_initial_chunks_staged after snapshot/scenario setup.
+    if player and not (defer_rebuild and (startup_loading_active or runtime_loading_active)):
         playtest_progress("reload_chunks_update")
         update_chunks(not defer_rebuild)
     playtest_progress("reload_chunks_done")

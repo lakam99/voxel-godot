@@ -55,24 +55,9 @@ func cache_asset_scenes() -> bool:
             last_errors.append("%s missing file %s" % [asset_id, absolute_path])
             ok = false
             continue
-        var document := GLTFDocument.new()
-        var state := GLTFState.new()
-        var import_error := document.append_from_file(absolute_path, state)
-        if import_error != OK:
-            last_errors.append("%s GLB import failed: %s" % [asset_id, str(import_error)])
-            ok = false
-            continue
-        var root := document.generate_scene(state)
-        if root == null:
-            last_errors.append("%s GLB generated no scene" % asset_id)
-            ok = false
-            continue
-        root.name = asset_id
-        var packed := PackedScene.new()
-        var pack_error := packed.pack(root)
-        root.free()
-        if pack_error != OK:
-            last_errors.append("%s PackedScene pack failed: %s" % [asset_id, str(pack_error)])
+        var packed := ResourceLoader.load(resource_path, "PackedScene", ResourceLoader.CACHE_MODE_REUSE) as PackedScene
+        if packed == null:
+            last_errors.append("%s imported PackedScene load failed: %s" % [asset_id, resource_path])
             ok = false
             continue
         scene_cache[asset_id] = packed

@@ -409,6 +409,60 @@
       "required": true
     },
     {
+      "id": "biome_environment_snapshot_oracle",
+      "description": "Direct Godot resolved biome environment profile values, exact numeric bits, and source-file identity for native catalog parity",
+      "command": ".\\tools\\run-biome-environment-snapshot-oracle.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\biome-environment-snapshot-oracle.json"],
+      "reportPath": "artifacts\\test-runners\\biome-environment-snapshot-oracle.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "surface_prop_tree_rng_compatibility_contract",
+      "description": "Direct Godot source contract for legacy natural-tree shared-PCG draw counts retained by the native surface-prop baseline",
+      "command": ".\\tools\\run-surface-prop-tree-rng-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-prop-tree-rng-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-prop-tree-rng-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "surface_tree_seed_semantics_contract",
+      "description": "Direct Godot source contract for the intentional raw tree-family seed and normalized tree-ecology seed split",
+      "command": ".\\tools\\run-surface-tree-seed-semantics-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-tree-seed-semantics-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-tree-seed-semantics-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "surface_rock_recipe_contract",
+      "description": "Direct Godot source contract for the six-draw surface rock visual and physical recipe inputs",
+      "command": ".\\tools\\run-surface-rock-recipe-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-rock-recipe-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-rock-recipe-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "surface_prop_spawn_projection_oracle",
+      "description": "Direct Godot source contract for unedited continuous surface-prop heights",
+      "command": ".\\tools\\run-surface-prop-spawn-projection-oracle.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-prop-spawn-projection-oracle.json"],
+      "reportPath": "artifacts\\test-runners\\surface-prop-spawn-projection-oracle.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
+      "id": "surface_prop_chunk_transform_contract",
+      "description": "Direct Godot chunk-local surface prop transform float32 contract",
+      "command": ".\\tools\\run-surface-prop-chunk-transform-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-prop-chunk-transform-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-prop-chunk-transform-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "canopy_asset_import_contract",
       "description": "VOX-120 Godot import integrity and runtime dormancy for generated mature canopy assets",
       "command": ".\\tools\\run-canopy-asset-import-contract-tests.mjs",

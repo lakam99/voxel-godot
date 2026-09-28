@@ -173,6 +173,10 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("main_instantiated")
+    if not await wait_for_runtime_loading_complete():
+        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        finish_playtest()
+        return
     await wait_physics_frames(20)
 
     player = main.get("player") as CharacterBody3D
@@ -551,6 +555,28 @@ func test_scene_bootstrap() -> void:
     var chunks := get_chunks()
     add_result("scene_bootstrap", main != null and player != null and camera != null, "main/player/camera present")
     add_result("initial_chunks_loaded", chunks.size() >= expected_chunks, "%d chunks" % chunks.size())
+    var has_native_load_main_hook := main != null \
+        and (main.has_method("begin_native_terrain_load_preparation") \
+            or main.has_method("advance_native_terrain_load_preparation") \
+            or main.has_method("stop_native_terrain_load_preparation"))
+    add_result("native_load_transaction_not_wired_before_bounded_import",
+        main != null and not has_native_load_main_hook,
+        "native initialization remains fixture-only until a bounded, cancellation-aware import can serve staged New Game and Continue")
+    var voxel_runtime = main.get("voxel_terrain_runtime") if main != null else null
+    var voxel_terrain = voxel_runtime.get("terrain") if voxel_runtime != null else null
+    var voxel_viewer = voxel_runtime.get("viewer") if voxel_runtime != null else null
+    var script_collision_retained: bool = voxel_runtime != null and voxel_terrain != null \
+        and voxel_runtime.get("authority_ready") == true \
+        and voxel_runtime.get("generator") != null \
+        and voxel_terrain.generator == voxel_runtime.get("generator") \
+        and voxel_terrain.generate_collisions \
+        and voxel_viewer != null and voxel_viewer.requires_collisions
+    add_result("precutover_voxel_collision_retained", script_collision_retained,
+        "authority %s generator %s collisions %s viewer %s" % [
+            str(voxel_runtime.authority_ready) if voxel_runtime != null else "missing",
+            str(voxel_terrain.generator != null) if voxel_terrain != null else "missing",
+            str(voxel_terrain.generate_collisions) if voxel_terrain != null else "missing",
+            str(voxel_viewer.requires_collisions) if voxel_viewer != null else "missing"])
     if player:
         add_result("controller_ticks", int(player.get("physics_ticks")) > 0, "%d ticks" % int(player.get("physics_ticks")))
     var hud = main.get("hud") if main else null
@@ -1061,6 +1087,28 @@ func test_tutorial_start_system() -> void:
     mark_progress("tutorial_weapon_preps_checked")
 
     var pre_rescue_snapshot: Dictionary = tutorial_system.snapshot()
+    # This service-level rescue exercise recreates the scenario on cleanup.
+    # Preserve physical NPC facts through the same API/order as MainSaveState,
+    # so it does not undo the home arrival already exercised above.
+    var pre_rescue_npc_facts: Array = npc_system.snapshot_job_facts()
+    var required_shelter_ids: Array[String] = []
+    var pre_rescue_actor_instances := {}
+    if not is_instance_valid(npc_root):
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture setup: tutorial actor root missing")
+        return
+    for actor in npc_root.get_children():
+        var actor_entry: Dictionary = npc_system.npc_entry_for_actor(actor)
+        var actor_id := String(actor_entry.get("id", ""))
+        if actor_id == "":
+            continue
+        pre_rescue_actor_instances[actor_id] = actor.get_instance_id()
+        if not bool(actor_entry.get("canFight", true)) and not required_shelter_ids.has(actor_id):
+            required_shelter_ids.append(actor_id)
+    required_shelter_ids.sort()
+    if required_shelter_ids.size() != 3 or pre_rescue_actor_instances.size() != npc_root.get_child_count():
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture setup: expected three registered tutorial nonfighters; IDs %s, actors %s" % [str(required_shelter_ids), str(pre_rescue_actor_instances)])
+        return
+    var pre_rescue_shelter: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
     hostile_system.clear()
     var final_started: bool = mira != null and bool(tutorial_system.interact_with(mira))
     if final_started:
@@ -1068,6 +1116,12 @@ func test_tutorial_start_system() -> void:
     main.call("update_objectives_and_contracts")
     var staged_state: Dictionary = tutorial_system.state()
     var staged_mission: Dictionary = staged_state.get("finalRescueMission", {}) if staged_state.get("finalRescueMission", {}) is Dictionary else {}
+    var staged_preparation_failure: Dictionary = {}
+    var staged_rescue_system = tutorial_system.get("rescue_system")
+    if staged_rescue_system != null:
+        var preparation_result = staged_rescue_system.get("last_preparation_result")
+        if preparation_result is Dictionary and not bool(preparation_result.get("ok", true)):
+            staged_preparation_failure = preparation_result.duplicate(true)
     var rescue_required: int = int(staged_state.get("rescueRequired", 6))
     var rescue_remaining: int = int(staged_state.get("rescueRemaining", 0))
     var niko_entry: Dictionary = npc_system.npc_entry_for_actor(niko) if npc_system and npc_system.has_method("npc_entry_for_actor") else {}
@@ -1112,7 +1166,7 @@ func test_tutorial_start_system() -> void:
             and guard_briefed
             and bool(escort_state.get("rescueEscortStarted", false))
             and guard_order_valid,
-        "started %s active %s phase %s Niko %s/%s hostiles %d/%d slots %s passive %s Sera %s/%s routeStack %s" % [
+        "started %s active %s phase %s Niko %s/%s hostiles %d/%d slots %s passive %s Sera %s/%s routeStack %s mission %s preparationFailure %s" % [
             str(final_started),
             str(staged_state.get("finalNightActive", false)),
             String(staged_mission.get("phase", "")),
@@ -1124,14 +1178,47 @@ func test_tutorial_start_system() -> void:
             str(passive_encounter_valid),
             String(guard_order.get("kind", "")),
             guard_order_state,
-            str(guard_order.get("usesRouteStack", false))
+            str(guard_order.get("usesRouteStack", false)),
+            JSON.stringify(staged_mission),
+            JSON.stringify(staged_preparation_failure)
         ]
     )
     mark_progress("tutorial_final_rescue_staging_checked")
     hostile_system.clear()
     tutorial_system.clear_rescue_torch()
+    npc_system.restore_job_facts(pre_rescue_npc_facts)
     tutorial_system.restore(pre_rescue_snapshot)
+    var restore_problems: Array[String] = []
+    var restored_actor_positions := {}
+    for fact_value in pre_rescue_npc_facts:
+        var fact: Dictionary = fact_value
+        var actor_id := String(fact.get("id", ""))
+        if not pre_rescue_actor_instances.has(actor_id):
+            continue
+        var restored_entry: Dictionary = npc_system.npc_entry_for_actor(actor_id)
+        var restored_body := restored_entry.get("body") as CharacterBody3D
+        if not is_instance_valid(restored_body) or not restored_body.is_inside_tree() or restored_body.get_parent() != npc_root:
+            restore_problems.append("%s: missing restored tutorial body" % actor_id)
+            continue
+        var saved_position: Array = fact.get("position", [])
+        restored_actor_positions[actor_id] = {
+            "beforeInstance": pre_rescue_actor_instances[actor_id],
+            "afterInstance": restored_body.get_instance_id(),
+            "savedPosition": saved_position,
+            "restoredPosition": restored_body.global_position,
+            "placementReason": restored_body.get_meta("npc_safe_placement_reason", "")
+        }
+        if saved_position.size() != 3 or String(restored_body.get_meta("npc_safe_placement_reason", "")) != "load_restore":
+            restore_problems.append("%s: saved physical placement was not accepted" % actor_id)
+        elif not Vector2(restored_body.global_position.x, restored_body.global_position.z).is_equal_approx(Vector2(float(saved_position[0]), float(saved_position[2]))):
+            restore_problems.append("%s: saved horizontal position was not restored" % actor_id)
+    if pre_rescue_actor_instances.size() != npc_root.get_child_count() or restored_actor_positions.size() != pre_rescue_actor_instances.size():
+        restore_problems.append("tutorial actor identities did not survive fixture restore")
+    if not restore_problems.is_empty():
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture restore failed: %s; actors %s" % [str(restore_problems), JSON.stringify(restored_actor_positions)])
+        return
     await wait_gameplay_frames(3)
+    var post_rescue_shelter: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
 
     hostile_system.clear()
     player.global_position = tutorial_original_position
@@ -1196,7 +1283,8 @@ func test_tutorial_start_system() -> void:
     for i in range(1800):
         if i % 30 == 0:
             var stats_now: Dictionary = npc_system.stats()
-            if int(stats_now.get("sheltered", 0)) >= 3 and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
+            var shelter_now: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
+            if bool(shelter_now.get("ready", false)) and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
                 break
         if i % 60 == 0:
             mark_progress("tutorial_guard_behavior_%03d" % i)
@@ -1204,16 +1292,18 @@ func test_tutorial_start_system() -> void:
     var npc_stats_after: Dictionary = npc_system.stats()
     var tutorial_npc_count := npc_root.get_child_count() if npc_root else 0
     var all_tutorial_npcs_have_homes := int(npc_stats_after.get("homed", 0)) >= tutorial_npc_count
-    var non_fighters_sheltered := int(npc_stats_after.get("sheltered", 0)) >= 3
+    var shelter_after: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
+    var non_fighters_sheltered := bool(shelter_after.get("ready", false))
     var tutorial_fighters_ready := int(npc_stats_after.get("fighters", 0)) >= 3
     var guards_fired := int(npc_stats_after.get("guardShots", 0)) > guard_shots_before
     var fighters_armed := int(npc_stats_after.get("armed", 0)) >= int(npc_stats_after.get("fighters", 0))
     var weapons_visible := int(npc_stats_after.get("visibleWeapons", 0)) >= int(npc_stats_after.get("fighters", 0))
     var weapon_use_animated := int(npc_stats_after.get("useAnimations", 0)) > use_animations_before
+    var shelter_failure_detail := "" if non_fighters_sheltered else "; cohort before %s afterRestore %s final %s restoredActors %s" % [JSON.stringify(pre_rescue_shelter), JSON.stringify(post_rescue_shelter), JSON.stringify(shelter_after), JSON.stringify(restored_actor_positions)]
     add_result(
         "tutorial_npc_home_and_guard_behavior",
         bool(guard_spawn.get("spawned", false)) and guard_target_configured and all_tutorial_npcs_have_homes and non_fighters_sheltered and tutorial_fighters_ready and guards_fired and fighters_armed and weapons_visible and weapon_use_animated,
-        "spawn %s, target configured %s, npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s" % [
+        "spawn %s, target configured %s, npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s%s" % [
             str(guard_spawn),
             str(guard_target_configured),
             tutorial_npc_count,
@@ -1222,7 +1312,8 @@ func test_tutorial_start_system() -> void:
             int(npc_stats_after.get("guardShots", 0)),
             use_animations_before,
             int(npc_stats_after.get("useAnimations", 0)),
-            npc_shelter_debug(npc_system)
+            npc_shelter_debug(npc_system),
+            shelter_failure_detail
         ]
     )
     hostile_system.clear()
@@ -1348,29 +1439,18 @@ func test_escape_menu_new_game() -> void:
 func wait_for_runtime_loading_complete(max_seconds := 240.0) -> bool:
     if main == null:
         return false
-    var started_usec := Time.get_ticks_usec()
-    var observed_frames := 0
-    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < max_seconds:
-        var failure_value = main.get("startup_loading_failure_result")
-        if failure_value is Dictionary and not (failure_value as Dictionary).is_empty():
-            mark_progress("escape_menu_new_game_failed_%s" % String((failure_value as Dictionary).get("reason", "unknown")))
-            return false
-        if not bool(main.get("runtime_loading_active")):
-            mark_progress("escape_menu_new_game_loaded")
-            return true
-        if observed_frames % 60 == 0:
-            var timeline_value = main.get("startup_loading_timeline")
-            var latest := {}
-            if timeline_value is Array and not (timeline_value as Array).is_empty() and (timeline_value as Array)[-1] is Dictionary:
-                latest = (timeline_value as Array)[-1]
-            var domain := String(latest.get("domain", "unknown")).replace(" ", "_")
-            var status := String(latest.get("status", "unknown")).replace(" ", "_")
-            var message := String(latest.get("message", "unknown")).replace(" ", "_")
-            mark_progress("escape_menu_new_game_loading_%04d_%s_%s_%s" % [observed_frames, domain, status, message])
-        await wait_physics_frames(1)
-        observed_frames += 1
-    mark_progress("escape_menu_new_game_loading_timeout")
-    return false
+    # Production checks the current gameplay domain for both initial startup
+    # and staged reload; reload does not emit the initial completion signal.
+    var progress_callback := func(message): mark_progress("runtime_loading_%s" % String(message).replace(" ", "_"))
+    main.connect("startup_loading_step", progress_callback)
+    var startup_ready: bool = await main.wait_for_startup_loading_complete(max_seconds)
+    if is_instance_valid(main) and main.is_connected("startup_loading_step", progress_callback):
+        main.disconnect("startup_loading_step", progress_callback)
+    if not startup_ready or finished:
+        mark_progress("runtime_startup_not_ready")
+        return false
+    mark_progress("runtime_loading_complete")
+    return true
 
 func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
     if main == null:
@@ -2839,15 +2919,16 @@ func test_teleport_system() -> void:
     if hud:
         hud.set_teleport_open(true)
         panel_open = hud.is_teleport_open() and hud.teleport_panel.visible
-    var teleported_xz: bool = bool(main.call("teleport_to", "64 -32"))
+    var teleported_xz: bool = await main.call("teleport_to", "64 -32")
     await wait_physics_frames(4)
     var terrain_y: float = surface_y_at_position(Vector3(64.0, 0.0, -32.0))
     var horizontal_ok := Vector2(player.global_position.x - 64.0, player.global_position.z + 32.0).length() < 0.35
     var safe_y := player.global_position.y >= maxf(terrain_y, WATER_LEVEL) - 0.1
-    var teleported_xyz: bool = bool(main.call("teleport_to", "12 40 -18"))
+    var teleported_xyz: bool = await main.call("teleport_to", "12 40 -18")
     await wait_physics_frames(2)
     var exact_xyz := player.global_position.distance_to(Vector3(12.0, 40.0, -18.0)) < 0.35
-    var rejected_bad: bool = not bool(main.call("teleport_to", "nowhere"))
+    var invalid_teleport: bool = await main.call("teleport_to", "nowhere")
+    var rejected_bad: bool = not invalid_teleport
     if hud:
         hud.set_teleport_open(false)
     player.global_position = original_position
@@ -3946,7 +4027,7 @@ func test_save_load_round_trip() -> void:
         blocks.erase(save_cell)
 
     main.set("autosave_enabled", true)
-    var loaded: bool = main.call("try_load_world", false)
+    var loaded: bool = await main.call("try_load_world_staged", false)
     main.set("autosave_enabled", original_autosave_enabled)
     blocks = get_blocks()
     var player_restored := player.global_position.distance_to(saved_position) < 0.05
@@ -4739,6 +4820,38 @@ func test_combat_save_transients() -> void:
     var forward := -player.global_transform.basis.z
     forward.y = 0.0
     forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    # Chunk presence alone does not prove regional publication or the swept
+    # dodge path ready. Use request_dodge's production proof before starting
+    # any short-lived combat transients, while normal process/physics advance.
+    const DefenseScript := preload("res://scripts/combat/runtime/PlayerDefenseController.gd")
+    var dodge_distance := DefenseScript.DODGE_SPEED * DefenseScript.DODGE_DURATION_SECONDS
+    var readiness_started := Time.get_ticks_msec()
+    var readiness_frames := 0
+    var readiness_failure := "motion_readiness_timeout"
+    var dodge_target := player.global_position - forward * dodge_distance
+    var motion_proof: Dictionary = {}
+    while Time.get_ticks_msec() - readiness_started < 60000:
+        dodge_target = player.global_position - forward * dodge_distance
+        motion_proof = main.terrain_collision_motion_proof(player.global_position, dodge_target, 0.42)
+        if bool(motion_proof.get("passed", false)):
+            break
+        if String(motion_proof.get("siteAdmission", {}).get("status", "")) == "failed" \
+            or String(motion_proof.get("regionalPublication", {}).get("status", "")) == "failed":
+            readiness_failure = "motion_readiness_dependency_failed"
+            break
+        if readiness_frames % 60 == 0:
+            mark_progress("combat_save_transients_readiness_%04d_%s" % [readiness_frames, String(motion_proof.get("reason", "unknown"))])
+        await wait_gameplay_frames(1)
+        if finished:
+            return
+        readiness_frames += 1
+    if not bool(motion_proof.get("passed", false)):
+        add_result("combat_save_transients_readiness", false, JSON.stringify({
+            "reason": readiness_failure, "elapsedMs": Time.get_ticks_msec() - readiness_started,
+            "from": player.global_position, "target": dodge_target, "proof": motion_proof
+        }))
+        return
+    mark_progress("combat_save_transients_readiness_ready")
     var enemy_position := player.global_position + forward * 1.72
     enemy_position.y = player.global_position.y
     var enemy: StaticBody3D = hostile_system.spawn_enemy(enemy_position, "shadow")
@@ -4770,7 +4883,7 @@ func test_combat_save_transients() -> void:
     }
     var snapshot: Dictionary = main.create_save_snapshot()
     var snapshot_is_durable_only := not snapshot.has("combat") and not snapshot.has("projectiles") and not snapshot.has("motions") and not snapshot.has("dodge")
-    var restored := bool(main.apply_save_snapshot(snapshot))
+    var restored := bool(await main.try_load_world_staged(false, snapshot))
     await wait_process_frames(2)
     var post_restore_clear: bool = hostile_motion.active_motion_count() == 0 \
         and not bool(player_motion.is_motion_active()) \
@@ -5961,11 +6074,35 @@ func test_npc_equipment_and_pathing() -> void:
         add_result("npc_equipment_and_pathing", false, "npc system missing")
         return
 
-    var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
-    reset_player_on_flat_patch(start_cell, 12)
+    var volume_snapshot: Array = call("snapshot_height_fixture") if has_method("snapshot_height_fixture") else []
+    var route_area_anchor := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
+    var route_tile_origin := Vector2i(
+        floori(float(route_area_anchor.x) / 16.0) * 16,
+        floori(float(route_area_anchor.y) / 16.0) * 16
+    )
+    # Keep the wall, both endpoints, and both detour ends inside one navigation
+    # tile. This fixture measures obstacle routing; seam traversal has its own
+    # headed coverage and must not become an undeclared setup dependency here.
+    var start_cell := route_tile_origin + Vector2i(4, 8)
+    var authoritative_floor := {"ok": true}
+    if has_method("prepare_authoritative_navigation_floor"):
+        var floor_sample_cells: Array[Vector2i] = [
+            start_cell,
+            start_cell + Vector2i(8, 0),
+            start_cell + Vector2i(4, -3),
+            start_cell + Vector2i(4, 3)
+        ]
+        authoritative_floor = await call("prepare_authoritative_navigation_floor", start_cell, 12, floor_sample_cells)
+    else:
+        reset_player_on_flat_patch(start_cell, 12)
+    if not bool(authoritative_floor.get("ok", false)):
+        var floor_details := "authoritative route floor failed: %s" % JSON.stringify(authoritative_floor)
+        add_result("npc_equipment_and_pathing", false, floor_details)
+        add_result("npc_route_invalidates_player_block", false, "skipped after route fixture setup failure")
+        add_result("npc_unreachable_goal_diagnostics", false, "skipped after route fixture setup failure")
+        return
     clear_blocks_near_cell(start_cell, 12)
     clear_props_near_cell(start_cell, 14)
-    await wait_physics_frames(3)
 
     var base_height: float = surface_y_at_cell2(start_cell)
     var start_position := Vector3(float(start_cell.x) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
@@ -5987,7 +6124,7 @@ func test_npc_equipment_and_pathing() -> void:
                 old_wall.queue_free()
             blocks.erase(wall_cell)
         main.call("create_block", wall_cell, "stoneBlock", { "world_y": wall_y })
-    await wait_physics_frames(3)
+    await settle_streamed_chunks_after_relocation("npc_nav_route_chunks", 240)
 
     var body := npc_system.create_npc_body("PlaytestPathingNPC", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
@@ -5996,7 +6133,7 @@ func test_npc_equipment_and_pathing() -> void:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
-    npc_system.safe_place_npc(body, start_position, null, "playtest_spawn")
+    var placement: Dictionary = npc_system.safe_place_npc(body, start_position, null, "playtest_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
         "id": "playtest-pathing-npc",
         "name": "Path Tester",
@@ -6021,23 +6158,44 @@ func test_npc_equipment_and_pathing() -> void:
     npc_system.update_npc_visual_state(entry, 0.08)
     var sword_animated := anchor != null and int(npc_system.stats().get("useAnimations", 0)) > uses_before and anchor.rotation.distance_to(rest_rotation) > 0.001
 
+    # Submit ordinary route demand once, then require the exact engine-owned
+    # endpoints before measuring detour behavior. A descriptor-only endpoint or
+    # a snap into a previously streamed region is a fixture setup failure.
+    npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
+    var expected_tile := Vector2i(floori(float(start_cell.x) / 16.0), floori(float(start_cell.y) / 16.0))
+    var endpoint_readiness := {"ok": true}
+    if has_method("wait_for_route_fixture_server_endpoints"):
+        var endpoint_points: Array[Vector3] = [
+            start_position - Vector3(0.0, 0.04, 0.0),
+            target_position - Vector3(0.0, 0.04, 0.0)
+        ]
+        endpoint_readiness = await call("wait_for_route_fixture_server_endpoints",
+            endpoint_points,
+            "%d,%d" % [expected_tile.x, expected_tile.y],
+            600
+        )
+    var fixture_ready := bool(placement.get("ok", false)) and bool(endpoint_readiness.get("ok", false))
+
     var detours_before := int(npc_system.stats().get("pathDetours", 0))
     var validated_before := int(npc_system.stats().get("validatedMoves", 0))
     var max_lateral := 0.0
     var entered_wall_cell := false
-    for i in range(240):
+    var wall_world_x := float(wall_x) * CELL
+    for i in range(720):
         npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
         max_lateral = maxf(max_lateral, absf(body.global_position.z - start_position.z))
         var npc_cell := world_to_flat_cell(body.global_position)
         if npc_cell.x == wall_x and abs(npc_cell.y - wall_z) <= 2:
             entered_wall_cell = true
         await wait_physics_frames(1)
+        if body.global_position.x > wall_world_x + CELL * 0.12 \
+                and int(npc_system.stats().get("pathDetours",0))>detours_before:
+            break
     var detours_after := int(npc_system.stats().get("pathDetours", 0))
     var validated_after := int(npc_system.stats().get("validatedMoves", 0))
-    var wall_world_x := float(wall_x) * CELL
     var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.12
     var detoured_around_wall := detours_after > detours_before and max_lateral > CELL * 0.75 and progressed_past_wall
-    var pathing_passed := weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before
+    var pathing_passed := fixture_ready and weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before
     var pathing_details := "weapon %s, sword animated %s, detours %d->%d, validated %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f, entered wall %s" % [
         str(weapon_visible),
         str(sword_animated),
@@ -6065,6 +6223,8 @@ func test_npc_equipment_and_pathing() -> void:
             "tilePublish": entry.get("lastNavmeshTilePublishDebug", []),
             "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {})
         }
+        pathing_debug["placement"] = placement
+        pathing_debug["endpointReadiness"] = endpoint_readiness
         pathing_details += ", debug %s" % JSON.stringify(pathing_debug)
     add_result(
         "npc_equipment_and_pathing",
@@ -6077,13 +6237,20 @@ func test_npc_equipment_and_pathing() -> void:
     entry["routeCells"] = []
     entry["routeForceReplan"] = true
     var replan_target := Vector3(float(start_cell.x + 7) * CELL, base_height + 0.04, float(start_cell.y + 4) * CELL)
-    for i in range(3):
+    var initial_route_ready := false
+    for i in range(180):
         npc_system.move_npc(entry, replan_target, CELL * 0.22, false, false)
         await wait_physics_frames(1)
+        if not (entry.get("routeCells", []) as Array).is_empty() and String(entry.get("routeStatus", "")) in ["routed", "moving", "arrived"]:
+            initial_route_ready = true
+            break
     var planned_cells: Array = entry.get("routeCells", [])
     var dynamic_block_cell := Vector2i(start_cell.x + 1, start_cell.y + 1)
-    if not planned_cells.is_empty() and planned_cells[0] is Vector2i:
-        dynamic_block_cell = planned_cells[0]
+    var current_route_cell := world_to_flat_cell(body.global_position)
+    for planned_cell_value in planned_cells:
+        if planned_cell_value is Vector2i and current_route_cell.distance_squared_to(planned_cell_value) > 1:
+            dynamic_block_cell = planned_cell_value
+            break
     var dynamic_block_key := Vector3i(dynamic_block_cell.x, wall_cell_y, dynamic_block_cell.y)
     blocks = get_blocks()
     if blocks.has(dynamic_block_key):
@@ -6096,16 +6263,18 @@ func test_npc_equipment_and_pathing() -> void:
     var route_revision_before := String(entry.get("routeSnapshotRevision", ""))
     var route_replans_before := int(entry.get("routeReplans", 0))
     var entered_dynamic_block := false
-    for i in range(12):
+    for i in range(120):
         npc_system.move_npc(entry, replan_target, CELL * 0.20, false, false)
         if world_to_flat_cell(body.global_position) == dynamic_block_cell:
             entered_dynamic_block = true
         await wait_physics_frames(1)
+        if String(entry.get("routeSnapshotRevision", "")) != route_revision_before and int(entry.get("routeReplans", 0)) > route_replans_before:
+            break
     var route_revision_after := String(entry.get("routeSnapshotRevision", ""))
     var route_replans_after := int(entry.get("routeReplans", 0))
     add_result(
         "npc_route_invalidates_player_block",
-        route_revision_after != route_revision_before and route_replans_after > route_replans_before and not entered_dynamic_block,
+        initial_route_ready and route_revision_after != route_revision_before and route_replans_after > route_replans_before and not entered_dynamic_block,
         "revision %s -> %s, replans %d->%d, blocked cell %s, entered %s" % [
             route_revision_before,
             route_revision_after,
@@ -6137,9 +6306,12 @@ func test_npc_equipment_and_pathing() -> void:
     await wait_physics_frames(3)
     var unreachable_before := int(npc_system.stats().get("unreachableGoals", 0))
     var unreachable_target := Vector3(float(unreachable_center.x) * CELL, base_height + 0.04, float(unreachable_center.y) * CELL)
-    for i in range(12):
+    for i in range(180):
         npc_system.move_npc(entry, unreachable_target, CELL * 0.20, false, false)
         await wait_physics_frames(1)
+        if int(npc_system.stats().get("unreachableGoals", 0)) > unreachable_before \
+                and String(entry.get("routeStatus", "")) not in ["", "pending", "queued"]:
+            break
     var unreachable_after := int(npc_system.stats().get("unreachableGoals", 0))
     var route_status := String(entry.get("routeStatus", ""))
     var route_reason := String(entry.get("routeReason", ""))
@@ -6177,6 +6349,8 @@ func test_npc_equipment_and_pathing() -> void:
             if wall_body:
                 wall_body.queue_free()
             blocks.erase(wall_cell)
+    if has_method("restore_height_fixture"):
+        call("restore_height_fixture", volume_snapshot, [start_cell])
 
 func test_structural_integrity() -> void:
     if not main or not player:
@@ -6898,7 +7072,7 @@ func test_modular_character_visuals() -> void:
     var family_count: int = npc_registry.family_count() if npc_ready else 0
     add_result(
         "character_asset_pack_ready",
-        npc_ready and hostile_ready and asset_count == 30 and family_count >= 8,
+        npc_ready and hostile_ready and asset_count == 40 and family_count >= 8,
         "npc ready %s, hostile ready %s, assets %d, families %d" % [str(npc_ready), str(hostile_ready), asset_count, family_count]
     )
 
@@ -8534,7 +8708,9 @@ func test_mining_tool_requirements() -> void:
     aim_player_at(Vector3(iron_cell.x * CELL, iron_cell.y * CELL, iron_cell.z * CELL))
     await wait_physics_frames(2)
     main.call("destroy_target")
+    var wrong_iron_diagnostic := {"immediate": mining_requirement_observation(iron_cell)}
     await wait_physics_frames(2)
+    wrong_iron_diagnostic["afterTwoFrames"] = mining_requirement_observation(iron_cell)
     var iron_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
     var iron_wrong_blocked: bool = blocks.has(iron_cell) and float(main.get("break_progress")) == 0.0 and iron_tool_message.find("Copper Pickaxe") >= 0
 
@@ -8559,14 +8735,31 @@ func test_mining_tool_requirements() -> void:
     add_result(
         "mining_tool_requirements",
         copper_wrong_blocked and copper_mined and iron_wrong_blocked and iron_mined,
-        "copper blocked %s/mined %s, iron blocked %s/mined %s, hud '%s'" % [
+        "copper blocked %s/mined %s, iron blocked %s/mined %s, hud '%s', wrong iron diagnostic %s" % [
             str(copper_wrong_blocked),
             str(copper_mined),
             str(iron_wrong_blocked),
             str(iron_mined),
-            iron_tool_message
+            iron_tool_message,
+            str(wrong_iron_diagnostic)
         ]
     )
+
+func mining_requirement_observation(cell: Vector3i) -> Dictionary:
+    # Two read-only samples around the existing assertion delay. This records
+    # notification replacement without retrying the strike or changing success.
+    var hit: Dictionary = player.view_ray(float(main.monumental_tree_melee_ray_range()))
+    var collider := hit.get("collider") as Node
+    var inventory_system = main.get("inventory_system")
+    var hud = main.get("hud")
+    return {
+        "rayId": collider.get_instance_id() if is_instance_valid(collider) else 0,
+        "rayBlockType": String(collider.get_meta("block_type", "")) if is_instance_valid(collider) else "",
+        "tool": String(inventory_system.active_stack().get("item", "")),
+        "blockExists": get_blocks().has(cell),
+        "progress": float(main.get("break_progress")),
+        "message": hud.notification_label.text if hud.notification_label != null else ""
+    }
 
 func run_synthetic_mining_upgrade_progression_fixture() -> void:
     if not main or not player or not camera:
@@ -8890,6 +9083,7 @@ func save_report(verbose := true) -> void:
     var report: Dictionary = {
         "finished": finished,
         "passed": not failed,
+        "startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
         "results": results
     }
     var run_token := OS.get_environment("VOXEL_PLAYTEST_RUN_TOKEN")
@@ -9578,6 +9772,30 @@ func _debug_node_name(value) -> String:
     if value is Object and not is_instance_valid(value):
         return "freed"
     return str(value)
+
+func tutorial_cohort_shelter_state(npc_system, npc_root: Node, required_ids: Array[String]) -> Dictionary:
+    var actors := {}
+    var all_sheltered := required_ids.size() == 3
+    var autonomy = npc_system.get("autonomy_system")
+    for actor_id in required_ids:
+        var entry: Dictionary = npc_system.npc_entry_for_actor(actor_id)
+        var body := entry.get("body") as CharacterBody3D
+        if not is_instance_valid(body) or not body.is_inside_tree() or body.get_parent() != npc_root or bool(entry.get("canFight", true)):
+            actors[actor_id] = {"ready": false, "reason": "required_nonfighter_body_missing_or_changed"}
+            all_sheltered = false
+            continue
+        var strict_inside: bool = autonomy != null and bool(autonomy.is_inside_home_interior(entry, body.global_position))
+        var sheltered: bool = strict_inside and bool(entry.get("insideHome", false)) and bool(body.get_meta("npc_inside_home", false))
+        actors[actor_id] = {
+            "instance": body.get_instance_id(), "position": body.global_position,
+            "ready": sheltered, "strictInside": strict_inside,
+            "routeStatus": entry.get("routeStatus", ""), "routeReason": entry.get("routeReason", ""),
+            "leaseRequest": entry.get("_v2LeaseExecutorRequestId", ""),
+            "leaseWaypoint": entry.get("_v2LeaseExecutorWaypointIndex", -1),
+            "leaseLastMove": entry.get("_v2LeaseExecutorLastMove", 0.0)
+        }
+        all_sheltered = all_sheltered and sheltered
+    return {"ready": all_sheltered, "requiredIds": required_ids, "actors": actors}
 
 func npc_shelter_debug(npc_system) -> String:
     if npc_system == null:

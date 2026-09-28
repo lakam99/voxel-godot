@@ -110,7 +110,7 @@ func _unhandled_input(event: InputEvent) -> void:
             update_hud("Story debug dumped to console")
             return
         if event.keycode == KEY_F9:
-            try_load_world(true)
+            await try_load_world_staged(true)
             return
         if event.keycode == KEY_T:
             if utility_system and utility_system.is_open():
@@ -260,8 +260,11 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: done")
 
-func show_action_message(message: String) -> void:
+func show_action_message(message: String, passive := false) -> void:
     if message == "" or hud == null:
+        return
+    if passive:
+        hud.show_notification(message, 1.25, -1)
         return
     hud_message_refresh_count += 1
     last_hud_refresh_message = message
@@ -300,7 +303,9 @@ func focused_interaction_prompt() -> String:
         if kind == "npc":
             return "[RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
     var block := interaction_block_from_collider(collider)
-    if block == null or not block.has_meta("kind") or String(block.get_meta("kind")) != "block":
+    if block == null:
+        return ""
+    if String(block.get_meta("kind", "")) != "block" and not (String(block.get_meta("block_type", "")) == "door" and block.has_meta("door_portal_id")):
         return ""
     var block_type := String(block.get_meta("block_type", ""))
     return focused_block_prompt(block, block_type)

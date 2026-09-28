@@ -33,6 +33,15 @@ func run() -> void:
     OS.set_environment("VOXEL_PLAYTEST", "1")
     main = MAIN_SCENE.instantiate()
     add_child(main)
+    if not await main.wait_for_startup_loading_complete():
+        write_json(output_path, {
+            "seed": seed,
+            "passed": false,
+            "reason": "startup_loading_not_ready",
+            "startup_loading_failure_result": main.get("startup_loading_failure_result")
+        })
+        finish(1)
+        return
     if not await wait_for_signature_chunk_readiness("initial world"):
         finish(1)
         return
@@ -75,6 +84,10 @@ func wait_for_signature_chunk_readiness(stage: String) -> bool:
     var previous_chunk_count := -1
     for frame in range(SIGNATURE_READINESS_MAX_FRAMES):
         await get_tree().process_frame
+        var failure: Dictionary = main.get("startup_loading_failure_result")
+        if not failure.is_empty():
+            write_json(output_path, {"seed": seed, "passed": false, "stage": stage, "startup_loading_failure_result": failure})
+            return false
         var chunks_value = main.get("chunks")
         var pending_loads_value = main.get("pending_chunk_loads")
         var chunk_count: int = int(chunks_value.size()) if chunks_value is Dictionary else -1

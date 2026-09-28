@@ -22,6 +22,7 @@ const STREAM_PATHS := {
 }
 
 var enabled := true
+var automated_playback_muted := false
 var player: AudioStreamPlayer
 var sfx_players: Array[AudioStreamPlayer] = []
 var sfx_cursor := 0
@@ -58,8 +59,21 @@ var effect_nodes_created := 0
 var effect_nodes_reused := 0
 var feedback_prime_nodes: Array[MeshInstance3D] = []
 var feedback_prime_frames_remaining := 0
+var staged_startup := false
+var startup_phase := "idle"
+var startup_material_colors: Array = []
+var stream_build_jobs: Array[Dictionary] = []
+var stream_build_cursor := 0
+var stream_build_total := 0
+var stream_build_active := false
+var stream_build_cancelled := false
+var stream_build_timings: Array[Dictionary] = []
 
 func _ready() -> void:
+    automated_playback_muted = automated_test_playback_muted()
+    if automated_playback_muted:
+        mute_master_bus_for_automated_run()
+    set_process(false)
     for i in range(SFX_POOL_SIZE):
         var sfx_player := AudioStreamPlayer.new()
         sfx_player.name = "SfxPlayer_%02d" % i
@@ -86,20 +100,45 @@ func _ready() -> void:
     night_player.name = "NightAmbience"
     night_player.volume_db = night_volume_db
     add_child(night_player)
-    build_streams()
-    prime_sfx_output()
-    prime_ambient_loop_players()
-    if streams.has("knock"):
-        knock_player.stream = streams["knock"]
-    setup_effect_mesh()
-    prime_visual_effect_pool()
-    set_process(true)
+    begin_stream_build()
+    startup_phase = "streams"
+    if not staged_startup:
+        while not startup_preparation_ready() and not stream_build_cancelled:
+            advance_startup_preparation()
 
 func _exit_tree() -> void:
     shutdown_audio()
 
+static func automated_test_playback_muted() -> bool:
+    # Automated runs retain audio state and player activity for behavioral
+    # assertions, but must never produce audible output on the host machine.
+    if OS.get_environment("VOXEL_DISABLE_AUDIO_PLAYBACK").strip_edges() == "1":
+        return true
+    if OS.has_feature("headless") or DisplayServer.get_name().to_lower() == "headless":
+        return true
+    for flag in [
+        "VOXEL_PLAYTEST",
+        "VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN",
+        "VOXEL_NPC_TEST_SUITE",
+        "CITADEL_CANDIDATE_TELEPORT_OUTPUT",
+        "CITADEL_CANDIDATE_RECIPE_OUTPUT"
+    ]:
+        if not OS.get_environment(flag).strip_edges().is_empty():
+            return true
+    return false
+
+func mute_master_bus_for_automated_run() -> void:
+    var master_bus := AudioServer.get_bus_index(&"Master")
+    if master_bus >= 0:
+        AudioServer.set_bus_mute(master_bus, true)
+
 func shutdown_audio() -> void:
     set_process(false)
+    stream_build_cancelled = true
+    stream_build_active = false
+    stream_build_jobs.clear()
+    startup_material_colors.clear()
+    startup_phase = "cancelled"
     knock_looping = false
     knock_repeat_timer = 0.0
     for sfx_player in sfx_players:
@@ -129,38 +168,111 @@ func release_audio_player(audio_player: AudioStreamPlayer) -> void:
     audio_player.stream = null
 
 func build_streams() -> void:
-    streams["strike"] = make_tone_stream([150.0], 0.055, "square")
-    streams["break"] = make_tone_stream([220.0, 330.0, 480.0], 0.07, "triangle")
-    streams["woodChop"] = load_wav_or_fallback("woodChop", make_tone_stream([86.0, 132.0], 0.08, "saw"))
-    streams["knock"] = load_wav_or_fallback("knock", make_tone_stream([125.0, 118.0, 132.0], 0.12, "triangle"))
-    streams["doorOpen"] = load_wav_or_fallback("doorOpen", make_tone_stream([260.0, 190.0], 0.13, "saw"))
-    streams["doorClose"] = load_wav_or_fallback("doorClose", make_tone_stream([150.0, 72.0], 0.11, "triangle"))
-    streams["chestOpen"] = load_wav_or_fallback("chestOpen", make_tone_stream([380.0, 205.0], 0.12, "triangle"))
-    streams["rainLoop"] = load_wav_or_fallback("rainLoop", make_noise_stream(1.2), true)
-    streams["tutorialTownDay"] = load_wav_or_fallback("tutorialTownDay", make_tone_stream([220.0], 0.02, "sine"), true)
-    var tutorial_day_stream := streams["tutorialTownDay"] as AudioStreamWAV
-    streams["gameDay2"] = load_wav_or_fallback("gameDay2", tutorial_day_stream, true)
-    daytime_music_tracks.clear()
-    for track in DAYTIME_MUSIC_TRACKS:
-        if streams.has(track):
-            daytime_music_tracks.append(track)
-    if not daytime_music_tracks.is_empty():
-        streams["daytime"] = streams[daytime_music_tracks[0]]
-    var nature_stream := load_imported_stream("natureDay")
-    if nature_stream != null:
-        streams["natureDay"] = nature_stream
-    var night_stream := load_imported_stream("nightWind")
-    if night_stream != null:
-        streams["nightWind"] = night_stream
-    streams["pickup"] = make_tone_stream([540.0, 760.0], 0.06, "triangle")
-    streams["craft"] = make_tone_stream([360.0, 540.0, 720.0], 0.06, "triangle")
-    streams["place"] = make_tone_stream([240.0], 0.08, "triangle")
-    streams["shoot"] = make_tone_stream([620.0, 340.0], 0.055, "triangle")
-    streams["eat"] = make_noise_stream(0.08)
-    streams["damage"] = make_tone_stream([82.0, 68.0], 0.10, "saw")
-    streams["enemyHit"] = make_tone_stream([112.0], 0.07, "saw")
-    streams["defeat"] = make_tone_stream([180.0, 260.0, 420.0, 620.0], 0.075, "triangle")
-    streams["level"] = make_tone_stream([330.0, 440.0, 660.0, 880.0], 0.09, "triangle")
+    begin_stream_build()
+    while stream_build_active:
+        advance_stream_build()
+
+func begin_stream_build() -> void:
+    if stream_build_cancelled or stream_build_active:
+        return
+    stream_build_cursor = 0
+    stream_build_timings.clear()
+    # Reserve all existing procedural/fallback objects in their original evaluation
+    # order before the first yield. In particular, rain and eat retain the same
+    # global RNG draws even when their files load successfully.
+    stream_build_jobs = [
+        {"kind": "generated", "name": "strike", "stream": make_tone_stream([150.0], 0.055, "square")},
+        {"kind": "generated", "name": "break", "stream": make_tone_stream([220.0, 330.0, 480.0], 0.07, "triangle")},
+        {"kind": "wav", "name": "woodChop", "fallback": make_tone_stream([86.0, 132.0], 0.08, "saw")},
+        {"kind": "wav", "name": "knock", "fallback": make_tone_stream([125.0, 118.0, 132.0], 0.12, "triangle")},
+        {"kind": "wav", "name": "doorOpen", "fallback": make_tone_stream([260.0, 190.0], 0.13, "saw")},
+        {"kind": "wav", "name": "doorClose", "fallback": make_tone_stream([150.0, 72.0], 0.11, "triangle")},
+        {"kind": "wav", "name": "chestOpen", "fallback": make_tone_stream([380.0, 205.0], 0.12, "triangle")},
+        {"kind": "wav", "name": "rainLoop", "fallback": make_noise_stream(1.2), "loop": true},
+        {"kind": "wav", "name": "tutorialTownDay", "fallback": make_tone_stream([220.0], 0.02, "sine"), "loop": true},
+        {"kind": "wav", "name": "gameDay2", "fallbackKey": "tutorialTownDay", "loop": true},
+        {"kind": "daytime_tracks"},
+        {"kind": "imported", "name": "natureDay"},
+        {"kind": "imported", "name": "nightWind"},
+        {"kind": "generated", "name": "pickup", "stream": make_tone_stream([540.0, 760.0], 0.06, "triangle")},
+        {"kind": "generated", "name": "craft", "stream": make_tone_stream([360.0, 540.0, 720.0], 0.06, "triangle")},
+        {"kind": "generated", "name": "place", "stream": make_tone_stream([240.0], 0.08, "triangle")},
+        {"kind": "generated", "name": "shoot", "stream": make_tone_stream([620.0, 340.0], 0.055, "triangle")},
+        {"kind": "generated", "name": "eat", "stream": make_noise_stream(0.08)},
+        {"kind": "generated", "name": "damage", "stream": make_tone_stream([82.0, 68.0], 0.10, "saw")},
+        {"kind": "generated", "name": "enemyHit", "stream": make_tone_stream([112.0], 0.07, "saw")},
+        {"kind": "generated", "name": "defeat", "stream": make_tone_stream([180.0, 260.0, 420.0, 620.0], 0.075, "triangle")},
+        {"kind": "generated", "name": "level", "stream": make_tone_stream([330.0, 440.0, 660.0, 880.0], 0.09, "triangle")}
+    ]
+    stream_build_total = stream_build_jobs.size()
+    stream_build_active = true
+
+func advance_stream_build() -> void:
+    if not stream_build_active or stream_build_cancelled:
+        return
+    while stream_build_cursor < stream_build_jobs.size():
+        var job := stream_build_jobs[stream_build_cursor]
+        var kind := String(job.kind)
+        var stream_name := String(job.get("name", ""))
+        var started := Time.get_ticks_usec()
+        if kind == "generated":
+            streams[stream_name] = job.stream
+        elif kind == "wav":
+            var fallback := job.get("fallback") as AudioStreamWAV
+            if job.has("fallbackKey"):
+                fallback = streams.get(job.fallbackKey) as AudioStreamWAV
+            streams[stream_name] = load_wav_or_fallback(stream_name, fallback, bool(job.get("loop", false)))
+        elif kind == "imported":
+            var imported := load_imported_stream(stream_name)
+            if imported != null:
+                streams[stream_name] = imported
+        elif kind == "daytime_tracks":
+            daytime_music_tracks.clear()
+            for track in DAYTIME_MUSIC_TRACKS:
+                if streams.has(track):
+                    daytime_music_tracks.append(track)
+            if not daytime_music_tracks.is_empty():
+                streams["daytime"] = streams[daytime_music_tracks[0]]
+        stream_build_cursor += 1
+        if kind == "wav" or kind == "imported":
+            stream_build_timings.append({"asset": stream_name, "elapsedUsec": Time.get_ticks_usec() - started})
+            # One file per call; the cost of a single file remains an atomic step.
+            return
+    stream_build_active = false
+    stream_build_jobs.clear()
+
+func startup_preparation_ready() -> bool:
+    return startup_phase == "ready" and not stream_build_cancelled
+
+func startup_preparation_state() -> Dictionary:
+    return {"phase": startup_phase, "completedJobs": stream_build_cursor,
+        "totalJobs": stream_build_total, "ready": startup_preparation_ready(),
+        "cancelled": stream_build_cancelled, "assetTimings": stream_build_timings.duplicate(true)}
+
+func advance_startup_preparation() -> Dictionary:
+    if stream_build_cancelled or startup_preparation_ready():
+        return startup_preparation_state()
+    if startup_phase == "streams":
+        advance_stream_build()
+        if not stream_build_active:
+            startup_phase = "prime_audio"
+    elif startup_phase == "prime_audio":
+        prime_sfx_output()
+        prime_ambient_loop_players()
+        if streams.has("knock"):
+            knock_player.stream = streams["knock"]
+        startup_phase = "prime_visuals"
+    elif startup_phase == "prime_visuals":
+        setup_effect_mesh()
+        prime_visual_effect_pool()
+        startup_phase = "prime_materials"
+    elif startup_phase == "prime_materials":
+        var colors := startup_material_colors
+        startup_material_colors = []
+        startup_phase = "ready"
+        prime_materials(colors)
+        set_process(true)
+    return startup_preparation_state()
 
 func prime_ambient_loop_players() -> void:
     if streams.has("rainLoop"):
@@ -202,6 +314,11 @@ func prime_visual_effect_pool() -> void:
         effect_nodes_created += 1
 
 func prime_materials(colors: Array) -> void:
+    if stream_build_cancelled:
+        return
+    if staged_startup and not startup_preparation_ready():
+        startup_material_colors.append_array(colors)
+        return
     for color_value in colors:
         if color_value is Color:
             var material := material_for(color_value)
@@ -444,6 +561,7 @@ func update_knock_loop(delta: float) -> void:
 
 func stats() -> Dictionary:
     return {
+        "automatedPlaybackMuted": automated_playback_muted,
         "lastPlayed": last_played,
         "playCount": play_count,
         "playCountsByName": play_counts_by_name.duplicate(),
@@ -549,10 +667,7 @@ func load_pcm_wav(path: String, loop := false) -> AudioStreamWAV:
         cursor += 8 + chunk_size + (chunk_size % 2)
     if data_offset < 0 or data_size <= 0 or sample_rate <= 0 or channels < 1 or channels > 2 or bits_per_sample != 16:
         return null
-    var data := PackedByteArray()
-    data.resize(data_size)
-    for i in range(data_size):
-        data[i] = bytes[data_offset + i]
+    var data := bytes.slice(data_offset, data_offset + data_size)
     var stream := AudioStreamWAV.new()
     stream.format = AudioStreamWAV.FORMAT_16_BITS
     stream.mix_rate = sample_rate

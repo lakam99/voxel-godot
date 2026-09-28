@@ -1,0 +1,171 @@
+extends SceneTree
+
+const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
+const Urban = preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
+const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
+const Infill = preload("res://scripts/buildings/CivicHouseInfillRecipe.gd")
+const Support = preload("res://scripts/buildings/CivicCourtyardSupport.gd")
+
+
+func _initialize() -> void:
+	call_deferred("_run")
+
+
+func _run() -> void:
+	var path := OS.get_environment("VOXEL_CITADEL_NATURAL_GROUND_REPORT").strip_edges().simplify_path()
+	if not path.is_absolute_path() or FileAccess.file_exists(path) or not DirAccess.dir_exists_absolute(path.get_base_dir()):
+		quit(2)
+		return
+	var seed := 237207443
+	var source = Castle.build(seed, {"biome": "forest", "citadelScale": 1.25, "siteKey": "river-citadel"})
+	var result: Dictionary = Urban.compose_prepared(source, seed)
+	var blueprint = result.get("blueprint")
+	var forbidden: Array = []
+	var courtyard_foundations: Array = []
+	var courtyard_paving: Array = []
+	var building_foundations: Array = []
+	var entry_foundations: Array = []
+	var interior_floors: Array = []
+	var decorative_public_finishes: Array = []
+	var district_visual_finishes: Array = []
+	var public_walkable_collision: Array = []
+	var grid_mode := ""
+	var street_records: Array = []
+	var inspected = blueprint if blueprint != null else source
+	if inspected != null:
+		var grammar: Dictionary = inspected.recipe.get("castleGrammar", {}) as Dictionary
+		var grid: Dictionary = grammar.get("courtyardGrid", {}) as Dictionary
+		grid_mode = String(grid.get("mode", ""))
+		street_records = grid.get("streetRecords", []) as Array
+		forbidden = inspected.parts.filter(func(part):
+			var id := String(part.id)
+			return id.begins_with("castle_terrace_block_") or id.begins_with("castle_terrace_stair_") \
+				or id.begins_with("urban_street_climb_") or id.begins_with("urban_market_plaza_retaining") \
+				or String(part.semantic) in ["castle_inhabited_terrace_block", "castle_terrace_route_wall", "castle_processional_step", "castle_route_terrace_walkway", "castle_route_junction", "citadel_urban_terrace", "citadel_urban_stair"])
+		courtyard_foundations = inspected.parts.filter(func(part): return String(part.id).begins_with("castle_compound_foundation_segment_"))
+		courtyard_paving = inspected.parts.filter(func(part): return String(part.id).begins_with("castle_compound_paving_segment_"))
+		building_foundations = inspected.parts.filter(func(part):
+			return String(part.kind) == "foundation" and bool(part.collision_enabled) \
+				and String(part.semantic) not in ["castle_courtyard_foundation", "castle_courtyard_paving"] \
+				and part.size.y >= 0.40)
+		entry_foundations = inspected.parts.filter(func(part): return String(part.id).contains("_entry_foundation"))
+		interior_floors = inspected.parts.filter(func(part): return String(part.id).ends_with("_interior_floor"))
+		decorative_public_finishes = inspected.parts.filter(func(part): return String(part.id) in ["urban_market_plaza", "urban_civic_quarter_paving"])
+		district_visual_finishes = inspected.parts.filter(func(part): return String(part.id).begins_with("castle_district_"))
+		public_walkable_collision = inspected.parts.filter(func(part):
+			return bool(part.collision_enabled) and String(part.semantic) in ["castle_courtyard_paving",
+				"castle_route_terrace_walkway", "castle_route_junction", "castle_processional_step"])
+	var continuous_grade_platform := courtyard_foundations.size() == 1 and not courtyard_paving.is_empty()
+	if continuous_grade_platform:
+		var bed = courtyard_foundations[0]
+		var paving_area := 0.0
+		var paving_geometry_valid := true
+		for paving_index in range(courtyard_paving.size()):
+			var paving = courtyard_paving[paving_index]
+			paving_area += paving.size.x*paving.size.z
+			paving_geometry_valid = paving_geometry_valid \
+				and paving.recipe.get("continuousGroundCourse") == true \
+				and is_equal_approx(paving.position.y + paving.size.y * 0.5, Castle.COURTYARD_GRADE_SURFACE_Y) \
+				and paving.position.x-paving.size.x*0.5 >= bed.position.x-bed.size.x*0.5-0.001 \
+				and paving.position.x+paving.size.x*0.5 <= bed.position.x+bed.size.x*0.5+0.001 \
+				and paving.position.z-paving.size.z*0.5 >= bed.position.z-bed.size.z*0.5-0.001 \
+				and paving.position.z+paving.size.z*0.5 <= bed.position.z+bed.size.z*0.5+0.001
+			var paving_bounds := Rect2(Vector2(paving.position.x - paving.size.x * 0.5, paving.position.z - paving.size.z * 0.5), Vector2(paving.size.x, paving.size.z))
+			for other_index in range(paving_index):
+				var other = courtyard_paving[other_index]
+				var other_bounds := Rect2(Vector2(other.position.x - other.size.x * 0.5, other.position.z - other.size.z * 0.5), Vector2(other.size.x, other.size.z))
+				var overlap := paving_bounds.intersection(other_bounds)
+				paving_geometry_valid = paving_geometry_valid and (overlap.size.x <= 0.001 or overlap.size.y <= 0.001)
+		continuous_grade_platform = bed.id == "castle_compound_foundation_segment_00" \
+			and bed.recipe.get("continuousGroundCourse") == true \
+			and is_equal_approx(bed.position.y - bed.size.y * 0.5, 0.0) \
+			and paving_geometry_valid and is_equal_approx(paving_area,bed.size.x*bed.size.z)
+	var finishes_match_authoritative_grade := decorative_public_finishes.size() == 2 and decorative_public_finishes.all(func(part):
+		return not part.collision_enabled and is_equal_approx(part.position.y + part.size.y * 0.5, Urban.PUBLIC_GROUND_SURFACE_Y) \
+			and not Urban.is_primary_tree_paving(part))
+	# District dressing is optional and may be elided by terminal composition;
+	# when retained, it must remain non-colliding and exactly flush with grade.
+	var district_visuals_match_authoritative_grade := district_visual_finishes.all(func(part):
+		return not part.collision_enabled and is_equal_approx(part.position.y + part.size.y * 0.5, Castle.COURTYARD_GRADE_SURFACE_Y))
+	var public_walkable_collision_matches_authoritative_grade := not public_walkable_collision.is_empty() and public_walkable_collision.all(func(part):
+		return is_equal_approx(part.position.y + part.size.y * 0.5, Castle.COURTYARD_GRADE_SURFACE_Y))
+	var street_ids := street_records.map(func(record): return String(record.get("id", "")) if record is Dictionary else "")
+	var street_records_stable := street_ids == ["processional_00_gate_lane", "processional_01_first_turn",
+		"processional_02a_civic_approach", "processional_02b_civic_climb", "processional_03_final_turn",
+		"processional_04a_palace_approach", "processional_04b_palace_reveal", "processional_04c_palace_entry_transition"] \
+		and street_records.all(func(record): return record is Dictionary and is_zero_approx(float(record.get("elevation", INF))))
+	var market_support_contract := _market_support_selection_contract()
+	var passed := bool(result.get("ready", false)) and blueprint != null and forbidden.is_empty() \
+		and grid_mode == "district_grid" and continuous_grade_platform and not building_foundations.is_empty() \
+		and finishes_match_authoritative_grade and district_visuals_match_authoritative_grade \
+		and public_walkable_collision_matches_authoritative_grade and street_records_stable \
+		and bool(market_support_contract.get("passed", false))
+	var report := {
+		"passed": passed,
+		"seed": seed,
+		"ready": result.get("ready", false),
+		"reason": result.get("reason", ""),
+		"failure": result.get("structuralCompletionFailure", result.get("civicQuarterFailure", result.get("civicClearanceFailure", result.get("shopFailure", result.get("terminalFoundationFailure", {}))))),
+		"forbiddenPartIds": forbidden.map(func(part): return String(part.id)),
+		"continuousGradePlatform": continuous_grade_platform,
+		"courtyardFoundationRecords": courtyard_foundations.map(func(part): return part.snapshot()),
+		"courtyardPavingRecords": courtyard_paving.map(func(part): return part.snapshot()),
+		"courtyardFoundationDeclared": courtyard_foundations.map(func(part): return Support.declared(part, 0.62)),
+		"courtyardUnderlayCompatible": (courtyard_foundations + courtyard_paving).map(func(part): return Infill.compatible_underlay(part, 0.62)),
+		"buildingFoundationCount": building_foundations.size(),
+		"entryFoundationRecords": entry_foundations.map(func(part): return part.snapshot()),
+		"interiorFloorRecords": interior_floors.map(func(part): return part.snapshot()),
+		"decorativePublicFinishRecords": decorative_public_finishes.map(func(part): return part.snapshot()),
+		"decorativeFinishesMatchAuthoritativeGrade": finishes_match_authoritative_grade,
+		"gridMode": grid_mode,
+		"districtVisualFinishCount": district_visual_finishes.size(),
+		"districtVisualsMatchAuthoritativeGrade": district_visuals_match_authoritative_grade,
+		"publicWalkableCollisionRecords": public_walkable_collision.map(func(part): return part.snapshot()),
+		"publicWalkableCollisionMatchesAuthoritativeGrade": public_walkable_collision_matches_authoritative_grade,
+		"streetRecordIds": street_ids,
+		"streetRecordsStableAndGroundLevel": street_records_stable,
+		"marketSupportSelectionContract":market_support_contract,
+		"partCount": blueprint.parts.size() if blueprint != null else 0,
+		"evidenceLevel": "full_source_composition_contract",
+		"doesNotProve": "No publication, rendered appearance, world-space terrain contact, routing, navigation or gameplay acceptance."
+	}
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		quit(2)
+		return
+	file.store_string(JSON.stringify(_json(report), "\t"))
+	file.close()
+	quit(0 if passed else 1)
+
+
+static func _market_support_selection_contract() -> Dictionary:
+	var fixture = Blueprint.new("market_public_course_selection", 1, "civic")
+	fixture.set_recipe({"castleGrammar":{"courtyardWidth":40.0,"courtyardDepth":40.0}, "urbanPoc":{"treePlacements":[]}})
+	fixture.add_part({"id":"public_course", "kind":"foundation", "material":"cobblestone", "position":Vector3(0.0,0.04,0.0), "size":Vector3(40.0,0.08,40.0), "collision":true, "semantic":"castle_courtyard_paving", "recipe":{"continuousGroundCourse":true,"pavingRegion":"citadel_courtyard"}})
+	fixture.add_part({"id":"terminal_foundation", "kind":"foundation", "material":"cobblestone", "position":Vector3(0.0,0.38,0.0), "size":Vector3(15.2,0.76,9.6), "collision":true, "semantic":"citadel_terminal_shop_foundation"})
+	fixture.add_part({"id":"market_member", "kind":"beam", "material":"timber_board", "position":Vector3(0.0,0.58,0.0), "size":Vector3(1.0,1.0,1.0), "collision":true, "semantic":"citadel_market_counter"})
+	var before := var_to_bytes(fixture.snapshot())
+	var plan: Dictionary = Urban.plan_courtyard_household(fixture,["market_member"],Vector3.FORWARD,[])
+	return {"passed":plan.get("ready",false) and plan.get("supportId","")=="public_course" and before==var_to_bytes(fixture.snapshot()),
+		"ready":plan.get("ready",false), "reason":plan.get("reason",""), "supportId":plan.get("supportId","")}
+
+
+static func _json(value: Variant) -> Variant:
+	if value is Vector3:
+		return [value.x, value.y, value.z]
+	if value is Vector2:
+		return [value.x, value.y]
+	if value is AABB or value is Rect2:
+		return {"position": _json(value.position), "size": _json(value.size)}
+	if value is float and not is_finite(value):
+		return str(value)
+	if value is Object:
+		return str(value)
+	if value is Dictionary:
+		var result: Dictionary = {}
+		for key in value:
+			result[key] = _json(value[key])
+		return result
+	if value is Array:
+		return value.map(func(item): return _json(item))
+	return value

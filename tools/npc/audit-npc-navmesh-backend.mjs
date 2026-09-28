@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runToolMain } from '../lib/voxel-tool-runtime.mjs';
+import { runSourceAudit } from '../lib/npc-source-audit.mjs';
 
-await runToolMain('npc/audit-npc-navmesh-backend');
+await runSourceAudit('npc/audit-npc-navmesh-backend');

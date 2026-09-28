@@ -21,27 +21,28 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	add_child(main)
-	if not await wait_for_world_generation(900):
+	# Preserve ordinary world inputs; generator existence is not terminal startup.
+	if not await main.wait_for_startup_loading_complete(240.0, false):
 		write_report({
 			"schemaVersion": 1,
 			"kind": "terrain_water_classification_probe",
 			"passed": false,
-			"reason": "world_generation_not_ready"
+			"reason": "startup_not_ready",
+			"startupLoadingFailureResult": main.get("startup_loading_failure_result").duplicate(true) if is_instance_valid(main) else {}
 		})
-		get_tree().quit(1)
+		if is_instance_valid(main) and main.is_inside_tree():
+			main.request_graceful_quit(1)
+		else:
+			get_tree().quit(1)
 		return
 	main.set_process(false)
 	main.set_physics_process(false)
 	var report := build_probe_report()
 	write_report(report)
+	if is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(0)
+		return
 	get_tree().quit(0)
-
-func wait_for_world_generation(max_frames: int) -> bool:
-	for _frame in range(max_frames):
-		if main != null and main.get("world_generation_system") != null:
-			return true
-		await get_tree().process_frame
-	return false
 
 func build_probe_report() -> Dictionary:
 	var center := probe_center()
@@ -248,6 +249,8 @@ func generated_fluid_summary(start_x: int, start_z: int) -> Dictionary:
 	}
 
 func write_report(report: Dictionary) -> void:
+	report["startupScope"] = "ordinary_startup_generator_probe"
+	report["gameplayAcceptance"] = false
 	var path := OS.get_environment("VOXEL_TERRAIN_WATER_PROBE_REPORT").strip_edges()
 	if path == "":
 		path = ProjectSettings.globalize_path("res://artifacts/vox43-repro/water-classification-probe.json")

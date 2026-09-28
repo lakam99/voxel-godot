@@ -12,10 +12,21 @@ const HOME_V2_ROUTE_MAX_EXPANSIONS := 8192
 const HOME_V2_WAYPOINT_RADIUS := 0.28
 const ROUTINE_V2_ROUTE_MAX_EXPANSIONS := 8192
 const ROUTINE_V2_WAYPOINT_RADIUS := 0.32
-const V2_ROUTE_EXPANSIONS_PER_CALL := 16
+const V2_ROUTE_EXPANSIONS_PER_CALL := 2
+const V2_ROUTE_VALIDATION_STEPS_PER_CALL := 2
+const V2_ROUTE_CHEAP_STEPS_PER_CALL := 48
+const V2_CANDIDATE_VALIDATIONS_PER_CALL := 2
 const GUARD_V2_ROUTE_EXPANSIONS_PER_CALL := 2
+const GUARD_V2_ROUTE_VALIDATION_STEPS_PER_CALL := 2
 const GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL := 2
 const V2_EXECUTION_REPAIR_RETRY_FRAMES := 1
+const ROUTE_PLAN_DETAILED_TIMING_ENV := "VOXEL_ROUTE_PLAN_DETAILED_TIMING"
+
+# Read once per executor, never once per routed actor/call. Normal gameplay
+# publishes only the bounded compliance gauges below; the attribution-heavy
+# profile remains available for an explicitly requested diagnostic run.
+var route_plan_detailed_timing_enabled := \
+	OS.get_environment(ROUTE_PLAN_DETAILED_TIMING_ENV).strip_edges() == "1"
 
 var autonomy_system = null
 var npc_system = null
@@ -210,6 +221,9 @@ func _physics_route_service_kind(entry: Dictionary) -> String:
 			return "home"
 	var routine_request_id := String(entry.get("routineRouteV2RequestId", ""))
 	if _v2_request_requires_physics_service(authority, entry, routine_request_id) and _has_executable_routine_route_intent(entry):
+		if _trader_fallback_selection_supersedes_routine(entry):
+			_cancel_routine_v2_request(authority, entry, "trader_fallback_target_selection")
+			return ""
 		# A forage routine is an action lifecycle as well as a route.  The job loop
 		# owns its departure, search, reservation, timeout, and release transitions.
 		# Letting the physics route service consume even a pending search/departure
@@ -224,6 +238,13 @@ func _physics_route_service_kind(entry: Dictionary) -> String:
 	if order_kind == "go_to" or (body != null and is_instance_valid(body) and body.has_meta("npc_scripted_target")):
 		return "scripted"
 	return ""
+
+func _trader_fallback_selection_supersedes_routine(entry: Dictionary) -> bool:
+	if String(entry.get("job", "")) != "trade":
+		return false
+	if bool(entry.get("traderFallbackSelectionPending", false)):
+		return true
+	return String(entry.get("jobPhase", "idle")) == "idle"
 
 
 func _has_executable_routine_route_intent(entry: Dictionary) -> bool:
@@ -475,6 +496,9 @@ func _advance_job_motion(entry: Dictionary, body: Node3D, delta: float) -> Dicti
 	if phase == "searching" and bool(entry.get("forageSearchWaiting", false)):
 		entry["lastMoveDistance"] = 0.0
 		return { "advanced": false, "reason": "forage_no_new_search_anchor", "intentKind": "forage" }
+	if phase == "searching" and bool(entry.get("traderFallbackSelectionPending", false)):
+		entry["lastMoveDistance"] = 0.0
+		return { "advanced": false, "reason": "trader_fallback_target_selection_pending", "intentKind": "work" }
 	if phase in ["outbound", "searching"] and (
 		_inside_home_now(entry, body)
 		or _inside_home_bounds_now(entry, body.global_position)
@@ -762,13 +786,16 @@ func _execute_home_route_v2(entry: Dictionary, body: Node3D, delta: float, speed
 			return _plan_and_commit_home_v2_route(entry, body, authority, substrate, world, {}, delta, speed)
 		return _execute_home_v2_lease(entry, body, authority, executor, active, delta, speed)
 	if state == "probing" and entry.get("_homeRouteV2Route", {}) is Dictionary:
+		var active_request_id := String(active.get("requestId", ""))
 		var authority_route: Dictionary = active.get("route", {}) if active.get("route", {}) is Dictionary else {}
 		var stored_route: Dictionary = authority_route if not authority_route.is_empty() else entry.get("_homeRouteV2Route", {})
 		var stored_intent: Dictionary = entry.get("_homeRouteV2Intent", {}) if entry.get("_homeRouteV2Intent", {}) is Dictionary else _home_v2_intent(entry, [])
 		var probe_start_cell := _home_v2_world_cell(world, body.global_position)
 		var probe_candidate_cells := _home_v2_candidate_cells(entry, probe_start_cell, world)
-		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _home_v2_plan_options(body.global_position))
-		var probe_result: Dictionary = authority.commit_route_after_probe(entry, String(active.get("requestId", "")), stored_route, stored_intent, probe_options)
+		var resumed_plan_options := _home_v2_plan_options(body.global_position)
+		resumed_plan_options["requestIdentity"] = active_request_id
+		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, resumed_plan_options)
+		var probe_result: Dictionary = authority.commit_route_after_probe(entry, active_request_id, stored_route, stored_intent, probe_options)
 		_update_v2_stored_route_from_authority(entry, "_homeRouteV2Route", probe_result)
 		entry["homeRouteV2LastAuthority"] = probe_result
 		if String(probe_result.get("state", "")) in ["ready", "moving"]:
@@ -777,10 +804,12 @@ func _execute_home_route_v2(entry: Dictionary, body: Node3D, delta: float, speed
 	if state in ["queued", "pending_nav_data", "pending_budget"]:
 		return _plan_and_commit_home_v2_route(entry, body, authority, substrate, world, active, delta, speed)
 	if state == "blocked_dynamic":
+		_evict_route_candidate_cache_for_request(String(active.get("requestId", "")))
 		if not _home_v2_dynamic_retry_due(entry):
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		entry.erase("homeRouteV2RequestId")
 	if state in ["unreachable_static", "invalid_goal", "arrived", "cancelled"]:
+		_evict_route_candidate_cache_for_request(String(active.get("requestId", "")))
 		if not bool(entry.get("routeForceReplan", false)):
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0 }
 		entry.erase("homeRouteV2RequestId")
@@ -806,13 +835,19 @@ func _plan_and_commit_home_v2_route(entry: Dictionary, body: Node3D, authority, 
 	var intent := _home_v2_intent(entry, candidate_cells)
 	entry["_homeRouteV2Intent"] = intent.duplicate(true)
 	var plan_options := _home_v2_plan_options(body.global_position, planning_budget)
+	plan_options["requestIdentity"] = request_id
 	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
+	_settle_v2_planning_budget(authority, request_id, route)
 	entry["homeRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
+		var route_classification := String(route.get("classification", route.get("status", "")))
+		if not route_classification in ["pending_budget", "pending_nav_data"]:
+			_evict_route_candidate_cache_for_request(request_id)
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
 		entry["homeRouteV2LastAuthority"] = failure
 		return _home_v2_pending_or_failure_result(failure)
+	_evict_route_candidate_cache_for_request(request_id)
 	entry["_homeRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
 	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
@@ -886,6 +921,16 @@ func _claim_v2_planning_budget(authority, request_id: String, reason: String) ->
 	if authority != null and authority.has_method("claim_planning_budget"):
 		return authority.claim_planning_budget(request_id, reason)
 	return { "ok": true, "granted": true, "requestId": request_id, "state": "queued", "reason": reason }
+
+
+func _settle_v2_planning_budget(authority, request_id: String, route := {}) -> Dictionary:
+	var actual_expansions := 0
+	if route is Dictionary:
+		var proof: Dictionary = (route as Dictionary).get("proof", {}) if (route as Dictionary).get("proof", {}) is Dictionary else {}
+		actual_expansions = maxi(0, int(proof.get("expansionsThisCall", 0)))
+	if authority != null and authority.has_method("settle_planning_budget"):
+		return authority.settle_planning_budget(request_id, actual_expansions)
+	return { "ok": true, "requestId": request_id, "actualExpansions": actual_expansions }
 
 
 func _report_v2_route_repair(authority, request_id: String, reason: String, details := {}) -> void:
@@ -1066,14 +1111,18 @@ func _home_v2_plan_options(start_position: Vector3, planning_budget := {}) -> Di
 		"ignoreDynamic": false,
 		"startPosition": start_position,
 		"maxExpansions": HOME_V2_ROUTE_MAX_EXPANSIONS,
-		"expansionsPerCall": _v2_route_search_expansions(planning_budget)
+		"expansionsPerCall": _v2_route_search_expansions(planning_budget),
+		"validationStepsPerCall": _v2_route_validation_steps(planning_budget),
+		"cheapStepsPerCall": _v2_route_cheap_steps(planning_budget)
 	}
 
 
 func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_position: Vector3, planning_budget := {}, use_staged_guard_budget := false) -> Dictionary:
 	var expansions_per_call := _v2_route_search_expansions(planning_budget)
+	var validation_steps_per_call := _v2_route_validation_steps(planning_budget)
 	if use_staged_guard_budget:
 		expansions_per_call = mini(GUARD_V2_ROUTE_EXPANSIONS_PER_CALL, expansions_per_call)
+		validation_steps_per_call = mini(GUARD_V2_ROUTE_VALIDATION_STEPS_PER_CALL, validation_steps_per_call)
 	return {
 		"allowOutside": allow_outside,
 		"movingHome": semantic_kind == "home_interior",
@@ -1081,7 +1130,9 @@ func _routine_v2_plan_options(allow_outside: bool, semantic_kind: String, start_
 		"semanticKind": semantic_kind,
 		"startPosition": start_position,
 		"maxExpansions": ROUTINE_V2_ROUTE_MAX_EXPANSIONS,
-		"expansionsPerCall": expansions_per_call
+		"expansionsPerCall": expansions_per_call,
+		"validationStepsPerCall": validation_steps_per_call,
+		"cheapStepsPerCall": _v2_route_cheap_steps(planning_budget)
 	}
 
 
@@ -1089,6 +1140,18 @@ func _v2_route_search_expansions(planning_budget) -> int:
 	if planning_budget is Dictionary:
 		return maxi(1, int((planning_budget as Dictionary).get("routeSearchExpansions", V2_ROUTE_EXPANSIONS_PER_CALL)))
 	return V2_ROUTE_EXPANSIONS_PER_CALL
+
+
+func _v2_route_validation_steps(planning_budget) -> int:
+	if planning_budget is Dictionary:
+		return maxi(1, int((planning_budget as Dictionary).get("routeValidationSteps", V2_ROUTE_VALIDATION_STEPS_PER_CALL)))
+	return V2_ROUTE_VALIDATION_STEPS_PER_CALL
+
+
+func _v2_route_cheap_steps(planning_budget) -> int:
+	if planning_budget is Dictionary:
+		return maxi(1, int((planning_budget as Dictionary).get("routeCheapSteps", V2_ROUTE_CHEAP_STEPS_PER_CALL)))
+	return V2_ROUTE_CHEAP_STEPS_PER_CALL
 
 
 func _v2_probe_repair_commit_options(substrate, start_cell: Vector2i, candidate_cells: Array, plan_options: Dictionary) -> Dictionary:
@@ -1174,6 +1237,13 @@ func _home_v2_route_debug(route: Dictionary) -> Dictionary:
 		"visitedCount": (route.get("visited", []) as Array).size() if route.get("visited", []) is Array else 0,
 		"totalVisitedCount": int(proof.get("visitedCount", 0)),
 		"expansions": int(proof.get("expansions", 0)),
+		"searchPhase": String(proof.get("searchPhase", "")),
+		"preflightIndex": int(proof.get("preflightIndex", 0)),
+		"candidateCount": int(proof.get("candidateCount", 0)),
+		"validationStepsThisCall": int(proof.get("validationStepsThisCall", 0)),
+		"validationStepLimit": int(proof.get("validationStepLimit", 0)),
+		"finalizeIndex": int(proof.get("finalizeIndex", 0)),
+		"finalizationRestartCount": int(proof.get("finalizationRestartCount", 0)),
 		"searchStartedRevision": String(proof.get("searchStartedRevision", "")),
 		"searchSnapshotRevision": String(proof.get("searchSnapshotRevision", "")),
 		"searchSnapshotChanged": bool(proof.get("searchSnapshotChanged", false)),
@@ -1218,13 +1288,16 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 			return _plan_and_commit_routine_v2_route(entry, body, authority, substrate, world, {}, delta, speed, intent_kind, target, semantic_kind, allow_outside, priority, reason, route_key)
 		return _execute_routine_v2_lease(entry, body, authority, executor, active, delta, speed, intent_kind, semantic_kind)
 	if state == "probing" and entry.get("_routineRouteV2Route", {}) is Dictionary and String(entry.get("routineRouteV2Key", "")) == route_key:
+		var active_request_id := String(active.get("requestId", ""))
 		var authority_route: Dictionary = active.get("route", {}) if active.get("route", {}) is Dictionary else {}
 		var stored_route: Dictionary = authority_route if not authority_route.is_empty() else entry.get("_routineRouteV2Route", {})
 		var stored_intent: Dictionary = entry.get("_routineRouteV2Intent", {}) if entry.get("_routineRouteV2Intent", {}) is Dictionary else _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, [], allow_outside, priority, reason)
 		var probe_start_cell := _home_v2_world_cell(world, body.global_position)
 		var probe_candidate_cells: Array = stored_intent.get("candidateCells", []) if stored_intent.get("candidateCells", []) is Array else []
-		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position))
-		var probe_result: Dictionary = authority.commit_route_after_probe(entry, String(active.get("requestId", "")), stored_route, stored_intent, probe_options)
+		var resumed_plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position)
+		resumed_plan_options["requestIdentity"] = active_request_id
+		var probe_options := _v2_probe_repair_commit_options(substrate, probe_start_cell, probe_candidate_cells, resumed_plan_options)
+		var probe_result: Dictionary = authority.commit_route_after_probe(entry, active_request_id, stored_route, stored_intent, probe_options)
 		_update_v2_stored_route_from_authority(entry, "_routineRouteV2Route", probe_result)
 		entry["routineRouteV2LastAuthority"] = probe_result
 		if String(probe_result.get("state", "")) in ["ready", "moving"]:
@@ -1239,6 +1312,7 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		_cancel_routine_v2_request(authority, entry, "blocked_dynamic_retry")
 	if state in ["unreachable_static", "invalid_goal", "arrived", "cancelled"]:
+		_evict_route_candidate_cache_for_request(String(active.get("requestId", "")))
 		if not bool(entry.get("routeForceReplan", false)) and String(entry.get("routineRouteV2Key", "")) == route_key:
 			return { "ok": state == "arrived", "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		_cancel_routine_v2_request(authority, entry, "routine_target_changed")
@@ -1269,41 +1343,71 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 	var candidate_start: int = monitor.begin_section("npc_routine_v2_candidates") if monitor != null else Time.get_ticks_usec()
 	var candidate_options := {
 		"allowOutside": allow_outside,
-		"movingHome": moving_home
+		"movingHome": moving_home,
+		"requestIdentity": request_id,
+		"candidateValidationsPerCall": V2_CANDIDATE_VALIDATIONS_PER_CALL
 	}
 	if use_staged_guard_budget:
 		candidate_options["candidateValidationsPerCall"] = GUARD_V2_CANDIDATE_VALIDATIONS_PER_CALL
 	var candidates_result: Dictionary = substrate.candidate_poses_for_target(entry, target_data, semantic_kind, candidate_options)
 	candidate_ms = monitor.end_section("npc_routine_v2_candidates", candidate_start) if monitor != null else float(Time.get_ticks_usec() - candidate_start) / 1000.0
 	entry["routineRouteV2LastCandidates"] = candidates_result
+	var candidate_validations := maxi(0, int(candidates_result.get("candidateValidationsThisCall", (candidates_result.get("candidateProgress", {}) as Dictionary).get("validatedThisCall", 0) if candidates_result.get("candidateProgress", {}) is Dictionary else 0)))
+	var granted_validations := maxi(1, int(planning_budget.get("routeValidationSteps", V2_ROUTE_VALIDATION_STEPS_PER_CALL)))
+	var remaining_validations := maxi(0, granted_validations - candidate_validations)
 	if String(candidates_result.get("classification", "")) == "pending_budget":
+		_settle_v2_planning_budget(authority, request_id)
+		entry["routineRouteV2LastValidationBudget"] = { "granted": granted_validations, "candidateUsed": candidate_validations, "planUsed": 0, "totalUsed": candidate_validations, "remaining": remaining_validations }
 		var pending_candidates: Dictionary = authority.mark_pending_budget(request_id, String(candidates_result.get("reason", "candidate_validation_deferred")))
 		entry["routineRouteV2LastAuthority"] = pending_candidates
 		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "candidate_budget")
 		return _routine_v2_pending_or_failure_result(pending_candidates)
 	var candidate_cells := _routine_v2_candidate_cells(candidates_result)
 	if candidate_cells.is_empty():
+		_settle_v2_planning_budget(authority, request_id)
+		_evict_route_candidate_cache_for_request(request_id)
 		var invalid_result: Dictionary = authority.report_invalid_goal(request_id, String(candidates_result.get("reason", "no_routeable_candidate_pose")))
 		entry["routineRouteV2LastAuthority"] = invalid_result
 		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "invalid_goal")
 		return _routine_v2_pending_or_failure_result(invalid_result)
+	if remaining_validations <= 0:
+		_settle_v2_planning_budget(authority, request_id)
+		entry["routineRouteV2LastValidationBudget"] = { "granted": granted_validations, "candidateUsed": candidate_validations, "planUsed": 0, "totalUsed": candidate_validations, "remaining": 0 }
+		var pending_shared_budget: Dictionary = authority.mark_pending_budget(request_id, "candidate_validation_consumed_shared_budget")
+		entry["routineRouteV2LastAuthority"] = pending_shared_budget
+		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "shared_validation_budget")
+		return _routine_v2_pending_or_failure_result(pending_shared_budget)
 	var intent := _routine_v2_intent(entry, intent_kind, semantic_kind, target, target_cell, candidate_cells, allow_outside, priority, reason)
 	var interaction_claim: Dictionary = intent.get("interactionClaim", {}) if intent.get("interactionClaim", {}) is Dictionary else {}
 	interaction_claim["routeGeneration"] = int(request.get("generation", 0))
 	intent["interactionClaim"] = interaction_claim
 	entry["_routineRouteV2Intent"] = intent.duplicate(true)
 	var plan_options := _routine_v2_plan_options(allow_outside, semantic_kind, body.global_position, planning_budget, use_staged_guard_budget)
+	plan_options["validationStepsPerCall"] = remaining_validations
+	plan_options["requestIdentity"] = request_id
+	plan_options["prevalidatedGoalCells"] = candidate_cells.duplicate()
+	plan_options["prevalidatedGoalSnapshotRevision"] = String(candidates_result.get("candidateSnapshotRevision", ""))
 	plan_options = _v2_plan_options_with_probe_repair_avoidance(plan_options, active)
 	var plan_start: int = monitor.begin_section("npc_routine_v2_plan") if monitor != null else Time.get_ticks_usec()
 	var route: Dictionary = substrate.plan_route(entry, start_cell, candidate_cells, plan_options)
 	plan_ms = monitor.end_section("npc_routine_v2_plan", plan_start) if monitor != null else float(Time.get_ticks_usec() - plan_start) / 1000.0
+	var plan_timing_profile: Dictionary = substrate.take_last_plan_timing_profile() if substrate.has_method("take_last_plan_timing_profile") else {}
+	_publish_routine_v2_plan_timing(entry, plan_timing_profile, plan_ms, monitor)
+	_settle_v2_planning_budget(authority, request_id, route)
+	var route_proof: Dictionary = route.get("proof", {}) if route.get("proof", {}) is Dictionary else {}
+	var plan_validations := maxi(0, int(route_proof.get("validationStepsThisCall", 0)))
+	entry["routineRouteV2LastValidationBudget"] = { "granted": granted_validations, "candidateUsed": candidate_validations, "planUsed": plan_validations, "totalUsed": candidate_validations + plan_validations, "remaining": maxi(0, remaining_validations - plan_validations) }
 	entry["routineRouteV2LastPlan"] = _home_v2_route_debug(route)
 	if not bool(route.get("ok", false)):
+		var route_classification := String(route.get("classification", route.get("status", "")))
+		if not route_classification in ["pending_budget", "pending_nav_data"]:
+			_evict_route_candidate_cache_for_request(request_id)
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
 		entry["routineRouteV2LastAuthority"] = failure
 		_record_routine_v2_planning_profile(entry, intent_kind, semantic_kind, reason, candidate_ms, plan_ms, probe_commit_ms, "route_failure")
 		return _routine_v2_pending_or_failure_result(failure)
 	route["interactionClaim"] = interaction_claim.duplicate(true)
+	_evict_route_candidate_cache_for_request(request_id)
 	entry["_routineRouteV2Route"] = route.duplicate(true)
 	entry["routeForceReplan"] = false
 	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options)
@@ -1316,6 +1420,82 @@ func _plan_and_commit_routine_v2_route(entry: Dictionary, body: Node3D, authorit
 	if String(commit.get("state", "")) in ["ready", "moving"]:
 		return _execute_routine_v2_lease(entry, body, authority, home_route_executor, commit, _delta, speed, intent_kind, semantic_kind)
 	return _routine_v2_pending_or_failure_result(commit)
+
+
+func _publish_routine_v2_plan_timing(entry: Dictionary, timing_value, outer_plan_ms: float, monitor) -> void:
+	if not (timing_value is Dictionary) or (timing_value as Dictionary).is_empty():
+		entry.erase("routineRouteV2LastPlanTimingProfile")
+		return
+	var timing: Dictionary = (timing_value as Dictionary).duplicate(true)
+	var outer_usec := maxi(0, roundi(maxf(0.0, outer_plan_ms) * 1000.0))
+	var attributed_usec := maxi(0, int(timing.get("totalUsec", 0)))
+	var outer_residual_usec := maxi(0, outer_usec - attributed_usec)
+	timing["outerPlanUsec"] = outer_usec
+	timing["outerResidualUsec"] = outer_residual_usec
+	timing["outerAccountedUsec"] = attributed_usec + outer_residual_usec
+	timing["outerArithmeticBalanced"] = outer_usec == attributed_usec + outer_residual_usec
+	entry["routineRouteV2LastPlanTimingProfile"] = timing
+	if monitor == null:
+		return
+	if not route_plan_detailed_timing_enabled:
+		if not monitor.has_method("observe_gauge"):
+			return
+		# These three latest/max gauges are sufficient to prove the production
+		# slice limits without allocating 14 duration-ring and 11 counter writes
+		# for every route call. The enclosing npc_routine_v2_plan duration is
+		# already sampled independently by the ordinary performance monitor.
+		monitor.observe_gauge(
+			"npc_route_plan_cheap_bookkeeping_residual_ms",
+			float(maxi(0, int(timing.get("cheapBookkeepingResidualUsec", 0)))) / 1000.0
+		)
+		monitor.observe_gauge(
+			"npc_route_plan_cheap_steps_this_call",
+			float(maxi(0, int(timing.get("cheapStepsThisCall", 0))))
+		)
+		monitor.observe_gauge(
+			"npc_route_plan_validator_calls_this_call",
+			float(maxi(0, int(timing.get("validationCount", 0))))
+		)
+		return
+	if not monitor.has_method("observe_external_duration"):
+		return
+	var duration_fields := {
+		"npc_route_plan_snapshot_capture": "snapshotUsec",
+		"npc_route_plan_validator_total": "validationUsec",
+		"npc_route_plan_validator_preflight_goal": "validationPreflightGoalUsec",
+		"npc_route_plan_validator_preflight_start": "validationPreflightStartUsec",
+		"npc_route_plan_validator_search_transition": "validationSearchTransitionUsec",
+		"npc_route_plan_validator_finalize_start": "validationFinalizeStartUsec",
+		"npc_route_plan_validator_finalize_transition": "validationFinalizeTransitionUsec",
+		"npc_route_plan_loop_gross": "loopGrossUsec",
+		"npc_route_plan_door_signature": "doorSignatureUsec",
+		"npc_route_plan_dynamic_signature": "dynamicSignatureUsec",
+		"npc_route_plan_finalization_assembly": "finalizationAssemblyUsec",
+		"npc_route_plan_cheap_bookkeeping_residual": "cheapBookkeepingResidualUsec",
+		"npc_route_plan_setup_residual": "setupResidualUsec",
+		"npc_route_plan_outer_residual": "outerResidualUsec"
+	}
+	for section_name in duration_fields.keys():
+		var duration_field_name := String(duration_fields[section_name])
+		monitor.observe_external_duration(String(section_name), float(maxi(0, int(timing.get(duration_field_name, 0)))) / 1000.0)
+	if not monitor.has_method("increment_counter"):
+		return
+	var count_fields := {
+		"npc_route_plan_validator_calls": "validationCount",
+		"npc_route_plan_validator_preflight_goal_calls": "validationPreflightGoalCount",
+		"npc_route_plan_validator_preflight_start_calls": "validationPreflightStartCount",
+		"npc_route_plan_validator_search_transition_calls": "validationSearchTransitionCount",
+		"npc_route_plan_validator_finalize_start_calls": "validationFinalizeStartCount",
+		"npc_route_plan_validator_finalize_transition_calls": "validationFinalizeTransitionCount",
+		"npc_route_plan_door_signature_cells": "doorSignatureCells",
+		"npc_route_plan_door_signature_doors": "doorSignatureDoors",
+		"npc_route_plan_dynamic_signature_cells": "dynamicSignatureCells",
+		"npc_route_plan_dynamic_signature_occupied": "dynamicSignatureOccupied",
+		"npc_route_plan_cheap_steps": "cheapStepsThisCall"
+	}
+	for counter_name in count_fields.keys():
+		var count_field_name := String(count_fields[counter_name])
+		monitor.increment_counter(String(counter_name), maxi(0, int(timing.get(count_field_name, 0))))
 
 
 func _record_routine_v2_planning_profile(entry: Dictionary, intent_kind: String, semantic_kind: String, reason: String, candidate_ms: float, plan_ms: float, probe_commit_ms: float, outcome: String) -> void:
@@ -1465,6 +1645,7 @@ func _routine_v2_active_summary(authority, entry: Dictionary, route_key: String)
 
 func _cancel_routine_v2_request(authority, entry: Dictionary, reason: String) -> void:
 	var request_id := String(entry.get("routineRouteV2RequestId", ""))
+	_evict_route_candidate_cache_for_request(request_id)
 	if request_id != "" and authority != null and authority.has_method("cancel_request"):
 		_report_v2_route_repair(authority, request_id, reason, {
 			"routeKey": String(entry.get("routineRouteV2Key", ""))
@@ -1482,10 +1663,40 @@ func _cancel_routine_v2_request(authority, entry: Dictionary, reason: String) ->
 
 func _cancel_home_v2_request(authority, entry: Dictionary, reason: String) -> void:
 	var request_id := String(entry.get("homeRouteV2RequestId", ""))
+	_evict_route_candidate_cache_for_request(request_id)
 	if request_id != "" and authority != null and authority.has_method("cancel_request"):
 		_report_v2_route_repair(authority, request_id, reason, {})
 		authority.cancel_request(request_id, reason)
 	_clear_home_v2_route_state(entry)
+
+func evict_route_candidate_cache_for_request(request_id: String) -> int:
+	return _evict_route_candidate_cache_for_request(request_id)
+
+func evict_route_candidate_cache_for_actor(entry_or_actor_id) -> int:
+	if home_route_substrate == null:
+		return 0
+	var removed := 0
+	if home_route_substrate.has_method("evict_candidate_cache_for_actor"):
+		removed += int(home_route_substrate.call("evict_candidate_cache_for_actor", entry_or_actor_id))
+	if home_route_substrate.has_method("evict_search_cache_for_actor"):
+		removed += int(home_route_substrate.call("evict_search_cache_for_actor", entry_or_actor_id))
+	return removed
+
+func route_candidate_cache_census() -> Dictionary:
+	if home_route_substrate == null or not home_route_substrate.has_method("candidate_cache_census"):
+		return { "jobCount": 0, "actorCount": 0 }
+	var census = home_route_substrate.call("candidate_cache_census")
+	return census if census is Dictionary else { "jobCount": 0, "actorCount": 0 }
+
+func _evict_route_candidate_cache_for_request(request_id: String) -> int:
+	if request_id == "" or home_route_substrate == null:
+		return 0
+	var removed := 0
+	if home_route_substrate.has_method("evict_candidate_cache_for_request"):
+		removed += int(home_route_substrate.call("evict_candidate_cache_for_request", request_id))
+	if home_route_substrate.has_method("evict_search_cache_for_request"):
+		removed += int(home_route_substrate.call("evict_search_cache_for_request", request_id))
+	return removed
 
 
 func _routine_v2_pending_or_failure_result(summary: Dictionary) -> Dictionary:
@@ -1552,6 +1763,7 @@ func _preempt_job_for_home(entry: Dictionary) -> void:
 	if not (phase in ["outbound", "searching", "gathering", "returning", "stall"]):
 		return
 	_release_job_reservation(entry, "schedule_home")
+	clear_trader_fallback_target_selection(entry, "schedule_home")
 	entry["jobPhase"] = "idle"
 	entry["jobTimer"] = 0.0
 	entry["jobTargetNode"] = null
@@ -2106,6 +2318,8 @@ func _update_returning_job(entry: Dictionary, body: Node3D, timer: float) -> boo
 func _update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
 	var phase := String(entry.get("jobPhase", "idle"))
 	var timer := float(entry.get("jobTimer", 0.0)) - delta
+	if phase != "searching" and bool(entry.get("traderFallbackSelectionPending", false)):
+		clear_trader_fallback_target_selection(entry, "trader_phase_changed")
 	if phase == "idle":
 		if timer > 0.0 and not _inside_home_now(entry, body):
 			entry["jobTimer"] = timer
@@ -2113,12 +2327,8 @@ func _update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
 			return false
 		var stall := _find_trader_stall(entry)
 		if stall == null:
-			entry["jobTarget"] = _choose_day_target(entry)
-			entry["jobPhase"] = "searching"
-			entry["jobTimer"] = _deterministic_seconds(entry, "trader_stall_search", 3.0, 7.0)
-			_set_npc_goal(entry, "find trader stall")
-			body.set_meta("npc_job_phase", "searching")
-			return true
+			return _begin_trader_fallback_target_selection(entry, body)
+		clear_trader_fallback_target_selection(entry, "trader_stall_found")
 		if not _reserve_station_target(entry, stall, "use_trader_stall"):
 			entry["jobTimer"] = _deterministic_seconds(entry, "trader_reserve_retry", 2.0, 5.0)
 			return false
@@ -2128,7 +2338,10 @@ func _update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
 		body.set_meta("npc_job_phase", "outbound")
 		return true
 	if phase == "searching":
+		if bool(entry.get("traderFallbackSelectionPending", false)):
+			return _advance_trader_fallback_target_selection(entry, body)
 		if timer <= 0.0:
+			clear_trader_fallback_target_selection(entry, "trader_search_complete")
 			entry["jobPhase"] = "idle"
 			entry["jobTimer"] = 0.0
 		else:
@@ -2157,7 +2370,61 @@ func _update_trader_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
 		body.set_meta("npc_job_phase", "stall")
 		return true
 	entry["jobPhase"] = "idle"
+	clear_trader_fallback_target_selection(entry, "trader_phase_reset")
 	entry["jobTimer"] = _deterministic_seconds(entry, "trader_idle_reset", 2.0, 5.0)
+	return false
+
+func _begin_trader_fallback_target_selection(entry: Dictionary, body: Node3D) -> bool:
+	clear_trader_fallback_target_selection(entry, "trader_fallback_restarted")
+	var authority = autonomy_system.get("route_authority_v2") if autonomy_system != null else null
+	_cancel_routine_v2_request(authority, entry, "trader_fallback_target_selection")
+	var serial := int(entry.get("traderFallbackRequestSerial", 0)) + 1
+	entry["traderFallbackRequestSerial"] = serial
+	entry["traderFallbackRequestId"] = "%s:trader-fallback:%d" % [String(entry.get("id", "npc")), serial]
+	entry["traderFallbackSelectionPending"] = true
+	entry["jobPhase"] = "searching"
+	entry["jobTimer"] = 0.0
+	entry.erase("jobTarget")
+	entry["routeForceReplan"] = false
+	_set_npc_goal(entry, "find trader stall")
+	body.set_meta("npc_job_phase", "searching")
+	return _advance_trader_fallback_target_selection(entry, body)
+
+func _advance_trader_fallback_target_selection(entry: Dictionary, body: Node3D) -> bool:
+	var request_id := String(entry.get("traderFallbackRequestId", ""))
+	var result: Dictionary
+	if npc_system != null and npc_system.has_method("advance_trader_fallback_target"):
+		result = npc_system.call("advance_trader_fallback_target", entry, request_id)
+	else:
+		result = {"status":"ready", "reason":"legacy_selector", "target":_choose_day_target(entry)}
+	var status := String(result.get("status", "exhausted"))
+	if status == "pending":
+		entry["traderFallbackSelectionPending"] = true
+		entry.erase("jobTarget")
+		entry["jobTimer"] = 0.0
+		entry["routeForceReplan"] = false
+		NpcRouteStateStoreScript.write_status(entry, "waiting", "trader_fallback_target_selection_pending", "NpcPlanExecutor.trader_fallback")
+		return true
+	if status == "ready" and result.get("target", null) is Vector3:
+		var target: Vector3 = result.get("target", body.global_position)
+		clear_trader_fallback_target_selection(entry, "trader_fallback_ready")
+		entry["jobTarget"] = target
+		entry["jobPhase"] = "searching"
+		entry["jobTimer"] = _deterministic_seconds(entry, "trader_stall_search", 3.0, 7.0)
+		_set_npc_goal(entry, "find trader stall")
+		body.set_meta("npc_job_phase", "searching")
+		return true
+	clear_trader_fallback_target_selection(entry, "trader_fallback_%s" % status)
+	entry.erase("jobTarget")
+	entry["jobPhase"] = "idle"
+	entry["routeForceReplan"] = false
+	if status == "invalidated":
+		entry["jobTimer"] = 0.0
+		NpcRouteStateStoreScript.write_status(entry, "waiting", String(result.get("reason", "trader_fallback_invalidated")), "NpcPlanExecutor.trader_fallback")
+	else:
+		entry["jobTimer"] = _deterministic_seconds(entry, "trader_fallback_retry", 2.0, 5.0)
+		NpcRouteStateStoreScript.write_status(entry, "blocked", String(result.get("reason", "no_reachable_wander_anchor")), "NpcPlanExecutor.trader_fallback")
+	body.set_meta("npc_job_phase", "idle")
 	return false
 
 func _update_forager_goal(entry: Dictionary, body: Node3D, delta: float) -> bool:
@@ -2619,6 +2886,14 @@ func _choose_day_target(entry: Dictionary) -> Vector3:
 		return npc_system.call("choose_day_target", entry)
 	return entry.get("porchPosition", Vector3.ZERO)
 
+func clear_trader_fallback_target_selection(entry: Dictionary, reason := "cancelled") -> void:
+	if npc_system != null and npc_system.has_method("clear_trader_fallback_target_selection"):
+		npc_system.call("clear_trader_fallback_target_selection", entry, reason)
+	else:
+		entry.erase("_traderFallbackSelection")
+		entry.erase("traderFallbackSelectionPending")
+	entry.erase("traderFallbackRequestId")
+
 func _choose_job_target(entry: Dictionary) -> Vector3:
 	if npc_system != null and npc_system.has_method("choose_job_target"):
 		return npc_system.call("choose_job_target", entry)
@@ -2834,6 +3109,7 @@ func _publish_debug(entry: Dictionary, blackboard, goal: Dictionary, plan: Dicti
 		body.set_meta("npc_inside_home", bool(perception.get("insideHome", false)))
 
 func _release_action_owned_state(entry: Dictionary, reason: String) -> void:
+	clear_trader_fallback_target_selection(entry, reason)
 	var body := entry.get("body") as Node
 	if autonomy_system != null:
 		if autonomy_system.has_method("release_npc_traffic_reservations"):

@@ -8,6 +8,10 @@ const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRoute
 const STATE_ACTIVE := "active"
 const STATE_NEARBY := "nearby"
 const STATE_ABSTRACT := "abstract"
+const PREFETCH_MIN_INTERVAL_FRAMES := 15
+const PREFETCH_MAX_TILES_PER_PASS := 4
+const PREFETCH_MAX_ROUTE_CELLS_PER_PASS := 64
+const INVALID_ROUTE_CELL := Vector2i(999999, 999999)
 
 const TRANSIENT_SAVE_KEYS := [
 	"routeCells",
@@ -28,6 +32,10 @@ const TRANSIENT_SAVE_KEYS := [
 	"activeDoorTrafficGroupId",
 	"jobReservationId",
 	"jobApproachSlotId",
+	"_traderFallbackSelection",
+	"traderFallbackSelectionPending",
+	"traderFallbackRequestId",
+	"traderFallbackRequestSerial",
 	"trafficWaitReason",
 	"npc_requested_velocity",
 	"npc_applied_velocity",
@@ -40,7 +48,10 @@ const TRANSIENT_SAVE_KEYS := [
 	"routePhysicsServiceLastFrame",
 	"routePhysicsServiceKind",
 	"routePhysicsServiceReason",
-	"routePhysicsServiceSinceBrainFrames"
+	"routePhysicsServiceSinceBrainFrames",
+	"npcLodPrefetchFrame",
+	"npcLodPrefetchSignature",
+	"npcLodPrefetchCursor"
 ]
 
 var autonomy_system = null
@@ -178,6 +189,21 @@ func active_forage_lifecycle_requires_active_simulation(entry: Dictionary) -> bo
 	if goal_kind != "forage":
 		return false
 	return String(entry.get("jobPhase", "")) in ["searching", "outbound", "gathering", "returning"]
+
+## Physical streaming follows the LOD authority rather than Node lifetime.
+## Abstract bodies intentionally remain registered and in-tree for durable NPC
+## identity, but stationary abstract actors do not own terrain or navigation.
+## An accepted route-backed order or active forage lifecycle retains demand so
+## its ordinary promotion remains retryable instead of losing its destination.
+func requires_physical_streaming(entry: Dictionary) -> bool:
+	if String(entry.get("simulationLod", STATE_ACTIVE)) != STATE_ABSTRACT:
+		return true
+	if route_order_requires_active_simulation(entry) or active_forage_lifecycle_requires_active_simulation(entry):
+		return true
+	if bool(entry.get("requiredVisibleScripted", false)) or bool(entry.get("visibleScriptedSequence", false)):
+		return true
+	var body_value = entry.get("body")
+	return is_instance_valid(body_value) and bool((body_value as Node).get_meta("npc_required_visible_sequence", false))
 
 func classify_distance(distance: float, previous_state := STATE_ACTIVE) -> String:
 	if previous_state == STATE_ACTIVE:
@@ -340,10 +366,18 @@ func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 		"traffic": 0,
 		"smartObjects": 0,
 		"doorHolds": 0,
+		"routeRequests": 0,
+		"routeJobs": 0,
+		"approachJobs": 0,
 		"routeState": 0,
 		"avoidance": 0
 	}
 	if autonomy_system != null:
+		if autonomy_system.has_method("cancel_and_evict_route_work_for_actor"):
+			var route_release: Dictionary = autonomy_system.cancel_and_evict_route_work_for_actor(entry, reason)
+			released["routeRequests"] = 1 if bool(route_release.get("cancelled", false)) else 0
+			released["routeJobs"] = int(route_release.get("evictedJobs", 0))
+			released["approachJobs"] = int(route_release.get("evictedApproachJobs", 0))
 		if autonomy_system.has_method("release_npc_traffic_reservations"):
 			released["traffic"] = int(autonomy_system.release_npc_traffic_reservations(actor_id, reason))
 		if autonomy_system.has_method("release_npc_door_hold"):
@@ -372,11 +406,26 @@ func clear_transient_entry_state(entry: Dictionary) -> void:
 func prefetch_for_entry(entry: Dictionary, margin_cells := NpcConstantsScript.LOD_PREFETCH_BOUNDARY_MARGIN_CELLS) -> Dictionary:
 	if autonomy_system == null or not autonomy_system.has_method("request_navigation_tile"):
 		return { "requested": [], "reason": "missing_navigation_world" }
+	var frame := Engine.get_process_frames()
+	var route_signature := String(entry.get("routeKey", entry.get("routeRequestId", "")))
+	if route_signature.is_empty():
+		var route_cells = entry.get("routeCells", [])
+		var goal = entry.get("routeGoalCell")
+		route_signature = "%d:%s:%s" % [route_cells.size() if route_cells is Array else 0,
+			str(route_cells[0]) if route_cells is Array and not route_cells.is_empty() else "", str(goal)]
+	var previous_signature := String(entry.get("npcLodPrefetchSignature", ""))
+	var previous_frame := int(entry.get("npcLodPrefetchFrame", -PREFETCH_MIN_INTERVAL_FRAMES))
+	if route_signature == previous_signature and frame - previous_frame < PREFETCH_MIN_INTERVAL_FRAMES:
+		return { "requested": [], "reason": "prefetch_paced" }
 	var cells := route_cells_for_entry(entry)
 	if cells.is_empty():
 		return { "requested": [], "reason": "no_route" }
-	var requested := []
-	for cell in cells:
+	var boundary_tiles: Dictionary = {}
+	var cursor := 0 if route_signature != previous_signature else posmod(int(entry.get("npcLodPrefetchCursor", 0)),cells.size())
+	var scanned := 0
+	while scanned<mini(PREFETCH_MAX_ROUTE_CELLS_PER_PASS,cells.size()) and boundary_tiles.size()<PREFETCH_MAX_TILES_PER_PASS:
+		var cell = cells[(cursor+scanned)%cells.size()]
+		scanned += 1
 		if not (cell is Vector2i):
 			continue
 		var tile_key := tile_key_for_cell(cell)
@@ -385,8 +434,18 @@ func prefetch_for_entry(entry: Dictionary, margin_cells := NpcConstantsScript.LO
 		var near_boundary := local_x <= margin_cells or local_y <= margin_cells or local_x >= NpcConstantsScript.NAV_TILE_CELL_SIZE - 1 - margin_cells or local_y >= NpcConstantsScript.NAV_TILE_CELL_SIZE - 1 - margin_cells
 		if not near_boundary:
 			continue
-		var result: Dictionary = autonomy_system.request_navigation_tile({ "tileKey": tile_key, "centerCell": cell }, 10, entry.get("motorProfile"))
-		requested.append({ "tileKey": tile_key, "result": result })
+		boundary_tiles[tile_key] = cell
+	var tile_keys: Array = boundary_tiles.keys()
+	tile_keys.sort()
+	var requested := []
+	if not tile_keys.is_empty():
+		for tile_key: String in tile_keys:
+			var cell: Vector2i = boundary_tiles[tile_key]
+			var result: Dictionary = autonomy_system.request_navigation_tile({ "tileKey": tile_key, "centerCell": cell }, 10, entry.get("motorProfile"))
+			requested.append({ "tileKey": tile_key, "result": result })
+	entry["npcLodPrefetchCursor"] = (cursor+scanned)%cells.size()
+	entry["npcLodPrefetchFrame"] = frame
+	entry["npcLodPrefetchSignature"] = route_signature
 	counters["prefetchRequests"] = int(counters.get("prefetchRequests", 0)) + requested.size()
 	return { "requested": requested, "reason": "boundary_prefetch" if not requested.is_empty() else "not_near_boundary" }
 
@@ -560,9 +619,11 @@ func promotion_position(entry: Dictionary, context: Dictionary) -> Vector3:
 func route_cells_for_entry(entry: Dictionary) -> Array:
 	var cells := []
 	if entry.get("routeCells", []) is Array:
-		cells.append_array(entry.get("routeCells", []))
+		for cell in entry.get("routeCells", []):
+			if cell is Vector2i and cell != INVALID_ROUTE_CELL:
+				cells.append(cell)
 	var goal = entry.get("routeGoalCell")
-	if goal is Vector2i:
+	if goal is Vector2i and goal != INVALID_ROUTE_CELL:
 		cells.append(goal)
 	return cells
 

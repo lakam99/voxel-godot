@@ -7,9 +7,11 @@ extends "res://scripts/testing/buildings/FurnishedCottageWalkthroughRunner.gd"
 
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const CastleFurnishingPlannerScript := preload("res://scripts/buildings/CastleFurnishingPlanner.gd")
+const BuildingCollisionProbeScript := preload("res://scripts/buildings/BuildingCollisionProbe.gd")
 
 var registered_door_count := 0
 var selected_citadel_scale := 6.0
+var review_capture_dir := ""
 var walkthrough_ground_body: StaticBody3D
 var walkthrough_ground_shape: CollisionShape3D
 var walkthrough_ground_mesh: PlaneMesh
@@ -20,6 +22,8 @@ func _ready() -> void:
 	build_world()
 	build_hud()
 	await rebuild_fixture(false)
+	if blueprint == null:
+		return
 	spawn_player()
 	update_hud()
 	if not report_path.is_empty():
@@ -38,6 +42,7 @@ func read_arguments() -> void:
 	selected_style = "masonry"
 	capture_path = OS.get_environment("VOXEL_CASTLE_WALKTHROUGH_CAPTURE")
 	report_path = OS.get_environment("VOXEL_CASTLE_WALKTHROUGH_REPORT")
+	review_capture_dir = OS.get_environment("VOXEL_CASTLE_WALKTHROUGH_SCREENSHOT_DIR")
 
 
 func build_world() -> void:
@@ -101,13 +106,17 @@ func rebuild_fixture(reset_player := true) -> void:
 	# Give the loading text one visible frame before the deterministic recipe
 	# builder performs its bounded synchronous sampling work.
 	await get_tree().process_frame
-	blueprint = CastleCompoundBlueprintBuilderScript.build(selected_seed, {
-		"biome": "forest",
-		# Match the exterior Castle PoC context so a seed identifies the same
-		# compound in both review modes rather than a walkthrough-only variant.
-		"siteKey": "river-citadel",
-		"citadelScale": selected_citadel_scale
-	})
+	blueprint = await prepare_castle_blueprint()
+	if blueprint == null:
+		set_loading("Castle blueprint construction failed")
+		is_rebuilding = false
+		if not report_path.is_empty():
+			var failure := FileAccess.open(report_path, FileAccess.WRITE)
+			if failure != null:
+				failure.store_string(JSON.stringify({"status": "failed", "reason": "blueprint_construction_failed", "seed": selected_seed, "citadelScale": selected_citadel_scale}))
+		push_error("Castle blueprint construction failed; publication cancelled")
+		get_tree().quit(2)
+		return
 	configure_walkthrough_ground()
 	await get_tree().process_frame
 
@@ -123,7 +132,13 @@ func rebuild_fixture(reset_player := true) -> void:
 	# constructed it.  The castle planner only applies the residence transform
 	# and namespace, then the shared publisher owns visual/collision publication.
 	await get_tree().process_frame
-	furnishing_plan = CastleFurnishingPlannerScript.build(blueprint, selected_seed * 7919 + 37)
+	furnishing_plan = await prepare_castle_furnishings()
+	if furnishing_plan == null:
+		set_loading("Castle furnishing preparation failed")
+		is_rebuilding = false
+		push_error("Castle furnishings are incomplete; publication cancelled")
+		get_tree().quit(2)
+		return
 	furnishing_root = Node3D.new()
 	furnishing_root.name = "PublishedCastleWalkthroughFurnishings"
 	add_child(furnishing_root)
@@ -143,6 +158,26 @@ func rebuild_fixture(reset_player := true) -> void:
 	is_rebuilding = false
 	set_loading_visible(false)
 	update_hud()
+
+
+func prepare_castle_blueprint():
+	# Specializations may keep source-only composition on an owned worker;
+	# scene publication below always remains on the main thread.
+	return build_castle_blueprint()
+
+
+func prepare_castle_furnishings():
+	return CastleFurnishingPlannerScript.build(blueprint, selected_seed * 7919 + 37)
+
+
+func build_castle_blueprint():
+	return CastleCompoundBlueprintBuilderScript.build(selected_seed, {
+		"biome": "forest",
+		# Match the exterior Castle PoC context so a seed identifies the same
+		# compound in both review modes rather than a walkthrough-only variant.
+		"siteKey": "river-citadel",
+		"citadelScale": selected_citadel_scale
+	})
 
 
 func configure_walkthrough_ground() -> void:
@@ -256,17 +291,23 @@ func write_automated_report() -> void:
 		await get_tree().process_frame
 	var gate_portal_check := await verify_gate_portal_contract()
 	var courtyard_entry_check := verify_published_courtyard_entry_orientation()
+	var physical_integrity: Dictionary = blueprint.validate_physical_integrity() if blueprint != null else {"passed": false}
+	var walkable_surface_collision: Dictionary = await BuildingCollisionProbeScript.audit_explicit_walkable_surfaces(self, player, cottage_root, blueprint.parts) if blueprint != null else {"passed": false}
 	var expected_residences := (blueprint.recipe.get("courtyardResidences", []) as Array).size() if blueprint != null else 0
 	var courtyard_furnishing := CastleFurnishingPlannerScript.summary(furnishing_plan, expected_residences)
+	var review_captures := await capture_review_views()
 	var report := {
 		"runnerId": "castle_walkthrough",
 		"evidenceLevel": "headed-fixture-startup + published-door transform audit + direct door-service contract",
-		"status": "passed" if blueprint != null and front_door != null and registered_door_count >= 2 and bool(gate_portal_check.get("passed", false)) and bool(courtyard_entry_check.get("passed", false)) and bool(courtyard_furnishing.get("allResidencesFurnished", false)) and not is_rebuilding else "failed",
+		"status": "passed" if blueprint != null and front_door != null and registered_door_count >= 2 and bool(physical_integrity.get("passed", false)) and bool(walkable_surface_collision.get("passed", false)) and bool(gate_portal_check.get("passed", false)) and bool(courtyard_entry_check.get("passed", false)) and bool(courtyard_furnishing.get("allResidencesFurnished", false)) and not is_rebuilding else "failed",
 		"seed": selected_seed,
 		"recipe": blueprint.recipe if blueprint != null else {},
 		"buildingPublication": building_publisher.summary() if building_publisher != null else {},
 		"furnishingPublication": furnishing_publisher.summary() if furnishing_publisher != null else {},
 		"courtyardFurnishing": courtyard_furnishing,
+		"physicalIntegrity": physical_integrity,
+		"walkableSurfaceCollision": walkable_surface_collision,
+		"reviewCaptures": review_captures,
 		"registeredDoorCount": registered_door_count,
 		"gatePortalCheck": gate_portal_check,
 		"courtyardEntryCheck": courtyard_entry_check,
@@ -282,6 +323,121 @@ func write_automated_report() -> void:
 		file.store_string(JSON.stringify(report, "\t"))
 		file.close()
 	get_tree().quit(0 if String(report.get("status", "failed")) == "passed" else 1)
+
+
+func capture_review_views() -> Array[Dictionary]:
+	var captures: Array[Dictionary] = []
+	if review_capture_dir.is_empty() or player == null or blueprint == null:
+		return captures
+	DirAccess.make_dir_recursive_absolute(review_capture_dir)
+	player.set_physics_process(false)
+	set_loading_visible(false)
+	if front_door != null and door_service != null:
+		door_service.request_door_state(front_door, true, player, "player", {"actors": [player]})
+	var hidden_layers: Array[CanvasLayer] = []
+	for child in get_children():
+		if child is CanvasLayer and child.visible:
+			hidden_layers.append(child as CanvasLayer)
+			child.visible = false
+	var review_camera := Camera3D.new()
+	review_camera.name = "CastleAutomatedReviewCamera"
+	review_camera.fov = player.camera.fov if player.camera != null else 74.0
+	review_camera.near = 0.05
+	add_child(review_camera)
+	review_camera.current = true
+	var grammar: Dictionary = blueprint.recipe.get("castleGrammar", {}) as Dictionary
+	var half_depth := float(grammar.get("courtyardDepth", 58.0)) * 0.5
+	var keep_depth := float(grammar.get("keepDepth", 18.0))
+	var keep_offset: Dictionary = grammar.get("keepOffset", {}) as Dictionary
+	var keep_z := float(grammar.get("courtyardDepth", 58.0)) * float(keep_offset.get("z", 0.14))
+	var views: Array[Dictionary] = [
+		{"id": "01_gate_approach", "position": Vector3(0.0, 0.04, -half_depth - float(grammar.get("gateDepth", 10.0)) - 7.0), "target": Vector3(0.0, 3.4, -half_depth)},
+		{"id": "02_gate_reveal", "position": Vector3(0.0, 0.04, -half_depth + 5.0), "target": Vector3(0.0, 3.0, keep_z - keep_depth * 0.5)},
+	]
+	var grid: Dictionary = grammar.get("courtyardGrid", {}) as Dictionary
+	var street_records: Array = grid.get("streetRecords", []) as Array
+	if String(grid.get("layoutFamily", "")) == "bent_processional":
+		var urban_rooms: Dictionary = grid.get("urbanRooms", {}) as Dictionary
+		var gate_room: Dictionary = urban_rooms.get("gate", {}) as Dictionary
+		var palace_room: Dictionary = urban_rooms.get("palace", {}) as Dictionary
+		var turn_x := float(grid.get("routeTurnOffset", 0.0))
+		var first_turn_z := float(grid.get("firstTurnZ", -12.0))
+		var final_turn_z := float(grid.get("finalTurnZ", 4.0))
+		var first_turn_y := _review_terrace_elevation(grid, first_turn_z)
+		var final_turn_y := _review_terrace_elevation(grid, final_turn_z)
+		views[1] = {"id": "02_gate_reveal", "position": (gate_room.get("center", Vector3(0.0, 0.0, -half_depth + 7.2)) as Vector3) + Vector3(0.0, 0.04, -4.0), "target": gate_room.get("sightlineTarget", Vector3(turn_x, first_turn_y + 2.3, first_turn_z + 8.0)) as Vector3}
+		views.append({"id": "03_golden_lane", "position": Vector3(turn_x, first_turn_y + float(grid.get("terraceStepHeight", 1.8)) + 0.04, first_turn_z + 5.0), "target": Vector3(turn_x, final_turn_y + 2.8, final_turn_z - 4.0)})
+		views.append({"id": "04_transition_lane", "position": Vector3(turn_x, final_turn_y + 0.04, final_turn_z - 7.0), "target": Vector3(0.0, final_turn_y + clampf(float(grammar.get("keepHeight", 20.0)) * 0.26, 5.6, 8.4), keep_z - keep_depth * 0.18)})
+		var row_centers: Array = grid.get("rowCenters", []) as Array
+		var route_centers: Array = grid.get("routeCenters", []) as Array
+		if row_centers.size() > 1 and route_centers.size() > 1:
+			var terrace_row_z := float(row_centers[1])
+			var terrace_stair_x := float(route_centers[1])
+			var terrace_stair_z := terrace_row_z - 1.6
+			views.append({"id": "04b_terrace_circulation", "position": Vector3(terrace_stair_x, 0.04, terrace_stair_z - 6.4), "target": Vector3(terrace_stair_x, first_turn_y + 2.2, terrace_stair_z + 3.4)})
+	else:
+		var golden_lane := _review_street_record(street_records, "golden_lane_left_")
+		if not golden_lane.is_empty():
+			var lane_z := float(golden_lane.get("z", 0.0))
+			var lane_center := Vector3(float(golden_lane.get("x", 0.0)), _review_terrace_elevation(grid, lane_z) + 0.04, lane_z)
+			var lane_width := float(golden_lane.get("width", 12.0))
+			views.append({"id": "03_golden_lane", "position": lane_center + Vector3(-lane_width * 0.43, 0.0, 0.0), "target": lane_center + Vector3(lane_width * 0.43, 2.2, 0.0)})
+		var transition_lane := _review_street_record(street_records, "golden_lane_transition_left")
+		if not transition_lane.is_empty():
+			var transition_z := float(transition_lane.get("z", 0.0))
+			var transition_center := Vector3(float(transition_lane.get("x", 0.0)), _review_terrace_elevation(grid, transition_z) + 0.04, transition_z)
+			var transition_depth := float(transition_lane.get("depth", 20.0))
+			views.append({"id": "04_transition_lane", "position": transition_center + Vector3(0.0, 0.0, -transition_depth * 0.42), "target": transition_center + Vector3(0.0, 2.4, transition_depth * 0.32)})
+	var keep_square_z := float(grid.get("finalTurnZ", keep_z - keep_depth * 0.5 - 5.0)) + 2.5 if String(grid.get("layoutFamily", "")) == "bent_processional" else keep_z - keep_depth * 0.5 - 5.0
+	var keep_square_y := _review_terrace_elevation(grid, keep_square_z)
+	var square_x := 0.0 if String(grid.get("layoutFamily", "")) == "bent_processional" else -maxf(5.0, float(grammar.get("keepWidth", 20.0)) * 0.32)
+	var palace_rooms: Dictionary = grid.get("urbanRooms", {}) as Dictionary
+	var palace_room: Dictionary = palace_rooms.get("palace", {}) as Dictionary
+	var palace_center: Vector3 = palace_room.get("center", Vector3(square_x, keep_square_y, keep_square_z)) as Vector3
+	views.append({"id": "05_keep_square", "position": palace_center + Vector3(0.0, 0.04, -float(palace_room.get("depth", 8.0)) * 0.84), "target": palace_room.get("sightlineTarget", Vector3(0.0, keep_square_y + float(grammar.get("keepHeight", 20.0)) * 0.42, keep_z)) as Vector3})
+	views.append({"id": "06_roofscape", "position": Vector3(0.0, keep_square_y + 22.0, -half_depth + 12.0), "target": Vector3(0.0, keep_square_y + 7.0, keep_z)})
+	for view_value in views:
+		var view: Dictionary = view_value as Dictionary
+		var view_position := view.get("position", Vector3.ZERO) as Vector3
+		var view_target := view.get("target", Vector3.ZERO) as Vector3
+		review_camera.global_position = view_position + Vector3(0.0, 1.48, 0.0)
+		review_camera.look_at(view_target, Vector3.UP)
+		await get_tree().process_frame
+		RenderingServer.force_draw(false)
+		var path := review_capture_dir.path_join("%s.png" % String(view.get("id", "review")))
+		var viewport_texture := get_viewport().get_texture()
+		var viewport_image := viewport_texture.get_image() if viewport_texture != null else null
+		var error := viewport_image.save_png(path) if viewport_image != null else ERR_UNAVAILABLE
+		captures.append({"id": view.get("id", "review"), "path": path, "saved": error == OK})
+	if player.camera != null:
+		player.camera.current = true
+	review_camera.queue_free()
+	for layer in hidden_layers:
+		layer.visible = true
+	return captures
+
+
+func _review_street_record(records: Array, prefix: String) -> Dictionary:
+	for value in records:
+		if value is Dictionary and String((value as Dictionary).get("id", "")).begins_with(prefix):
+			return (value as Dictionary).duplicate(true)
+	return {}
+
+
+func _review_terrace_elevation(grid: Dictionary, z: float) -> float:
+	var step_height := float(grid.get("terraceStepHeight", 1.75))
+	if String(grid.get("layoutFamily", "")) == "bent_processional":
+		if z < float(grid.get("firstTurnZ", 0.0)):
+			return 0.0
+		if z < float(grid.get("finalTurnZ", 0.0)):
+			return step_height
+		return step_height * 2.0
+	var rows: Array = grid.get("rowCenters", []) as Array
+	var row_index := 0
+	for candidate_index in range(rows.size()):
+		if z >= float(rows[candidate_index]):
+			row_index = candidate_index
+	return minf(7.0, float(row_index) * step_height)
 
 
 func verify_published_courtyard_entry_orientation() -> Dictionary:

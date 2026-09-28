@@ -220,6 +220,7 @@ func build_oak_reference_skeleton_recipe(seed: int, maturity: float) -> Dictiona
 		"pocContinuousWood": true,
 		"signature": signature,
 		"branches": branches,
+		"rootButtressFootprints": root_buttress_footprints(branches),
 		"foliage": foliage,
 		"branchCount": branches.size(),
 		"foliageClusterCount": foliage.size(),
@@ -459,6 +460,7 @@ func build_oak_space_colony_recipe(seed: int, maturity: float, growth_profile: D
 		"pocContinuousWood": true,
 		"signature": signature,
 		"branches": branches,
+		"rootButtressFootprints": root_buttress_footprints(branches),
 		"foliage": foliage,
 		"branchCount": branches.size(),
 		"foliageClusterCount": foliage.size(),
@@ -1135,7 +1137,8 @@ func build_dynamic_crown_density_field(
 		var start: Vector3 = nodes[parent_index].get("position", Vector3.ZERO)
 		var end: Vector3 = nodes[child_index].get("position", Vector3.ZERO)
 		var child: Dictionary = nodes[child_index]
-		var terminal := (child.get("children", []) as Array).is_empty()
+		var child_count := (child.get("children", []) as Array).size()
+		var terminal := child_count == 0
 		var spread: float = float([0.0, 1.70, 1.34, 0.94, 0.62][order])
 		var strength: float = float([0.0, 0.44, 0.54, 0.66, 0.74][order])
 		if terminal and order >= 2:
@@ -1579,7 +1582,8 @@ func build_oak_full_axis_foliage(
 		if child_index < 0 or parent_index < 0 or child_index >= nodes.size() or parent_index >= nodes.size():
 			continue
 		var child: Dictionary = nodes[child_index]
-		var terminal := (child.get("children", []) as Array).is_empty()
+		var child_count := (child.get("children", []) as Array).size()
+		var terminal := child_count == 0
 		# The base bole and first structural split remain wood-dominant, but any
 		# secondary axis carries living crown tissue along its full length. Limiting
 		# leaves to third-order wood (or a terminal second-order stub) made shallow,
@@ -1590,7 +1594,12 @@ func build_oak_full_axis_foliage(
 		# it has emitted a secondary split. Treat that terminal limb as crown tissue
 		# too. The main bole remains excluded, while every supported non-bole axis
 		# can develop leaves rather than producing a seed-dependent bare candelabra.
-		if order < 2 and not (order == 1 and terminal):
+		# A living primary bough is a crown-supporting axis, not merely bare
+		# scaffolding between terminal pom-poms. Its actual child graph determines
+		# lobe density, so this fills mature oak shoulders without a free-standing
+		# canopy shell or city-specific visual patch.
+		var primary_crown_axis := order == 1 and (terminal or child_count > 0)
+		if order < 2 and not primary_crown_axis:
 			continue
 		var start: Vector3 = nodes[parent_index].get("position", Vector3.ZERO)
 		var end: Vector3 = child.get("position", Vector3.UP)
@@ -1598,6 +1607,13 @@ func build_oak_full_axis_foliage(
 		if length < 0.05:
 			continue
 		var midpoint := start.lerp(end, 0.5)
+		# The crown base is biological structure, not a visual cleanup plane. Keep
+		# foliage off the bole and low scaffold until the support enters the actual
+		# crown envelope, so an urban oak reads as a canopy rather than a trunk
+		# covered in repeated green pellets.
+		var crown_foliage_floor := crown_center.y - crown_radii.y * 0.60
+		if midpoint.y < crown_foliage_floor and end.y < crown_foliage_floor:
+			continue
 		var midpoint_envelope := Vector3(
 			(midpoint.x - crown_center.x) / maxf(0.1, crown_radii.x),
 			(midpoint.y - crown_center.y) / maxf(0.1, crown_radii.y),
@@ -1605,13 +1621,15 @@ func build_oak_full_axis_foliage(
 		).length()
 		var exposure := clampf((midpoint_envelope - 0.12) / 0.88, 0.0, 1.0)
 		var capacity := (length * (0.96 if order >= 4 else 0.72) + (0.82 if terminal else 0.28)) \
-			* lerpf(0.76, 1.34, exposure) * 1.42
+			* lerpf(0.76, 1.34, exposure) * (1.68 if primary_crown_axis else 1.42)
 		# Longer, better exposed living axes support proportionally more leaf
 		# clusters. The runtime foliage budget selects a deterministic bounded
 		# subset later, so this increases ecological colonization without allowing
 		# an unbounded publication cost.
-		var density_multiplier := lerpf(1.28, 1.72, exposure)
-		var cluster_count := clampi(ceili(capacity * density_multiplier), 1, 6)
+		var density_multiplier := lerpf(1.42, 1.98, exposure)
+		var cluster_count := clampi(ceili(capacity * density_multiplier), 1, 7)
+		if primary_crown_axis:
+			cluster_count = maxi(cluster_count, 2 + mini(2, child_count))
 		var direction := (end - start).normalized()
 		var side := direction.cross(Vector3.UP)
 		if side.length_squared() < 0.001:
@@ -1624,7 +1642,18 @@ func build_oak_full_axis_foliage(
 			var jitter_a := stable_signed("oak-full-axis-leaf-a:%d:%d:%d" % [seed, segment_index, cluster_index])
 			var jitter_b := stable_signed("oak-full-axis-leaf-b:%d:%d:%d" % [seed, segment_index, cluster_index])
 			var position := start.lerp(end, clampf(unit + jitter_a * 0.08, 0.16, 1.0))
-			position += side * jitter_a * 0.48 + normal * jitter_b * 0.42
+			var radial := Vector3(position.x - crown_center.x, 0.0, position.z - crown_center.z)
+			if radial.length_squared() < 0.001:
+				radial = side
+			else:
+				radial = radial.normalized()
+			# Each lobe is a leaf volume around its support axis. The outward offset is
+			# bounded by the eventual cluster scale and envelope exposure, retaining a
+			# visibly connected crown rather than branch-attached green pellets.
+			var lobe_spread := lerpf(0.16, 0.48, exposure)
+			position += side * jitter_a * 0.58 + normal * jitter_b * 0.48 + radial * lobe_spread
+			if position.y < crown_foliage_floor:
+				continue
 			var envelope_unit := Vector3(
 				(position.x - crown_center.x) / maxf(0.1, crown_radii.x),
 				(position.y - crown_center.y) / maxf(0.1, crown_radii.y),
@@ -1654,12 +1683,12 @@ func build_oak_full_axis_foliage(
 		var exposure := float(candidate.get("exposure", 0.0))
 		var segment_index := int(candidate.get("sourceSegment", -1))
 		var cluster_index := int(candidate.get("clusterIndex", 0))
-		var outer_scale := lerpf(1.22, 2.46, exposure)
+		var outer_scale := lerpf(1.04, 1.86, exposure)
 		if bool(candidate.get("terminal", false)):
-			outer_scale *= 1.10
+			outer_scale *= 1.12
 		var vertical_scale := outer_scale * lerpf(
-			0.68,
-			0.82,
+			0.56,
+			0.74,
 			stable_unit("oak-full-axis-leaf-y:%d:%d:%d" % [seed, segment_index, cluster_index])
 		)
 		foliage.append({

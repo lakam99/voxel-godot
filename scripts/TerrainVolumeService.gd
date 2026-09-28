@@ -26,6 +26,13 @@ var configured_max_height := 120.0
 var generator_ref: WeakRef
 var sections := {}
 var edited_cells := {}
+# Durable save records are normalized and frozen when an edit changes. Autosave
+# only assembles section references, instead of walking and deep-copying every
+# live edit on the gameplay thread.
+var durable_delta_cells_by_section := {}
+var durable_delta_section_snapshots := {}
+var durable_delta_dirty_sections := {}
+var durable_delta_section_revisions := {}
 var scene_block_cells := {}
 var mesh_edited_column_counts := {}
 var mesh_edited_cells_by_section := {}
@@ -42,6 +49,7 @@ var fluid_section_column_revisions := {}
 var fluid_dirty_cells := {}
 var dirty_sections := {}
 var top_surface_y_cache := {}
+var terrain_mesh_surface_cache := {}
 var exposed_floor_cache := {}
 var revision := 0
 var fluid_revision := 0
@@ -59,6 +67,10 @@ func active_generator():
 func reset() -> void:
 	sections.clear()
 	edited_cells.clear()
+	durable_delta_cells_by_section.clear()
+	durable_delta_section_snapshots.clear()
+	durable_delta_dirty_sections.clear()
+	durable_delta_section_revisions.clear()
 	scene_block_cells.clear()
 	mesh_edited_column_counts.clear()
 	mesh_edited_cells_by_section.clear()
@@ -75,6 +87,7 @@ func reset() -> void:
 	fluid_dirty_cells.clear()
 	dirty_sections.clear()
 	top_surface_y_cache.clear()
+	terrain_mesh_surface_cache.clear()
 	exposed_floor_cache.clear()
 	revision = 0
 	fluid_revision = 0
@@ -1048,6 +1061,7 @@ func set_cell_state_with_previous(cell: Vector3i, state: Dictionary, previous_fl
 	if cell_state_affects_surface_projection(normalized):
 		adjust_surface_projection_edited_column_count(cell, 1)
 	revision += 1
+	_update_durable_delta_cell(cell,normalized)
 	if fluid_state_changed(fluid_mesh_payload_state(previous_fluid_state), fluid_mesh_payload_state(normalized)):
 		mark_fluid_section_changed(cell)
 	var skip_loaded_section_write := String(normalized_metadata.get("source", "")) == "scene_block" \
@@ -1078,6 +1092,7 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 	if cell_state_affects_surface_projection(previous):
 		adjust_surface_projection_edited_column_count(cell, -1)
 	revision += 1
+	_update_durable_delta_cell(cell,{})
 	if fluid_state_changed(fluid_mesh_payload_state(previous), fluid_mesh_payload_state(restored_state)):
 		mark_fluid_section_changed(cell)
 	var previous_metadata: Dictionary = previous.get("metadata", {}) if previous.get("metadata", {}) is Dictionary else {}
@@ -2088,6 +2103,7 @@ func apply_box_edit(min_cell: Vector3i, max_cell: Vector3i, state: Dictionary, r
 				if previous_surface_affects:
 					adjust_surface_projection_edited_column_count(cell, -1)
 				edited_cells[cell] = normalized
+				_update_durable_delta_cell(cell,normalized)
 				write_loaded_section_cell_state(cell, normalized)
 				if previous_mesh_affects or cell_state_affects_terrain_mesh(normalized):
 					dirty_lookup[section_key_for_cell(cell)] = true
@@ -2190,31 +2206,15 @@ func mark_section_dirty(section_key: Vector3i, flags := {}) -> void:
 	dirty_sections[section_key] = entry
 
 func save_section_delta(section_key: Vector3i) -> Dictionary:
-	var cells := []
-	var origin := section_key * SECTION_SIZE
-	for cell_value in edited_cells.keys():
-		var cell: Vector3i = cell_value
-		if section_key_for_cell(cell) != section_key:
-			continue
-		var state: Dictionary = edited_cells[cell]
-		if not cell_state_saved_in_delta(state):
-			continue
-		var saved_state := state.duplicate(true)
-		saved_state["cell"] = vector3i_to_array(cell)
-		saved_state["sectionKey"] = vector3i_to_array(section_key)
-		saved_state["localCell"] = vector3i_to_array(local_cell_for(cell))
-		cells.append({
-			"local": vector3i_to_array(local_cell_for(cell)),
-			"cell": vector3i_to_array(cell),
-			"state": saved_state
-		})
-	return {
-		"schemaVersion": 1,
-		"sectionKey": vector3i_to_array(section_key),
-		"originCell": vector3i_to_array(origin),
-		"revision": revision,
-		"cells": cells
-	}
+	_refresh_durable_delta_section(section_key)
+	if durable_delta_section_snapshots.has(section_key):
+		return durable_delta_section_snapshots[section_key]
+	var empty_cells: Array = []
+	empty_cells.make_read_only()
+	var empty := {"schemaVersion":1,"sectionKey":vector3i_to_array(section_key),
+		"originCell":vector3i_to_array(section_key*SECTION_SIZE),"revision":revision,"cells":empty_cells}
+	empty.make_read_only()
+	return empty
 
 func load_section(section_key: Vector3i, delta: Dictionary) -> void:
 	var cells_value = delta.get("cells", [])
@@ -2241,25 +2241,72 @@ func load_section(section_key: Vector3i, delta: Dictionary) -> void:
 		rebuild_sky_light_column(column.x, column.y, "loaded_delta")
 
 func save_all_section_deltas() -> Dictionary:
-	var section_lookup := {}
-	for cell_value in edited_cells.keys():
-		var cell: Vector3i = cell_value
-		if not cell_state_saved_in_delta(edited_cells[cell]):
-			continue
-		section_lookup[section_key_for_cell(cell)] = true
-	var deltas := []
-	for key_value in section_lookup.keys():
-		var section_key: Vector3i = key_value
-		var delta := save_section_delta(section_key)
-		if (delta.get("cells", []) as Array).is_empty():
-			continue
-		deltas.append(delta)
+	var section_keys: Array = durable_delta_cells_by_section.keys()
+	section_keys.sort_custom(_vector3i_less)
+	var deltas: Array = []
+	for section_key: Vector3i in section_keys:
+		_refresh_durable_delta_section(section_key)
+		var delta: Dictionary = durable_delta_section_snapshots.get(section_key,{})
+		if not delta.is_empty(): deltas.append(delta)
+	deltas.make_read_only()
 	return {
 		"schemaVersion": 1,
 		"sectionSize": SECTION_SIZE,
 		"revision": revision,
 		"sections": deltas
 	}
+
+func _update_durable_delta_cell(cell: Vector3i, state: Dictionary) -> void:
+	var section_key := section_key_for_cell(cell)
+	var bucket: Dictionary = durable_delta_cells_by_section.get(section_key,{})
+	if state.is_empty() or not cell_state_saved_in_delta(state):
+		bucket.erase(cell)
+	else:
+		var saved_state: Dictionary = state.duplicate(true)
+		saved_state["cell"] = vector3i_to_array(cell)
+		saved_state["sectionKey"] = vector3i_to_array(section_key)
+		saved_state["localCell"] = vector3i_to_array(local_cell_for(cell))
+		var record: Variant = _freeze_durable_delta_value({"local":vector3i_to_array(local_cell_for(cell)),
+			"cell":vector3i_to_array(cell),"state":saved_state})
+		if record is Dictionary: bucket[cell]=record
+	if bucket.is_empty(): durable_delta_cells_by_section.erase(section_key)
+	else: durable_delta_cells_by_section[section_key]=bucket
+	durable_delta_dirty_sections[section_key]=true
+	durable_delta_section_revisions[section_key]=revision
+
+func _refresh_durable_delta_section(section_key: Vector3i) -> void:
+	if not durable_delta_dirty_sections.has(section_key): return
+	durable_delta_dirty_sections.erase(section_key)
+	var bucket: Dictionary = durable_delta_cells_by_section.get(section_key,{})
+	if bucket.is_empty():
+		durable_delta_section_snapshots.erase(section_key)
+		return
+	var cells: Array = []
+	var cell_keys: Array = bucket.keys()
+	cell_keys.sort_custom(_vector3i_less)
+	for cell: Vector3i in cell_keys: cells.append(bucket[cell])
+	cells.make_read_only()
+	var delta := {"schemaVersion":1,"sectionKey":vector3i_to_array(section_key),
+		"originCell":vector3i_to_array(section_key*SECTION_SIZE),
+		"revision":int(durable_delta_section_revisions.get(section_key,revision)),"cells":cells}
+	delta.make_read_only()
+	durable_delta_section_snapshots[section_key]=delta
+
+static func _vector3i_less(a: Vector3i, b: Vector3i) -> bool:
+	return a.z<b.z or a.z==b.z and (a.y<b.y or a.y==b.y and a.x<b.x)
+
+static func _freeze_durable_delta_value(value: Variant) -> Variant:
+	if value is Dictionary:
+		var frozen_dictionary: Dictionary = {}
+		for key in value: frozen_dictionary[key]=_freeze_durable_delta_value(value[key])
+		frozen_dictionary.make_read_only()
+		return frozen_dictionary
+	if value is Array:
+		var frozen_array: Array = []
+		for item in value: frozen_array.append(_freeze_durable_delta_value(item))
+		frozen_array.make_read_only()
+		return frozen_array
+	return value
 
 func load_section_deltas(snapshot_value) -> void:
 	var snapshot: Dictionary = snapshot_value if snapshot_value is Dictionary else {}
@@ -2690,6 +2737,39 @@ func cardinal_directions() -> Array[Vector3i]:
 func surface_y_for_cell(cell: Vector3i) -> float:
 	return column_top_surface_y_for_cell(cell)
 
+## Return the surface represented by the VoxelTerrain payload. Scene-rendered
+## building blocks intentionally become air in that payload, while terrain
+## edits and generated density remain authoritative. Collision publication
+## uses this contract instead of comparing the edited mesh to the original
+## heightfield.
+func terrain_mesh_surface_projection_for_cell(cell: Vector3i) -> Dictionary:
+	var key := Vector2i(cell.x, cell.z)
+	if terrain_mesh_surface_cache.has(key):
+		var cached_value = terrain_mesh_surface_cache[key]
+		if cached_value is Dictionary and int(cached_value.get("revision", -1)) == revision:
+			return (cached_value as Dictionary).get("projection", {}).duplicate(true)
+	var projection := {"found": false, "columnCell": Vector3i(cell.x, 0, cell.z)}
+	for y in range(world_top_cell_y(), world_bottom_cell_y() - 1, -1):
+		var solid_cell := Vector3i(cell.x, y, cell.z)
+		var solid_state := terrain_mesh_payload_state(solid_cell, get_cell_state(solid_cell))
+		if not bool(solid_state.get("solid", false)):
+			continue
+		var air_cell := solid_cell + Vector3i(0, 1, 0)
+		var air_state := terrain_mesh_payload_state(air_cell, get_cell_state(air_cell))
+		if bool(air_state.get("solid", false)):
+			continue
+		projection = {
+			"found": true,
+			"solidCell": solid_cell,
+			"airCell": air_cell,
+			"position": Vector3((float(cell.x) + 0.5) * cell_size(), float(air_cell.y) * cell_size(), (float(cell.z) + 0.5) * cell_size()),
+			"solidState": solid_state,
+			"airState": air_state
+		}
+		break
+	terrain_mesh_surface_cache[key] = {"revision": revision, "projection": projection.duplicate(true)}
+	return projection
+
 func reference_surface_y_for_cell(cell: Vector3i) -> float:
 	var generation = active_generator()
 	if generation != null and generation.has_method("terrain_reference_surface_y_for_cell"):
@@ -2782,6 +2862,69 @@ func walkable_surface_cell_near(cell: Vector3i, max_up_cells := 16, max_down_cel
 	projection["walkable"] = not solid_at_cell(air_cell) and not solid_at_cell(above_air_cell)
 	projection["occupancy"] = terrain_occupancy_at_cell(air_cell)
 	return projection
+
+## Validate the exact smooth surface boundary already resolved by the world
+## generator. Navigation used to follow that authoritative height with another
+## broad vertical search for every edited column. Keep the broad search as the
+## caller's mismatch fallback, while the ordinary case reads only the three
+## cells that prove support and standing headroom at this boundary.
+func navigation_surface_projection_at_known_height(column_cell: Vector3i, surface_y: float) -> Dictionary:
+	var probe_y := floori(surface_y / cell_size())
+	var states := {}
+	var solid_cell := Vector3i(2147483000, 2147483000, 2147483000)
+	var solid_state := {}
+	var air_state := {}
+	var above_state := {}
+	# Smooth density boundaries and discrete occupancy can straddle an integer
+	# lattice plane. Inspect only the four cells adjacent to the already-known
+	# boundary, from highest to lowest, instead of scanning an arbitrary column.
+	for candidate_y in range(probe_y, probe_y - 3, -1):
+		var candidate := Vector3i(column_cell.x, candidate_y, column_cell.z)
+		for offset in range(3):
+			var sample_cell := candidate + Vector3i(0, offset, 0)
+			if not states.has(sample_cell): states[sample_cell] = get_cell_state(sample_cell)
+		var candidate_solid: Dictionary = states[candidate]
+		var candidate_air: Dictionary = states[candidate + Vector3i(0, 1, 0)]
+		var candidate_above: Dictionary = states[candidate + Vector3i(0, 2, 0)]
+		if bool(candidate_solid.get("solid", false)) and not bool(candidate_air.get("solid", false)) \
+				and not bool(candidate_above.get("solid", false)):
+			solid_cell = candidate
+			solid_state = candidate_solid
+			air_state = candidate_air
+			above_state = candidate_above
+			break
+	if solid_cell.x == 2147483000:
+		return {
+			"status": "mismatch",
+			"reason": "known_surface_boundary_occupancy_mismatch",
+			"found": false,
+			"columnCell": Vector3i(column_cell.x, 0, column_cell.z)
+		}
+	var air_cell := solid_cell + Vector3i(0, 1, 0)
+	return {
+		"status": "ready",
+		"reason": "",
+		"volumeRevision": revision,
+		"found": true,
+		"solidCell": solid_cell,
+		"airCell": air_cell,
+		"position": Vector3(float(column_cell.x) * cell_size(), surface_y, float(column_cell.z) * cell_size()),
+		"solidState": solid_state,
+		"airState": air_state,
+		"walkable": true,
+		"occupancy": {
+			"cell": air_cell,
+			"solid": false,
+			"air": true,
+			"material": String(air_state.get("material", "air")),
+			"biome": String(air_state.get("biome", "")),
+			"fluid": String(air_state.get("fluid", "")),
+			"light": air_state.get("light", {"sky": 0, "block": 0}),
+			"floorSolid": true,
+			"ceilingSolid": false,
+			"walkableAir": true
+		}
+	}
 
 func exposed_surface_cells(chunk_key: Vector2i, chunk_size := SECTION_SIZE) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []

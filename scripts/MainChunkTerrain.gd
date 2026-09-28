@@ -26,10 +26,15 @@ func block_visual_material(material_key: String) -> Material:
 
 func block_visual_mesh(material_key: String) -> Mesh:
     var mesh_key := "plain" if material_key in ["glass", "flame", "furnaceGlow", "copperOreGlow", "ironOreGlow"] else "chamfered"
+    # SurfaceTool-backed ArrayMesh resources require a real renderer RID. The
+    # headless gameplay suites prove collision and world-state behavior, so use
+    # the same unit dimensions through a primitive visual proxy there.
+    if DisplayServer.get_name().to_lower() == "headless":
+        mesh_key = "headless_proxy"
     if block_meshes.has(mesh_key):
         return block_meshes[mesh_key]
     var mesh: Mesh
-    if mesh_key == "plain":
+    if mesh_key in ["plain", "headless_proxy"]:
         var plain := BoxMesh.new()
         plain.size = Vector3.ONE
         mesh = plain
@@ -921,6 +926,7 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    register_navigation_marker_block(cell, body, block_type)
     register_light_safety_source(cell, block_type, body)
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NodeBuild", node_build_started_usec)
     var defer_world_edit_followup := bool(options.get("deferWorldEditFollowup", false))

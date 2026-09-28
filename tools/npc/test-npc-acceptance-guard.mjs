@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runToolMain } from '../lib/voxel-tool-runtime.mjs';
+import { runAcceptanceGuardSelfTest } from '../lib/npc-acceptance-guard-self-test.mjs';
 
-await runToolMain('npc/test-npc-acceptance-guard');
+await runAcceptanceGuardSelfTest();

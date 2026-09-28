@@ -16,6 +16,7 @@ var blockers: Array[Dictionary] = []
 var semantic_anchors: Array[Dictionary] = []
 var door_portals: Array[Dictionary] = []
 var door_links: Array[Dictionary] = []
+var crossing_links: Array[Dictionary] = []
 
 static func create(region_id_value: String, tile_key_value: String, bounds_value := AABB()):
 	var descriptor = load("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd").new()
@@ -98,6 +99,13 @@ static func from_tile_snapshot(snapshot: Dictionary):
 		if portal_id == "":
 			continue
 		descriptor.add_door_link(String(link.get("from", "")), String(link.get("to", "")), portal_id, link)
+	for crossing in snapshot.get("crossingLinks", []):
+		if crossing is Dictionary: descriptor.crossing_links.append(crossing.duplicate(true))
+	for surface: Dictionary in snapshot.get("buildingSurfaces",[]):
+		descriptor.walkable_surfaces.append(surface)
+		for point: Vector3 in surface.get("polygon",[]):
+			merged_bounds = merged_bounds.expand(point) if has_bounds else AABB(point,Vector3.ZERO)
+			has_bounds = true
 	if has_bounds:
 		descriptor.bounds = merged_bounds
 	return descriptor
@@ -177,6 +185,14 @@ func add_door_link(from_key: String, to_key: String, portal_id: String, extra :=
 	_merge_extra(link, extra)
 	door_links.append(link)
 
+func add_crossing_link(link_id: String, start: Vector3, end: Vector3, source: Dictionary) -> void:
+	# Source-certified physical crossings have no door action or portal state.
+	var crossing := source.duplicate(true)
+	crossing["id"] = link_id
+	crossing["start"] = start
+	crossing["end"] = end
+	crossing_links.append(crossing)
+
 func stable_signature() -> String:
 	return JSON.stringify(to_summary())
 
@@ -193,7 +209,8 @@ func to_summary() -> Dictionary:
 		"blockers": _sorted_summary_array(blockers),
 		"semanticAnchors": _sorted_summary_array(semantic_anchors),
 		"doorPortals": _sorted_summary_array(door_portals),
-		"doorLinks": _sorted_summary_array(door_links)
+		"doorLinks": _sorted_summary_array(door_links),
+		"crossingLinks": _sorted_summary_array(crossing_links)
 	}
 
 func _merge_extra(target: Dictionary, extra := {}) -> void:

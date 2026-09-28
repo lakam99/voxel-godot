@@ -7,12 +7,18 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CollisionProbeServiceScript := preload("res://scripts/npc_ai/routing/CollisionProbeService.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 
-const DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME := 160
+const DEFAULT_PROBE_SAMPLE_BUDGET_PER_FRAME := 32
+# Collision probing is already governed by the 32-sample global frame budget.
+# Let one admitted route consume that bounded atom so long, already-planned
+# routes do not spend another sixteen frames draining eight-sample fragments.
+const DEFAULT_PROBE_SAMPLES_PER_REQUEST := 32
 const DEFAULT_PLAN_ATTEMPT_BUDGET_PER_FRAME := 4
-const DEFAULT_ROUTE_SEARCH_EXPANSION_BUDGET_PER_FRAME := 64
-const DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 16
+const DEFAULT_ROUTE_SEARCH_EXPANSION_BUDGET_PER_FRAME := 8
+const DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 2
+const DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST := 2
+const DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST := 48
 const URGENT_ROUTE_PRIORITY := 180
-const URGENT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 48
+const URGENT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST := 2
 const PLANNING_STARVATION_FRAME_LIMIT := 24
 const PROBE_STARVATION_FRAME_LIMIT := 24
 const MAX_PROBE_REPAIR_ATTEMPTS := 3
@@ -43,6 +49,7 @@ const PENDING_STATES := [STATE_QUEUED, STATE_PENDING_NAV_DATA, STATE_PENDING_BUD
 const TERMINAL_STATES := [STATE_BLOCKED_DYNAMIC, STATE_UNREACHABLE_STATIC, STATE_INVALID_GOAL, STATE_ARRIVED, STATE_CANCELLED]
 
 var frame_serial := 0
+var planning_budget_epoch := -1
 var request_sequence := 0
 var actor_generations := {}
 var active_request_by_actor := {}
@@ -58,6 +65,7 @@ var plan_attempts_used_this_frame := 0
 var planning_starvation_override_used_this_frame := false
 var planning_grants_this_frame := {}
 var planning_claimed_this_frame := {}
+var planning_reserved_expansions_this_frame := {}
 var planning_grants_prepared_frame := -1
 var route_search_expansion_budget_per_frame := DEFAULT_ROUTE_SEARCH_EXPANSION_BUDGET_PER_FRAME
 var route_search_expansions_used_this_frame := 0
@@ -71,6 +79,7 @@ var collision_recovery_stalls_by_actor := {}
 var collision_recovery_stall_trace_records: Array = []
 var counters := {
 	"registeredActors": 0,
+	"unregisteredActors": 0,
 	"requests": 0,
 	"planningBudgetGrants": 0,
 	"planningBudgetDeferrals": 0,
@@ -112,13 +121,23 @@ func setup(system_node, main_node, route_probe = null) -> void:
 		collision_probe = CollisionProbeServiceScript.new()
 		collision_probe.setup(system, main)
 
-func begin_frame() -> void:
+func begin_frame(budget_epoch := -1) -> void:
+	# Physics can catch up more than once before the next presented/process frame.
+	# Planning and probing are gameplay-frame budgets, so repeated physics ticks in
+	# the same process epoch must not silently multiply the expensive allowance.
+	# Tests and direct service callers may omit the epoch to advance explicitly.
+	var requested_epoch := int(budget_epoch)
+	if requested_epoch >= 0:
+		if requested_epoch == planning_budget_epoch:
+			return
+		planning_budget_epoch = requested_epoch
 	frame_serial += 1
 	plan_attempts_used_this_frame = 0
 	route_search_expansions_used_this_frame = 0
 	planning_starvation_override_used_this_frame = false
 	planning_grants_this_frame.clear()
 	planning_claimed_this_frame.clear()
+	planning_reserved_expansions_this_frame.clear()
 	planning_grants_prepared_frame = -1
 	probe_samples_used_this_frame = 0
 	probe_starvation_override_used_this_frame = false
@@ -148,6 +167,39 @@ func register_actor(entry: Dictionary) -> Dictionary:
 	var debug := debug_for_actor(actor_id)
 	entry["routeAuthorityV2"] = debug
 	return debug
+
+
+func unregister_actor(entry_or_id, reason := "actor_unregistered") -> Dictionary:
+	var actor_id := String(entry_or_id.get("id", "")) if entry_or_id is Dictionary else String(entry_or_id)
+	if actor_id == "":
+		return {"ok": false, "status": "failed", "reason": "missing_actor_id", "actorId": ""}
+	var was_registered := registered_actors.has(actor_id) or actor_entries.has(actor_id)
+	var request_id := String(active_request_by_actor.get(actor_id, ""))
+	var request_state := STATE_NONE
+	var cancelled := false
+	if request_id != "" and requests_by_id.has(request_id):
+		var record: Dictionary = requests_by_id[request_id]
+		request_state = String(record.get("state", STATE_NONE))
+		if not (request_state in TERMINAL_STATES):
+			var cancellation := cancel_request(request_id, reason)
+			cancelled = bool(cancellation.get("ok", false)) and String(cancellation.get("state", "")) == STATE_CANCELLED
+			request_state = String(cancellation.get("state", request_state))
+		_clear_probe_cursors_for_request(request_id)
+	active_request_by_actor.erase(actor_id)
+	actor_entries.erase(actor_id)
+	registered_actors.erase(actor_id)
+	collision_recovery_stalls_by_actor.erase(actor_id)
+	if was_registered:
+		counters["unregisteredActors"] = int(counters.get("unregisteredActors", 0)) + 1
+	return {
+		"ok": true,
+		"status": "unregistered" if was_registered or request_id != "" else "absent",
+		"reason": reason,
+		"actorId": actor_id,
+		"requestId": request_id,
+		"requestState": request_state,
+		"cancelled": cancelled
+	}
 
 func submit_request(entry: Dictionary, intent: Dictionary, options := {}) -> Dictionary:
 	var actor_id := actor_id_for_entry(entry)
@@ -214,9 +266,12 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 	var wait_frames := _planning_wait_frames(record)
 	var starvation_override := bool(grant.get("starvationOverride", false))
 	var route_search_expansions := maxi(1, int(grant.get("routeSearchExpansions", DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST)))
+	var route_validation_steps := maxi(1, int(grant.get("routeValidationSteps", DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST)))
+	var route_cheap_steps := maxi(1, int(grant.get("routeCheapSteps", DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST)))
 	if not grant.is_empty() and plan_attempts_used_this_frame < plan_attempt_budget_per_frame and route_search_expansions_used_this_frame + route_search_expansions <= route_search_expansion_budget_per_frame:
 		planning_grants_this_frame.erase(request_id)
 		planning_claimed_this_frame[request_id] = true
+		planning_reserved_expansions_this_frame[request_id] = route_search_expansions
 		plan_attempts_used_this_frame += 1
 		route_search_expansions_used_this_frame += route_search_expansions
 		if starvation_override:
@@ -228,6 +283,8 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"budgetPerFrame": plan_attempt_budget_per_frame,
 			"usedThisFrame": plan_attempts_used_this_frame,
 			"routeSearchExpansions": route_search_expansions,
+			"routeValidationSteps": route_validation_steps,
+			"routeCheapSteps": route_cheap_steps,
 			"routeSearchExpansionBudgetPerFrame": route_search_expansion_budget_per_frame,
 			"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame,
 			"starvationOverride": starvation_override
@@ -241,6 +298,8 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 			"reason": reason,
 			"budget": _planning_budget_debug(record),
 			"routeSearchExpansions": route_search_expansions,
+			"routeValidationSteps": route_validation_steps,
+			"routeCheapSteps": route_cheap_steps,
 			"starvationOverride": starvation_override
 		}
 	counters["planningBudgetDeferrals"] = int(counters.get("planningBudgetDeferrals", 0)) + 1
@@ -251,6 +310,37 @@ func claim_planning_budget(request_id: String, reason := "planning") -> Dictiona
 	summary["granted"] = false
 	summary["budget"] = _planning_budget_debug(record)
 	return summary
+
+
+func settle_planning_budget(request_id: String, actual_expansions: int) -> Dictionary:
+	if request_id == "" or not planning_reserved_expansions_this_frame.has(request_id):
+		return {
+			"ok": false,
+			"reason": "planning_budget_not_reserved",
+			"requestId": request_id,
+			"actualExpansions": 0,
+			"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame
+		}
+	var reserved := maxi(0, int(planning_reserved_expansions_this_frame.get(request_id, 0)))
+	var actual := clampi(actual_expansions, 0, reserved)
+	planning_reserved_expansions_this_frame.erase(request_id)
+	route_search_expansions_used_this_frame = maxi(0, route_search_expansions_used_this_frame - (reserved - actual))
+	if requests_by_id.has(request_id):
+		var record: Dictionary = requests_by_id[request_id]
+		_record_service_event(record, "planning_budget_settled", "actual_route_expansions", {
+			"reservedExpansions": reserved,
+			"actualExpansions": actual,
+			"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame
+		})
+		requests_by_id[request_id] = record
+	return {
+		"ok": true,
+		"reason": "planning_budget_settled",
+		"requestId": request_id,
+		"reservedExpansions": reserved,
+		"actualExpansions": actual,
+		"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame
+	}
 
 func _ensure_planning_grants() -> void:
 	if planning_grants_prepared_frame != frame_serial:
@@ -282,9 +372,9 @@ func _prepare_planning_grants() -> void:
 	var starvation_override_id := String(starved_record.get("requestId", ""))
 	var ordinary_record := _first_ordinary_planning_record(remaining, starved_record)
 
-	# Preserve the former 64-expansion global cap. Reserve one normal slice whenever
-	# ordinary work is waiting; divide the rest between selected urgent requests so
-	# a busy scripted moment continues to service every active actor fairly.
+	# Urgency controls who is serviced first, never how large one indivisible search
+	# atom may become. Reserve one normal slice while ordinary work is waiting, then
+	# admit urgent work through the same two-expansion cap.
 	if not ordinary_record.is_empty() and available_attempts > 0 and available_expansions > 0:
 		var ordinary_slice := _planning_slice_for_record(ordinary_record, available_expansions)
 		_grant_planning_slice(ordinary_record, ordinary_slice, String(ordinary_record.get("requestId", "")) == starvation_override_id)
@@ -294,11 +384,9 @@ func _prepare_planning_grants() -> void:
 	var urgent_records := _selected_urgent_planning_records(remaining, starved_record, available_attempts)
 	if not urgent_records.is_empty() and available_expansions > 0:
 		var urgent_count := urgent_records.size()
-		var base_urgent_slice := int(available_expansions / urgent_count)
-		var urgent_remainder := available_expansions % urgent_count
 		for index in range(urgent_count):
 			var urgent_record: Dictionary = urgent_records[index]
-			var urgent_slice := base_urgent_slice + (1 if index < urgent_remainder else 0)
+			var urgent_slice := mini(URGENT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST, available_expansions)
 			var urgent_cap := int(urgent_record.get("maxExpansionsPerPlanningSlice", 0))
 			if urgent_cap > 0:
 				urgent_slice = mini(urgent_slice, urgent_cap)
@@ -306,7 +394,9 @@ func _prepare_planning_grants() -> void:
 			_remove_planning_record(remaining, String(urgent_record.get("requestId", "")))
 			available_attempts -= 1
 			available_expansions -= urgent_slice
-	while urgent_records.is_empty() and available_attempts > 0 and available_expansions > 0 and not remaining.is_empty():
+	# Fill every remaining slot from the already priority/age-sorted queue. Urgent
+	# admission must not strand capacity that can advance ordinary requests.
+	while available_attempts > 0 and available_expansions > 0 and not remaining.is_empty():
 		var record: Dictionary = remaining[0]
 		var slice := _planning_slice_for_record(record, available_expansions)
 		_grant_planning_slice(record, slice, String(record.get("requestId", "")) == starvation_override_id)
@@ -364,7 +454,9 @@ func _grant_planning_slice(record: Dictionary, route_search_expansions: int, sta
 		return
 	planning_grants_this_frame[request_id] = {
 		"starvationOverride": starvation_override,
-		"routeSearchExpansions": maxi(1, route_search_expansions)
+		"routeSearchExpansions": maxi(1, route_search_expansions),
+		"routeValidationSteps": DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST,
+		"routeCheapSteps": DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST
 	}
 
 func _remove_planning_record(records: Array, request_id: String) -> void:
@@ -425,8 +517,7 @@ func mark_ready(request_id: String, route: Dictionary, proof := {}) -> Dictionar
 	var record: Dictionary = requests_by_id[request_id]
 	var actor_id := String(record.get("actorId", ""))
 	var generation := int(record.get("generation", 0))
-	record.erase("probeRepairAvoidCells")
-	record.erase("probeRepairFailedGoalCells")
+	_clear_probe_repair_state(record, true)
 	var route_copy := route.duplicate(true)
 	route_copy["probeCertificate"] = certificate.duplicate(true)
 	var lease = RouteLeaseScript.from_route(route_copy, actor_id, generation, NpcEnumsScript.ROUTE_AUTHORITY_READY, NpcEnumsScript.ROUTE_REASON_NONE)
@@ -446,7 +537,14 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 	var intent_record: Dictionary = requests_by_id[request_id]
 	intent_record["intent"] = intent_dict.duplicate(true)
 	requests_by_id[request_id] = intent_record
+	var repair_phase := String(intent_record.get("probeRepairPhase", ""))
+	if repair_phase == "planning":
+		return _resume_probe_repair_planning(entry, request_id, intent_dict, options)
 	var route_copy := route.duplicate(true)
+	if repair_phase == "probe_repaired_route":
+		var staged_route: Dictionary = intent_record.get("route", {}) if intent_record.get("route", {}) is Dictionary else {}
+		if not staged_route.is_empty():
+			route_copy = staged_route.duplicate(true)
 	var route_geometry := _validate_route_geometry(route_copy)
 	if not bool(route_geometry.get("ok", false)):
 		var invalid_proof := _route_proof(route_copy, {
@@ -459,42 +557,38 @@ func commit_route_after_probe(entry: Dictionary, request_id: String, route: Dict
 		})
 		_record_probe_decision(request_id, route_copy, invalid_proof)
 		return report_invalid_goal(request_id, String(route_geometry.get("reason", "invalid_route_geometry")))
-	var repair_attempts := 0
-	var repair_avoid_cells: Array = intent_record.get("probeRepairAvoidCells", []).duplicate() if intent_record.get("probeRepairAvoidCells", []) is Array else []
-	while true:
-		mark_probing(request_id, "collision_probe")
-		var certificate := _probe_ready_route(entry, request_id, route_copy, intent_dict, options)
-		var proof := _route_proof(route_copy, certificate)
-		_record_probe_decision(request_id, route_copy, proof)
-		if _probe_certificate_allows_ready(certificate):
-			return mark_ready(request_id, route_copy, proof)
-		var reason := String(certificate.get("reason", "collision_probe_failed"))
-		if reason == "collision_probe_budget" or String(certificate.get("status", "")) == "pending_probe":
-			return mark_probing(request_id, reason)
-		if not bool(certificate.get("authoritative", false)) or String(certificate.get("status", "")) == "skipped":
-			return mark_probing(request_id, reason)
-		var state := _state_for_probe_certificate(certificate)
-		if state == STATE_INVALID_GOAL:
-			return report_invalid_goal(request_id, reason)
-		repair_avoid_cells = _merge_repair_avoid_cells(repair_avoid_cells, _probe_repair_avoid_cells(certificate))
-		var repair_record: Dictionary = requests_by_id[request_id]
-		repair_record["probeRepairAvoidCells"] = repair_avoid_cells.duplicate()
+	mark_probing(request_id, "collision_probe")
+	var certificate := _probe_ready_route(entry, request_id, route_copy, intent_dict, options)
+	var proof := _route_proof(route_copy, certificate)
+	_record_probe_decision(request_id, route_copy, proof)
+	if _probe_certificate_allows_ready(certificate):
+		return mark_ready(request_id, route_copy, proof)
+	var reason := String(certificate.get("reason", "collision_probe_failed"))
+	if reason == "collision_probe_budget" or String(certificate.get("status", "")) == "pending_probe":
+		return mark_probing(request_id, reason)
+	if not bool(certificate.get("authoritative", false)) or String(certificate.get("status", "")) == "skipped":
+		return mark_probing(request_id, reason)
+	var state := _state_for_probe_certificate(certificate)
+	if state == STATE_INVALID_GOAL:
+		return report_invalid_goal(request_id, reason)
+	var repair_record: Dictionary = requests_by_id[request_id]
+	var repair_attempts := int(repair_record.get("probeRepairAttemptCount", 0))
+	var repair_avoid_cells: Array = repair_record.get("probeRepairAvoidCells", []).duplicate() if repair_record.get("probeRepairAvoidCells", []) is Array else []
+	repair_avoid_cells = _merge_repair_avoid_cells(repair_avoid_cells, _probe_repair_avoid_cells(certificate))
+	repair_record["probeRepairAvoidCells"] = repair_avoid_cells.duplicate()
+	if _should_attempt_probe_repair(certificate, state, options, repair_attempts):
+		repair_record["probeRepairPhase"] = "planning"
+		repair_record["probeRepairFailedRoute"] = route_copy.duplicate(true)
+		repair_record["probeRepairCertificate"] = certificate.duplicate(true)
+		repair_record["probeRepairFailureState"] = state
+		repair_record["probeRepairFailureReason"] = reason
 		requests_by_id[request_id] = repair_record
-		if _should_attempt_probe_repair(certificate, state, options, repair_attempts):
-			var repaired_route := _plan_probe_repair_route(entry, request_id, route_copy, intent_dict, certificate, options, repair_avoid_cells, repair_attempts)
-			var repair_classification := String(repaired_route.get("classification", repaired_route.get("status", ""))) if not repaired_route.is_empty() else ""
-			if repair_classification == STATE_PENDING_BUDGET:
-				return mark_pending_budget(request_id, String(repaired_route.get("reason", "probe_repair_budget")))
-			if repair_classification == STATE_PENDING_NAV_DATA:
-				return mark_pending_nav_data(request_id, String(repaired_route.get("reason", "probe_repair_nav_data")))
-			if not repaired_route.is_empty() and bool(repaired_route.get("ok", false)):
-				route_copy = repaired_route
-				repair_attempts += 1
-				continue
-		if state == STATE_BLOCKED_DYNAMIC:
-			return report_blocked_dynamic(request_id, reason)
-		return report_unreachable_static(request_id, reason)
-	return report_unreachable_static(request_id, "probe_commit_exhausted")
+		return mark_probing(request_id, "probe_repair_queued")
+	_clear_probe_repair_state(repair_record)
+	requests_by_id[request_id] = repair_record
+	if state == STATE_BLOCKED_DYNAMIC:
+		return report_blocked_dynamic(request_id, reason)
+	return report_unreachable_static(request_id, reason)
 
 func begin_moving(request_id: String, reason := "lease_following") -> Dictionary:
 	if not requests_by_id.has(request_id):
@@ -596,6 +690,12 @@ func report_invalid_goal(request_id: String, reason := "invalid_goal") -> Dictio
 	return result
 
 func cancel_request(request_id: String, reason := "cancelled") -> Dictionary:
+	if not requests_by_id.has(request_id):
+		return { "ok": false, "reason": "missing_request", "requestId": request_id }
+	var record: Dictionary = requests_by_id[request_id]
+	record["routeLease"] = {}
+	requests_by_id[request_id] = record
+	_clear_probe_cursors_for_request(request_id)
 	var result := transition_request(request_id, STATE_CANCELLED, reason)
 	if bool(result.get("ok", false)):
 		counters["cancelled"] = int(counters.get("cancelled", 0)) + 1
@@ -605,6 +705,8 @@ func transition_request(request_id: String, state: String, reason := "") -> Dict
 	if not requests_by_id.has(request_id):
 		return { "ok": false, "reason": "missing_request", "requestId": request_id }
 	var record: Dictionary = requests_by_id[request_id]
+	if state in [STATE_READY, STATE_ARRIVED, STATE_BLOCKED_DYNAMIC, STATE_UNREACHABLE_STATIC, STATE_INVALID_GOAL, STATE_CANCELLED]:
+		_clear_probe_repair_state(record)
 	_transition_record(record, state, reason)
 	requests_by_id[request_id] = record
 	_publish_record_to_entry(record)
@@ -736,6 +838,7 @@ func debug_snapshot() -> Dictionary:
 		actors[actor_id] = debug_for_actor(String(actor_id))
 	return {
 		"frame": frame_serial,
+		"planningBudgetEpoch": planning_budget_epoch,
 		"actorCount": registered_actors.size(),
 		"requestCount": requests_by_id.size(),
 		"activeRequestCount": active_request_by_actor.size(),
@@ -815,15 +918,20 @@ func _probe_ready_route(entry: Dictionary, request_id: String, route: Dictionary
 			"sampleCount": 0,
 			"details": {}
 		}
-	var requested_max_samples := int(options.get("maxSamples", probe_sample_budget_per_frame - probe_samples_used_this_frame))
-	var max_samples := requested_max_samples
-	var remaining_budget := maxi(0, max_samples)
+	var requested_max_samples := clampi(
+		int(options.get("maxSamples", DEFAULT_PROBE_SAMPLES_PER_REQUEST)),
+		1,
+		DEFAULT_PROBE_SAMPLES_PER_REQUEST
+	)
+	var remaining_global_budget := maxi(0, probe_sample_budget_per_frame - probe_samples_used_this_frame)
+	var remaining_budget := mini(requested_max_samples, remaining_global_budget)
 	if remaining_budget <= 0:
 		var probe_wait_frames := _request_state_wait_frames(request_id, STATE_PROBING)
 		var starvation_override := probe_wait_frames >= PROBE_STARVATION_FRAME_LIMIT and not probe_starvation_override_used_this_frame
 		if starvation_override:
 			probe_starvation_override_used_this_frame = true
-			remaining_budget = maxi(1, probe_sample_budget_per_frame)
+			# Starvation changes admission priority, not the size of the probe atom.
+			remaining_budget = mini(requested_max_samples, maxi(1, probe_sample_budget_per_frame))
 			counters["probeStarvationOverrides"] = int(counters.get("probeStarvationOverrides", 0)) + 1
 		else:
 			counters["probeBudgetDeferrals"] = int(counters.get("probeBudgetDeferrals", 0)) + 1
@@ -971,6 +1079,83 @@ func _probe_certificate_is_dynamic_actor_block(certificate: Dictionary, options:
 		or block_type in ["npc", "actor", "player"] \
 		or collider_class in ["CharacterBody3D", "KinematicBody3D"]
 
+func _resume_probe_repair_planning(entry: Dictionary, request_id: String, intent: Dictionary, options: Dictionary) -> Dictionary:
+	if not requests_by_id.has(request_id):
+		return { "ok": false, "reason": "missing_request", "requestId": request_id }
+	var budget := _claim_probe_repair_planning_budget(request_id)
+	if not bool(budget.get("granted", false)):
+		return mark_probing(request_id, String(budget.get("reason", "probe_repair_search_budget")))
+	var record: Dictionary = requests_by_id[request_id]
+	var failed_route: Dictionary = record.get("probeRepairFailedRoute", {}) if record.get("probeRepairFailedRoute", {}) is Dictionary else {}
+	var certificate: Dictionary = record.get("probeRepairCertificate", {}) if record.get("probeRepairCertificate", {}) is Dictionary else {}
+	var repair_avoid_cells: Array = record.get("probeRepairAvoidCells", []).duplicate() if record.get("probeRepairAvoidCells", []) is Array else []
+	var repair_attempts := int(record.get("probeRepairAttemptCount", 0))
+	var repair_options := options.duplicate(true)
+	var repair_plan_options: Dictionary = repair_options.get("repairPlanOptions", {}) if repair_options.get("repairPlanOptions", {}) is Dictionary else {}
+	repair_plan_options = repair_plan_options.duplicate(true)
+	# Repair search remains owned by the original route request. Enforce this at
+	# the authority boundary so every resumed caller is cancellation-safe.
+	repair_plan_options["requestIdentity"] = request_id
+	repair_plan_options["expansionsPerCall"] = int(budget.get("routeSearchExpansions", DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST))
+	repair_plan_options["validationStepsPerCall"] = int(budget.get("routeValidationSteps", DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST))
+	repair_plan_options["cheapStepsPerCall"] = int(budget.get("routeCheapSteps", DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST))
+	repair_options["repairPlanOptions"] = repair_plan_options
+	var repaired_route := _plan_probe_repair_route(entry, request_id, failed_route, intent, certificate, repair_options, repair_avoid_cells, repair_attempts)
+	var repaired_proof: Dictionary = repaired_route.get("proof", {}) if repaired_route.get("proof", {}) is Dictionary else {}
+	settle_planning_budget(request_id, int(repaired_proof.get("expansionsThisCall", 0)))
+	var classification := String(repaired_route.get("classification", repaired_route.get("status", ""))) if not repaired_route.is_empty() else ""
+	if classification in [STATE_PENDING_BUDGET, STATE_PENDING_NAV_DATA]:
+		return mark_probing(request_id, String(repaired_route.get("reason", "probe_repair_search_pending")))
+	if not repaired_route.is_empty() and bool(repaired_route.get("ok", false)):
+		record = requests_by_id[request_id]
+		record["probeRepairPhase"] = "probe_repaired_route"
+		record["probeRepairAttemptCount"] = repair_attempts + 1
+		record["route"] = repaired_route.duplicate(true)
+		record.erase("probeRepairFailedRoute")
+		record.erase("probeRepairCertificate")
+		requests_by_id[request_id] = record
+		return mark_probing(request_id, "probe_repair_ready")
+	var failure_state := String(record.get("probeRepairFailureState", STATE_UNREACHABLE_STATIC))
+	var failure_reason := String(record.get("probeRepairFailureReason", "collision_probe_failed"))
+	_clear_probe_repair_state(record)
+	requests_by_id[request_id] = record
+	if failure_state == STATE_BLOCKED_DYNAMIC:
+		return report_blocked_dynamic(request_id, failure_reason)
+	return report_unreachable_static(request_id, failure_reason)
+
+func _claim_probe_repair_planning_budget(request_id: String) -> Dictionary:
+	if request_id == "" or not requests_by_id.has(request_id):
+		return { "granted": false, "reason": "missing_request", "routeSearchExpansions": 0, "routeValidationSteps": 0, "routeCheapSteps": 0 }
+	if planning_claimed_this_frame.has(request_id):
+		return { "granted": false, "reason": "probe_repair_already_serviced_this_frame", "routeSearchExpansions": 0, "routeValidationSteps": 0, "routeCheapSteps": 0 }
+	var repair_expansions := DEFAULT_ROUTE_SEARCH_EXPANSIONS_PER_REQUEST
+	if plan_attempts_used_this_frame >= plan_attempt_budget_per_frame \
+		or route_search_expansions_used_this_frame + repair_expansions > route_search_expansion_budget_per_frame:
+		counters["planningBudgetDeferrals"] = int(counters.get("planningBudgetDeferrals", 0)) + 1
+		return { "granted": false, "reason": "probe_repair_search_budget", "routeSearchExpansions": 0, "routeValidationSteps": 0, "routeCheapSteps": 0 }
+	planning_claimed_this_frame[request_id] = true
+	planning_reserved_expansions_this_frame[request_id] = repair_expansions
+	plan_attempts_used_this_frame += 1
+	route_search_expansions_used_this_frame += repair_expansions
+	counters["planningBudgetGrants"] = int(counters.get("planningBudgetGrants", 0)) + 1
+	var record: Dictionary = requests_by_id[request_id]
+	_record_service_event(record, "probe_repair_budget_granted", "probe_repair_search", {
+		"routeSearchExpansions": repair_expansions,
+		"routeValidationSteps": DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST,
+		"routeCheapSteps": DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST,
+		"routeSearchExpansionsUsedThisFrame": route_search_expansions_used_this_frame,
+		"routeSearchExpansionBudgetPerFrame": route_search_expansion_budget_per_frame
+	})
+	requests_by_id[request_id] = record
+	return { "granted": true, "reason": "probe_repair_search", "routeSearchExpansions": repair_expansions, "routeValidationSteps": DEFAULT_ROUTE_VALIDATION_STEPS_PER_REQUEST, "routeCheapSteps": DEFAULT_ROUTE_CHEAP_STEPS_PER_REQUEST }
+
+func _clear_probe_repair_state(record: Dictionary, clear_avoidance := false) -> void:
+	for key in ["probeRepairPhase", "probeRepairFailedRoute", "probeRepairCertificate", "probeRepairFailureState", "probeRepairFailureReason", "probeRepairAttemptCount"]:
+		record.erase(key)
+	if clear_avoidance:
+		record.erase("probeRepairAvoidCells")
+		record.erase("probeRepairFailedGoalCells")
+
 func _plan_probe_repair_route(entry: Dictionary, request_id: String, failed_route: Dictionary, intent: Dictionary, certificate: Dictionary, options: Dictionary, repair_avoid_cells: Array, repair_attempts: int) -> Dictionary:
 	var substrate = options.get("repairSubstrate", null)
 	if substrate == null or not substrate.has_method("repair_route_after_probe"):
@@ -1105,6 +1290,15 @@ func _probe_cursor_key(request_id: String, route: Dictionary, intent: Dictionary
 			parts.append("%.3f,%.3f,%.3f" % [waypoint.x, waypoint.y, waypoint.z])
 	return "|".join(parts)
 
+
+func _clear_probe_cursors_for_request(request_id: String) -> void:
+	if request_id == "":
+		return
+	var prefix := "%s|" % request_id
+	for key_value in probe_cursors.keys():
+		if String(key_value).begins_with(prefix):
+			probe_cursors.erase(key_value)
+
 func _probe_cell_key(value) -> String:
 	if value is Vector2i:
 		var cell: Vector2i = value
@@ -1133,10 +1327,17 @@ func actor_id_for_entry(entry: Dictionary) -> String:
 	var actor_id := String(entry.get("id", ""))
 	if actor_id != "":
 		return actor_id
-	var body := entry.get("body") as Node
-	if body != null and is_instance_valid(body):
+	var body := _safe_entry_body(entry)
+	if body != null:
 		return str(body.get_instance_id())
 	return ""
+
+
+func _safe_entry_body(entry: Dictionary) -> Node3D:
+	var body_value = entry.get("body")
+	if body_value == null or not is_instance_valid(body_value) or not (body_value is Node3D):
+		return null
+	return body_value as Node3D
 
 func _transition_record(record: Dictionary, state: String, reason: String) -> void:
 	# begin_frame is the sole physics clock for pending-state durations.
@@ -1247,13 +1448,18 @@ func _maybe_capture_pending_stall_trace(record: Dictionary) -> void:
 	var actor_id := String(record.get("actorId", ""))
 	var entry_value = actor_entries.get(actor_id, {})
 	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
-	var body := entry.get("body") as Node3D
-	var position = body.global_position if body != null and is_instance_valid(body) else null
+	# Fixture and streamed actors can leave the registry between the retained
+	# request's creation and this delayed diagnostic. Validate the Variant before
+	# casting it; casting a freed Object is itself a script error and must never
+	# turn an observation path into a gameplay failure.
+	var body := _safe_entry_body(entry)
+	var position = body.global_position if body != null else null
 	var route: Dictionary = record.get("route", {}) if record.get("route", {}) is Dictionary else {}
 	var proof: Dictionary = record.get("routeProof", {}) if record.get("routeProof", {}) is Dictionary else {}
 	var trace := {
 		"capturedWallMsec": now_msec,
-		"authorityPhysicsFrame": frame_serial,
+		"authorityFrameSerial": frame_serial,
+		"planningBudgetEpoch": planning_budget_epoch,
 		"worldSeed": String(main.get("seed_text")) if main != null else "",
 		"actorId": actor_id,
 		"requestId": String(record.get("requestId", "")),
@@ -1324,11 +1530,13 @@ func _maybe_capture_scripted_order_stall_trace(actor_id: String, entry: Dictiona
 		return
 	entry["_scriptedOrderStallTraceOrderId"] = order_id
 	counters["scriptedOrderStallTraceCaptures"] = int(counters.get("scriptedOrderStallTraceCaptures", 0)) + 1
-	var body := entry.get("body") as Node3D
+	var body := _safe_entry_body(entry)
+	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,
-		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"authorityFrameSerial": frame_serial,
+		"planningBudgetEpoch": planning_budget_epoch,
+		"worldSeed": trace_seed if trace_seed is String else "",
 		"actorId": actor_id,
 		"order": _trace_safe_value(order),
 		"submittedPhysicsFrame": int(order.get("submittedPhysicsFrame", -1)),
@@ -1400,11 +1608,13 @@ func _observe_collision_recovery_stall(record: Dictionary, details) -> void:
 	counters["collisionRecoveryStallTraceCaptures"] = int(counters.get("collisionRecoveryStallTraceCaptures", 0)) + 1
 	var entry_value = actor_entries.get(actor_id, {})
 	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
-	var body := entry.get("body") as Node3D
+	var body := _safe_entry_body(entry)
+	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,
-		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"authorityFrameSerial": frame_serial,
+		"planningBudgetEpoch": planning_budget_epoch,
+		"worldSeed": trace_seed if trace_seed is String else "",
 		"actorId": actor_id,
 		"firstCollisionWallMsec": first_msec,
 		"wallRecoveryMsec": wall_wait_msec,

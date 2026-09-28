@@ -119,10 +119,27 @@ func test_current_save_format_is_the_only_authority() -> void:
 	var fresh_saved := save_system.save("fresh", {"marker": "current"})
 	var fresh: Dictionary = save_system.load("fresh")
 	var current_format_written := fresh_saved and int(fresh.get("version", 0)) == SaveSystemScript.SAVE_VERSION and int(fresh.get("version", 0)) == 2
-	add_result("incompatible_saves_are_purged_and_only_current_format_loads", legacy_purged and current_format_written, {
+	var read_stats: Dictionary = save_system.stats()
+	var read_file_ms := float(read_stats.get("lastReadFileMs", -1.0))
+	var decode_ms := float(read_stats.get("lastJsonDecodeMs", -1.0))
+	var total_ms := float(read_stats.get("lastReadParseMs", -1.0))
+	var read_bytes := int(read_stats.get("lastReadBytes", 0))
+	var read_metrics_present := read_stats.has("lastReadFileMs") and read_stats.has("lastJsonDecodeMs") \
+		and read_stats.has("lastReadParseMs") and read_stats.has("lastReadBytes") \
+		and read_file_ms >= 0.0 and decode_ms >= 0.0 and total_ms >= read_file_ms \
+		and total_ms >= decode_ms and read_bytes > 0
+	add_result("incompatible_saves_are_purged_current_format_loads_and_read_phases_are_reported", legacy_purged and current_format_written and read_metrics_present, {
 		"legacyPurged": legacy_purged,
 		"currentFormatWritten": current_format_written,
-		"saveVersion": SaveSystemScript.SAVE_VERSION
+		"saveVersion": SaveSystemScript.SAVE_VERSION,
+		"loadedMarker": fresh.get("marker", ""),
+		"readMetrics": {
+			"fileReadMs": read_file_ms,
+			"jsonDecodeMs": decode_ms,
+			"compatibleTotalMs": total_ms,
+			"bytes": read_bytes,
+			"present": read_metrics_present
+		}
 	})
 	for target_path in [save_path, legacy_slot_path, active_seed_path, "%s_slot_fresh.json" % stem]:
 		remove_test_file(target_path)

@@ -12,13 +12,15 @@ func _ready() -> void:
 
 func run() -> void:
 	report_path = OS.get_environment("VOXEL_TERRAIN_PUBLICATION_REPORT")
+	# Preserve the requested seed and keep this fixture out of user autosaves.
+	OS.set_environment("VOXEL_PLAYTEST", "1")
 	var main := MAIN_SCENE.instantiate() as Node3D
 	main.set("startup_mode", "new_game")
 	get_tree().root.add_child(main)
-	for _i in range(240):
-		await get_tree().process_frame
-		if not bool(main.get("startup_loading_active")):
-			break
+	if not await main.wait_for_startup_loading_complete():
+		add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+		finish(main)
+		return
 	main.set_physics_process(false)
 	var player = main.get("player") as CharacterBody3D
 	player.set_physics_process(false)
@@ -30,10 +32,17 @@ func run() -> void:
 		(player.collision_mask & 2) != 0,
 		"playerMask=%d terrainLayer=%d" % [player.collision_mask, 2]
 	)
-	var chunk_key: Vector2i = main.call("world_to_chunk", player.global_position.x, player.global_position.z)
-	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
+	var player_chunk_key: Vector2i = main.call("world_to_chunk", player.global_position.x, player.global_position.z)
+	# Startup now correctly publishes the player chunk before this fixture can
+	# act. Probe a fresh remote container, keeping the player on proven terrain.
+	var chunk_key := player_chunk_key + Vector2i(0, 8)
 	var runtime := main.get_node_or_null("VoxelTerrainRuntime")
+	var request_id: int = main.world_streaming.request_region(Rect2i(chunk_key * 28, Vector2i.ONE * 28), 1, "collision_publication_contract")
+	add_result("voxel_publication_remote_demand_retained", request_id > 0, str(chunk_key))
+	main.apply_streaming_region_demand()
+	runtime.call("configure_startup_auxiliary_viewers", [player_chunk_key, chunk_key], main.get("world_generation_system"))
 	var navigation_loaded_before := navigation_chunk_loaded_count(main)
+	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
 	var initially_published := bool(runtime.call("gameplay_chunks_published", [chunk_key]))
 	add_result("voxel_publication_not_guessed_at_container_create", not initially_published, str(chunk_key))
 	var published_frame := -1
@@ -60,15 +69,28 @@ func run() -> void:
 	var position_proof: Dictionary = runtime.call("collision_proof_for_world_position", player.global_position, 0.0)
 	var position_samples = position_proof.get("samples", [])
 	var center_sample: Dictionary = position_samples[0] if position_samples is Array and not position_samples.is_empty() and position_samples[0] is Dictionary else {}
-	var expected_y := float(center_sample.get("expectedY", INF))
-	var hit_y := float(center_sample.get("hitY", -INF))
+	var source_surface := expected_mesh_column_surface(main, runtime, player.global_position)
+	var expected_y := float(source_surface.get("height", INF))
+	# The production observation reports a placement-reference height, which
+	# intentionally excludes structure reservations. Compare collision with the
+	# actual mesh-affecting density source instead, without changing placement.
+	var hit := {}
+	if bool(source_surface.get("passed", false)):
+		var query := PhysicsRayQueryParameters3D.create(
+			Vector3(player.global_position.x, expected_y + CELL * 48.0, player.global_position.z),
+			Vector3(player.global_position.x, float(main.world_generation_system.world_bottom_cell_y()) * CELL - CELL * 2.0, player.global_position.z), 2)
+		hit = main.get_world_3d().direct_space_state.intersect_ray(query)
+	var hit_y := float((hit.get("position", Vector3(0.0, -INF, 0.0)) as Vector3).y)
 	var alignment_delta := absf(expected_y - hit_y)
 	add_result(
 		"voxel_publication_analytic_surface_matches_collision",
-		bool(center_sample.get("hit", false)) and alignment_delta <= SURFACE_ALIGNMENT_TOLERANCE,
+		bool(source_surface.get("passed", false)) and not hit.is_empty()
+			and bool(runtime.voxel_terrain_collider(hit.get("collider"))) and alignment_delta <= SURFACE_ALIGNMENT_TOLERANCE,
 		JSON.stringify({
 			"position": player.global_position,
 			"expectedY": expected_y,
+			"placementReferenceY": center_sample.get("expectedY", INF),
+			"meshSource": source_surface,
 			"hitY": hit_y,
 			"delta": alignment_delta,
 			"tolerance": SURFACE_ALIGNMENT_TOLERANCE,
@@ -106,10 +128,10 @@ func run() -> void:
 		disconnected_components.size() == 2,
 		JSON.stringify(disconnected_components)
 	)
-	var connected_player_region: Array[Vector2i] = [chunk_key]
+	var connected_player_region: Array[Vector2i] = [player_chunk_key]
 	var extension_index := 1
 	while bool(runtime.call("primary_viewer_covers_component", connected_player_region)) and extension_index <= 32:
-		connected_player_region.append(chunk_key + Vector2i(extension_index, 0))
+		connected_player_region.append(player_chunk_key + Vector2i(extension_index, 0))
 		extension_index += 1
 	var connected_player_region_needs_help := not bool(
 		runtime.call("primary_viewer_covers_component", connected_player_region)
@@ -128,11 +150,11 @@ func run() -> void:
 			break
 	add_result(
 		"voxel_publication_player_connected_region_gets_auxiliary_coverage_when_needed",
-		connected_player_region.has(chunk_key)
+		connected_player_region.has(player_chunk_key)
 			and connected_player_region_needs_help
 			and auxiliary_covers_far_edge,
 		JSON.stringify({
-			"playerChunk": chunk_key,
+			"playerChunk": player_chunk_key,
 			"region": connected_player_region,
 			"primaryCovers": not connected_player_region_needs_help,
 			"auxiliaryViewerCount": auxiliary_viewer_records.size(),
@@ -157,9 +179,7 @@ func run() -> void:
 		shutdown_pending_tasks == 0,
 		"pending=%d elapsedMs=%.3f" % [shutdown_pending_tasks, float(Time.get_ticks_usec() - shutdown_started_usec) / 1000.0]
 	)
-	main.queue_free()
-	await get_tree().process_frame
-	finish()
+	finish(main)
 
 func add_result(name: String, passed: bool, details: String) -> void:
 	results.append({"name": name, "passed": passed, "details": details})
@@ -175,7 +195,60 @@ func navigation_chunk_loaded_count(main: Node) -> int:
 	var counters: Dictionary = telemetry.get("counters", {}) if telemetry.get("counters", {}) is Dictionary else {}
 	return int(counters.get("change_chunk_loaded", 0))
 
-func finish() -> void:
+func expected_mesh_column_surface(main: Node, runtime: Node, position: Vector3) -> Dictionary:
+	# Diagnostic only. Integer-lattice samples independently reconstruct the
+	# crossing from the same edited-cell selection used by native publication.
+	# Scene overlays and placement projections are not terrain density sources.
+	var generation = main.world_generation_system
+	var service = runtime.volume_service()
+	var x := roundi(position.x / CELL)
+	var z := roundi(position.z / CELL)
+	if not is_equal_approx(position.x, float(x) * CELL) or not is_equal_approx(position.z, float(z) * CELL):
+		return {"passed":false,"reason":"diagnostic_requires_lattice_column"}
+	if service == null or runtime.configured_seed != String(main.seed_text) \
+			or int(runtime.last_volume_revision) != int(service.revision) \
+			or not runtime.gameplay_chunks_published([main.world_to_chunk(position.x, position.z)]):
+		return {"passed":false,"reason":"source_or_collision_publication_pending"}
+	var edits: Dictionary = service.edited_cells
+	var reference_y := float(generation.terrain_deformed_surface_y_for_cell(Vector3i(x, 0, z)))
+	var high := floori(reference_y / CELL) + 8
+	var bounds: Dictionary = service.mesh_edited_y_bounds_for_region(x, x, z, z)
+	if bool(bounds.get("found", false)): high = maxi(high, int(bounds.maxY) + 1)
+	high = mini(high, int(generation.world_top_cell_y()))
+	var previous := {}
+	for y in range(high, int(generation.world_bottom_cell_y()) - 1, -1):
+		var cell := Vector3i(x, y, z)
+		var edit: Dictionary = edits.get(cell, {})
+		var use_edit := not edit.is_empty() and bool(runtime.state_affects_terrain_mesh(service, edit))
+		var signature := String(runtime.edit_signature(edit)) if use_edit else ""
+		if String(runtime.applied_edit_signatures.get(cell, "")) != signature:
+			return {"passed":false,"reason":"source_edit_not_applied","cell":cell}
+		var sample: Dictionary = edit if use_edit else runtime.generated_state_at_grid_cell(cell)
+		var density := float(sample.get("density", -CELL))
+		var current := {"cell":cell,"density":density,"source":"edit" if use_edit else "generated",
+			"metadata":sample.get("metadata", {})}
+		if density >= 0.0 and not previous.is_empty() and float(previous.density) < 0.0:
+			var readback: Array = []
+			var source_matches := true
+			var tool = runtime.terrain.get_voxel_tool()
+			tool.channel = VoxelBuffer.CHANNEL_SDF
+			var encoded := VoxelBuffer.new()
+			encoded.create(1, 1, 1)
+			encoded.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+			for source: Dictionary in [current, previous]:
+				encoded.set_voxel_f(-float(source.density) / CELL, 0, 0, 0, VoxelBuffer.CHANNEL_SDF)
+				var expected_sdf := encoded.get_voxel_f(0, 0, 0, VoxelBuffer.CHANNEL_SDF)
+				var actual_sdf := float(tool.get_voxel_f(source.cell))
+				source_matches = source_matches and absf(expected_sdf - actual_sdf) <= 0.0001
+				readback.append({"cell":source.cell,"expectedSdf":expected_sdf,"publishedSdf":actual_sdf})
+			return {"passed":source_matches,"sourceRevision":int(service.revision),"seed":String(main.seed_text),
+				"publishedDensityReadback":readback,
+				"height":generation.surface_boundary_y_between_numeric_samples(y, density, float(previous.density)),
+				"solidSample":current,"airSample":previous}
+		previous = current
+	return {"passed":false,"reason":"source_surface_not_found"}
+
+func finish(shutdown_main: Node = null) -> void:
 	var passed := true
 	for result in results:
 		if not bool(result.get("passed", false)):
@@ -185,6 +258,8 @@ func finish() -> void:
 		"runnerId": "voxel_terrain_collision_publication",
 		"evidenceLevel": "integration",
 		"passed": passed,
+		"seed": String(shutdown_main.get("seed_text")) if is_instance_valid(shutdown_main) else "",
+		"startup_loading_failure_result": shutdown_main.get("startup_loading_failure_result") if is_instance_valid(shutdown_main) else {},
 		"results": results
 	}
 	if report_path != "":
@@ -194,4 +269,7 @@ func finish() -> void:
 			file.store_string(JSON.stringify(report, "  "))
 			file.close()
 	print(JSON.stringify(report, "  "))
-	get_tree().quit(0 if passed else 1)
+	if is_instance_valid(shutdown_main):
+		shutdown_main.call("request_graceful_quit", 0 if passed else 1)
+	else:
+		get_tree().quit(0 if passed else 1)

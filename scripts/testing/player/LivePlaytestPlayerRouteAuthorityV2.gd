@@ -78,7 +78,8 @@ func plan_route(entry: Dictionary, target: Vector3, semantic_kind: String, optio
 		"semanticKind": semantic_kind,
 		"startPosition": player.global_position,
 		"maxExpansions": int(options.get("maxExpansions", 8192)),
-		"expansionsPerCall": int(options.get("expansionsPerCall", 16))
+		"expansionsPerCall": int(options.get("expansionsPerCall", 16)),
+		"requestIdentity": active_request_id
 	}
 	var requested_avoids: Array = options.get("avoidCells", []) if options.get("avoidCells", []) is Array else []
 	var repair_avoids: Array = runtime.get("probeRepairAvoidCells", []) if runtime.get("probeRepairAvoidCells", []) is Array else []
@@ -139,6 +140,11 @@ func cancel_active(entry: Dictionary, reason := "cancelled") -> Dictionary:
 		active_commit_options = {}
 		return { "ok": true, "cancelled": false, "reason": "no_active_player_route" }
 	_bind_entry(entry)
+	if substrate != null:
+		if substrate.has_method("evict_candidate_cache_for_request"):
+			substrate.evict_candidate_cache_for_request(active_request_id)
+		if substrate.has_method("evict_search_cache_for_request"):
+			substrate.evict_search_cache_for_request(active_request_id)
 	var cancelled: Dictionary = authority.cancel_request(active_request_id, reason)
 	active_request_id = ""
 	active_signature = ""
@@ -184,7 +190,8 @@ func _bind_entry(entry: Dictionary) -> void:
 func _candidate_poses(entry: Dictionary, target: Vector3, semantic_kind: String, allow_outside: bool, moving_home: bool, options: Dictionary) -> Dictionary:
 	var candidates: Dictionary = substrate.candidate_poses_for_target(entry, _target_data(entry, target, semantic_kind, options), semantic_kind, {
 		"allowOutside": allow_outside,
-		"movingHome": moving_home
+		"movingHome": moving_home,
+		"requestIdentity": active_request_id
 	})
 	var unfiltered_cells := _candidate_cells(candidates)
 	var constrained: Array = []

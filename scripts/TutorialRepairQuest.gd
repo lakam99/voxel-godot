@@ -157,6 +157,7 @@ func remove_repair_target_prop(prop: Node3D) -> void:
     if prop_id != "":
         var removed_props: Dictionary = main.get("removed_props")
         removed_props[prop_id] = true
+        main.removed_props_revision += 1
         if main.npc_system and main.npc_system.has_method("notify_navigation_prop_removed"):
             main.npc_system.notify_navigation_prop_removed(prop_id, prop)
     prop.queue_free()

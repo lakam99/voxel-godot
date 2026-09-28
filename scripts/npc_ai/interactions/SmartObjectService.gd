@@ -11,6 +11,7 @@ const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const CELL := 1.35
 const WORLD_CHUNK_CELL_SIZE := 28
 const RESOURCE_QUERY_DEFAULT_CHUNK_RADIUS := 3
+const QUERY_CACHE_MAX_ENTRIES := 128
 const COMMAND_RESERVE := &"reserve"
 const COMMAND_RELEASE := &"release"
 const COMMAND_CANCEL := &"cancel"
@@ -36,11 +37,21 @@ var index_by_region := {}
 var index_by_town := {}
 var index_by_layer := {}
 var query_cache := {}
+var query_cache_sequence := 0
 var last_release_by_object := {}
 
 func setup(owner_node: Node, door_portal_service) -> void:
 	owner = owner_node
 	door_portals = door_portal_service
+
+
+func performance_monitor():
+	if owner == null or not is_instance_valid(owner):
+		return null
+	var main_node = owner.get("main")
+	if main_node == null or not is_instance_valid(main_node):
+		return null
+	return main_node.get("runtime_perf_monitor")
 
 func clear() -> void:
 	registrations.clear()
@@ -73,6 +84,39 @@ func register_door(door: Node, metadata := {}) -> String:
 		registrations[portal_id] = SmartObjectRegistrationScript.make(portal_id, "door", door, metadata)
 		_connect_registration_lifecycle(registrations[portal_id])
 	return portal_id
+
+## Streaming owner calls before freeing the leaf. Do not recreate a grouped
+## registration: its reservations and logical metadata belong to the survivor.
+func unregister_door(door: Node) -> Dictionary:
+	if door_portals == null:
+		return {"status":"failed","reason":"missing_door_service","portalRemoved":false}
+	var result: Dictionary = door_portals.unregister_door(door)
+	if result.get("status") != "unregistered": return result
+	var portal_id := String(result.portalId)
+	_disconnect_door_lifecycle(portal_id, door)
+	var registration = registrations.get(portal_id)
+	if registration == null or registration.kind != "door": return result
+	if bool(result.portalRemoved):
+		_disconnect_door_lifecycle(portal_id, registration.node)
+		mark_registration_unbound(registration, "door_streamed_out")
+		registrations.erase(portal_id)
+		last_release_by_object.erase(portal_id)
+	else:
+		var portal = door_portals.portals[portal_id]
+		if not is_instance_valid(registration.node) or not portal.leaf_nodes.has(registration.node):
+			_disconnect_door_lifecycle(portal_id, registration.node)
+			registration.node = portal.leaf_nodes[0]
+			registration.revision = _next_revision()
+			query_cache.clear()
+			# Prior unbinding may already have released reservations. Rebinding is
+			# not authority to resurrect them or clear stale/depleted policy flags.
+			_connect_registration_lifecycle(registration)
+	return result
+
+func _disconnect_door_lifecycle(portal_id: String, node) -> void:
+	if not is_instance_valid(node) or not node is Node: return
+	var callback := Callable(self, "_on_registered_node_tree_exiting").bind(portal_id, int(node.get_instance_id()))
+	if node.tree_exiting.is_connected(callback): node.tree_exiting.disconnect(callback)
 
 func register_object(object_id: String, kind: String, node: Node = null, metadata := {}) -> String:
 	if object_id == "":
@@ -147,6 +191,10 @@ func register_workstation(block: Node, metadata := {}) -> String:
 		kind = "bed"
 	var merged := metadata.duplicate(true) if metadata is Dictionary else {}
 	merged["blockType"] = block_type
+	# A workstation registration represents a currently existing block. Unlike a
+	# harvested resource rebind, recreating the same cell/type is authoritative
+	# evidence that a previously removed utility is available again.
+	merged["depleted"] = bool(merged.get("depleted", false))
 	merged["requiresApproach"] = true
 	merged["actionReach"] = float(merged.get("actionReach", CELL * 1.55))
 	merged["verticalTolerance"] = float(merged.get("verticalTolerance", CELL * 0.72))
@@ -270,6 +318,7 @@ func reserve_interaction(request):
 		occupants.append(owner_id)
 	updated_slot["occupants"] = occupants
 	registration.slots[slot_id] = updated_slot
+	query_cache.clear()
 	_count("reservations_granted")
 	_record("reserved", registration.object_id, registration.kind, reservation_metrics(registration, reservation, false))
 	return _result(NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED, &"reserved", reservation_metrics(registration, reservation, false))
@@ -421,6 +470,19 @@ func notify_object_removed(object_id: String, node_or_reason = null, reason := "
 		return
 	mark_registration_removed(registration, removal_reason)
 
+## Streaming removes a binding, not the durable resource. An old scene cannot
+## unbind a newer instance which happens to use the same deterministic ID.
+func notify_object_unloaded(object_id: String, node: Node) -> Dictionary:
+	if object_id == "" or not is_instance_valid(node):
+		return {"status":"failed", "reason":"invalid_object_binding"}
+	var registration = registrations.get(object_id)
+	if registration == null or registration.node == null:
+		return {"status":"absent", "objectId":object_id}
+	if not is_same(registration.node, node):
+		return {"status":"failed", "reason":"object_binding_mismatch", "objectId":object_id}
+	mark_registration_unbound(registration, "object_streamed_out")
+	return {"status":"unregistered", "objectId":object_id}
+
 func object_available(object_id: String, actor_id := "") -> Dictionary:
 	var registration = registrations.get(object_id)
 	if registration == null:
@@ -440,40 +502,59 @@ func object_available(object_id: String, actor_id := "") -> Dictionary:
 	}
 
 func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Array[Node3D]:
+	var monitor = performance_monitor()
+	var total_start: int = monitor.begin_section("npc_smart_object_resource_query") if monitor != null else 0
 	var option_map: Dictionary = options if options is Dictionary else {}
-	var cache_key: String = query_cache_key(entry, kinds, option_map)
-	var cached: Dictionary = query_cache.get(cache_key, {})
-	if not cached.is_empty() and int(cached.get("revision", -1)) == revision_counter and int(cached.get("frame", -1000)) + int(option_map.get("cacheFrames", 8)) >= Engine.get_process_frames():
-		var cached_nodes: Array[Node3D] = []
-		for object_id_value in cached.get("objectIds", []):
-			var registration = registrations.get(String(object_id_value))
-			var node := cached_resource_node_for_query(registration, entry, option_map)
-			if node != null:
-				cached_nodes.append(node)
-		_count("indexed_query_cache_hits")
-		return cached_nodes
 	var body: Node3D = null
 	var body_value = entry.get("body")
 	if body_value != null and is_instance_valid(body_value) and body_value is Node3D:
 		body = body_value as Node3D
 	var origin: Vector3 = node_position(body) if body != null else entry.get("porchPosition", Vector3.ZERO)
+	var bypass_cache := bool(option_map.get("bypassCache", false))
+	var cache_key := ""
+	var cached: Dictionary = {}
+	if not bypass_cache:
+		cache_key = query_cache_key(entry, kinds, option_map, origin)
+		cached = query_cache.get(cache_key, {})
+	if not bypass_cache and not cached.is_empty() and int(cached.get("revision", -1)) == revision_counter and int(cached.get("frame", -1000)) + int(option_map.get("cacheFrames", 8)) >= Engine.get_process_frames():
+		var cache_start: int = monitor.begin_section("npc_smart_object_query_cache_bind") if monitor != null else 0
+		var cached_nodes: Array[Node3D] = []
+		for object_id_value in cached.get("objectIds", []):
+			var registration = registrations.get(String(object_id_value))
+			var node := live_registration_node_3d(registration) if registration_matches_query(registration, entry, option_map) else null
+			if node != null:
+				cached_nodes.append(node)
+		_count("indexed_query_cache_hits")
+		if monitor != null:
+			monitor.end_section("npc_smart_object_query_cache_bind", cache_start)
+			monitor.end_section("npc_smart_object_resource_query", total_start)
+		return cached_nodes
+	var bucket_start: int = monitor.begin_section("npc_smart_object_query_bucket_scan") if monitor != null else 0
 	var object_ids := candidate_object_ids_for_query(entry, kinds, option_map, origin)
+	if monitor != null:
+		monitor.end_section("npc_smart_object_query_bucket_scan", bucket_start)
+	var filter_start: int = monitor.begin_section("npc_smart_object_query_filter_score") if monitor != null else 0
 	var scored: Array[Dictionary] = []
+	var distance_mode := String(option_map.get("distanceMode", "planar_xz"))
 	for object_id in object_ids.keys():
 		var registration = registrations.get(String(object_id))
 		if registration == null or not registration_matches_query(registration, entry, option_map):
 			continue
 		var position: Vector3 = object_position(registration)
+		var distance := position.distance_to(origin) if distance_mode == "3d" else Vector2(position.x - origin.x, position.z - origin.z).length()
 		scored.append({
 			"objectId": String(object_id),
 			"position": position,
-			"distance": Vector2(position.x - origin.x, position.z - origin.z).length()
+			"distance": distance
 		})
 	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if is_equal_approx(float(a.get("distance", 0.0)), float(b.get("distance", 0.0))):
 			return String(a.get("objectId", "")) < String(b.get("objectId", ""))
 		return float(a.get("distance", 0.0)) < float(b.get("distance", 0.0))
 	)
+	if monitor != null:
+		monitor.end_section("npc_smart_object_query_filter_score", filter_start)
+	var bind_start: int = monitor.begin_section("npc_smart_object_query_result_bind") if monitor != null else 0
 	var limit: int = maxi(1, int(option_map.get("limit", 48)))
 	var result: Array[Node3D] = []
 	var result_ids: Array[String] = []
@@ -489,13 +570,90 @@ func query_resource_nodes(entry: Dictionary, kinds: Array, options := {}) -> Arr
 			continue
 		result.append(node)
 		result_ids.append(object_id)
-	query_cache[cache_key] = {
-		"revision": revision_counter,
-		"frame": Engine.get_process_frames(),
-		"objectIds": result_ids
-	}
+	if not bypass_cache:
+		store_query_cache_result(cache_key, {
+			"revision": revision_counter,
+			"frame": Engine.get_process_frames(),
+			"objectIds": result_ids
+		})
 	_count("indexed_resource_queries")
+	if monitor != null:
+		monitor.end_section("npc_smart_object_query_result_bind", bind_start)
+		monitor.end_section("npc_smart_object_resource_query", total_start)
 	return result
+
+## Stateless semantic invalidation fingerprint for multi-frame selectors. Only
+## registrations eligible for the same kinds and spatial/policy filters affect
+## the fingerprint. Availability, reservations, depletion/removal/recreation,
+## and position/revision changes remain observable without broad chunk churn.
+func query_scope_revision(entry: Dictionary, kinds: Array, options := {}, origin_value = null) -> Dictionary:
+	var option_map: Dictionary = options if options is Dictionary else {}
+	var origin: Vector3
+	if origin_value is Vector3:
+		origin = origin_value
+	else:
+		var body_value = entry.get("body")
+		if body_value != null and is_instance_valid(body_value) and body_value is Node3D:
+			origin = node_position(body_value as Node3D)
+		else:
+			origin = entry.get("porchPosition", Vector3.ZERO)
+	var object_ids := candidate_object_ids_for_query(entry, kinds, option_map, origin)
+	var sorted_ids: Array[String] = []
+	for object_id_value in object_ids.keys():
+		sorted_ids.append(String(object_id_value))
+	sorted_ids.sort()
+	var fingerprint := HashingContext.new()
+	fingerprint.start(HashingContext.HASH_SHA256)
+	var policy_key := query_cache_key(entry, kinds, option_map, origin)
+	fingerprint.update((policy_key + "\n").to_utf8_buffer())
+	var eligible_count := 0
+	var actor_id := String(entry.get("id", ""))
+	for object_id in sorted_ids:
+		var registration = registrations.get(object_id)
+		if registration == null:
+			continue
+		var position: Vector3 = object_position(registration)
+		var owners: Array = reservation_owners(registration)
+		owners.sort()
+		var availability: Dictionary = object_available(object_id, actor_id)
+		var semantic_row := "%s|%s|%s|%.4f,%.4f,%.4f|%d|%s|%s|%s\n" % [
+			object_id,
+			String(registration.kind),
+			String(registration.metadata.get("blockType", "")),
+			position.x,
+			position.y,
+			position.z,
+			int(registration.revision),
+			str(bool(availability.get("ok", false))),
+			String(availability.get("reason", "")),
+			JSON.stringify(owners)
+		]
+		fingerprint.update(semantic_row.to_utf8_buffer())
+		eligible_count += 1
+	return {
+		"serviceInstanceId": get_instance_id(),
+		"semanticFingerprint": fingerprint.finish().hex_encode(),
+		"eligibleCount": eligible_count
+	}
+
+func store_query_cache_result(cache_key: String, value: Dictionary) -> void:
+	query_cache_sequence += 1
+	var stored := value.duplicate(true)
+	stored["sequence"] = query_cache_sequence
+	if not query_cache.has(cache_key) and query_cache.size() >= QUERY_CACHE_MAX_ENTRIES:
+		var oldest_key := ""
+		var oldest_sequence := 9223372036854775807
+		for key_value in query_cache.keys():
+			var key := String(key_value)
+			var cached: Dictionary = query_cache.get(key, {})
+			var sequence := int(cached.get("sequence", 0))
+			if sequence < oldest_sequence or (sequence == oldest_sequence and (oldest_key == "" or key < oldest_key)):
+				oldest_key = key
+				oldest_sequence = sequence
+		if oldest_key != "":
+			query_cache.erase(oldest_key)
+			_count("indexed_query_cache_evictions")
+	query_cache[cache_key] = stored
 
 func candidate_object_ids_for_query(entry: Dictionary, kinds: Array, options: Dictionary, origin: Vector3) -> Dictionary:
 	var kind_lookup := {}
@@ -519,7 +677,7 @@ func candidate_object_ids_for_query(entry: Dictionary, kinds: Array, options: Di
 				var chunk_cell := origin_cell + Vector2i(dx * chunk_size, dz * chunk_size)
 				var bucket: Dictionary = index_by_chunk.get(chunk_key_for_cell(chunk_cell), {})
 				collect_candidate_object_ids(result, bucket, kind_lookup, entry, options, collection_limit)
-				if result.size() >= collection_limit:
+				if collection_limit > 0 and result.size() >= collection_limit:
 					found_enough = true
 					break
 			if found_enough:
@@ -531,7 +689,7 @@ func candidate_object_ids_for_query(entry: Dictionary, kinds: Array, options: Di
 		for kind in kind_lookup.keys():
 			var bucket: Dictionary = available_index_by_kind.get(String(kind), {})
 			collect_candidate_object_ids(result, bucket, kind_lookup, entry, options, collection_limit)
-			if result.size() >= collection_limit:
+			if collection_limit > 0 and result.size() >= collection_limit:
 				break
 	elif result.is_empty():
 		_count("indexed_resource_empty_spatial_queries")
@@ -549,6 +707,8 @@ func resource_query_chunk_radius(entry: Dictionary, options: Dictionary) -> int:
 	return maxi(1, int(options.get("chunkRadius", RESOURCE_QUERY_DEFAULT_CHUNK_RADIUS)))
 
 func resource_query_collection_limit(options: Dictionary) -> int:
+	if bool(options.get("collectAllSpatialMatches", false)):
+		return 0
 	var limit := maxi(1, int(options.get("limit", 48)))
 	return maxi(6, limit)
 
@@ -578,8 +738,13 @@ func registration_matches_candidate_filters(registration, entry: Dictionary, opt
 	var allowed_materials: Array = options.get("materials", [])
 	if not allowed_materials.is_empty() and not allowed_materials.has(registration_material_value(registration)):
 		return false
+	var allowed_block_types: Array = options.get("blockTypes", [])
+	if not allowed_block_types.is_empty() and not allowed_block_types.has(registration_block_type_value(registration)):
+		return false
 	var position: Vector3 = object_position(registration)
 	if bool(options.get("workAreaOnly", true)) and not indexed_point_inside_work_area(entry, position):
+		return false
+	if bool(options.get("insideTownOnly", false)) and not indexed_point_inside_town(entry, position):
 		return false
 	if bool(options.get("outsideTown", true)) and indexed_point_inside_town(entry, position):
 		return false
@@ -604,6 +769,14 @@ func registration_material_value(registration) -> String:
 		return String(node.get_meta("material", registration.metadata.get("material", "")))
 	return String(registration.metadata.get("material", ""))
 
+func registration_block_type_value(registration) -> String:
+	if registration == null:
+		return ""
+	var node := live_registration_node_3d(registration)
+	if node != null:
+		return String(node.get_meta("block_type", registration.metadata.get("blockType", "")))
+	return String(registration.metadata.get("blockType", ""))
+
 func registration_matches_query(registration, entry: Dictionary, options: Dictionary) -> bool:
 	if registration == null or registration.depleted:
 		return false
@@ -618,11 +791,16 @@ func registration_matches_query(registration, entry: Dictionary, options: Dictio
 	var allowed_materials: Array = options.get("materials", [])
 	if not allowed_materials.is_empty() and not allowed_materials.has(String(node.get_meta("material", ""))):
 		return false
+	var allowed_block_types: Array = options.get("blockTypes", [])
+	if not allowed_block_types.is_empty() and not allowed_block_types.has(String(node.get_meta("block_type", registration.metadata.get("blockType", "")))):
+		return false
 	var unreachable_key := String(options.get("unreachableMetaKey", ""))
 	if unreachable_key != "" and bool(node.get_meta(unreachable_key, false)):
 		return false
 	var position: Vector3 = object_position(registration)
 	if bool(options.get("workAreaOnly", true)) and not indexed_point_inside_work_area(entry, position):
+		return false
+	if bool(options.get("insideTownOnly", false)) and not indexed_point_inside_town(entry, position):
 		return false
 	if bool(options.get("outsideTown", true)) and indexed_point_inside_town(entry, position):
 		return false
@@ -832,6 +1010,8 @@ func release_reservation(registration, reservation_id: String, owner_id: String,
 		registration.slots[slot_id] = slot
 		released += 1
 		_record("released", registration.object_id, registration.kind, { "reservationId": String(key), "reason": reason })
+	if released > 0:
+		query_cache.clear()
 	return released
 
 func release_object_reservations(registration, reason: String) -> int:
@@ -1312,21 +1492,28 @@ func indexed_point_inside_work_area(entry: Dictionary, position: Vector3) -> boo
 	var flat := Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL)
 	return flat.length() <= radius
 
-func query_cache_key(entry: Dictionary, kinds: Array, options: Dictionary) -> String:
+func query_cache_key(entry: Dictionary, kinds: Array, options: Dictionary, origin: Vector3) -> String:
 	var kind_values: Array[String] = []
 	for kind_value in kinds:
 		kind_values.append(String(kind_value))
 	kind_values.sort()
 	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
-	return "%s|%d,%d|%d|%s|%s|%s|%s" % [
+	return "%s|%d,%d|%d|%s|%.4f,%.4f,%.4f|%s|%s|%s|%s|%s|%s|%s" % [
 		",".join(kind_values),
 		center.x,
 		center.y,
 		int(entry.get("townRadius", 18)),
+		String(entry.get("id", "")),
+		origin.x,
+		origin.y,
+		origin.z,
 		str(bool(options.get("workAreaOnly", true))),
 		str(bool(options.get("outsideTown", true))),
+		str(bool(options.get("insideTownOnly", false))),
+		str(bool(options.get("collectAllSpatialMatches", false))),
+		String(options.get("distanceMode", "planar_xz")),
 		String(options.get("unreachableMetaKey", "")),
-		String(options.get("verticalLayer", "")) + "|" + str(int(options.get("limit", 48))) + "|" + JSON.stringify(options.get("drops", [])) + "|" + JSON.stringify(options.get("materials", []))
+		String(options.get("verticalLayer", "")) + "|" + str(int(options.get("limit", 48))) + "|" + JSON.stringify(options.get("drops", [])) + "|" + JSON.stringify(options.get("materials", [])) + "|" + JSON.stringify(options.get("blockTypes", []))
 	]
 
 func reservation_owners(registration) -> Array:

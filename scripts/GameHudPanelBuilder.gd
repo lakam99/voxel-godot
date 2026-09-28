@@ -199,7 +199,7 @@ static func build_loading_overlay(hud, root: Control) -> void:
     root.add_child(hud.loading_overlay)
 
     var dim := ColorRect.new()
-    dim.color = Color(0.02, 0.025, 0.022, 0.84)
+    dim.color = Color(0.02, 0.025, 0.022, 1.0)
     dim.set_anchors_preset(Control.PRESET_FULL_RECT)
     dim.mouse_filter = Control.MOUSE_FILTER_STOP
     hud.loading_overlay.add_child(dim)

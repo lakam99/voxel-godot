@@ -1122,7 +1122,7 @@ func foliage_material(architecture: String, biome: String) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
 	material.resource_name = "procedural_tree_foliage_%s" % key.replace(":", "_")
 	material.shader = FOLIAGE_SHADER
-	var leaf := Color("477a2d")
+	var leaf := Color("3d672c")
 	match architecture:
 		"conifer":
 			leaf = Color("28553b")

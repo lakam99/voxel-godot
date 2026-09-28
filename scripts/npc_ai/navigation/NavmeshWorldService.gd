@@ -1,10 +1,16 @@
 extends RefCounted
 class_name NavmeshWorldService
 
+## Value-only scheduling events; subscribers must still validate acceptance.
+signal accepted_tile_changed(tile_key: String, source_key: String, world_seed: String, owner_id: int, serial: int, present: bool)
+
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const NavigationMeshPreparationScript := preload("res://scripts/npc_ai/navigation/NavigationMeshPreparation.gd")
+const PreparedNavigationDescriptorScript := preload("res://scripts/npc_ai/navigation/PreparedNavigationDescriptor.gd")
+const NavigationPublicationQueueScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationQueue.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -24,6 +30,9 @@ var region_states := {}
 var region_rids_by_region := {}
 var region_ids_by_rid := {}
 var region_metrics_by_region := {}
+## Private value-only installation receipts; never a route or topology authority.
+## Each receipt expires with its exact region installation.
+var _tile_publication_receipts := {}
 var topology_revision := 0
 var dynamic_revision := 0
 var registered_region_count := 0
@@ -39,23 +48,42 @@ var max_path_query_usec := 0
 var slowest_path_query := {}
 var install_duration_samples_usec: Array[int] = []
 var path_query_duration_samples_usec: Array[int] = []
+var publication_phase_metrics: Dictionary = {}
 var dirty_regions_by_region := {}
 var dirty_region_queue: Array[String] = []
 var rebuild_count := 0
 var last_rebuild_usec := 0
 var door_link_records_by_region := {}
 var door_link_records_by_portal := {}
+var crossing_link_records_by_region := {}
 var door_portal_states := {}
+## Bounded by retained descriptors, including unloaded/empty regions. These
+## indexes also locate links if one installed-link index needs retirement repair.
+var _door_descriptor_regions_by_portal := {}
+var _door_descriptor_portals_by_region := {}
 var installed_door_link_count := 0
 var door_link_state_revision := 0
 var door_link_install_failure_count := 0
 var actor_path_records := {}
 var navigation_map_dirty_serial := 0
 var navigation_map_synced_serial := 0
+var _publication_synced_serial := 0
 var navigation_map_last_iteration_id := -1
 var reusable_path_query_parameters := NavigationPathQueryParameters3D.new()
 var endpoint_query_cache := {}
 var endpoint_query_cache_order: Array[String] = []
+var _publication_queue = NavigationPublicationQueueScript.new()
+var _publication_owner: WeakRef
+var _publication_source_key := ""
+var _publication_world_seed := ""
+var _staged_descriptor
+var _staged_mesh: NavigationMesh
+var _staged_binding := {}
+var _publication_bindings := {}
+var _publication_resetting := false
+var _accepted_tile_sources: Dictionary = {}
+var _accepted_source_serial := 0
+var _publication_producers: Dictionary = {}
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -63,16 +91,31 @@ func setup(config = null) -> void:
 		_ensure_navigation_map()
 
 func clear() -> void:
+	for reference: WeakRef in _publication_producers.values():
+		var producer = reference.get_ref()
+		if is_instance_valid(producer) and producer.has_method("release_navigation_capture_cache"):
+			producer.release_navigation_capture_cache()
+	_publication_producers.clear()
+	for region: String in _accepted_tile_sources.keys(): _retire_accepted_tile(region)
+	_publication_queue.cancel()
+	_publication_owner = null
+	_publication_bindings.clear()
 	for region_id in region_rids_by_region.keys():
 		_release_region(String(region_id))
+	for descriptor in descriptors_by_region.values():
+		_retire_prepared_descriptor(descriptor)
 	descriptors_by_region.clear()
 	region_states.clear()
 	region_metrics_by_region.clear()
+	_tile_publication_receipts.clear()
 	dirty_regions_by_region.clear()
 	dirty_region_queue.clear()
 	door_link_records_by_region.clear()
 	door_link_records_by_portal.clear()
+	crossing_link_records_by_region.clear()
 	door_portal_states.clear()
+	_door_descriptor_regions_by_portal.clear()
+	_door_descriptor_portals_by_region.clear()
 	actor_path_records.clear()
 	endpoint_query_cache.clear()
 	endpoint_query_cache_order.clear()
@@ -93,9 +136,11 @@ func clear() -> void:
 	slowest_path_query.clear()
 	navigation_map_dirty_serial = 0
 	navigation_map_synced_serial = 0
+	_publication_synced_serial = 0
 	navigation_map_last_iteration_id = -1
 	install_duration_samples_usec.clear()
 	path_query_duration_samples_usec.clear()
+	publication_phase_metrics.clear()
 	installed_door_link_count = 0
 	door_link_state_revision = 0
 	door_link_install_failure_count = 0
@@ -112,19 +157,28 @@ func clear() -> void:
 	navigation_map = RID()
 	owns_navigation_map = false
 
-func register_chunk_descriptor(descriptor) -> Dictionary:
+func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
+	if _publication_resetting: return {"status":"pending","installed":false,"reason":"navigation_world_reset"}
 	if descriptor == null:
 		return { "status": "rejected", "reason": "missing_descriptor" }
+	if descriptor is PreparedNavigationDescriptorScript and not descriptor.preparation_valid():
+		return {"status":"rejected","reason":"prepared_navigation_source_changed"}
 	var region_id := String(descriptor.get("region_id"))
 	if region_id == "":
 		return { "status": "rejected", "reason": "missing_region_id" }
+	var crossing_error := _crossing_descriptor_error(descriptor)
+	if not crossing_error.is_empty():
+		return {"status":"rejected","reason":crossing_error}
 	var signature: String = String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else ""
 	var existing_metrics: Dictionary = region_metrics_by_region.get(region_id, {})
 	if signature != "" \
 		and descriptors_by_region.has(region_id) \
 		and region_rids_by_region.has(region_id) \
 		and not dirty_regions_by_region.has(region_id) \
-		and String(existing_metrics.get("signature", "")) == signature:
+		and String(existing_metrics.get("signature", "")) == signature \
+		and String(_tile_publication_receipts.get(region_id, {}).get("sourceKey", "")) == source_key \
+		and (descriptor != _staged_descriptor or (descriptor == descriptors_by_region.get(region_id) \
+			and _publication_bindings.get(region_id,{}) == _staged_binding)):
 		return {
 			"status": String(region_states.get(region_id, "installed")),
 			"regionId": region_id,
@@ -136,12 +190,36 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 			"signature": signature
 		}
 	_ensure_navigation_map()
-	if region_rids_by_region.has(region_id):
-		_release_region(region_id)
+	var previous_descriptor = descriptors_by_region.get(region_id)
+	var previous_receipt: Dictionary = _tile_publication_receipts.get(region_id,{})
 	descriptors_by_region[region_id] = descriptor
-	_clear_dirty_region(region_id)
+	_index_descriptor_doors(region_id, descriptor)
 	var loaded := bool(descriptor.get("loaded"))
+	if not loaded: _release_region(region_id)
+	_tile_publication_receipts.erase(region_id)
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
+	if String(install_result.get("status", "")) == "failed":
+		if previous_descriptor != null:
+			descriptors_by_region[region_id] = previous_descriptor
+			_index_descriptor_doors(region_id, previous_descriptor)
+		else:
+			descriptors_by_region.erase(region_id)
+			_unindex_descriptor_doors(region_id)
+		if not previous_receipt.is_empty(): _tile_publication_receipts[region_id] = previous_receipt
+		return {"status":"failed","installed":false,"reason":install_result.get("reason","installation_failed")}
+	_clear_dirty_region(region_id)
+	_publication_bindings.erase(region_id)
+	if previous_descriptor != descriptor: _retire_prepared_descriptor(previous_descriptor)
+	# Bind only a receipt produced by this fresh installation. Virtual installers
+	# which do not emit an actual receipt remain unacknowledged.
+	if String(install_result.get("status", "")) == "installed":
+		var fresh: Dictionary = _tile_publication_receipts.get(region_id, {})
+		if not fresh.is_empty() and fresh.descriptorId == descriptor.get_instance_id() \
+				and fresh.regionRid == region_rids_by_region.get(region_id, RID()):
+			var bound := fresh.duplicate()
+			bound.sourceKey = source_key
+			bound.make_read_only()
+			_tile_publication_receipts[region_id] = bound
 	if signature != "":
 		install_result["signature"] = signature
 		var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
@@ -161,11 +239,18 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	}
 
 func unregister_chunk(region_id: String) -> Dictionary:
+	_publication_bindings.erase(region_id)
+	var active: Dictionary = _publication_queue.stats().binding
+	if not active.is_empty() and NavigationBakeDescriptorScript.chunk_region_id(String(active.siteId)) == region_id:
+		_publication_queue.cancel()
+		_publication_owner = null
+	_unindex_descriptor_doors(region_id)
 	if not descriptors_by_region.has(region_id):
 		_release_region(region_id)
 		_clear_dirty_region(region_id)
 		return { "status": "missing", "regionId": region_id, "topologyRevision": topology_revision }
 	_release_region(region_id)
+	_retire_prepared_descriptor(descriptors_by_region.get(region_id))
 	descriptors_by_region.erase(region_id)
 	region_states[region_id] = "unregistered"
 	region_metrics_by_region.erase(region_id)
@@ -175,8 +260,348 @@ func unregister_chunk(region_id: String) -> Dictionary:
 	return { "status": "unregistered", "regionId": region_id, "topologyRevision": topology_revision }
 
 func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
+	if String(snapshot.get("publicationStatus", "ready")) != "ready":
+		return {"status":snapshot.get("publicationStatus", "pending"),"reason":snapshot.get("reason", "source_pending"),"installed":false}
+	# An admitted filter packet has no surface arrays until the worker completes.
+	if snapshot.has("publicationInput"):
+		return _request_prepared_tile(snapshot)
+	# A demand containing only a tile key is not an authoritative empty tile.
+	# Reject it before descriptor replacement can retire the installed geometry.
+	if not bool(snapshot.get("unloaded", false)) and not snapshot.get("surfaces") is Array \
+			and not snapshot.get("buildingSurfaces") is Array:
+		return {"status":"rejected","reason":"missing_tile_surface_source","installed":false}
+	if snapshot.has("publicationSource"):
+		return _request_prepared_tile(snapshot)
 	var descriptor = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
-	return register_chunk_descriptor(descriptor)
+	return register_chunk_descriptor(descriptor, String(snapshot.get("sourceKey", "")))
+
+func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
+	if _publication_resetting: return {"status":"pending","installed":false,"reason":"navigation_world_reset"}
+	var filtering := snapshot.has("publicationInput")
+	var source_value = snapshot.get("publicationInput",{}) if filtering else snapshot.get("publicationSource",{})
+	if not source_value is Dictionary:
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var source: Dictionary = source_value
+	if not source.is_read_only() or not source.get("snapshot") is Dictionary or not source.snapshot.is_read_only() \
+			or not source.get("profile") is Dictionary or not source.profile.is_read_only():
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var tile_key := String(snapshot.get("tileKey",""))
+	var source_key := String(snapshot.get("sourceKey",""))
+	var owner_ref = snapshot.get("publicationOwner")
+	var owner = owner_ref.get_ref() if owner_ref is WeakRef else null
+	if source.get("status") != "prepared" or owner == null or source_key.is_empty() or tile_key.is_empty():
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var world_seed := String(source.get("profile",{}).get("worldSeed",""))
+	if source.get("snapshot",{}).get("worldSeed") != world_seed or source.snapshot.get("tileKey") != tile_key \
+			or source.snapshot.get("sourceKey") != source_key or source.snapshot.get("regionId") != NavigationBakeDescriptorScript.chunk_region_id(tile_key) \
+			or (filtering and (source.get("profile",{}).get("captureMode") != "filter_input" or not source.has("filterInput"))):
+		return {"status":"failed","installed":false,"reason":"navigation_capture_identity_mismatch"}
+	var queue_state: Dictionary = _publication_queue.stats()
+	var queued_binding: Dictionary = queue_state.binding
+	# A completed slot already owns an immutable captured source. Polling that
+	# slot must stay cheap; perform the full live-source proof once, immediately
+	# before installation, rather than three times on the completion path.
+	var consuming_current_ready: bool = queue_state.status == "ready" \
+		and queued_binding.get("siteId") == tile_key \
+		and queued_binding.get("sourceKey") == world_seed+"|"+source_key
+	var source_validated_in_call := false
+	if not consuming_current_ready:
+		if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+			return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+		source_validated_in_call = true
+	_publication_producers[owner.get_instance_id()] = owner_ref
+	if owner.has_method("bind_navigation_publication_service"): owner.bind_navigation_publication_service(self)
+	var binding := {"siteId":tile_key,"sourceKey":world_seed+"|"+source_key,
+		"generation":maxi(1,int(source.snapshot.get("sourceRevision",1)))}
+	# Preserve current-slot validation BEFORE the installation cache fast path.
+	var active_binding: Dictionary = queued_binding
+	if active_binding.get("siteId") == tile_key:
+		var active_owner = _publication_owner.get_ref() if _publication_owner != null else null
+		if active_owner != owner or (not consuming_current_ready \
+				and not _source_owner_matches(active_owner,tile_key,_publication_source_key,_publication_world_seed)):
+			_publication_queue.cancel()
+			_publication_owner = null
+		elif active_binding.get("sourceKey") == binding.sourceKey:
+			binding = active_binding
+	var region_id := String(source.snapshot.regionId)
+	# The progress lookup is structural and O(1). This operation already owns a
+	# physical proof unless it entered with a completed queue slot; acquire that
+	# proof at most once before borrowing an installed source.
+	var accepted := accepted_tile_progress_source(tile_key,source_key,world_seed,owner)
+	if not accepted.is_empty() and not source_validated_in_call:
+		if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+			return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+		source_validated_in_call=true
+	if not accepted.is_empty():
+		_attach_accepted_source(snapshot,accepted)
+		return {"status":"empty" if accepted.empty else "installed","installed":not accepted.empty,
+			"cached":true,"regionId":region_id,"tileKey":tile_key}
+	# A borrowed accepted result may not be replayed after its installation retires.
+	# A future adapter call obtains the retained input or captures current facts.
+	if snapshot.has("publicationAcceptedSerial"):
+		return {"status":"pending","installed":false,"reason":"navigation_accepted_source_retired"}
+	if not consuming_current_ready:
+		advance_publication()
+	var requested: Dictionary = _publication_queue.request(source,binding)
+	if _publication_queue.stats().binding == binding:
+		_publication_owner = owner_ref
+		_publication_source_key = source_key
+		_publication_world_seed = world_seed
+	if requested.status != "ready":
+		if requested.status == "failed" and _publication_queue.stats().binding == binding:
+			_publication_queue.cancel()
+			_publication_owner = null
+		return {"status":requested.status,"reason":requested.get("reason","navigation_preparation_pending"),"installed":false}
+	var ready: Dictionary = _publication_queue.take_ready(binding)
+	if ready.is_empty(): return {"status":"pending","reason":"navigation_preparation_pending","installed":false}
+	var accepted_source: Dictionary = ready.get("acceptedSource",{})
+	if (not source_validated_in_call and not _source_owner_matches(owner,tile_key,source_key,world_seed)) or ready.binding != binding \
+			or accepted_source.get("status") != "prepared" or accepted_source.snapshot.get("worldSeed") != world_seed \
+			or accepted_source.snapshot.get("tileKey") != tile_key or accepted_source.snapshot.get("sourceKey") != source_key \
+			or accepted_source.snapshot.get("regionId") != region_id:
+		_retire_navigation_ready(ready)
+		_publication_owner = null
+		return {"status":"pending","installed":false,"reason":"navigation_completed_source_changed"}
+	_staged_descriptor = ready.descriptor
+	_staged_mesh = ready.mesh
+	_staged_binding = ready.binding
+	var result := register_chunk_descriptor(_staged_descriptor,source_key)
+	if result.get("installed",false) or result.get("status") == "empty":
+		_publication_bindings[region_id] = ready.binding
+		_retire_accepted_tile(region_id)
+		_accepted_source_serial += 1
+		var retained := {"source":accepted_source,"owner":owner_ref,"binding":ready.binding,
+			"descriptorId":_staged_descriptor.get_instance_id(),"serial":_accepted_source_serial,
+			"empty":result.get("status") == "empty","diagnostics":ready.get("diagnostics",{}),
+			"doorOwners":snapshot.get("publicationDoorOwners",{}),
+			"filterProfile":ready.get("filterProfile",{}),
+			"captureProfile":ready.get("captureProfile",{}),
+			"installationSerial":navigation_map_dirty_serial if result.get("status")=="empty" else _tile_publication_receipts.get(region_id,{}).get("installationSerial",-1),
+			"mapRid":navigation_map}
+		retained.make_read_only()
+		_accepted_tile_sources[region_id] = retained
+		accepted_tile_changed.emit(tile_key,source_key,world_seed,owner.get_instance_id(),_accepted_source_serial,true)
+		_attach_accepted_source(snapshot,retained)
+		var monitor = owner.performance_monitor() if owner.has_method("performance_monitor") else null
+		if monitor != null:
+			for field: String in retained.filterProfile:
+				monitor.observe_external_duration("navmesh_worker_"+field,float(retained.filterProfile[field])/1000.0)
+	else:
+		_retire_navigation_ready(ready)
+	_staged_descriptor = null; _staged_mesh = null; _staged_binding = {}
+	_publication_owner = null
+	return result
+
+func accepted_tile_state(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# Read-only borrowed source ownership and live acknowledgement. A queued
+	# server sync is not source loss and must not trigger another worker build.
+	var result := {"status":"absent","reason":"navigation_accepted_source_absent","sourceOwned":false,
+		"empty":false,"accepted":{},"receipt":{},"acceptedSerial":0,"installationSerial":-1}
+	if tile_key.is_empty() or source_key.is_empty() or world_seed.is_empty():
+		return _accepted_state_result(result,"invalid","invalid_publication_request",{})
+	# Validate the requested identity before comparing an older installation.
+	# Stale callers cannot borrow it; a legitimate successor must be free to
+	# capture and replace the predecessor through the ordinary worker path.
+	if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+		return _accepted_state_result(result,"invalid","navigation_source_owner_changed",{})
+	var region: String = NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+	var accepted: Dictionary = _accepted_tile_sources.get(region,{})
+	if accepted.is_empty(): return result
+	if accepted.owner.get_ref()!=owner or accepted.source.snapshot.get("sourceKey")!=source_key \
+			or accepted.source.snapshot.get("worldSeed")!=world_seed:
+		result.reason = "navigation_accepted_source_obsolete"
+		return result
+	result.acceptedSerial = int(accepted.serial)
+	result.installationSerial = int(accepted.installationSerial)
+	result.empty = bool(accepted.empty)
+	var descriptor = descriptors_by_region.get(region)
+	if descriptor==null or descriptor.get_instance_id()!=accepted.descriptorId:
+		return _accepted_state_result(result,"invalid","navigation_accepted_descriptor_retired",{})
+	if not descriptor is PreparedNavigationDescriptorScript or not descriptor.preparation_valid():
+		return _accepted_state_result(result,"invalid","prepared_navigation_source_changed",{})
+	if dirty_regions_by_region.has(region):
+		return _accepted_state_result(result,"invalid","navigation_accepted_source_dirty",{})
+	if _publication_bindings.get(region,{})!=accepted.binding:
+		return _accepted_state_result(result,"invalid","navigation_accepted_binding_changed",{})
+	var snapshot: Dictionary = accepted.source.snapshot
+	if snapshot.get("sourceKey")!=source_key or snapshot.get("worldSeed")!=world_seed \
+			or snapshot.get("tileKey")!=tile_key or snapshot.get("regionId")!=region:
+		return _accepted_state_result(result,"invalid","navigation_accepted_source_changed",{})
+	result.receipt = {"status":"pending","empty":result.empty,"sourceKey":source_key,
+		"sourceRevision":int(descriptor.get("revision")),"installationSerial":result.installationSerial,
+		"acceptedSerial":result.acceptedSerial}
+	if accepted.empty:
+		if not bool(descriptor.get("loaded")) or region_states.get(region)!="empty" or region_rids_by_region.has(region) \
+				or not descriptor.walkable_surfaces.is_empty() or not descriptor.door_links.is_empty() \
+				or not descriptor.crossing_links.is_empty():
+			return _accepted_state_result(result,"invalid","authoritative_empty_source_changed",{})
+		if not backend_config.use_navmesh():
+			return _accepted_state_result(result,"invalid","navmesh_backend_disabled",{})
+		# An empty replacement still owns the removal of its predecessor. Its
+		# barrier is recorded after region/link retirement, even without a RID.
+		if _publication_synced_serial<int(accepted.installationSerial) or publication_sync_pending():
+			return _accepted_state_result(result,"retained","installation_sync_pending",accepted)
+		if navigation_map!=accepted.get("mapRid",RID()) or not NavigationServer3D.get_maps().has(navigation_map):
+			return _accepted_state_result(result,"invalid","installed_map_lost",{})
+		if not NavigationServer3D.map_is_active(navigation_map):
+			return _accepted_state_result(result,"retained","navigation_map_inactive",accepted)
+		# A true empty source has no region iteration to test. First empty
+		# publication also need not manufacture a positive map iteration.
+		return _accepted_state_result(result,"acknowledged","authoritative_empty_complete",accepted)
+	var receipt: Dictionary = _tile_publication_receipts.get(region,{})
+	if not region_rids_by_region.has(region) or receipt.get("sourceKey")!=source_key \
+			or receipt.get("descriptorId")!=accepted.descriptorId or receipt.get("installationSerial")!=accepted.installationSerial:
+		return _accepted_state_result(result,"invalid","navigation_accepted_installation_changed",{})
+	var checked: Dictionary = _validate_tile_installation(region,descriptor,receipt,source_key,{})
+	if not checked.is_empty():
+		return _accepted_state_result(result,"retained" if checked.status=="pending" else "invalid",String(checked.reason),
+			accepted if checked.status=="pending" else {})
+	var region_rid: RID = receipt.regionRid
+	if _navigation_map_iteration_id()<=0 or NavigationServer3D.region_get_iteration_id(region_rid)<=0:
+		return _accepted_state_result(result,"retained","installation_sync_pending",accepted)
+	return _accepted_state_result(result,"acknowledged","tile_publication_complete",accepted)
+
+static func _accepted_state_result(result: Dictionary, status: String, reason: String, accepted: Dictionary) -> Dictionary:
+	result.status = status
+	result.reason = reason
+	result.sourceOwned = status=="retained" or status=="acknowledged"
+	result.accepted = accepted if result.sourceOwned else {}
+	if not result.receipt.is_empty():
+		result.receipt.status = "ready" if status=="acknowledged" else ("pending" if status=="retained" else "failed")
+		result.receipt.reason = reason
+	return result
+
+func accepted_tile_source(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# Compatibility source lookup: borrowed immutable facts survive pending sync
+	# and disabled publication. Callers use accepted_tile_state for readiness.
+	var state: Dictionary = accepted_tile_state(tile_key,source_key,world_seed,owner)
+	return state.accepted if state.sourceOwned else {}
+
+func accepted_tile_progress_source(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# This is intentionally weaker than accepted_tile_state: it lends an already
+	# installed immutable source to a resumable consumer, but never proves that
+	# source is current or route-ready. The consumer must call accepted_tile_state
+	# before acknowledgement, which performs the full live physical proof.
+	if tile_key.is_empty() or source_key.is_empty() or not _source_owner_live(owner,world_seed):
+		return {}
+	var region := NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+	var accepted: Dictionary = _accepted_tile_sources.get(region,{})
+	if accepted.is_empty() or accepted.owner.get_ref()!=owner \
+		or accepted.source.snapshot.get("sourceKey")!=source_key \
+		or accepted.source.snapshot.get("worldSeed")!=world_seed \
+		or accepted.source.snapshot.get("tileKey")!=tile_key \
+		or _publication_bindings.get(region,{})!=accepted.binding \
+		or dirty_regions_by_region.has(region):
+		return {}
+	var descriptor = descriptors_by_region.get(region)
+	if descriptor==null or descriptor.get_instance_id()!=accepted.descriptorId \
+		or not descriptor is PreparedNavigationDescriptorScript or not descriptor.preparation_valid():
+		return {}
+	return accepted
+
+func _attach_accepted_source(request: Dictionary, accepted: Dictionary) -> void:
+	# Only a per-call header copy is mutated; the adapter's cached input stays raw.
+	for field in accepted.source.snapshot: request[field] = accepted.source.snapshot[field]
+	request["publicationSource"] = accepted.source
+	request["publicationAcceptedSerial"] = accepted.serial
+	request["publicationDoorOwners"] = accepted.doorOwners
+	request["publicationCaptureProfile"] = accepted.captureProfile
+	if not accepted.diagnostics.is_empty(): request["publicationDiagnostics"] = accepted.diagnostics
+
+func retire_navigation_payload(payload: Dictionary) -> void:
+	_publication_queue.retire(payload)
+
+func retain_navigation_capture_owner(producer) -> void:
+	_publication_producers[producer.get_instance_id()] = weakref(producer)
+
+func _retire_accepted_tile(region: String) -> void:
+	if not _accepted_tile_sources.has(region): return
+	var retired: Dictionary = _accepted_tile_sources[region]
+	_publication_queue.retire(retired)
+	_accepted_tile_sources.erase(region)
+	var source: Dictionary = retired.source.snapshot
+	var owner = retired.owner.get_ref()
+	accepted_tile_changed.emit(String(source.tileKey),String(source.sourceKey),String(source.worldSeed),
+		owner.get_instance_id() if is_instance_valid(owner) else 0,int(retired.serial),false)
+
+func accepted_tile_scheduling_hint(tile_key: String, world_seed: String, owner) -> Dictionary:
+	# O(1) installation header lookup for a newly retained demand. No source,
+	# geometry or descriptor proof; this result cannot establish readiness.
+	var accepted: Dictionary = _accepted_tile_sources.get(NavigationBakeDescriptorScript.chunk_region_id(tile_key),{})
+	if accepted.is_empty() or not is_instance_valid(owner) or accepted.owner.get_ref()!=owner \
+			or accepted.source.snapshot.get("worldSeed")!=world_seed: return {}
+	return {"sourceKey":String(accepted.source.snapshot.sourceKey),"serial":int(accepted.serial)}
+
+func _retire_navigation_ready(ready: Dictionary) -> void:
+	# NavigationMesh upload resource retains its existing main-thread lifetime.
+	_publication_queue.retire({"descriptor":ready.get("descriptor"),
+		"acceptedSource":ready.get("acceptedSource",{}),"diagnostics":ready.get("diagnostics",{}),
+		"filterProfile":ready.get("filterProfile",{}),"captureProfile":ready.get("captureProfile",{})})
+
+func _source_owner_matches(owner, tile_key: String, source_key: String, world_seed: String) -> bool:
+	return _source_owner_live(owner,world_seed) \
+		and String(owner.navmesh_tile_source_key_for_tile(tile_key)) == source_key
+
+func _source_owner_live(owner, world_seed: String) -> bool:
+	return is_instance_valid(owner) and is_instance_valid(owner.get("main")) \
+		and not (owner is Node and owner.is_queued_for_deletion()) \
+		and not (owner.main is Node and owner.main.is_queued_for_deletion()) \
+		and String(owner.main.get("seed_text")) == world_seed
+
+func advance_publication(budget_usec := 4000) -> Dictionary:
+	var state: Dictionary = _publication_queue.stats()
+	var binding: Dictionary = state.binding
+	# Explicit zero-budget calls are a synchronous inspection boundary. They are
+	# used by cancellation/retirement owners and must reject a changed source even
+	# when the worker has already advanced in this engine frame.
+	if budget_usec <= 0 and not binding.is_empty():
+		var inspection_owner = _publication_owner.get_ref() if _publication_owner != null else null
+		if not _source_owner_matches(inspection_owner,String(binding.siteId),_publication_source_key,_publication_world_seed):
+			_publication_queue.cancel()
+			_publication_owner = null
+			return _publication_queue.stats()
+	if _publication_queue.advanced_this_frame(): return state
+	if not binding.is_empty():
+		var owner = _publication_owner.get_ref() if _publication_owner != null else null
+		# Polling never establishes readiness. Ordinary positive slices check only
+		# lifecycle identity so a large physical proof cannot consume every frame.
+		# A zero-budget caller explicitly asks to hold worker/upload work while
+		# synchronously checking whether its retained source is still current.
+		if not _source_owner_live(owner,_publication_world_seed) \
+				or (budget_usec <= 0 and not _source_owner_matches(owner,String(binding.siteId),_publication_source_key,_publication_world_seed)):
+			_publication_queue.cancel()
+			_publication_owner = null
+	return _publication_queue.advance(budget_usec)
+
+func active_publication_request() -> Dictionary:
+	# Scheduling identity only. The service still validates the live source and
+	# consumes/installs the prepared result through register_tile_snapshot.
+	var state: Dictionary = _publication_queue.stats()
+	return {"tileKey":String(state.binding.get("siteId","")),"status":state.status}
+
+func request_publication_shutdown() -> void:
+	_publication_owner = null
+	_publication_queue.request_shutdown()
+	# Detach service-owned descriptors before waiting: their final references
+	# must retire on the worker before the autonomy owner itself is released.
+	clear()
+
+func begin_publication_reset() -> void:
+	_publication_resetting = true
+	clear()
+
+func finish_publication_reset() -> bool:
+	if _publication_queue.stats().busy: return false
+	_publication_resetting = false
+	return true
+
+func finish_publication_for_owner_exit() -> void:
+	request_publication_shutdown()
+	_publication_queue.finish_shutdown_for_owner_exit()
+
+func _retire_prepared_descriptor(descriptor) -> void:
+	if descriptor is PreparedNavigationDescriptorScript:
+		_publication_queue.retire({"descriptor":descriptor})
 
 func register_semantic_descriptor(kind: String, region_id: String, bounds: AABB, metadata := {}) -> Dictionary:
 	if region_id == "":
@@ -207,6 +632,7 @@ func apply_navigation_events(events: Array) -> Array[Dictionary]:
 
 func process_dirty_regions(max_jobs := 1, max_usec := 4000) -> Array[Dictionary]:
 	var started := Time.get_ticks_usec()
+	advance_publication(max_usec)
 	var results: Array[Dictionary] = []
 	var jobs := maxi(0, max_jobs)
 	for region_id_value in dirty_region_queue.duplicate():
@@ -223,6 +649,11 @@ func process_dirty_regions(max_jobs := 1, max_usec := 4000) -> Array[Dictionary]
 			results.append({ "status": "missing", "regionId": region_id, "dirty": dirty_record })
 			continue
 		var descriptor = descriptors_by_region[region_id]
+		# A prepared source revision is immutable. Retain its installed geometry
+		# while ordinary demand obtains a fresh authoritative source revision.
+		if descriptor is PreparedNavigationDescriptorScript or _publication_bindings.has(region_id):
+			dirty_region_queue.append(region_id)
+			continue
 		if descriptor == null:
 			dirty_regions_by_region.erase(region_id)
 			region_states[region_id] = "missing"
@@ -275,6 +706,130 @@ func set_door_portal_state(portal_or_id, state_value := "", metadata := {}) -> D
 		"doorLinkStateRevision": door_link_state_revision,
 		"dynamicRevision": dynamic_revision
 	}
+
+## Retire only this portal's installed links and live-state overlay. Call after
+## its final shared leaf is unregistered; grouped survivors still own the ID.
+## Retained descriptors become service-owned shallow copies without this door;
+## dirty rebuilds cannot resurrect it. Geometry and caller descriptors are not
+## mutated. External callers must still remove/invalidate their original source
+## before submitting another snapshot: no historical tombstone is retained here.
+func forget_door_portal(portal_id: String) -> Dictionary:
+	var started := Time.get_ticks_usec()
+	if portal_id == "":
+		return { "status": "rejected", "reason": "missing_portal_id", "elapsedUsec": Time.get_ticks_usec() - started }
+	var state_removed: bool = door_portal_states.erase(portal_id)
+	var found := state_removed
+	var released_rids := {}
+	var affected_regions: Array[String] = []
+	for region_id: String in _door_descriptor_regions_by_portal.get(portal_id, {}):
+		affected_regions.append(region_id)
+	# The descriptor index includes uninstalled records. Union it with installed
+	# portal owners instead of scanning every region for each departing door.
+	var portal_records: Array = door_link_records_by_portal.get(portal_id, [])
+	var kept_portal_records: Array = []
+	for value in portal_records:
+		if not value is Dictionary or String(value.get("portalId", "")) != portal_id:
+			kept_portal_records.append(value)
+			continue
+		found = true
+		var link_rid: RID = value.get("rid", RID())
+		if link_rid.is_valid(): released_rids[link_rid] = true
+		var region_id := String(value.get("regionId", ""))
+		if region_id != "" and not affected_regions.has(region_id): affected_regions.append(region_id)
+	if door_link_records_by_portal.has(portal_id) and kept_portal_records.is_empty():
+		door_link_records_by_portal.erase(portal_id)
+		found = true
+	elif kept_portal_records.size() != portal_records.size():
+		door_link_records_by_portal[portal_id] = kept_portal_records
+	var filtered_descriptors := 0
+	for region_key: String in affected_regions:
+		if _filter_descriptor_door(region_key, portal_id):
+			found = true
+			filtered_descriptors += 1
+		var records: Array = door_link_records_by_region.get(region_key, [])
+		var kept: Array = []
+		for value in records:
+			if not value is Dictionary or String(value.get("portalId", "")) != portal_id:
+				kept.append(value)
+				continue
+			found = true
+			var link_rid: RID = value.get("rid", RID())
+			if link_rid.is_valid(): released_rids[link_rid] = true
+		if kept.size() == records.size(): continue
+		if kept.is_empty(): door_link_records_by_region.erase(region_key)
+		else: door_link_records_by_region[region_key] = kept
+	for link_rid: RID in released_rids:
+		NavigationServer3D.free_rid(link_rid)
+		_mark_navigation_map_dirty()
+	installed_door_link_count = maxi(0, installed_door_link_count - released_rids.size())
+	if found:
+		door_link_state_revision += 1
+		dynamic_revision += 1
+	affected_regions.sort()
+	return {
+		"status": "forgotten" if found else "absent", "portalId": portal_id,
+		"stateRemoved": state_removed, "removedLinks": released_rids.size(),
+		"filteredDescriptors": filtered_descriptors,
+		"affectedRegions": affected_regions, "installedDoorLinkCount": installed_door_link_count,
+		"doorLinkStateRevision": door_link_state_revision, "dynamicRevision": dynamic_revision,
+		"elapsedUsec": Time.get_ticks_usec() - started
+	}
+
+func _unindex_descriptor_doors(region_id: String) -> void:
+	for portal_id: String in _door_descriptor_portals_by_region.get(region_id, {}):
+		var regions: Dictionary = _door_descriptor_regions_by_portal.get(portal_id, {})
+		regions.erase(region_id)
+		if regions.is_empty(): _door_descriptor_regions_by_portal.erase(portal_id)
+	_door_descriptor_portals_by_region.erase(region_id)
+
+func _index_descriptor_doors(region_id: String, descriptor) -> void:
+	_unindex_descriptor_doors(region_id)
+	var ids := {}
+	for value in _descriptor_array(descriptor, "door_portals"):
+		if not value is Dictionary: continue
+		var portal_id := String(value.get("id", value.get("portalId", "")))
+		if portal_id != "": ids[portal_id] = true
+	for value in _descriptor_array(descriptor, "door_links"):
+		if not value is Dictionary: continue
+		var portal_id := String(value.get("portalId", value.get("portal_id", "")))
+		if portal_id != "": ids[portal_id] = true
+	if ids.is_empty(): return
+	_door_descriptor_portals_by_region[region_id] = ids
+	for portal_id: String in ids:
+		if not _door_descriptor_regions_by_portal.has(portal_id):
+			_door_descriptor_regions_by_portal[portal_id] = {}
+		_door_descriptor_regions_by_portal[portal_id][region_id] = true
+
+func _filter_descriptor_door(region_id: String, portal_id: String) -> bool:
+	var descriptor = descriptors_by_region.get(region_id)
+	if descriptor == null: return false
+	var portals: Array[Dictionary] = []
+	var links: Array[Dictionary] = []
+	var removed := false
+	for value: Dictionary in _descriptor_array(descriptor, "door_portals"):
+		if String(value.get("id", value.get("portalId", ""))) == portal_id: removed = true
+		else: portals.append(value)
+	for value: Dictionary in _descriptor_array(descriptor, "door_links"):
+		if String(value.get("portalId", value.get("portal_id", ""))) == portal_id: removed = true
+		else: links.append(value)
+	if not removed: return false
+	# NavigationBakeDescriptor's ordinary data schema; retain all geometry arrays
+	# by identity. Only the descriptor shell and its two door arrays are new.
+	var filtered = NavigationBakeDescriptorScript.new()
+	for property: String in ["region_id", "tile_key", "bounds", "revision", "loaded", "metadata", "walkable_surfaces", "blockers", "semantic_anchors", "crossing_links"]:
+		filtered.set(property, descriptor.get(property))
+	filtered.door_portals = portals
+	filtered.door_links = links
+	descriptors_by_region[region_id] = filtered
+	_retire_prepared_descriptor(descriptor)
+	_index_descriptor_doors(region_id, filtered)
+	# Invalidate the old source signature without walking unrelated geometry.
+	# Ordinary registration computes its signature again; a fresh same-ID source
+	# must never hit a cached signature belonging to the removed door set.
+	var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
+	metrics.erase("signature")
+	region_metrics_by_region[region_id] = metrics
+	return true
 
 func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 	var server_result := _closest_walkable_from_server(position, max_distance)
@@ -624,6 +1179,177 @@ func tile_region_status(tile_key: String) -> Dictionary:
 		"installStatus": String(metrics.get("status", ""))
 	}
 
+
+## Exact publication acknowledgement only. It does not certify endpoint/seam
+## clearance, connected routes, door traversability or live actor movement.
+func tile_publication_readiness(tile_key: String, expected_source_key: String, required_surface_ids: Array = [], required_link_ids: Array = []) -> Dictionary:
+	var result := {"status":"pending", "reason":"tile_not_registered", "sourceKey":"",
+		"signature":"", "sourceRevision":-1, "installationSerial":0,
+		"completeSurfaceCoverage":false, "missingDeclaredSurfaceIds":[],
+		"tileKey":tile_key, "missingSurfaceIds":[], "missingLinkIds":[],
+		"limitation":"Installation/ownership acknowledgement only; no endpoint, seam, clearance or traversability certification."}
+	if tile_key.is_empty() or expected_source_key.is_empty():
+		return _publication_result(result, "failed", "invalid_publication_request")
+	var region_id := ""
+	for key in descriptors_by_region:
+		var candidate = descriptors_by_region[key]
+		if candidate != null and String(candidate.get("tile_key")) == tile_key:
+			if not region_id.is_empty(): return _publication_result(result, "failed", "ambiguous_tile_owner")
+			region_id = String(key)
+	if region_id.is_empty(): return result
+	var descriptor = descriptors_by_region[region_id]
+	var receipt: Dictionary = _tile_publication_receipts.get(region_id, {})
+	for field: String in ["sourceKey","signature","sourceRevision","installationSerial","completeSurfaceCoverage","missingDeclaredSurfaceIds"]:
+		if receipt.has(field): result[field] = receipt[field]
+	var checked: Dictionary = _validate_tile_installation(region_id,descriptor,receipt,expected_source_key,result)
+	if not checked.is_empty(): return checked
+	var region_rid: RID = receipt.regionRid
+	for value in required_surface_ids:
+		if not value is String or String(value).is_empty():
+			return _publication_result(result, "failed", "invalid_required_surface_id")
+		if not receipt.surfaces.has(value): result.missingSurfaceIds.append(value)
+	if not result.missingSurfaceIds.is_empty():
+		return _publication_result(result, "failed", "required_surfaces_missing")
+	var live_links: Array = NavigationServer3D.map_get_links(navigation_map)
+	for value in required_link_ids:
+		var link: Dictionary = {}
+		if value is Dictionary:
+			# Grouped doors legitimately share a routing ID. A publication caller
+			# must identify the actual leaf, rather than accepting an arbitrary RID.
+			if not _valid_required_door_link(value):
+				return _publication_result(result, "failed", "invalid_required_link_source")
+			for installed: Dictionary in receipt.get("doorLinkSources", []):
+				var matches := true
+				for field: String in ["id", "portalId", "cell", "start", "end"]:
+					if installed.get(field) != value[field]: matches = false; break
+				if not matches: continue
+				if not link.is_empty():
+					return _publication_result(result, "failed", "required_link_source_ambiguous")
+				link = installed
+		elif value is String and not value.is_empty():
+			link = receipt.links.get(value, {})
+		else:
+			return _publication_result(result, "failed", "invalid_required_link_id")
+		if link.is_empty() or not live_links.has(link.rid):
+			result.missingLinkIds.append(value)
+			continue
+		if NavigationServer3D.link_get_start_position(link.rid) != link.start \
+				or NavigationServer3D.link_get_end_position(link.rid) != link.end:
+			return _publication_result(result, "failed", "installed_link_geometry_changed")
+		if link.get("physicalCrossing",false) and (not NavigationServer3D.link_get_enabled(link.rid) \
+				or NavigationServer3D.link_is_bidirectional(link.rid) != bool(link.bidirectional)):
+			return _publication_result(result,"failed","installed_crossing_state_changed")
+	if not result.missingLinkIds.is_empty():
+		return _publication_result(result, "failed", "required_links_missing")
+	# A positive map iteration alone can describe an older installation.
+	# Only the existing explicit sync path advances this acknowledgement serial.
+	if _navigation_map_iteration_id() <= 0 \
+			or NavigationServer3D.region_get_iteration_id(region_rid) <= 0:
+		return _publication_result(result, "pending", "installation_sync_pending")
+	return _publication_result(result, "ready", "tile_publication_complete")
+
+func _validate_tile_installation(region_id: String, descriptor, receipt: Dictionary, expected_source_key: String, result: Dictionary) -> Dictionary:
+	# Shared installation checks, independent of caller-specific surface/link
+	# obligations. Never query a region RID before synchronization and membership.
+	if not bool(descriptor.get("loaded")): return _publication_result(result, "pending", "tile_unloaded")
+	if dirty_regions_by_region.has(region_id): return _publication_result(result, "pending", "tile_dirty")
+	if receipt.is_empty(): return _publication_result(result, "pending", "tile_not_installed")
+	if String(receipt.sourceKey) != expected_source_key:
+		return _publication_result(result, "pending", "source_key_mismatch")
+	if descriptor.get_instance_id() != receipt.descriptorId or int(descriptor.get("revision")) != int(receipt.sourceRevision) \
+			or not descriptor.has_method("stable_signature") or String(descriptor.stable_signature()) != String(receipt.signature):
+		return _publication_result(result, "failed", "installed_descriptor_changed")
+	if String(receipt.signature).is_empty(): return _publication_result(result, "failed", "missing_descriptor_signature")
+	if not backend_config.use_navmesh(): return _publication_result(result, "failed", "navmesh_backend_disabled")
+	# Queued server commands are not lost resources. Require an actual explicit
+	# sync before consulting installed membership, including after replacement.
+	if _publication_synced_serial < int(receipt.installationSerial) \
+			or navigation_map_synced_serial != navigation_map_dirty_serial:
+		return _publication_result(result, "pending", "installation_sync_pending")
+	# RID.is_valid only tests the handle, not whether the server still owns it.
+	# Check server membership before making RID-specific calls.
+	if navigation_map != receipt.mapRid or not NavigationServer3D.get_maps().has(navigation_map):
+		return _publication_result(result, "failed", "installed_map_lost")
+	if not NavigationServer3D.map_is_active(navigation_map):
+		return _publication_result(result, "pending", "navigation_map_inactive")
+	var region_rid: RID = receipt.regionRid
+	if region_rids_by_region.get(region_id, RID()) != region_rid \
+			or not NavigationServer3D.map_get_regions(navigation_map).has(region_rid):
+		return _publication_result(result, "failed", "installed_region_lost")
+	if not NavigationServer3D.region_get_enabled(region_rid):
+		return _publication_result(result, "pending", "installed_region_disabled")
+	if NavigationServer3D.region_get_transform(region_rid) != Transform3D.IDENTITY:
+		return _publication_result(result, "failed", "installed_region_transform_changed")
+	if int(receipt.polygonCount) <= 0 or receipt.surfaces.is_empty():
+		return _publication_result(result, "failed", "installed_surface_geometry_missing")
+	return {}
+
+static func _publication_result(result: Dictionary, status: String, reason: String) -> Dictionary:
+	result.status = status
+	result.reason = reason
+	return result
+
+static func _valid_required_door_link(value: Dictionary) -> bool:
+	return value.get("id") is String and not value.id.is_empty() \
+		and value.get("portalId") is String and not value.portalId.is_empty() \
+		and value.get("cell") is Vector2i and value.get("start") is Vector3 and value.get("end") is Vector3 \
+		and value.start.is_finite() and value.end.is_finite() and value.start != value.end
+
+static func _record_surface_polygon(ownership: Dictionary, surface_id: String, polygon_index: int) -> void:
+	if surface_id.is_empty(): return
+	# Duplicate source IDs are ambiguous even if they happen to share a polygon.
+	ownership[surface_id] = -1 if ownership.has(surface_id) else polygon_index
+
+func _record_tile_publication(region_id: String, descriptor, source_key: String, region_rid: RID, mesh: NavigationMesh, surface_polygons: Dictionary) -> void:
+	var proof: Dictionary
+	if descriptor is PreparedNavigationDescriptorScript and descriptor == _staged_descriptor and mesh == _staged_mesh:
+		# The queue read back every uploaded polygon and the vertex buffer before
+		# returning this exact resource. Reuse its sealed source-to-polygon proof;
+		# do not rescan thousands of source identities during main-thread attach.
+		proof = descriptor.prepared_geometry()
+	else:
+		var polygons: Array[PackedInt32Array] = []
+		for index in mesh.get_polygon_count(): polygons.append(mesh.get_polygon(index))
+		proof = NavigationMeshPreparationScript.validate_ownership(mesh.get_vertices(),polygons,surface_polygons,_descriptor_array(descriptor,"walkable_surfaces"))
+	var surfaces: Dictionary = proof.validSurfacePolygons
+	var missing_declared: Array[String] = proof.missingDeclaredSurfaceIds
+	var links: Dictionary = {}
+	var duplicate_links: Dictionary = {}
+	var door_link_sources: Array[Dictionary] = []
+	for value in door_link_records_by_region.get(region_id, []) + crossing_link_records_by_region.get(region_id, []):
+		var record: Dictionary = value
+		var id := String(record.get("linkId", ""))
+		if id.is_empty(): continue
+		if record.get("publicationCell") is Vector2i:
+			var source := {"id":id,"portalId":String(record.get("portalId","")),
+				"cell":record.publicationCell,"start":record.start,"end":record.end,"rid":record.rid}
+			source.make_read_only()
+			door_link_sources.append(source)
+		if links.has(id) or duplicate_links.has(id):
+			links.erase(id); duplicate_links[id] = true; continue
+		var link := {"rid":record.rid,"start":record.start,"end":record.end}
+		if record.get("physicalCrossing",false):
+			link["physicalCrossing"] = true
+			link["bidirectional"] = record.bidirectional
+		link.make_read_only()
+		links[id] = link
+	surfaces.make_read_only()
+	links.make_read_only()
+	door_link_sources.make_read_only()
+	var receipt := {"sourceKey":source_key,
+		"signature":String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else "",
+		"sourceRevision":int(descriptor.get("revision")), "descriptorId":descriptor.get_instance_id(),
+		"installationSerial":navigation_map_dirty_serial, "regionRid":region_rid, "mapRid":navigation_map,
+		"completeSurfaceCoverage":missing_declared.is_empty(), "missingDeclaredSurfaceIds":missing_declared,
+		"polygonCount":mesh.get_polygon_count(), "surfaces":surfaces, "links":links,
+		"doorLinkSources":door_link_sources}
+	receipt.make_read_only()
+	_tile_publication_receipts[region_id] = receipt
+
+func publication_sync_pending() -> bool:
+	# A scheduling obligation only; observing it never forces synchronization.
+	return navigation_map_dirty_serial!=navigation_map_synced_serial or _publication_synced_serial<navigation_map_dirty_serial
+
 func sync_navigation_map_if_dirty() -> bool:
 	return _sync_navigation_map_if_dirty()
 
@@ -672,6 +1398,8 @@ func stats() -> Dictionary:
 		"maxPathQueryUsec": max_path_query_usec,
 		"pathQueryP95Usec": _percentile_usec(path_query_duration_samples_usec, 0.95),
 		"slowestPathQuery": slowest_path_query.duplicate(true)
+		,"publicationPhaseMetrics":publication_phase_metrics.duplicate(true)
+		,"publication":_publication_queue.stats()
 	}
 
 func revision() -> String:
@@ -752,12 +1480,23 @@ func _ensure_navigation_map() -> void:
 
 func _install_region(region_id: String, descriptor) -> Dictionary:
 	var started := Time.get_ticks_usec()
-	var navigation_mesh = _build_navigation_mesh(descriptor)
+	_tile_publication_receipts.erase(region_id)
+	var phase_started := Time.get_ticks_usec()
+	var surface_polygons: Dictionary = descriptor.prepared_geometry().get("surfacePolygons",{}) if descriptor is PreparedNavigationDescriptorScript else {}
+	var navigation_mesh = _staged_mesh if descriptor == _staged_descriptor and _staged_mesh != null else _build_navigation_mesh(descriptor, surface_polygons)
+	_record_publication_phase("mesh_resource_build",phase_started)
+	if navigation_mesh == null:
+		return {"status":"failed","regionId":region_id,"reason":"invalid_navigation_preparation"}
+	# Resource construction/upload completed before retiring the old installation.
+	phase_started=Time.get_ticks_usec()
+	_release_region(region_id)
+	_record_publication_phase("prior_region_release",phase_started)
 	var polygon_count := int(navigation_mesh.get_polygon_count()) if navigation_mesh != null and navigation_mesh.has_method("get_polygon_count") else 0
 	var vertex_count := int(navigation_mesh.get_vertices().size()) if navigation_mesh != null and navigation_mesh.has_method("get_vertices") else 0
 	if polygon_count <= 0:
 		region_metrics_by_region[region_id] = { "status": "empty", "polygonCount": 0, "vertexCount": vertex_count }
 		return { "status": "empty", "regionId": region_id, "polygonCount": 0, "vertexCount": vertex_count }
+	phase_started=Time.get_ticks_usec()
 	var region_rid := NavigationServer3D.region_create()
 	NavigationServer3D.region_set_map(region_rid, navigation_map)
 	NavigationServer3D.region_set_navigation_mesh(region_rid, navigation_mesh)
@@ -768,7 +1507,11 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	_mark_navigation_map_dirty()
 	region_rids_by_region[region_id] = region_rid
 	region_ids_by_rid[region_rid] = region_id
+	_record_publication_phase("server_region_registration",phase_started)
+	phase_started=Time.get_ticks_usec()
 	var link_metrics := _install_door_links_for_region(region_id, descriptor)
+	var crossing_metrics := _install_crossing_links_for_region(region_id, descriptor)
+	_record_publication_phase("link_registration",phase_started)
 	last_install_usec = Time.get_ticks_usec() - started
 	_record_timing_sample(install_duration_samples_usec, last_install_usec)
 	installed_region_count += 1
@@ -778,151 +1521,43 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"polygonCount": polygon_count,
 		"vertexCount": vertex_count,
 		"durationUsec": last_install_usec,
-		"doorLinks": link_metrics
+		"doorLinks": link_metrics,
+		"crossingLinks": crossing_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
+	phase_started=Time.get_ticks_usec()
+	_record_tile_publication(region_id, descriptor, "", region_rid, navigation_mesh, surface_polygons)
+	_record_publication_phase("final_acceptance_record",phase_started)
 	return metrics.duplicate(true)
 
-func _build_navigation_mesh(descriptor):
+func _build_navigation_mesh(descriptor, surface_polygons: Dictionary = {}):
 	var navigation_mesh := NavigationMesh.new()
-	var vertices := PackedVector3Array()
-	var vertex_indices := {}
-	var polygons: Array[PackedInt32Array] = []
 	var surfaces: Array = descriptor.get("walkable_surfaces")
-	var sorted_surfaces: Array = surfaces.duplicate()
-	sorted_surfaces.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
-	for polygon_points in _navigation_mesh_polygons_for_surfaces(sorted_surfaces):
-		if polygon_points.size() < 3:
-			continue
-		var indices := PackedInt32Array()
-		for point in polygon_points:
-			var vertex_key := _navigation_mesh_vertex_key(point)
-			if vertex_indices.has(vertex_key):
-				indices.append(int(vertex_indices[vertex_key]))
-			else:
-				vertex_indices[vertex_key] = vertices.size()
-				indices.append(vertices.size())
-				vertices.append(point)
-		polygons.append(indices)
-	navigation_mesh.set_vertices(vertices)
-	for polygon in polygons:
+	var packet: Dictionary = descriptor.prepared_geometry() if descriptor is PreparedNavigationDescriptorScript else NavigationMeshPreparationScript.new().compile(surfaces)
+	if packet.is_empty(): return null
+	if not is_same(surface_polygons,packet.surfacePolygons): surface_polygons.merge(packet.surfacePolygons)
+	navigation_mesh.set_vertices(packet.vertices)
+	for polygon in packet.polygons:
 		navigation_mesh.add_polygon(polygon)
 	return navigation_mesh
 
 func _navigation_mesh_vertex_key(point: Vector3) -> String:
-	return "%d:%d:%d" % [
-		roundi(point.x * 1000.0),
-		roundi(point.y * 1000.0),
-		roundi(point.z * 1000.0)
-	]
+	return NavigationMeshPreparationScript.new()._navigation_mesh_vertex_key(point)
 
-func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array) -> Array:
-	var result := []
-	var layers := {}
-	for surface_value in sorted_surfaces:
-		if not (surface_value is Dictionary):
-			continue
-		var surface: Dictionary = surface_value
-		if not bool(surface.get("walkable", true)):
-			continue
-		if not _surface_mergeable_for_mesh(surface):
-			var polygon := _surface_polygon(surface)
-			if polygon.size() >= 3:
-				result.append(polygon)
-			continue
-		var cell: Vector3i = surface.get("cell")
-		var center: Vector3 = surface.get("center", Vector3(float(cell.x) * CELL, float(cell.y) * CELL, float(cell.z) * CELL))
-		var layer_key := "%d:%d" % [cell.y, roundi(center.y * 100.0)]
-		if not layers.has(layer_key):
-			layers[layer_key] = {
-				"cells": {},
-				"y": center.y
-			}
-		var layer: Dictionary = layers[layer_key]
-		var grid: Dictionary = layer.get("cells", {})
-		grid[Vector2i(cell.x, cell.z)] = true
-	for layer_key in layers.keys():
-		var layer: Dictionary = layers[layer_key]
-		var grid: Dictionary = layer.get("cells", {})
-		result.append_array(_merged_grid_polygons(grid, float(layer.get("y", 0.0))))
-	return result
+func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_polygons: Dictionary = {}) -> Array:
+	return NavigationMeshPreparationScript.new()._navigation_mesh_polygons_for_surfaces(sorted_surfaces, surface_polygons)
 
-func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
-	if surface.has("polygon"):
-		var polygon_value = surface.get("polygon", [])
-		if polygon_value is Array and polygon_value.size() >= 3:
-			return false
-	var cell_value = surface.get("cell")
-	if not (cell_value is Vector3i):
-		return false
-	var size: Vector3 = surface.get("size", Vector3(CELL, 0.05, CELL))
-	return absf(size.x - CELL) <= CELL * 0.05 and absf(size.z - CELL) <= CELL * 0.05
-
-func _merged_grid_polygons(grid: Dictionary, y: float) -> Array:
-	var result := []
-	var keys: Array = grid.keys()
-	keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		if a.y == b.y:
-			return a.x < b.x
-		return a.y < b.y
-	)
-	var visited := {}
-	for key_value in keys:
-		if not (key_value is Vector2i):
-			continue
-		var start: Vector2i = key_value
-		if visited.has(start):
-			continue
-		var end_x := start.x
-		while grid.has(Vector2i(end_x + 1, start.y)) and not visited.has(Vector2i(end_x + 1, start.y)):
-			end_x += 1
-		var end_z := start.y
-		var can_extend := true
-		while can_extend:
-			var next_z := end_z + 1
-			for x in range(start.x, end_x + 1):
-				if not grid.has(Vector2i(x, next_z)) or visited.has(Vector2i(x, next_z)):
-					can_extend = false
-					break
-			if can_extend:
-				end_z = next_z
-		for z in range(start.y, end_z + 1):
-			for x in range(start.x, end_x + 1):
-				visited[Vector2i(x, z)] = true
-		var min_x := float(start.x) * CELL - CELL * 0.5
-		var max_x := float(end_x) * CELL + CELL * 0.5
-		var min_z := float(start.y) * CELL - CELL * 0.5
-		var max_z := float(end_z) * CELL + CELL * 0.5
-		result.append([
-			Vector3(min_x, y, min_z),
-			Vector3(min_x, y, max_z),
-			Vector3(max_x, y, max_z),
-			Vector3(max_x, y, min_z)
-		])
-	return result
-
-func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
-	var polygon_value = surface.get("polygon", [])
-	if polygon_value is Array and polygon_value.size() >= 3:
-		var polygon: Array[Vector3] = []
-		for point in polygon_value:
-			if point is Vector3:
-				polygon.append(point)
-		if polygon.size() >= 3:
-			return polygon
-	var center: Vector3 = surface.get("center", Vector3.ZERO)
-	var size: Vector3 = surface.get("size", Vector3.ONE)
-	var half_x := maxf(size.x, 0.01) * 0.5
-	var half_z := maxf(size.z, 0.01) * 0.5
-	return [
-		Vector3(center.x - half_x, center.y, center.z - half_z),
-		Vector3(center.x - half_x, center.y, center.z + half_z),
-		Vector3(center.x + half_x, center.y, center.z + half_z),
-		Vector3(center.x + half_x, center.y, center.z - half_z)
-	]
+func _source_rectangle(surface: Dictionary, polygon: Array) -> Dictionary:
+	return NavigationMeshPreparationScript.new()._source_rectangle(surface, polygon)
 
 func _release_region(region_id: String) -> void:
+	_retire_accepted_tile(region_id)
+	_tile_publication_receipts.erase(region_id)
 	_release_door_links_for_region(region_id)
+	for record in crossing_link_records_by_region.get(region_id,[]):
+		NavigationServer3D.free_rid(record.rid)
+		_mark_navigation_map_dirty()
+	crossing_link_records_by_region.erase(region_id)
 	if not region_rids_by_region.has(region_id):
 		return
 	var region_rid: RID = region_rids_by_region[region_id]
@@ -1389,6 +2024,13 @@ func _record_timing_sample(samples: Array[int], value: int) -> void:
 	while samples.size() > MAX_TIMING_SAMPLES:
 		samples.pop_front()
 
+func _record_publication_phase(label: String, started_usec: int) -> void:
+	var elapsed := Time.get_ticks_usec()-started_usec
+	var metric: Dictionary=publication_phase_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0})
+	metric.calls+=1; metric.totalUsec+=elapsed; metric.lastUsec=elapsed
+	metric.maxUsec=maxi(int(metric.maxUsec),elapsed)
+	publication_phase_metrics[label]=metric
+
 func _route_options_summary(options := {}) -> Dictionary:
 	if not (options is Dictionary):
 		return {}
@@ -1432,6 +2074,44 @@ func _route_query_failure(status: String, reason: String, start: Vector3, target
 		for key in (details as Dictionary).keys():
 			result[key] = (details as Dictionary)[key]
 	return result
+
+func _crossing_descriptor_error(descriptor) -> String:
+	var ids := {}
+	for crossing in _descriptor_array(descriptor,"crossing_links"):
+		if not crossing is Dictionary: return "invalid_physical_crossing"
+		var id := String(crossing.get("id",""))
+		var start = crossing.get("start")
+		var end = crossing.get("end")
+		if id.is_empty() or ids.has(id) or not start is Vector3 or not end is Vector3:
+			return "invalid_physical_crossing_identity"
+		if not start.is_finite() or not end.is_finite() or start.is_equal_approx(end):
+			return "invalid_physical_crossing_geometry"
+		if String(crossing.get("ownerTileKey","")) != String(descriptor.get("tile_key")):
+			return "physical_crossing_owner_mismatch"
+		if String(crossing.get("kind","")) not in ["stair_ramp","support_seam","interior_passage","porch"]:
+			return "invalid_physical_crossing_kind"
+		if crossing.has("portalId") or crossing.has("actionId") or crossing.has("door"):
+			return "physical_crossing_contains_door_action"
+		ids[id] = true
+	return ""
+
+func _install_crossing_links_for_region(region_id: String, descriptor) -> Dictionary:
+	var records: Array[Dictionary] = []
+	for crossing in _descriptor_array(descriptor,"crossing_links"):
+		var rid := NavigationServer3D.link_create()
+		NavigationServer3D.link_set_map(rid,navigation_map)
+		NavigationServer3D.link_set_start_position(rid,crossing.start)
+		NavigationServer3D.link_set_end_position(rid,crossing.end)
+		var bidirectional := bool(crossing.get("bidirectional",true))
+		NavigationServer3D.link_set_bidirectional(rid,bidirectional)
+		NavigationServer3D.link_set_navigation_layers(rid,1)
+		NavigationServer3D.link_set_enter_cost(rid,0.0)
+		NavigationServer3D.link_set_travel_cost(rid,1.0)
+		NavigationServer3D.link_set_enabled(rid,true)
+		records.append({"rid":rid,"linkId":crossing.id,"start":crossing.start,"end":crossing.end,
+			"physicalCrossing":true,"bidirectional":bidirectional})
+	if not records.is_empty(): crossing_link_records_by_region[region_id] = records
+	return {"installed":records.size()}
 
 func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary:
 	var door_portals: Array = _descriptor_array(descriptor, "door_portals")
@@ -1478,6 +2158,11 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 			continue
 		var portal: Dictionary = portal_by_id.get(portal_id, {})
 		var base_metadata := _merged_link_metadata(portal, link_spec, door_portal_states.get(portal_id, {}))
+		# A live grouped survivor overlay overrides the old representative stored
+		# in a descriptor. Validate only AFTER that ordinary precedence is applied.
+		if not _door_reference_available(base_metadata):
+			failures += 1
+			continue
 		var start_position := _door_link_position(link_spec, portal, ["start", "startPosition", "fromPosition", "entrance"], Vector3.ZERO)
 		var end_position := _door_link_position(link_spec, portal, ["end", "endPosition", "toPosition", "exit"], Vector3.ZERO)
 		if start_position == end_position:
@@ -1505,6 +2190,8 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 			"regionId": region_id,
 			"portalId": portal_id,
 			"linkId": String(base_metadata.get("id", "door-link:%s" % portal_id)),
+			# Original source cell, not a portal's mutable representative leaf.
+			"publicationCell": link_spec.get("cell"),
 			"start": start_position,
 			"end": end_position,
 			"enabled": enabled,
@@ -1521,6 +2208,11 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 	installed_door_link_count += installed
 	door_link_install_failure_count += failures
 	return { "status": "installed", "installed": installed, "failed": failures }
+
+func _door_reference_available(metadata: Dictionary) -> bool:
+	if not metadata.has("door"): return true # Ordinary value-only tile snapshots.
+	var door = metadata.get("door")
+	return is_instance_valid(door) and door is Node and not door.is_queued_for_deletion()
 
 func _descriptor_array(descriptor, property_name: String) -> Array:
 	if descriptor == null:
@@ -1579,13 +2271,17 @@ func _mark_navigation_map_dirty() -> void:
 	navigation_map_dirty_serial += 1
 
 func _sync_navigation_map_if_dirty() -> bool:
+	var started := Time.get_ticks_usec()
 	if navigation_map_synced_serial == navigation_map_dirty_serial:
 		navigation_map_last_iteration_id = _navigation_map_iteration_id()
+		_record_publication_phase("synchronization_observation",started)
 		return false
 	if navigation_map.is_valid() and NavigationServer3D.has_method("map_force_update"):
 		NavigationServer3D.call("map_force_update", navigation_map)
+		_publication_synced_serial = navigation_map_dirty_serial
 	navigation_map_last_iteration_id = _navigation_map_iteration_id()
 	navigation_map_synced_serial = navigation_map_dirty_serial
+	_record_publication_phase("synchronization",started)
 	return true
 
 func _navigation_map_readiness(sync_dirty := false) -> Dictionary:

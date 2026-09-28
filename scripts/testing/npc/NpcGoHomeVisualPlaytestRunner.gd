@@ -117,6 +117,14 @@ func run() -> void:
 	main = MAIN_SCENE.instantiate()
 	add_child(main)
 	write_progress("main_instantiated")
+	var progress_callback := func(message): write_progress("startup_%s" % String(message).replace(" ", "_"))
+	main.connect("startup_loading_step", progress_callback)
+	var startup_ready: bool = await main.wait_for_startup_loading_complete()
+	main.disconnect("startup_loading_step", progress_callback)
+	if not startup_ready or finished:
+		add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+		finish(1)
+		return
 	bind_scene_nodes()
 	write_progress("scene_nodes_bound")
 	if main == null or player == null or npc_system == null:
@@ -642,7 +650,10 @@ func finish(exit_code: int) -> void:
 	final_stats = sanitize_value(npc_system.stats()) if npc_system != null else final_stats
 	write_report(true)
 	write_progress("finished")
-	get_tree().quit(exit_code)
+	if is_instance_valid(main):
+		main.call("request_graceful_quit", exit_code)
+	else:
+		get_tree().quit(exit_code)
 
 func write_report(verbose := true) -> void:
 	var failure_count := 0
@@ -658,6 +669,7 @@ func write_report(verbose := true) -> void:
 		"finished": finished,
 		"passed": failure_count == 0,
 		"failureCount": failure_count,
+		"startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
 		"resultCount": results.size(),
 		"results": results,
 		"fixture": fixture,

@@ -1,0 +1,500 @@
+{
+  "decision": "not_promoted",
+  "reason": "Mixed timings do not establish culling benefit outweighing additional submissions.",
+  "runs": {
+    "spatial-reference-01": {
+      "startupMs": 82910,
+      "source": {
+        "elapsedUsec": 33324,
+        "path": "C:\\Users\\arkam\\Documents\\Codex\\2026-06-18\\goal-develop-a-3d-voxel-seed\\outputs\\voxel-biome-world-godot-citadel-visuals\\artifacts\\citadel-runtime-integration\\candidate-teleport-spatial-reference-01/accepted-source.bin",
+        "sha256": "dbe543f28dfe876f28ae8611d7e869f07975f69e09067b2fe5c88d56e3e4b042"
+      },
+      "counts": {
+        "nodeCount": 5934,
+        "multiMeshes": 1548,
+        "instances": 241573,
+        "sourceCollisionCount": 3253,
+        "publishedSourceCollisionCount": 3253
+      },
+      "phases": {
+        "fixed_view:courtyard_overview": {
+          "cadence": {
+            "maxMs": 19.434,
+            "meanMs": 16.4540909090909,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 17,
+            "samples": 121
+          },
+          "drawCallsMax": 1990,
+          "frameSetupCpu": {
+            "maxMs": 0.344,
+            "meanMs": 0.147893442622951,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.3,
+            "p99Ms": 0.4,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1990.945,
+          "primitivesMax": 2999765,
+          "renderCpu": {
+            "maxMs": 6.68699979782104,
+            "meanMs": 3.1515983714432,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 2.9,
+            "p95Ms": 4.8,
+            "p99Ms": 5.5,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 9.53499984741211,
+            "meanMs": 9.02612298824748,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 9.1,
+            "p95Ms": 9.2,
+            "p99Ms": 9.3,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 4430,
+          "shadowPrimitivesMax": 7235290,
+          "staticMemoryMaxBytes": 1190765342
+        },
+        "fixed_view:overview_0": {
+          "cadence": {
+            "maxMs": 16.879,
+            "meanMs": 16.4704876033058,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 16.9,
+            "samples": 121
+          },
+          "drawCallsMax": 2449,
+          "frameSetupCpu": {
+            "maxMs": 0.172,
+            "meanMs": 0.12372131147541,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.2,
+            "p99Ms": 0.2,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1992.929,
+          "primitivesMax": 3452701,
+          "renderCpu": {
+            "maxMs": 4.61399984359741,
+            "meanMs": 3.47500000039085,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 3.4,
+            "p95Ms": 4.1,
+            "p99Ms": 4.6,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 7.21500015258789,
+            "meanMs": 6.73131967372582,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 6.8,
+            "p95Ms": 6.9,
+            "p99Ms": 6.9,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 4854,
+          "shadowPrimitivesMax": 7351425,
+          "staticMemoryMaxBytes": 1174946066
+        },
+        "fixed_view:urban_row_00_left_door": {
+          "cadence": {
+            "maxMs": 16.89,
+            "meanMs": 16.4405537190083,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 16.9,
+            "samples": 121
+          },
+          "drawCallsMax": 665,
+          "frameSetupCpu": {
+            "maxMs": 0.263,
+            "meanMs": 0.124704918032787,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.2,
+            "p99Ms": 0.3,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1989.307,
+          "primitivesMax": 1257037,
+          "renderCpu": {
+            "maxMs": 1.67700004577637,
+            "meanMs": 1.04676229103667,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 1,
+            "p95Ms": 1.5,
+            "p99Ms": 1.7,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 5.9060001373291,
+            "meanMs": 5.15927048589363,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 5.2,
+            "p95Ms": 5.3,
+            "p99Ms": 5.4,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 1005,
+          "shadowPrimitivesMax": 1932100,
+          "staticMemoryMaxBytes": 1201633734
+        },
+        "ordinary_input_approach": {
+          "cadence": {
+            "maxMs": 38.543,
+            "meanMs": 16.6312515789474,
+            "over100ms": 0,
+            "over33ms": 1,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 17,
+            "samples": 950
+          },
+          "drawCallsMax": 2400,
+          "frameSetupCpu": {
+            "maxMs": 0.348,
+            "meanMs": 0.156567823343849,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.3,
+            "p99Ms": 0.3,
+            "samples": 951
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 15799.689,
+          "primitivesMax": 3686018,
+          "renderCpu": {
+            "maxMs": 6.98299980163574,
+            "meanMs": 3.03966981755446,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 2.8,
+            "p95Ms": 4.6,
+            "p99Ms": 5.4,
+            "samples": 951
+          },
+          "renderGpu": {
+            "maxMs": 7.19899988174438,
+            "meanMs": 5.85806414256211,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 5.7,
+            "p95Ms": 7,
+            "p99Ms": 7.2,
+            "samples": 951
+          },
+          "renderSamples": 951,
+          "shadowDrawCallsMax": 4158,
+          "shadowPrimitivesMax": 7217638,
+          "staticMemoryMaxBytes": 1190548966
+        }
+      },
+      "cameras": [
+        {
+          "label": "overview_0",
+          "transform": "[X: (0.707106, 0.0, -0.707108), Y: (-0.175039, 0.968877, -0.175038), Z: (0.685101, 0.247542, 0.685099), O: (-4419.202, 86.31854, -3720.097)]"
+        },
+        {
+          "label": "courtyard_overview",
+          "transform": "[X: (1.0, 0.0, 0.0), Y: (0.0, 0.302833, -0.953044), Z: (0.0, 0.953044, 0.302833), O: (-4501.25, 104.106, -3787.073)]"
+        },
+        {
+          "label": "urban_row_00_left_door",
+          "transform": "[X: (-0.0, 0.0, -1.0), Y: (-0.14834, 0.988936, 0.0), Z: (0.988936, 0.14834, -0.0), O: (-4500.907, 44.02, -3847.594)]"
+        }
+      ]
+    },
+    "spatial-02": {
+      "startupMs": 79078,
+      "source": {
+        "elapsedUsec": 35266,
+        "path": "C:\\Users\\arkam\\Documents\\Codex\\2026-06-18\\goal-develop-a-3d-voxel-seed\\outputs\\voxel-biome-world-godot-citadel-visuals\\artifacts\\citadel-runtime-integration\\candidate-teleport-spatial-02/accepted-source.bin",
+        "sha256": "dbe543f28dfe876f28ae8611d7e869f07975f69e09067b2fe5c88d56e3e4b042"
+      },
+      "counts": {
+        "nodeCount": 6065,
+        "multiMeshes": 1679,
+        "instances": 241573,
+        "sourceCollisionCount": 3253,
+        "publishedSourceCollisionCount": 3253
+      },
+      "phases": {
+        "fixed_view:courtyard_overview": {
+          "cadence": {
+            "maxMs": 16.842,
+            "meanMs": 16.4742066115702,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 16.9,
+            "samples": 121
+          },
+          "drawCallsMax": 2109,
+          "frameSetupCpu": {
+            "maxMs": 0.274,
+            "meanMs": 0.125131147540984,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.2,
+            "p99Ms": 0.3,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1993.379,
+          "primitivesMax": 2964226,
+          "renderCpu": {
+            "maxMs": 5.11700010299683,
+            "meanMs": 3.18790983567472,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 3,
+            "p95Ms": 4.8,
+            "p99Ms": 5,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 8.71700000762939,
+            "meanMs": 8.48062295210166,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 8.6,
+            "p95Ms": 8.7,
+            "p99Ms": 8.7,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 4685,
+          "shadowPrimitivesMax": 7158014,
+          "staticMemoryMaxBytes": 1212569876
+        },
+        "fixed_view:overview_0": {
+          "cadence": {
+            "maxMs": 17.795,
+            "meanMs": 16.4740165289256,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 17.8,
+            "samples": 121
+          },
+          "drawCallsMax": 2571,
+          "frameSetupCpu": {
+            "maxMs": 0.285,
+            "meanMs": 0.132344262295082,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.2,
+            "p99Ms": 0.3,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1993.356,
+          "primitivesMax": 3360666,
+          "renderCpu": {
+            "maxMs": 7.21500015258789,
+            "meanMs": 3.94059836864471,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 3.6,
+            "p95Ms": 6,
+            "p99Ms": 6.8,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 6.74399995803833,
+            "meanMs": 6.52876229364364,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 6.6,
+            "p95Ms": 6.7,
+            "p99Ms": 6.8,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 5128,
+          "shadowPrimitivesMax": 6962891,
+          "staticMemoryMaxBytes": 1195376768
+        },
+        "fixed_view:urban_row_00_left_door": {
+          "cadence": {
+            "maxMs": 17.087,
+            "meanMs": 16.4407520661157,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 17,
+            "samples": 121
+          },
+          "drawCallsMax": 691,
+          "frameSetupCpu": {
+            "maxMs": 0.262,
+            "meanMs": 0.135467213114754,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.2,
+            "p99Ms": 0.3,
+            "samples": 122
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 1989.331,
+          "primitivesMax": 1001425,
+          "renderCpu": {
+            "maxMs": 1.87399995326996,
+            "meanMs": 1.07282787072854,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 1.1,
+            "p95Ms": 1.4,
+            "p99Ms": 1.8,
+            "samples": 122
+          },
+          "renderGpu": {
+            "maxMs": 6.09600019454956,
+            "meanMs": 5.33106558831012,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 5.4,
+            "p95Ms": 5.4,
+            "p99Ms": 5.6,
+            "samples": 122
+          },
+          "renderSamples": 122,
+          "shadowDrawCallsMax": 1048,
+          "shadowPrimitivesMax": 1457908,
+          "staticMemoryMaxBytes": 1219367772
+        },
+        "ordinary_input_approach": {
+          "cadence": {
+            "maxMs": 28.425,
+            "meanMs": 16.6370618046972,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 16.7,
+            "p95Ms": 16.9,
+            "p99Ms": 17,
+            "samples": 809
+          },
+          "drawCallsMax": 2526,
+          "frameSetupCpu": {
+            "maxMs": 0.3,
+            "meanMs": 0.144487654320988,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 0.2,
+            "p95Ms": 0.3,
+            "p99Ms": 0.3,
+            "samples": 810
+          },
+          "gpuUnavailableSamples": 0,
+          "observedSpanMs": 13459.383,
+          "primitivesMax": 3686863,
+          "renderCpu": {
+            "maxMs": 6.03700017929077,
+            "meanMs": 2.96991728264608,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 2.8,
+            "p95Ms": 4.5,
+            "p99Ms": 5.5,
+            "samples": 810
+          },
+          "renderGpu": {
+            "maxMs": 6.84800004959106,
+            "meanMs": 5.68859382499883,
+            "over100ms": 0,
+            "over33ms": 0,
+            "overflowSamples": 0,
+            "p50Ms": 5.5,
+            "p95Ms": 6.7,
+            "p99Ms": 6.8,
+            "samples": 810
+          },
+          "renderSamples": 810,
+          "shadowDrawCallsMax": 4168,
+          "shadowPrimitivesMax": 6831525,
+          "staticMemoryMaxBytes": 1208800739
+        }
+      },
+      "cameras": [
+        {
+          "label": "overview_0",
+          "transform": "[X: (0.707106, 0.0, -0.707108), Y: (-0.175039, 0.968877, -0.175038), Z: (0.685101, 0.247542, 0.685099), O: (-4419.202, 86.31854, -3720.097)]"
+        },
+        {
+          "label": "courtyard_overview",
+          "transform": "[X: (1.0, 0.0, 0.0), Y: (0.0, 0.302833, -0.953044), Z: (0.0, 0.953044, 0.302833), O: (-4501.25, 104.106, -3787.073)]"
+        },
+        {
+          "label": "urban_row_00_left_door",
+          "transform": "[X: (-0.0, 0.0, -1.0), Y: (-0.14834, 0.988936, 0.0), Z: (0.988936, 0.14834, -0.0), O: (-4500.907, 44.02, -3847.594)]"
+        }
+      ]
+    }
+  }
+}

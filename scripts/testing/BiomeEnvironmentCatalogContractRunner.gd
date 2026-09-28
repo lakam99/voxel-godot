@@ -25,6 +25,7 @@ func run() -> void:
 	test_detail_parity(catalog)
 	test_fallback_and_validation(catalog)
 	test_shared_consumer_injection(catalog)
+	test_generation_receipts()
 	test_rng_and_source_firewall(catalog)
 	finish()
 
@@ -167,6 +168,52 @@ func test_shared_consumer_injection(catalog) -> void:
 		"profileCount": registry.profile_count()
 	})
 	weather.free()
+
+func test_generation_receipts() -> void:
+	var first := CatalogScript.new()
+	var initial: Dictionary = first.generation_receipt()
+	var first_ok: bool = first.setup()
+	var ready: Dictionary = first.generation_receipt()
+	var failed_ok: bool = first.setup(["res://resources/visual/biomes/does-not-exist.tres"])
+	var failed: Dictionary = first.generation_receipt()
+	var recovered_ok: bool = first.setup()
+	var recovered: Dictionary = first.generation_receipt()
+	add_result("catalog_receipt_advances_across_failed_and_recovered_setup", first_ok and not failed_ok and recovered_ok \
+		and int(initial.revision) == 0 and not bool(initial.ready) \
+		and int(ready.revision) == 1 and bool(ready.ready) \
+		and int(failed.revision) == 2 and not bool(failed.ready) \
+		and int(recovered.revision) == 3 and bool(recovered.ready) \
+		and int(initial.owner_id) == int(recovered.owner_id), [initial, ready, failed, recovered])
+	var replacement := CatalogScript.new()
+	var replacement_ok: bool = replacement.setup()
+	var registry := VisualAssetRegistryScript.new()
+	var registry_ok: bool = registry.setup(first)
+	var registry_first: Dictionary = registry.generation_receipt()
+	var registry_second_ok: bool = registry.setup(first)
+	var registry_second: Dictionary = registry.generation_receipt()
+	var registry_replacement_ok: bool = registry.setup(replacement)
+	var registry_replacement: Dictionary = registry.generation_receipt()
+	add_result("registry_receipt_tracks_reload_and_shared_catalog_replacement", replacement_ok and registry_ok and registry_second_ok and registry_replacement_ok \
+		and int(registry_first.revision) == 1 and int(registry_second.revision) == 2 and int(registry_replacement.revision) == 3 \
+		and bool(registry_first.ready) and bool(registry_second.ready) and bool(registry_replacement.ready) \
+		and int(registry_first.catalog.owner_id) == int(first.get_instance_id()) \
+		and int(registry_replacement.catalog.owner_id) == int(replacement.get_instance_id()) \
+		and registry_replacement.catalog != registry_first.catalog, [registry_first, registry_second, registry_replacement])
+	var before_catalog_reload: Dictionary = registry.generation_receipt()
+	var catalog_reload_ok: bool = replacement.setup()
+	var after_catalog_reload: Dictionary = registry.generation_receipt()
+	add_result("registry_receipt_detects_shared_catalog_reload_without_registry_setup", catalog_reload_ok \
+		and int(before_catalog_reload.revision) == int(after_catalog_reload.revision) \
+		and before_catalog_reload.catalog != after_catalog_reload.catalog, [before_catalog_reload, after_catalog_reload])
+	registry.disable_asset_for_test("contract_asset")
+	var disabled: Dictionary = registry.generation_receipt()
+	registry.disable_asset_for_test("contract_asset")
+	var disabled_again: Dictionary = registry.generation_receipt()
+	registry.clear_test_disabled_assets()
+	var cleared: Dictionary = registry.generation_receipt()
+	add_result("registry_receipt_tracks_test_asset_filter_mutations", int(disabled.revision) == int(after_catalog_reload.revision) + 1 \
+		and int(disabled_again.revision) == int(disabled.revision) \
+		and int(cleared.revision) == int(disabled.revision) + 1, [disabled, disabled_again, cleared])
 
 func test_rng_and_source_firewall(catalog) -> void:
 	var control := RandomNumberGenerator.new()

@@ -42,6 +42,44 @@ static func tile_keys_for_bounds(bounds: AABB) -> Array[String]:
 	result.sort()
 	return result
 
+static func terrain_capture_tile_keys_for_bounds(bounds: AABB, capture_halo_cells := 1) -> Array[String]:
+	# Terrain navigation captures read a one-cell seam outside their core tile.
+	# Publish an edit to every tile whose complete capture intersects the edited
+	# cell volume, rather than only the tile that owns the edited cell centre.
+	if bounds.size.x <= 0.0 or bounds.size.z <= 0.0:
+		return []
+	var bounds_end := bounds.position + bounds.size
+	var epsilon := 0.0001
+	var min_cell := Vector2i(
+		floori(bounds.position.x / NpcConstantsScript.CELL_SIZE - 0.5 + epsilon) + 1,
+		floori(bounds.position.z / NpcConstantsScript.CELL_SIZE - 0.5 + epsilon) + 1)
+	var max_cell := Vector2i(
+		ceili(bounds_end.x / NpcConstantsScript.CELL_SIZE + 0.5 - epsilon) - 1,
+		ceili(bounds_end.z / NpcConstantsScript.CELL_SIZE + 0.5 - epsilon) - 1)
+	if max_cell.x < min_cell.x or max_cell.y < min_cell.y:
+		return []
+	var edit_cells := Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE)
+	var halo := maxi(0, capture_halo_cells)
+	var candidate_cells := edit_cells.grow(halo)
+	var last_candidate := candidate_cells.end - Vector2i.ONE
+	var min_tile := Vector2i(
+		floori(float(candidate_cells.position.x) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE)),
+		floori(float(candidate_cells.position.y) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE)))
+	var max_tile := Vector2i(
+		floori(float(last_candidate.x) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE)),
+		floori(float(last_candidate.y) / float(NpcConstantsScript.NAV_TILE_CELL_SIZE)))
+	var result: Array[String] = []
+	for tile_z in range(min_tile.y, max_tile.y + 1):
+		for tile_x in range(min_tile.x, max_tile.x + 1):
+			var tile := Vector2i(tile_x, tile_z)
+			var capture_bounds := Rect2i(
+				tile * NpcConstantsScript.NAV_TILE_CELL_SIZE,
+				Vector2i.ONE * NpcConstantsScript.NAV_TILE_CELL_SIZE).grow(halo)
+			if capture_bounds.intersects(edit_cells):
+				result.append("%d,%d" % [tile_x, tile_z])
+	result.sort()
+	return result
+
 func emit_change(kind: StringName, object_id: String, bounds: AABB, tile_keys: Array, source_revision := 0) -> int:
 	monotonic_revision += 1
 	var normalized_tiles := _normalized_tile_keys(tile_keys)

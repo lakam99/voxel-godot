@@ -8,6 +8,8 @@ const NpcGoalSelectorScript := preload("res://scripts/npc_ai/behavior/NpcGoalSel
 const NpcBlackboardScript := preload("res://scripts/npc_ai/NpcBlackboard.gd")
 const NpcProfileRulesScript := preload("res://scripts/NpcProfileRules.gd")
 const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
+const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
+const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const CELL := 1.35
 
 var runner = null
@@ -33,6 +35,61 @@ class FakeAutonomyRelease:
 			"reservationId": String(metadata.get("reservationId", ""))
 		})
 		return null
+
+class FakeUtilityAnchorSystem:
+	extends RefCounted
+	var service
+
+	func _init(service_value) -> void:
+		service = service_value
+
+	func smart_object_service():
+		return service
+
+	func performance_monitor():
+		return null
+
+class FakeUtilityAnchorWorld:
+	extends RefCounted
+	var approach_calls := 0
+	var standability_calls := 0
+	var reject_all_standability := false
+	var no_approach := false
+	var approach_offset := Vector2i(0, 1)
+
+	func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
+		var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
+		var radius := float(entry.get("townRadius", 18)) * CELL
+		return Vector2(position.x - float(center.x) * CELL, position.z - float(center.y) * CELL).length() <= radius
+
+	func approach_cells_for_target(_entry: Dictionary, position: Vector3, _outside_only := false) -> Array[Vector2i]:
+		approach_calls += 1
+		if no_approach:
+			return []
+		return [Vector2i(roundi(position.x / CELL), roundi(position.z / CELL)) + approach_offset]
+
+	func cell_position(cell: Vector2i) -> Vector3:
+		return Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL)
+
+	func world_cell(position: Vector3) -> Vector2i:
+		return Vector2i(roundi(position.x / CELL), roundi(position.z / CELL))
+
+	func point_inside_work_area(_entry: Dictionary, _position: Vector3) -> bool:
+		return true
+
+	func point_allowed(entry: Dictionary, position: Vector3, allow_outside := false, _moving_home := false) -> bool:
+		return allow_outside or point_inside_town(entry, position)
+
+	func cell_is_standable_goal(_entry: Dictionary, _cell: Vector2i, _allow_outside := false, _moving_home := false) -> bool:
+		standability_calls += 1
+		return not reject_all_standability
+
+class FakeUtilityMain:
+	extends RefCounted
+	const WATER_LEVEL := -100.0
+
+	func surface_y_at_position(_position: Vector3) -> float:
+		return 0.0
 
 func setup(owner) -> void:
 	runner = owner
@@ -66,6 +123,21 @@ func cases() -> Array[Dictionary]:
 		case("npc_interaction_true_depletion_survives_rebind", "day", "test_true_depletion_survives_rebind"),
 		case("npc_interaction_freed_job_target_release_clears_state", "day", "test_freed_job_target_release_clears_state"),
 		case("npc_interaction_query_cache_invalidates_on_resource_removal", "day", "test_query_cache_invalidates_on_resource_removal"),
+		case("npc_interaction_utility_anchor_index_matches_deterministic_scan", "day", "test_utility_anchor_index_matches_deterministic_scan"),
+		case("npc_interaction_utility_anchor_inside_town_survives_outside_crowding", "day", "test_utility_anchor_inside_town_survives_outside_crowding"),
+		case("npc_interaction_utility_anchor_limit_uses_legacy_3d_distance", "day", "test_utility_anchor_limit_uses_legacy_3d_distance"),
+		case("npc_interaction_utility_anchor_moving_origin_bypasses_cache", "day", "test_utility_anchor_moving_origin_bypasses_cache"),
+		case("npc_interaction_utility_query_cache_separates_actor_origins", "day", "test_utility_query_cache_separates_actor_origins"),
+		case("npc_interaction_utility_query_cache_has_hard_origin_cap", "day", "test_utility_query_cache_has_hard_origin_cap"),
+		case("npc_interaction_utility_query_cache_tracks_reserve_release", "day", "test_utility_query_cache_tracks_reserve_release"),
+		case("npc_interaction_utility_query_scope_fingerprint_is_stateless", "day", "test_utility_query_scope_fingerprint_is_stateless"),
+		case("npc_interaction_utility_anchor_index_tracks_block_lifecycle", "day", "test_utility_anchor_index_tracks_block_lifecycle"),
+		case("npc_interaction_utility_anchor_selection_has_no_global_or_route_scan", "day", "test_utility_anchor_selection_has_no_global_or_route_scan"),
+		case("npc_interaction_trader_fallback_incremental_parity_and_bound", "day", "test_trader_fallback_incremental_parity_and_bound"),
+		case("npc_interaction_trader_fallback_scoped_invalidation", "day", "test_trader_fallback_scoped_invalidation"),
+		case("npc_interaction_trader_fallback_matching_mutations_invalidate", "day", "test_trader_fallback_matching_mutations_invalidate"),
+		case("npc_interaction_trader_fallback_identity_invalidation", "day", "test_trader_fallback_identity_invalidation"),
+		case("npc_interaction_trader_fallback_exhaustion_liveness", "day", "test_trader_fallback_exhaustion_liveness"),
 		case("npc_interaction_forager_query_after_harvest_no_crash", "day", "test_forager_query_after_harvest_no_crash"),
 		case("npc_interaction_forager_live_candidate_only", "day", "test_forager_live_candidate_only"),
 		case("npc_interaction_forager_reachable_approach_slot", "day", "test_forager_reachable_approach_slot"),
@@ -565,6 +637,486 @@ func test_query_cache_invalidates_on_resource_removal(_mode: String) -> Dictiona
 	var passed: bool = before.size() == 1 and cache_before.size() > 0 and cache_after_remove.is_empty() and after.is_empty()
 	return outcome(passed, "before=%d cacheBefore=%d cacheAfterRemove=%d after=%d" % [before.size(), cache_before.size(), cache_after_remove.size(), after.size()], ["query_cache_populated", "query_cache_invalidated_on_removal", "removed_resource_not_returned"], state(service))
 
+func test_utility_anchor_index_matches_deterministic_scan(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), null, world, null)
+	var body := attach_to_runner(make_actor("utility-query-actor", Vector3.ZERO))
+	var entry := {
+		"id": "utility-query-actor",
+		"job": "trade",
+		"body": body,
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 8,
+		"porchPosition": Vector3.ZERO
+	}
+	var blocks: Array[Node3D] = [
+		attach_to_runner(make_block("traderStall", Vector3(-CELL * 2.0, 0.0, 0.0))),
+		attach_to_runner(make_block("chest", Vector3(CELL * 2.0, 0.0, 0.0))),
+		attach_to_runner(make_block("workbench", Vector3(CELL * 3.0, 0.0, 0.0))),
+		attach_to_runner(make_block("furnace", Vector3(CELL * 4.0, 0.0, 0.0))),
+		attach_to_runner(make_block("bed", Vector3(CELL * 5.0, 0.0, 0.0))),
+		attach_to_runner(make_block("campfire", Vector3(CELL * 6.0, 0.0, 0.0))),
+		attach_to_runner(make_block("anvil", Vector3(CELL * 7.0, 0.0, 0.0))),
+		attach_to_runner(make_block("chest", Vector3(CELL * 10.0, 0.0, 0.0)))
+	]
+	for index in range(blocks.size() - 1, -1, -1):
+		service.register_workstation(blocks[index])
+	var actual: Array[Vector3] = [Vector3.ZERO]
+	planner.add_utility_anchor_candidates(actual, entry)
+	var expected: Array[Vector3] = [Vector3.ZERO]
+	expected.append_array(legacy_utility_anchor_candidates(blocks, entry, world, body.global_position))
+	var debug: Dictionary = entry.get("lastUtilityAnchorDebug", {})
+	var passed := actual == expected \
+		and actual.size() == 8 \
+		and actual[1].x < actual[2].x \
+		and int(debug.get("indexedReturned", -1)) == 7 \
+		and int(debug.get("acceptedUtilityNodes", -1)) == 7 \
+		and int(debug.get("appendedApproachCandidates", -1)) == 7 \
+		and int(debug.get("totalCandidatesAfter", -1)) == 8
+	return outcome(passed, "actual=%s expected=%s debug=%s" % [JSON.stringify(actual), JSON.stringify(expected), JSON.stringify(debug)], ["indexed_candidates_match_legacy_town_and_approach_semantics", "distance_then_stable_object_id_order", "all_utility_kinds_share_authoritative_index"], state(service))
+
+func test_utility_anchor_inside_town_survives_outside_crowding(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), null, world, null)
+	var entry := {
+		"id": "crowding-trader",
+		"job": "trade",
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 4,
+		"porchPosition": Vector3.ZERO
+	}
+	var outside_count := 0
+	for x in range(-20, 21):
+		for z in range(-20, 21):
+			if outside_count >= 70:
+				break
+			var radius := Vector2(float(x), float(z)).length()
+			if radius <= 5.0 or radius > 20.0:
+				continue
+			var block := attach_to_runner(make_block("chest", Vector3(float(x) * CELL, 0.0, float(z) * CELL)))
+			service.register_workstation(block)
+			outside_count += 1
+		if outside_count >= 70:
+			break
+	var inside_nodes: Array[Node3D] = [
+		attach_to_runner(make_block("traderStall", Vector3(-CELL, 0.0, 0.0))),
+		attach_to_runner(make_block("workbench", Vector3(CELL, 0.0, 0.0))),
+		attach_to_runner(make_block("bed", Vector3(0.0, 0.0, CELL)))
+	]
+	for node in inside_nodes:
+		service.register_workstation(node)
+	var actual: Array[Vector3] = []
+	planner.add_utility_anchor_candidates(actual, entry)
+	var debug: Dictionary = entry.get("lastUtilityAnchorDebug", {})
+	var passed := outside_count == 70 \
+		and actual.size() == 3 \
+		and int(debug.get("indexedReturned", -1)) == 3 \
+		and int(debug.get("acceptedUtilityNodes", -1)) == 3 \
+		and int(debug.get("appendedApproachCandidates", -1)) == 3 \
+		and int(debug.get("totalCandidatesAfter", -1)) == 3
+	return outcome(passed, "outside=%d actual=%s debug=%s" % [outside_count, JSON.stringify(actual), JSON.stringify(debug)], ["inside_town_filter_applies_before_query_limit", "outside_town_utilities_cannot_crowd_valid_anchors", "spatial_query_remains_bounded"], state(service))
+
+func test_utility_anchor_limit_uses_legacy_3d_distance(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), null, world, null)
+	var entry := {
+		"id": "multilevel-trader",
+		"job": "trade",
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 20,
+		"porchPosition": Vector3.ZERO
+	}
+	for index in range(70):
+		var high_block := attach_to_runner(make_block("workbench", Vector3(0.0, CELL * float(100 + index), 0.0)))
+		service.register_workstation(high_block)
+	var ground_nearest := attach_to_runner(make_block("traderStall", Vector3(CELL * 10.0, 0.0, 0.0)))
+	service.register_workstation(ground_nearest)
+	var actual: Array[Vector3] = []
+	planner.add_utility_anchor_candidates(actual, entry)
+	var expected_first := world.cell_position(Vector2i(10, 1))
+	var debug: Dictionary = entry.get("lastUtilityAnchorDebug", {})
+	var passed := not actual.is_empty() \
+		and actual[0].is_equal_approx(expected_first) \
+		and int(debug.get("indexedReturned", -1)) == 64 \
+		and int(debug.get("acceptedUtilityNodes", -1)) == 64
+	return outcome(passed, "first=%s expected=%s debug=%s" % [str(actual[0] if not actual.is_empty() else Vector3.INF), str(expected_first), JSON.stringify(debug)], ["service_applies_3d_distance_before_limit", "vertical_decoys_do_not_crowd_legacy_nearest", "stable_id_tie_break_remains_deterministic"], state(service))
+
+func test_utility_anchor_moving_origin_bypasses_cache(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), null, world, null)
+	var station := attach_to_runner(make_block("workbench", Vector3(CELL * 3.0, 0.0, 0.0)))
+	service.register_workstation(station)
+	var body := attach_to_runner(make_actor("moving-trader", Vector3.ZERO))
+	var entry := { "id": "moving-trader", "job": "trade", "body": body, "townCenter": Vector2i.ZERO, "townRadius": 20, "porchPosition": Vector3.ZERO }
+	var fallback_options := {
+		"limit": 64,
+		"outsideTown": false,
+		"insideTownOnly": true,
+		"workAreaOnly": true,
+		"collectAllSpatialMatches": true,
+		"distanceMode": "3d",
+		"bypassCache": true
+	}
+	var seeded_key: String = service.query_cache_key(entry, ["trader_stall", "workstation", "storage", "bed"], fallback_options, body.global_position)
+	var cache: Dictionary = service.get("query_cache")
+	cache[seeded_key] = {
+		"revision": int(service.get("revision_counter")),
+		"frame": Engine.get_process_frames(),
+		"objectIds": [],
+		"sentinel": "must_remain_untouched"
+	}
+	var nonempty_queries := 0
+	for index in range(24):
+		body.position = Vector3(float(index) * 0.05, 0.0, 0.0)
+		var candidates: Array[Vector3] = []
+		planner.add_utility_anchor_candidates(candidates, entry)
+		if not candidates.is_empty():
+			nonempty_queries += 1
+	var seeded_after: Dictionary = cache.get(seeded_key, {})
+	var passed := nonempty_queries == 24 \
+		and cache.size() == 1 \
+		and String(seeded_after.get("sentinel", "")) == "must_remain_untouched" \
+		and (seeded_after.get("objectIds", []) as Array).is_empty()
+	return outcome(passed, "queries=%d cache=%d seeded=%s" % [nonempty_queries, cache.size(), JSON.stringify(seeded_after)], ["matching_stale_cache_entry_is_ignored", "moving_fallback_queries_remain_exact", "fallback_explicitly_bypasses_shared_cache", "repeated_origins_leave_cache_unchanged"], state(service))
+
+func test_utility_query_cache_separates_actor_origins(_mode: String) -> Dictionary:
+	var service = make_service()
+	var left := attach_to_runner(make_block("workbench", Vector3(-CELL * 2.0, 0.0, 0.0)))
+	var right := attach_to_runner(make_block("workbench", Vector3(CELL * 2.0, 0.0, 0.0)))
+	service.register_workstation(left)
+	service.register_workstation(right)
+	var options := { "limit": 1, "outsideTown": false, "insideTownOnly": true, "workAreaOnly": true, "collectAllSpatialMatches": true, "cacheFrames": 60 }
+	var left_entry := { "id": "left-npc", "townCenter": Vector2i.ZERO, "townRadius": 8, "porchPosition": Vector3(-CELL * 4.0, 0.0, 0.0) }
+	var right_entry := { "id": "right-npc", "townCenter": Vector2i.ZERO, "townRadius": 8, "porchPosition": Vector3(CELL * 4.0, 0.0, 0.0) }
+	var left_result: Array[Node3D] = service.query_resource_nodes(left_entry, ["workstation"], options)
+	var right_result: Array[Node3D] = service.query_resource_nodes(right_entry, ["workstation"], options)
+	var cache: Dictionary = service.get("query_cache")
+	var passed := left_result == [left] and right_result == [right] and cache.size() == 2
+	return outcome(passed, "left=%s right=%s cache=%d" % [node_names(left_result), node_names(right_result), cache.size()], ["query_cache_key_includes_actor_origin", "limited_results_are_sorted_per_caller", "same_town_npcs_do_not_share_ordered_cache"], state(service))
+
+func test_utility_query_cache_has_hard_origin_cap(_mode: String) -> Dictionary:
+	var service = make_service()
+	var station := attach_to_runner(make_block("workbench", Vector3.ZERO))
+	service.register_workstation(station)
+	var options := { "limit": 1, "outsideTown": false, "workAreaOnly": false, "chunkRadius": 1, "cacheFrames": 60 }
+	var first_entry := { "id": "cache-cap-actor", "townCenter": Vector2i.ZERO, "townRadius": 8, "porchPosition": Vector3.ZERO }
+	var first_key: String = service.query_cache_key(first_entry, ["workstation"], options, Vector3.ZERO)
+	var last_key := ""
+	var returned := 0
+	for index in range(140):
+		var origin := Vector3(float(index) * 0.001, 0.0, 0.0)
+		var entry := { "id": "cache-cap-actor", "townCenter": Vector2i.ZERO, "townRadius": 8, "porchPosition": origin }
+		var queried: Array[Node3D] = service.query_resource_nodes(entry, ["workstation"], options)
+		if queried == [station]:
+			returned += 1
+		last_key = service.query_cache_key(entry, ["workstation"], options, origin)
+	var cache: Dictionary = service.get("query_cache")
+	var counters: Dictionary = service.stats().get("counters", {})
+	var passed := returned == 140 \
+		and cache.size() == 128 \
+		and not cache.has(first_key) \
+		and cache.has(last_key) \
+		and int(counters.get("indexed_query_cache_evictions", 0)) == 12
+	return outcome(passed, "returned=%d cache=%d first=%s last=%s evictions=%d" % [returned, cache.size(), str(cache.has(first_key)), str(cache.has(last_key)), int(counters.get("indexed_query_cache_evictions", 0))], ["origin_aware_cache_has_hard_cap", "oldest_origin_is_evicted", "latest_origin_is_retained", "eviction_count_is_deterministic"], state(service))
+
+func test_utility_query_cache_tracks_reserve_release(_mode: String) -> Dictionary:
+	var service = make_service()
+	var station := attach_to_runner(make_block("workbench", Vector3.ZERO))
+	var object_id: String = service.register_workstation(station, { "capacity": 1 })
+	var entry := { "id": "availability-observer", "townCenter": Vector2i.ZERO, "townRadius": 8, "porchPosition": Vector3.ZERO }
+	var options := { "limit": 8, "outsideTown": false, "insideTownOnly": true, "workAreaOnly": true, "collectAllSpatialMatches": true, "cacheFrames": 60 }
+	var scope_before: Dictionary = service.query_scope_revision(entry, ["workstation"], options, Vector3.ZERO)
+	var before: Array[Node3D] = service.query_resource_nodes(entry, ["workstation"], options)
+	var holder := make_actor("reservation-holder", Vector3(0.0, 0.0, CELL))
+	var reserved = reserve(service, object_id, station, holder, "reservation-holder", "use_workbench")
+	var scope_after_reserve: Dictionary = service.query_scope_revision(entry, ["workstation"], options, Vector3.ZERO)
+	var cache_after_reserve: Dictionary = service.get("query_cache").duplicate(true)
+	var busy: Array[Node3D] = service.query_resource_nodes(entry, ["workstation"], options)
+	var released = release(service, object_id, station, holder, "reservation-holder", reserved)
+	var scope_after_release: Dictionary = service.query_scope_revision(entry, ["workstation"], options, Vector3.ZERO)
+	var cache_after_release: Dictionary = service.get("query_cache").duplicate(true)
+	var available: Array[Node3D] = service.query_resource_nodes(entry, ["workstation"], options)
+	var passed: bool = before == [station] \
+		and succeeded(reserved) \
+		and scope_after_reserve.get("semanticFingerprint") != scope_before.get("semanticFingerprint") \
+		and cache_after_reserve.is_empty() \
+		and busy.is_empty() \
+		and succeeded(released) \
+		and scope_after_release.get("semanticFingerprint") != scope_after_reserve.get("semanticFingerprint") \
+		and cache_after_release.is_empty() \
+		and available == [station]
+	return outcome(passed, "before=%d reserved=%s cacheReserve=%d busy=%d released=%s cacheRelease=%d available=%d fingerprints=%s/%s/%s" % [before.size(), summary(reserved), cache_after_reserve.size(), busy.size(), summary(released), cache_after_release.size(), available.size(), str(scope_before.get("semanticFingerprint")), str(scope_after_reserve.get("semanticFingerprint")), str(scope_after_release.get("semanticFingerprint"))], ["reserve_invalidates_availability_query_cache", "reserve_changes_semantic_query_fingerprint", "busy_utility_is_not_returned", "release_invalidates_cache_and_restores_utility", "release_changes_semantic_query_fingerprint"], state(service))
+
+func test_utility_query_scope_fingerprint_is_stateless(_mode: String) -> Dictionary:
+	var service = make_service()
+	var entry := {"id":"fingerprint-observer", "townCenter":Vector2i.ZERO, "townRadius":8, "porchPosition":Vector3.ZERO}
+	var options := {"limit":64, "outsideTown":false, "insideTownOnly":true, "workAreaOnly":true, "collectAllSpatialMatches":true, "distanceMode":"3d", "bypassCache":true}
+	var before: Dictionary = service.query_scope_revision(entry, ["workstation"], options, Vector3.ZERO)
+	for index in range(540):
+		service.register_anchor("irrelevant-tree:%d" % index, "tree_source", Vector3(float(index % 8) * CELL, 0.0, float((index / 8) % 8) * CELL), {})
+	var after: Dictionary = service.query_scope_revision(entry, ["workstation"], options, Vector3.ZERO)
+	var passed: bool = before == after and service.get("query_cache").size() <= 128 and before.size() == 3
+	return outcome(passed, "before=%s after=%s cache=%d" % [JSON.stringify(before), JSON.stringify(after), service.get("query_cache").size()], ["semantic_query_fingerprint_is_stateless", "irrelevant_kind_churn_does_not_change_fingerprint", "service_memory_remains_bounded"], state(service))
+
+func test_utility_anchor_index_tracks_block_lifecycle(_mode: String) -> Dictionary:
+	var autonomy = NpcAutonomySystemScript.new()
+	transient_nodes.append(autonomy)
+	var block := attach_to_runner(make_block("traderStall", Vector3(CELL * 2.0, 0.0, 0.0)))
+	var cell: Vector3i = block.get_meta("cell")
+	var entry := {
+		"id": "trader-lifecycle",
+		"job": "trade",
+		"townCenter": Vector2i.ZERO,
+		"townRadius": 8,
+		"porchPosition": Vector3.ZERO
+	}
+	var options := { "limit": 8, "outsideTown": false, "workAreaOnly": true, "cacheFrames": 60 }
+	autonomy.notify_block_created(cell, "traderStall", block)
+	var created: Array[Node3D] = autonomy.smart_objects.query_resource_nodes(entry, ["trader_stall"], options)
+	var cache_after_create: Dictionary = autonomy.smart_objects.get("query_cache").duplicate(true)
+	autonomy.notify_block_removed(cell, "traderStall", block)
+	var cache_after_remove: Dictionary = autonomy.smart_objects.get("query_cache").duplicate(true)
+	var removed: Array[Node3D] = autonomy.smart_objects.query_resource_nodes(entry, ["trader_stall"], options)
+	var replacement := attach_to_runner(make_block("traderStall", Vector3(CELL * 2.0, 0.0, 0.0)))
+	autonomy.notify_block_created(cell, "traderStall", replacement)
+	var recreated: Array[Node3D] = autonomy.smart_objects.query_resource_nodes(entry, ["trader_stall"], options)
+	var recreated_debug: Dictionary = autonomy.smart_objects.reservation_debug("block:%d,%d,%d:traderStall" % [cell.x, cell.y, cell.z], "")
+	var passed := created == [block] \
+		and not cache_after_create.is_empty() \
+		and cache_after_remove.is_empty() \
+		and removed.is_empty() \
+		and recreated == [replacement] \
+		and not bool(recreated_debug.get("depleted", true))
+	return outcome(passed, "created=%d cacheCreated=%d cacheRemoved=%d removed=%d recreated=%d debug=%s" % [created.size(), cache_after_create.size(), cache_after_remove.size(), removed.size(), recreated.size(), JSON.stringify(recreated_debug)], ["block_create_registers_indexed_utility", "block_remove_invalidates_query_cache", "removed_utility_is_not_selected", "same_cell_type_recreation_reactivates_utility"], state(autonomy.smart_objects))
+
+func test_utility_anchor_selection_has_no_global_or_route_scan(_mode: String) -> Dictionary:
+	var source := FileAccess.get_file_as_string("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
+	var start := source.find("func add_utility_anchor_candidates")
+	var finish := source.find("\nfunc ", start + 1)
+	var method_source := source.substr(start, finish - start) if start >= 0 and finish > start else ""
+	var uses_authoritative_index := method_source.contains("smart_object_service()") and method_source.contains("query_resource_nodes")
+	var has_bounded_inside_query := method_source.contains("\"insideTownOnly\": true") and method_source.contains("\"collectAllSpatialMatches\": true")
+	var has_legacy_ordering_and_cache_policy := method_source.contains("\"distanceMode\": \"3d\"") and method_source.contains("\"bypassCache\": true")
+	var scans_global_blocks := method_source.contains("main.get(\"blocks\")") or method_source.contains("blocks.values()")
+	var invokes_route_authority := method_source.contains("route_cost") \
+		or method_source.contains("route_authority") \
+		or method_source.contains("choose_best_reachable_position") \
+		or method_source.contains("planner.")
+	var passed := uses_authoritative_index and has_bounded_inside_query and has_legacy_ordering_and_cache_policy and not scans_global_blocks and not invokes_route_authority
+	return outcome(passed, "indexed=%s boundedInside=%s exactPolicy=%s globalScan=%s routeAuthority=%s" % [str(uses_authoritative_index), str(has_bounded_inside_query), str(has_legacy_ordering_and_cache_policy), str(scans_global_blocks), str(invokes_route_authority)], ["no_global_block_dictionary_scan", "existing_smart_object_authority_reused", "inside_town_matches_collected_before_limit", "three_dimensional_ordering_precedes_limit", "moving_fallback_bypasses_cache", "target_collection_does_not_invoke_route_authority"], {})
+
+func test_trader_fallback_incremental_parity_and_bound(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	world.approach_offset = Vector2i.ZERO
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), FakeUtilityMain.new(), world, RefCounted.new())
+	var body := attach_to_runner(make_actor("incremental-trader", Vector3(CELL * 5.0, 0.0, 0.0)))
+	var entry := {"id":"incremental-trader", "job":"trade", "body":body, "townCenter":Vector2i.ZERO, "townRadius":20, "porchPosition":Vector3(-CELL * 8.0, 0.0, 0.0), "guardPosition":Vector3(-CELL * 7.0, 0.0, 0.0)}
+	for index in range(12):
+		var block := attach_to_runner(make_block("workbench", Vector3(CELL * float(12 - index), float(index % 3) * CELL, CELL * float((index % 2) * 2))))
+		service.register_workstation(block)
+	var synchronous_candidates: Array[Vector3] = planner.town_anchor_candidates(entry)
+	var expected: Vector3 = planner.choose_best_reachable_position(entry, synchronous_candidates, false, false, CELL * 0.85, 16)
+	world.approach_calls = 0
+	world.standability_calls = 0
+	var final_result: Dictionary = {}
+	var bounded_each_call := true
+	var pending_had_no_target := true
+	var bounded_state := true
+	for _iteration in range(80):
+		var before := world.approach_calls + world.standability_calls
+		final_result = planner.advance_trader_fallback_target(entry, "incremental-request")
+		var delta_checks := world.approach_calls + world.standability_calls - before
+		bounded_each_call = bounded_each_call and delta_checks <= 1
+		if String(final_result.get("status", "")) == "pending":
+			pending_had_no_target = pending_had_no_target and not final_result.has("target")
+			var selector_state: Dictionary = entry.get("_traderFallbackSelection", {})
+			var descriptors: Array = selector_state.get("utilityDescriptors", []) if selector_state.get("utilityDescriptors", []) is Array else []
+			bounded_state = bounded_state and descriptors.size() <= 64
+			for descriptor_value in descriptors:
+				if descriptor_value is Dictionary:
+					for value in (descriptor_value as Dictionary).values():
+						bounded_state = bounded_state and not (value is Node)
+		if String(final_result.get("status", "")) != "pending":
+			break
+	var actual: Vector3 = final_result.get("target", Vector3.INF)
+	var passed := String(final_result.get("status", "")) == "ready" and actual.is_equal_approx(expected) \
+		and bounded_each_call and pending_had_no_target and bounded_state \
+		and world.approach_calls <= 8 and world.standability_calls <= 16 \
+		and not entry.has("_traderFallbackSelection") and not entry.has("traderFallbackSelectionPending")
+	return outcome(passed, "expected=%s actual=%s result=%s approach=%d standability=%d bounded=%s" % [str(expected), str(actual), JSON.stringify(final_result), world.approach_calls, world.standability_calls, str(bounded_each_call)], ["incremental_result_matches_synchronous_nearest_valid_3d_order", "one_expensive_check_per_call", "pending_never_invents_target", "selector_state_is_bounded_and_node_free", "ready_cleans_selector_state"], state(service))
+
+func test_trader_fallback_scoped_invalidation(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	world.approach_offset = Vector2i.ZERO
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), FakeUtilityMain.new(), world, RefCounted.new())
+	var body := attach_to_runner(make_actor("scoped-trader", Vector3.ZERO))
+	var entry := {"id":"scoped-trader", "job":"trade", "body":body, "townCenter":Vector2i.ZERO, "townRadius":12, "porchPosition":Vector3(CELL * 9.0, 0.0, 0.0)}
+	for index in range(8):
+		service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * float(index + 3), 0.0, CELL))))
+	var options: Dictionary = planner.utility_anchor_query_options()
+	var scope_before: Dictionary = service.query_scope_revision(entry, ["trader_stall", "workstation", "storage", "bed"], options, body.global_position)
+	service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * 1000.0, 0.0, 0.0))))
+	var scope_after_far: Dictionary = service.query_scope_revision(entry, ["trader_stall", "workstation", "storage", "bed"], options, body.global_position)
+	var first: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_resource(attach_to_runner(make_prop("irrelevant-tree", "tree", "logs", 1, Vector3(CELL * 2.0, 0.0, 0.0))))
+	var after_tree: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_resource(attach_to_runner(make_prop("irrelevant-forage", "berryBush", "berries", 1, Vector3(CELL * 2.0, 0.0, CELL))))
+	var after_forage: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_resource(attach_to_runner(make_prop("irrelevant-rock", "rock", "stones", 1, Vector3(CELL * 2.0, 0.0, CELL * 2.0))))
+	var after_rock: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_workstation(attach_to_runner(make_block("decorativeUtility", Vector3(CELL * 2.0, 0.0, CELL * 3.0))))
+	var after_unsupported_block: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * 40.0, 0.0, 0.0))))
+	var after_outside: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	service.register_workstation(attach_to_runner(make_block("traderStall", Vector3(CELL, 0.0, 0.0))))
+	var invalidated: Dictionary = planner.advance_trader_fallback_target(entry, "scoped-request")
+	var final_result: Dictionary = {}
+	for _iteration in range(40):
+		final_result = planner.advance_trader_fallback_target(entry, "scoped-request")
+		if String(final_result.get("status", "")) != "pending":
+			break
+	var passed := scope_before == scope_after_far \
+		and String(first.get("status", "")) == "pending" \
+		and String(after_tree.get("status", "")) == "pending" \
+		and String(after_forage.get("status", "")) == "pending" \
+		and String(after_rock.get("status", "")) == "pending" \
+		and String(after_unsupported_block.get("status", "")) == "pending" \
+		and String(after_outside.get("status", "")) == "pending" \
+		and String(invalidated.get("status", "")) == "invalidated" and String(invalidated.get("reason", "")) == "source_changed" \
+		and not invalidated.has("target") and String(final_result.get("status", "")) == "ready"
+	return outcome(passed, "scopeBefore=%s scopeAfterFar=%s first=%s irrelevant=%s/%s/%s/%s/%s invalidated=%s final=%s" % [JSON.stringify(scope_before), JSON.stringify(scope_after_far), JSON.stringify(first), JSON.stringify(after_tree), JSON.stringify(after_forage), JSON.stringify(after_rock), JSON.stringify(after_unsupported_block), JSON.stringify(after_outside), JSON.stringify(invalidated), JSON.stringify(final_result)], ["outside_query_scope_mutation_does_not_restart", "same_scope_tree_forage_rock_mutations_do_not_restart", "unsupported_block_type_does_not_restart", "out_of_town_utility_does_not_restart", "inside_query_scope_matching_utility_invalidates", "invalidated_result_has_no_stale_target", "same_request_can_restart_and_complete"], state(service))
+
+func test_trader_fallback_matching_mutations_invalidate(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), FakeUtilityMain.new(), world, RefCounted.new())
+	var body := attach_to_runner(make_actor("mutation-trader", Vector3.ZERO))
+	var entry := {"id":"mutation-trader", "job":"trade", "body":body, "townCenter":Vector2i.ZERO, "townRadius":20, "porchPosition":Vector3(CELL * 12.0, 0.0, 0.0)}
+	for index in range(8):
+		service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * float(index + 3), 0.0, CELL))))
+	var mutable_station := attach_to_runner(make_block("workbench", Vector3(CELL * 2.0, 0.0, 0.0)))
+	var mutable_id: String = service.register_workstation(mutable_station, {"capacity":1})
+	var holder := attach_to_runner(make_actor("mutation-holder", Vector3(CELL * 2.0, 0.0, CELL)))
+	var statuses := {}
+	statuses["reserveStart"] = planner.advance_trader_fallback_target(entry, "mutation-reserve")
+	var reserved = reserve(service, mutable_id, mutable_station, holder, "mutation-holder", "use_workbench")
+	statuses["reserve"] = planner.advance_trader_fallback_target(entry, "mutation-reserve")
+	statuses["releaseStart"] = planner.advance_trader_fallback_target(entry, "mutation-release")
+	var released = release(service, mutable_id, mutable_station, holder, "mutation-holder", reserved)
+	statuses["release"] = planner.advance_trader_fallback_target(entry, "mutation-release")
+	var deplete_station := attach_to_runner(make_block("workbench", Vector3(CELL * 2.0, 0.0, CELL * 2.0)))
+	var deplete_id: String = service.register_workstation(deplete_station, {"singleUse":true})
+	var deplete_actor := attach_to_runner(make_actor("mutation-depleter", Vector3(CELL * 2.0, 0.0, CELL * 3.05)))
+	statuses["depleteStart"] = planner.advance_trader_fallback_target(entry, "mutation-deplete")
+	var depleted = use_object(service, deplete_id, deplete_station, deplete_actor, "mutation-depleter", "use_workbench", "mutation-deplete-effect")
+	statuses["deplete"] = planner.advance_trader_fallback_target(entry, "mutation-deplete")
+	statuses["removeStart"] = planner.advance_trader_fallback_target(entry, "mutation-remove")
+	service.notify_object_removed(mutable_id, "mutation_removed")
+	statuses["remove"] = planner.advance_trader_fallback_target(entry, "mutation-remove")
+	statuses["recreateStart"] = planner.advance_trader_fallback_target(entry, "mutation-recreate")
+	var replacement := attach_to_runner(make_block("workbench", Vector3(CELL * 2.0, 0.0, 0.0)))
+	service.register_workstation(replacement, {"capacity":1})
+	statuses["recreate"] = planner.advance_trader_fallback_target(entry, "mutation-recreate")
+	statuses["relocateStart"] = planner.advance_trader_fallback_target(entry, "mutation-relocate")
+	replacement.position = Vector3(CELL * 4.0, 0.0, CELL * 2.0)
+	service.register_workstation(replacement, {"capacity":1})
+	statuses["relocate"] = planner.advance_trader_fallback_target(entry, "mutation-relocate")
+	var passed: bool = succeeded(reserved) and succeeded(released) and succeeded(depleted)
+	for key in ["reserveStart", "releaseStart", "depleteStart", "removeStart", "recreateStart", "relocateStart"]:
+		passed = passed and String((statuses.get(key, {}) as Dictionary).get("status", "")) == "pending"
+	for key in ["reserve", "release", "deplete", "remove", "recreate", "relocate"]:
+		var result: Dictionary = statuses.get(key, {})
+		passed = passed and String(result.get("status", "")) == "invalidated" and String(result.get("reason", "")) == "source_changed" and not result.has("target")
+	return outcome(passed, "statuses=%s reserved=%s released=%s depleted=%s" % [JSON.stringify(statuses), summary(reserved), summary(released), summary(depleted)], ["matching_reserve_invalidates_in_progress_selector", "matching_release_invalidates_in_progress_selector", "matching_depletion_invalidates_in_progress_selector", "matching_remove_invalidates_in_progress_selector", "matching_recreate_invalidates_in_progress_selector", "matching_relocation_invalidates_in_progress_selector"], state(service))
+
+func test_trader_fallback_identity_invalidation(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), FakeUtilityMain.new(), world, RefCounted.new())
+	var body := attach_to_runner(make_actor("identity-trader", Vector3.ZERO))
+	var entry := {"id":"identity-trader", "job":"trade", "body":body, "townCenter":Vector2i.ZERO, "townRadius":12, "porchPosition":Vector3.ZERO, "guardPosition":Vector3(CELL * 2.0, 0.0, 0.0), "townKey":"town-a", "homeStableId":"home-a", "homeKey":1, "homeCell":Vector2i(1, 1), "porchCell":Vector2i(1, 2)}
+	service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * 3.0, 0.0, 0.0))))
+	planner.advance_trader_fallback_target(entry, "identity-a")
+	entry["townRadius"] = 13
+	var town_changed: Dictionary = planner.advance_trader_fallback_target(entry, "identity-a")
+	planner.advance_trader_fallback_target(entry, "identity-a")
+	var request_changed: Dictionary = planner.advance_trader_fallback_target(entry, "identity-b")
+	planner.advance_trader_fallback_target(entry, "identity-b")
+	body.position.x += 0.25
+	var actor_changed: Dictionary = planner.advance_trader_fallback_target(entry, "identity-b")
+	var anchor_results: Array[Dictionary] = []
+	planner.advance_trader_fallback_target(entry, "identity-anchor-porch")
+	entry["porchPosition"] = Vector3(CELL, 0.0, 0.0)
+	anchor_results.append(planner.advance_trader_fallback_target(entry, "identity-anchor-porch"))
+	planner.advance_trader_fallback_target(entry, "identity-anchor-guard")
+	entry["guardPosition"] = Vector3(CELL * 3.0, 0.0, 0.0)
+	anchor_results.append(planner.advance_trader_fallback_target(entry, "identity-anchor-guard"))
+	var assignment_results: Array[Dictionary] = []
+	var assignment_mutations := [
+		{"key":"townKey", "value":"town-b"},
+		{"key":"homeStableId", "value":"home-b"},
+		{"key":"homeKey", "value":2},
+		{"key":"homeCell", "value":Vector2i(2, 1)},
+		{"key":"porchCell", "value":Vector2i(2, 2)}
+	]
+	for index in range(assignment_mutations.size()):
+		var request_id := "identity-assignment-%d" % index
+		planner.advance_trader_fallback_target(entry, request_id)
+		var mutation: Dictionary = assignment_mutations[index]
+		entry[String(mutation.get("key", ""))] = mutation.get("value")
+		assignment_results.append(planner.advance_trader_fallback_target(entry, request_id))
+	var passed := String(town_changed.get("reason", "")) == "town_changed" and not town_changed.has("target") \
+		and String(request_changed.get("reason", "")) == "request_changed" and not request_changed.has("target") \
+		and String(actor_changed.get("reason", "")) == "actor_changed" and not actor_changed.has("target") \
+		and not entry.has("_traderFallbackSelection")
+	for result in anchor_results:
+		passed = passed and String(result.get("status", "")) == "invalidated" and String(result.get("reason", "")) == "anchor_changed" and not result.has("target")
+	for result in assignment_results:
+		passed = passed and String(result.get("status", "")) == "invalidated" and String(result.get("reason", "")) == "assignment_changed" and not result.has("target")
+	return outcome(passed, "town=%s request=%s actor=%s anchors=%s assignments=%s" % [JSON.stringify(town_changed), JSON.stringify(request_changed), JSON.stringify(actor_changed), JSON.stringify(anchor_results), JSON.stringify(assignment_results)], ["town_change_invalidates", "request_change_invalidates", "actor_origin_change_invalidates", "porch_and_guard_anchor_changes_invalidate", "stable_town_and_home_assignment_changes_invalidate", "all_invalidations_clear_state_without_target"], state(service))
+
+func test_trader_fallback_exhaustion_liveness(_mode: String) -> Dictionary:
+	var service = make_service()
+	var world := FakeUtilityAnchorWorld.new()
+	world.no_approach = true
+	world.reject_all_standability = true
+	var planner = NpcSemanticGoalPlannerScript.new()
+	planner.setup(FakeUtilityAnchorSystem.new(service), FakeUtilityMain.new(), world, RefCounted.new())
+	var body := attach_to_runner(make_actor("exhausted-trader", Vector3.ZERO))
+	var entry := {"id":"exhausted-trader", "job":"trade", "body":body, "townCenter":Vector2i.ZERO, "townRadius":200, "porchPosition":Vector3(CELL * 20.0, 0.0, 0.0)}
+	for index in range(64):
+		service.register_workstation(attach_to_runner(make_block("workbench", Vector3(CELL * float(index + 1), 0.0, CELL * 2.0))))
+	var result: Dictionary = {}
+	var bounded_each_call := true
+	var calls := 0
+	for iteration in range(80):
+		var before := world.approach_calls + world.standability_calls
+		result = planner.advance_trader_fallback_target(entry, "exhaustion-request")
+		calls = iteration + 1
+		bounded_each_call = bounded_each_call and world.approach_calls + world.standability_calls - before <= 1
+		if String(result.get("status", "")) != "pending":
+			break
+	var debug: Dictionary = entry.get("lastTraderFallbackSelectionDebug", {})
+	var passed := String(result.get("status", "")) == "exhausted" and calls <= 80 and bounded_each_call \
+		and world.approach_calls == 64 and world.standability_calls <= 16 \
+		and int(debug.get("approachChecks", -1)) == 64 and int(debug.get("standabilityChecks", -1)) == world.standability_calls \
+		and not entry.has("_traderFallbackSelection") and not entry.has("traderFallbackSelectionPending")
+	return outcome(passed, "result=%s calls=%d approach=%d standability=%d debug=%s" % [JSON.stringify(result), calls, world.approach_calls, world.standability_calls, JSON.stringify(debug)], ["adversarial_selection_terminates_within_80_admissions", "approach_scan_is_bounded_at_64", "validation_is_bounded_at_16", "exhaustion_cleans_state"], state(service))
+
 func test_forager_query_after_harvest_no_crash(_mode: String) -> Dictionary:
 	var service = make_service()
 	var prop := make_prop("harvest-query", "berryBush", "berries", 3, Vector3(12.0, 0.0, 0.0))
@@ -779,6 +1331,42 @@ func worker_gather_deliver(prop_id: String, material: String, drop: String, work
 	var passed: bool = succeeded(gathered) and String(gathered.metrics.get("drop", "")) == drop and succeeded(delivered)
 	return outcome(passed, "gather=%s deposit=%s" % [summary(gathered), summary(delivered)], ["worker_gather_effect", "worker_deliver_effect"], state(service))
 
+func legacy_utility_anchor_candidates(blocks: Array[Node3D], entry: Dictionary, world, origin: Vector3) -> Array[Vector3]:
+	var utility_types := ["traderStall", "workbench", "furnace", "chest", "bed", "campfire", "anvil"]
+	var utility_nodes: Array[Node3D] = []
+	for node in blocks:
+		if node == null or not is_instance_valid(node):
+			continue
+		if not (String(node.get_meta("block_type", "")) in utility_types):
+			continue
+		if not world.point_inside_town(entry, node.global_position):
+			continue
+		utility_nodes.append(node)
+	utility_nodes.sort_custom(func(a: Node3D, b: Node3D) -> bool:
+		var a_distance := a.global_position.distance_squared_to(origin)
+		var b_distance := b.global_position.distance_squared_to(origin)
+		if is_equal_approx(a_distance, b_distance):
+			return stable_test_node_id(a) < stable_test_node_id(b)
+		return a_distance < b_distance
+	)
+	var result: Array[Vector3] = []
+	for node in utility_nodes:
+		for cell in world.approach_cells_for_target(entry, node.global_position, false):
+			var position: Vector3 = world.cell_position(cell)
+			if world.point_inside_town(entry, position):
+				result.append(position)
+				break
+		if result.size() >= 8:
+			break
+	return result
+
+func stable_test_node_id(node: Node) -> String:
+	if node.has_meta("cell"):
+		var cell = node.get_meta("cell")
+		if cell is Vector3i:
+			return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, String(node.get_meta("block_type", node.name))]
+	return String(node.name)
+
 func make_service():
 	var service = SmartObjectServiceScript.new()
 	service.setup(null, null)
@@ -808,6 +1396,12 @@ func query_forage_nodes(service) -> Array[Node3D]:
 		"limit": 8,
 		"cacheFrames": 60
 	})
+
+func node_names(nodes: Array[Node3D]) -> String:
+	var names: Array[String] = []
+	for node in nodes:
+		names.append(String(node.name) if node != null else "<null>")
+	return JSON.stringify(names)
 
 func make_query_entry() -> Dictionary:
 	return {

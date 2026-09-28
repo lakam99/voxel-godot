@@ -1,0 +1,358 @@
+#include "test_harness.hpp"
+
+#include "../core/native_cell_state.hpp"
+
+#include <cmath>
+#include <limits>
+#include <type_traits>
+#include <vector>
+
+using namespace voxel::world_backend;
+
+static_assert(!std::is_convertible_v<NativeSurfaceColumnFacts, NativeCellState>);
+static_assert(!std::is_convertible_v<NativeLatticeNumericFacts, NativeCellState>);
+
+namespace {
+
+NativeCellStateInput air(const CellCoord cell = {0, 0, 0}) {
+    NativeCellStateInput value;
+    value.cell = cell;
+    value.material = TerrainMaterialId::air;
+    value.biome = TerrainBiomeId::underground_air;
+    value.solid = false;
+    value.density = -1.35;
+    value.fluid = TerrainFluidId::none;
+    value.light = {0, 0};
+    return value;
+}
+
+NativeCellStateInput stone(const CellCoord cell) {
+    NativeCellStateInput value = air(cell);
+    value.material = TerrainMaterialId::stone;
+    value.biome = TerrainBiomeId::underground;
+    value.solid = true;
+    value.density = 1.35;
+    return value;
+}
+
+NativeCellStateInput lava(const CellCoord cell) {
+    NativeCellStateInput value = air(cell);
+    value.material = TerrainMaterialId::lava;
+    value.fluid = TerrainFluidId::lava;
+    value.density = -0.25;
+    return value;
+}
+
+} // namespace
+
+VWB_TEST(native_cell_state_derives_exact_negative_section_address_and_x_y_z_index) {
+    const NativeCellState state = make_native_cell_state(stone({-1, -16, -17}));
+    VWB_EXPECT((state.section == CellCoord{-1, -1, -2}));
+    VWB_EXPECT((state.local_cell == CellCoord{15, 0, 15}));
+    VWB_EXPECT_EQ(3855U, native_cell_state_section_index(state));
+
+    const NativeCellState zero = make_native_cell_state(air({16, 31, 32}));
+    VWB_EXPECT((zero.section == CellCoord{1, 1, 2}));
+    VWB_EXPECT((zero.local_cell == CellCoord{0, 15, 0}));
+    VWB_EXPECT_EQ(240U, native_cell_state_section_index(zero));
+}
+
+VWB_TEST(native_cell_state_preserves_only_normalized_fields_and_canonicalizes_metadata) {
+    NativeCellStateInput input = stone({4, 5, 6});
+    input.metadata = NativeValue::object({
+        {"saveDelta", NativeValue::boolean(true)},
+        {"source", NativeValue::object({
+            {"actor", NativeValue::string("player")},
+            {"kind", NativeValue::string("dig")},
+        })},
+    });
+    const NativeCellState state = make_native_cell_state(input);
+    VWB_EXPECT_EQ(NativeValueKind::object, state.metadata.kind());
+    VWB_EXPECT_EQ(2U, state.metadata.as_object().size());
+    VWB_EXPECT_EQ(std::string("saveDelta"), state.metadata.as_object()[0].first);
+    VWB_EXPECT_EQ(NativeValueKind::boolean, state.metadata.as_object()[0].second.kind());
+    VWB_EXPECT(state.metadata == input.metadata);
+    VWB_EXPECT(state.generated);
+    VWB_EXPECT(!state.edited);
+}
+
+VWB_TEST(native_cell_state_value_equality_covers_light_metadata_and_every_stored_field) {
+    const NativeCellLight light{14, 3};
+    VWB_EXPECT((light == NativeCellLight{14, 3}));
+    VWB_EXPECT((!(light == NativeCellLight{13, 3})));
+    VWB_EXPECT((!(light == NativeCellLight{14, 2})));
+    const NativeBlockIdentity torch = NativeBlockIdentity::create("torch.wall");
+    VWB_EXPECT(torch == NativeBlockIdentity::create("torch.wall"));
+    VWB_EXPECT(torch != NativeBlockIdentity::create("door.oak"));
+
+    NativeCellStateInput input = stone({4, 5, 6});
+    input.light = light;
+    input.metadata = NativeValue::object({{"source", NativeValue::string("dig")}});
+    input.block_id = torch;
+    const NativeCellState original = make_native_cell_state(input);
+    NativeCellState changed = original;
+    VWB_EXPECT(original == changed);
+    changed.cell.x += 1;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.section.x += 1;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.local_cell.x += 1;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.material = TerrainMaterialId::dirt;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.biome = TerrainBiomeId::plains;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.solid = false;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.density = 2.0;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.fluid = TerrainFluidId::water;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.light.block = 2;
+    VWB_EXPECT(!(original == changed));
+    changed = original;
+    changed.metadata = NativeValue::object({{"source", NativeValue::string("other")}});
+    VWB_EXPECT(!(original == changed));
+    changed = original;
+    changed.block_id = NativeBlockIdentity::create("door.oak");
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.edit_reason = "other";
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.generated = false;
+    VWB_EXPECT(!(original == changed));
+    changed = original; changed.edited = true;
+    VWB_EXPECT(!(original == changed));
+}
+
+VWB_TEST(native_cell_state_accepts_lava_as_non_solid_typed_fluid) {
+    const NativeCellState state = make_native_cell_state(lava({2, -55, 3}));
+    VWB_EXPECT_EQ(TerrainMaterialId::lava, state.material);
+    VWB_EXPECT_EQ(TerrainFluidId::lava, state.fluid);
+    VWB_EXPECT(!state.solid);
+}
+
+VWB_TEST(native_cell_state_accepts_fluid_and_narrow_edited_air_zero_density) {
+    NativeCellStateInput water = air({2, -55, 3});
+    water.material = TerrainMaterialId::water;
+    water.fluid = TerrainFluidId::water;
+    water.density = 0.0;
+    VWB_EXPECT_EQ(TerrainFluidId::water, make_native_cell_state(water).fluid);
+    NativeCellStateInput lava_zero = water;
+    lava_zero.material = TerrainMaterialId::lava;
+    lava_zero.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_EQ(TerrainFluidId::lava, make_native_cell_state(lava_zero).fluid);
+    NativeCellStateInput air_zero = air();
+    air_zero.density = 0.0;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(air_zero));
+    NativeCellStateInput zero_air_with_fluid = air_zero;
+    zero_air_with_fluid.fluid = TerrainFluidId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(zero_air_with_fluid));
+    air_zero.generated = false;
+    air_zero.edited = true;
+    air_zero.edit_reason = "sphere_boundary";
+    VWB_EXPECT_EQ(0.0, make_native_cell_state(
+        air_zero, NativeCellStateNamespace::durable_terrain).density);
+    VWB_EXPECT_EQ(0.0, make_native_cell_state(
+        air_zero, NativeCellStateNamespace::scene_overlay).density);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(
+        air_zero, static_cast<NativeCellStateNamespace>(255U)));
+    NativeCellStateInput stone_zero = stone({1, 2, 3});
+    stone_zero.density = 0.0;
+    // The pre-existing solid rule deliberately permits a zero-density solid;
+    // this change admits no additional non-fluid *non-solid* zero state.
+    VWB_EXPECT(make_native_cell_state(stone_zero).solid);
+}
+
+VWB_TEST(native_cell_state_rejects_malformed_density_solid_fluid_and_light_combinations) {
+    NativeCellStateInput invalid = stone({0, 0, 0});
+    invalid.density = -0.1;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = stone({0, 0, 0});
+    invalid.fluid = TerrainFluidId::water;
+    invalid.material = TerrainMaterialId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.material = TerrainMaterialId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.light.sky = 16;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.light.block = 16;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.density = std::numeric_limits<double>::quiet_NaN();
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.density = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = stone({0, 0, 0});
+    invalid.material = TerrainMaterialId::air;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.fluid = TerrainFluidId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.material = TerrainMaterialId::lava;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    NativeCellStateInput water = air();
+    water.material = TerrainMaterialId::water;
+    water.fluid = TerrainFluidId::water;
+    water.density = -0.25;
+    VWB_EXPECT_EQ(TerrainFluidId::water, make_native_cell_state(water).fluid);
+}
+
+VWB_TEST(native_cell_state_rejects_invalid_metadata_and_generated_edited_ambiguity) {
+    NativeCellStateInput invalid = air();
+    invalid.metadata = NativeValue::object({{"", NativeValue::string("empty")}});
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.metadata = NativeValue::array({NativeValue::string("not-an-object")});
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.edited = true;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.generated = false;
+    invalid.edited = false;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.generated = true;
+    invalid.edited = true;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.material = static_cast<TerrainMaterialId>(255);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.biome = static_cast<TerrainBiomeId>(255);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.fluid = static_cast<TerrainFluidId>(255);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+}
+
+VWB_TEST(native_cell_state_keeps_block_identity_distinct_from_terrain_material_and_rejects_bad_identity_text) {
+    NativeCellStateInput door = stone({3, 4, 5});
+    door.block_id = NativeBlockIdentity::create("door.oak.closed");
+    const NativeCellState state = make_native_cell_state(door);
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, state.material);
+    VWB_EXPECT(state.block_id.has_value());
+    VWB_EXPECT_EQ(std::string("door.oak.closed"), state.block_id->value());
+
+    VWB_EXPECT_THROW(NativeCellStateRejected, NativeBlockIdentity::create(""));
+    VWB_EXPECT_THROW(NativeValueRejected, NativeBlockIdentity::create(std::string("bad\xC0\x80", 5)));
+}
+
+VWB_TEST(native_cell_state_preserves_optional_edit_reason_including_explicit_empty_string) {
+    NativeCellStateInput input = stone({3, 4, 5});
+    input.edit_reason = "";
+    const NativeCellState explicit_empty = make_native_cell_state(input);
+    VWB_EXPECT(explicit_empty.edit_reason.has_value());
+    VWB_EXPECT_EQ(std::string(""), *explicit_empty.edit_reason);
+    input.edit_reason.reset();
+    const NativeCellState absent = make_native_cell_state(input);
+    VWB_EXPECT(!absent.edit_reason.has_value());
+    VWB_EXPECT(!(explicit_empty == absent));
+    input.edit_reason = std::string("bad\xC0\x80", 5);
+    VWB_EXPECT_THROW(NativeValueRejected, make_native_cell_state(input));
+}
+
+VWB_TEST(native_cell_state_policy_keeps_scene_overlay_out_of_durable_save_and_terrain_projection) {
+    const NativeCellStatePersistencePolicy durable = native_cell_state_policy(NativeCellStateNamespace::durable_terrain);
+    VWB_EXPECT(durable.persists_in_save);
+    VWB_EXPECT(durable.affects_terrain_mesh);
+    VWB_EXPECT(durable.affects_surface_projection);
+    const NativeCellStatePersistencePolicy overlay = native_cell_state_policy(NativeCellStateNamespace::scene_overlay);
+    VWB_EXPECT(!overlay.persists_in_save);
+    VWB_EXPECT(!overlay.affects_terrain_mesh);
+    VWB_EXPECT(!overlay.affects_surface_projection);
+
+    NativeCellStateInput scene = air({9, 8, 7});
+    scene.generated = false;
+    scene.edited = true;
+    VWB_EXPECT_EQ((CellCoord{9, 8, 7}), make_native_cell_state(scene, NativeCellStateNamespace::scene_overlay).cell);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(air({9, 8, 7}), NativeCellStateNamespace::scene_overlay));
+    NativeCellStateInput missing_edit = scene;
+    missing_edit.edited = false;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(missing_edit, NativeCellStateNamespace::scene_overlay));
+    const NativeCellStatePersistencePolicy unknown = native_cell_state_policy(static_cast<NativeCellStateNamespace>(255));
+    VWB_EXPECT(!unknown.persists_in_save);
+    VWB_EXPECT(!unknown.affects_terrain_mesh);
+    VWB_EXPECT(!unknown.affects_surface_projection);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(scene, static_cast<NativeCellStateNamespace>(255)));
+}
+
+VWB_TEST(native_cell_state_v2_save_order_is_z_then_y_then_x_even_across_negative_sections) {
+    std::vector<NativeCellState> states;
+    states.push_back(make_native_cell_state(air({0, 0, 0})));
+    states.push_back(make_native_cell_state(air({-20, 7, -1})));
+    states.push_back(make_native_cell_state(air({5, -2, -1})));
+    states.push_back(make_native_cell_state(air({-8, -2, -1})));
+    const std::vector<NativeCellState> sorted = sort_native_cell_states_v2_for_save(std::move(states));
+    VWB_EXPECT((sorted[0].cell == CellCoord{-8, -2, -1}));
+    VWB_EXPECT((sorted[1].cell == CellCoord{5, -2, -1}));
+    VWB_EXPECT((sorted[2].cell == CellCoord{-20, 7, -1}));
+    VWB_EXPECT((sorted[3].cell == CellCoord{0, 0, 0}));
+}
+
+VWB_TEST(native_cell_state_v2_save_order_groups_sections_before_ordering_cells) {
+    std::vector<NativeCellState> states;
+    states.push_back(make_native_cell_state(air({0, 0, 1})));
+    states.push_back(make_native_cell_state(air({-1, 0, 15})));
+    states.push_back(make_native_cell_state(air({-16, 0, 0})));
+    const std::vector<NativeCellState> sorted = sort_native_cell_states_v2_for_save(std::move(states));
+    VWB_EXPECT((sorted[0].section == CellCoord{-1, 0, 0}));
+    VWB_EXPECT((sorted[0].cell == CellCoord{-16, 0, 0}));
+    VWB_EXPECT((sorted[1].section == CellCoord{-1, 0, 0}));
+    VWB_EXPECT((sorted[1].cell == CellCoord{-1, 0, 15}));
+    VWB_EXPECT((sorted[2].section == CellCoord{0, 0, 0}));
+    VWB_EXPECT((sorted[2].cell == CellCoord{0, 0, 1}));
+}
+
+VWB_TEST(native_cell_state_v2_save_rejects_duplicate_cells) {
+    std::vector<NativeCellState> states;
+    states.push_back(make_native_cell_state(air({1, 2, 3})));
+    states.push_back(make_native_cell_state(lava({1, 2, 3})));
+    VWB_EXPECT_THROW(NativeCellStateRejected, sort_native_cell_states_v2_for_save(std::move(states)));
+}
+
+VWB_TEST(native_cell_state_v2_comparator_covers_every_coordinate_tie_break_and_empty_save) {
+    const NativeCellState section_z_low = make_native_cell_state(air({0, 0, -1}));
+    const NativeCellState section_z_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState section_y_low = make_native_cell_state(air({0, -1, 0}));
+    const NativeCellState section_y_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState section_x_low = make_native_cell_state(air({-1, 0, 0}));
+    const NativeCellState section_x_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState cell_z_low = make_native_cell_state(air({15, 15, 0}));
+    const NativeCellState cell_z_high = make_native_cell_state(air({0, 0, 1}));
+    const NativeCellState cell_y_low = make_native_cell_state(air({15, 0, 0}));
+    const NativeCellState cell_y_high = make_native_cell_state(air({0, 1, 0}));
+    const NativeCellState cell_x_low = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState cell_x_high = make_native_cell_state(air({1, 0, 0}));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_z_low, section_z_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_z_high, section_z_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_y_low, section_y_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_y_high, section_y_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_x_low, section_x_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_x_high, section_x_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_z_low, cell_z_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_z_high, cell_z_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_y_low, cell_y_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_y_high, cell_y_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_x_low, cell_x_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_x_high, cell_x_low));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_x_high, cell_x_high));
+    VWB_EXPECT(sort_native_cell_states_v2_for_save({}).empty());
+}
+
+VWB_TEST(native_cell_state_index_rejects_state_with_forged_section_or_local_address) {
+    NativeCellState state = make_native_cell_state(air({-1, -1, -1}));
+    state.section = {0, 0, 0};
+    VWB_EXPECT_THROW(NativeCellStateRejected, native_cell_state_section_index(state));
+    state = make_native_cell_state(air({-1, -1, -1}));
+    state.local_cell = {0, 0, 0};
+    VWB_EXPECT_THROW(NativeCellStateRejected, native_cell_state_section_index(state));
+}

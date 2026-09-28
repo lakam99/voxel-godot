@@ -142,7 +142,7 @@ func start_new_world() -> bool:
     last_dialogue_node = null
     return true
 
-func start_new_world_staged() -> Dictionary:
+func start_new_world_staged(before_world_preparation: Callable = Callable()) -> Dictionary:
     reset_startup_readiness_state()
     if main == null:
         return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_main"))
@@ -151,6 +151,14 @@ func start_new_world_staged() -> Dictionary:
     if town.is_empty():
         return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_town"))
     reserve_tutorial_town_layout()
+    # Scenario geometry must be finalized before the host binds terrain inputs.
+    # Existing callers may still initialize terrain lazily after this stage.
+    if before_world_preparation.is_valid():
+        var preparation_result: Variant = await before_world_preparation.call()
+        if not bool(StartupReadinessResultScript.validate(preparation_result).get("ok", false)):
+            return remember_startup_readiness(StartupReadinessResultScript.failed("invalid_world_preparation_result"))
+        if not bool(preparation_result.get("ok", false)):
+            return remember_startup_readiness(preparation_result)
     started = true
     interacted.clear()
     completed_steps.clear()
@@ -173,6 +181,7 @@ func complete_restore_world_staged() -> Dictionary:
     return await prepare_tutorial_world_staged(true)
 
 func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     startup_scenario_requirements = tutorial_scenario_requirements()
     if not bool(startup_scenario_requirements.get("ok", false)):
         return await fail_tutorial_startup("invalid_tutorial_scenario_requirements", {}, {
@@ -203,11 +212,13 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         )
     await loading_yield("Tutorial town doors ready", "town_doors", "ready", door_result.get("metrics", {}))
     await loading_yield("Preparing village perimeter", "tutorial_scene", "pending")
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     ensure_village_perimeter()
     await loading_yield("Preparing village lights", "tutorial_scene", "pending")
     var village_light_metrics: Dictionary = await ensure_village_lights_staged()
     await loading_yield("Village lights ready", "tutorial_scene", "pending", village_light_metrics)
     await loading_yield("Preparing starter shelter", "tutorial_scene", "pending")
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     var starter_shelter_metrics := ensure_starter_shelter()
     await loading_yield("Starter shelter terrain ready", "tutorial_scene", "pending", starter_shelter_metrics)
     var starter_bed_started_usec := Time.get_ticks_usec()
@@ -218,6 +229,7 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
     if not restoring:
         place_player_in_starter_house()
     await loading_yield("Preparing villagers", "npc_registration", "pending")
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     var spawn_result: Dictionary = scene_builder.spawn_tutorial_npcs(startup_actor_specs)
     if not bool(spawn_result.get("ok", false)):
         return await fail_tutorial_startup(
@@ -271,6 +283,7 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
                 )
             await loading_yield("Rescue mission state restored", "tutorial_mission", "ready", rescue_restore)
     await loading_yield("Villagers registered", "npc_registration", "ready", registration_result.get("metrics", {}))
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     if not restoring:
         force_stormy_night()
         last_message = "Knock, knock. Someone is at the door."
@@ -291,7 +304,11 @@ func prepare_tutorial_world_staged(restoring: bool) -> Dictionary:
         "rescueRestore": rescue_restore
     }
     await loading_yield("Tutorial world ready", "tutorial_world", "ready", metrics)
+    if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
     return remember_startup_readiness(StartupReadinessResultScript.ready(startup_town_manifest, metrics))
+
+func startup_cancel_requested() -> bool:
+    return is_instance_valid(main) and main.get("shutdown_requested") == true
 
 func ensure_town_manifest_ready_staged(requirements: Dictionary) -> Dictionary:
     if main == null or town.is_empty() or main.structure_system == null:
@@ -301,6 +318,7 @@ func ensure_town_manifest_ready_staged(requirements: Dictionary) -> Dictionary:
     var started_usec := Time.get_ticks_usec()
     var last_result: Dictionary = {}
     while true:
+        if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
         var result_value = main.structure_system.call(
             "request_town_manifest_publication",
             town,
@@ -315,6 +333,7 @@ func ensure_town_manifest_ready_staged(requirements: Dictionary) -> Dictionary:
         var metrics: Dictionary = last_result.get("metrics", {}) if last_result.get("metrics", {}) is Dictionary else {}
         if status == StartupReadinessResultScript.STATUS_READY:
             await loading_yield("Tutorial town manifest ready", "town_manifest", "ready", metrics)
+            if startup_cancel_requested(): return remember_startup_readiness(StartupReadinessResultScript.failed("startup_cancelled"))
             return last_result
         if status == StartupReadinessResultScript.STATUS_FAILED:
             return await fail_tutorial_startup(
