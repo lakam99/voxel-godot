@@ -92,7 +92,7 @@ individual symptom:
   `scripts/missions/` own scenario and story composition. Dialogue presents
   state; it does not become the state authority.
 - `scripts/npc_ai/` owns the mature routing/movement stack. Read
-  `MANIFESTO.md` before considering any change there.
+  `docs/architecture/npc-navigation-manifesto.md` before considering any change there.
 
 ## Core Principles
 
@@ -180,28 +180,31 @@ individual symptom:
 
 ## Important Plans And Docs
 
-- `MANIFESTO.md`: the pathfinding stability manifesto. Read it before work that
-  could touch NPC routing, generated collision, doors, towns, streaming,
-  navigation publication or pathfinding acceptance. The routing replacement is
-  complete; its code is protected unless pathfinding work is explicitly
-  authorised.
-- `CODEX_NPC_PATHFINDING_FINAL_IMPLEMENTATION_PLAN.md`,
-  `CODEX_MATURE_NAV_PLAN.md`, and `NPC_PATHFINDING_REGRESSION_HANDOFF.md`:
-  historical implementation/reference material. They become controlling only
-  for explicitly authorised pathfinding work; otherwise use them to preserve
-  contracts, not to restart an old replacement campaign.
-- `CODEX_TUTORIAL_TOWN_NPC_LOADING_PLAN.md`: controlling sequential plan for making the tutorial town a fully published loading artifact and removing tutorial-specific movement privilege from generic NPC systems. Follow it before changing tutorial-town readiness, tutorial NPC spawning/home assignment, post-knock behavior, or tutorial-owned NPC commands.
-- `Minecraft-Equivalent Terrain Migr.md`: terrain architecture migration context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
-- `CODEX_PERFORMANCE_PLAN.md`: performance roadmap and prior performance constraints. Recheck when touching terrain, chunk streaming, structures, NPC/nav, autosave, or main menu/runtime loading.
-- `CODEX_VISUAL_UPGRADE_PLAN.md`: visual polish roadmap.
-- `CODEX_STORY_IMPLEMENTATION_PLAN.md`: story/worldmark roadmap. Follow one phase at a time.
-- `docs/KILOMETRE_BIOME_FIELD.md`: the current single-authority regional-biome
+- `docs/architecture/npc-navigation-manifesto.md`: the pathfinding stability
+  manifesto. Read it before work that could touch NPC routing, generated
+  collision, doors, towns, streaming, navigation publication, or pathfinding
+  acceptance. The routing replacement is complete; its code is protected
+  unless pathfinding work is explicitly authorised.
+- Historical pathfinding plans and phase reports are archived in the
+  [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/gameplay/npc-navigation).
+- `docs/roadmaps/tutorial-town-loading.md`: controlling sequential plan for
+  making the tutorial town a fully published loading artifact and removing
+  tutorial-specific movement privilege from generic NPC systems. Follow it
+  before changing tutorial-town readiness, tutorial NPC spawning/home
+  assignment, post-knock behavior, or tutorial-owned NPC commands.
+- `docs/architecture/terrain-authority.md`: terrain architecture context. The target is Minecraft-like terrain authority with smooth/non-blocky rendering, not a heightfield plus cave band-aids.
+- `docs/roadmaps/performance.md`: performance roadmap and prior performance
+  constraints. Recheck when touching terrain, chunk streaming, structures,
+  NPC/nav, autosave, or main menu/runtime loading.
+- `docs/roadmaps/visual-upgrade.md`: visual polish roadmap.
+- `docs/roadmaps/story-implementation.md`: story/worldmark roadmap. Follow one phase at a time.
+- `docs/world-generation/biome-region-field.md`: the current single-authority regional-biome
   contract and its focused verification.
-- `docs/ANIMATED_ASSET_PIPELINE.md`: generated animated asset workflow.
-- `docs/STORY_SUMMARY.md`: narrative brief for story manager context.
-- `docs/VISUAL_*_REPORT.md`: prior visual work and verification notes.
+- `docs/pipelines/animated-assets.md`: generated animated asset workflow.
+- `docs/game-design/story/summary.md`: narrative brief for story manager context.
+- Dated visual reports are preserved in the [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/art-direction).
 
-When executing story work, reread `CODEX_STORY_IMPLEMENTATION_PLAN.md` and follow the requested phase only. Phase reports and commits are part of the expected workflow.
+When executing story work, reread `docs/roadmaps/story-implementation.md` and follow the requested phase only. Phase reports and commits are part of the expected workflow.
 
 ## Procedural Ecology And Trees
 
@@ -237,7 +240,7 @@ BiomeRegionField -> BiomeEnvironmentCatalog -> TreeEcologySampler
 All executable tool entry points are Node.js (`node tools/<runner>.mjs`). Do
 not add PowerShell runners or wrappers. Windows Job Object and window APIs
 use the small native helpers under `tools/native/`, compiled directly by Node;
-they must not shell out to PowerShell. See `docs/NODE_RUNNER_MIGRATION_2026-09-08.md`.
+they must not shell out to PowerShell. See `docs/development/node-test-runners.md`.
 
 Use the bundled Godot console executable paths already encoded in the tool scripts.
 
@@ -478,7 +481,7 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 
 > **Historical backlog note (superseded 2026-09-17):** the implementation and
 > deferral decisions in this subsection predate
-> `CODEX_NATIVE_WORLD_BACKEND_MIGRATION_HANDOFF_2026-09-17.md`. The native
+> the [native world-backend migration archive](https://github.com/lakam99/voxel-godot-docs/tree/main/migrations/native-world-backend). The native
 > N0–N9 migration now owns this cutover, including a pure native source core,
 > standalone native coverage, collision-first publication, and deletion of the
 > old production path after validation. Preserve the measurements and safety
@@ -592,7 +595,8 @@ Avoid:
 
 ## NPC And AI Expectations
 
-Pathfinding replacement is complete and protected by `MANIFESTO.md`. Do not
+Pathfinding replacement is complete and protected by
+`docs/architecture/npc-navigation-manifesto.md`. Do not
 modify it during ordinary NPC, tutorial, terrain, loading, performance or world
 generation work. If a task explicitly authorises pathfinding work, begin with
 the manifesto and the relevant historical plan, then tie every acceptance claim
