@@ -1,6 +1,6 @@
 # Codex Story and Worldmark Implementation Plan — Voxel Biome World Godot
 
-Historical phase reports are preserved in the [documentation archive](https://github.com/lakam99/voxel-godot-docs/tree/main/game-design/story/history). New story reports for resumed work belong under `docs/reports/story/` in this repository.
+Historical phase reports are preserved in the [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/game-design/story/history). New story reports for resumed work belong under `game-design/story/reports/` in that repository.
 
 This roadmap turns the existing tutorial, procedural world, NPCs, combat, objectives, settlements, generated Blender assets, and animation system into the first complete narrative arc, then generalizes that arc into a reusable Worldmark framework.
 

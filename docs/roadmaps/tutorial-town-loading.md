@@ -1,6 +1,6 @@
 # Tutorial Town Loading And Ordinary NPC Integration Plan
 
-Historical phase reports referenced below are preserved in the [documentation archive](https://github.com/lakam99/voxel-godot-docs/tree/main/gameplay/tutorial-town/history). New reports for any resumed work belong under `docs/reports/tutorial-town/` in this repository.
+Historical phase reports referenced below are preserved in the [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/gameplay/tutorial-town/history). New reports for resumed work belong under `gameplay/tutorial-town/reports/` in that repository.
 
 ## Purpose
 
@@ -259,7 +259,7 @@ These invariants apply to every phase:
 2. Run the phase's focused checks.
 3. Run headed/no-flags evidence where required.
 4. Inspect reports, timelines, and screenshots manually.
-5. Write a phase report under `docs/reports/tutorial-town/`.
+5. Write a phase report under `gameplay/tutorial-town/reports/` in the documentation repository.
 6. Add command, seed, report paths, capture paths, and honest residual failures to Linear.
 7. Commit the phase with a behavior-focused message.
 8. Merge/fast-forward into `master` only after the phase is green.

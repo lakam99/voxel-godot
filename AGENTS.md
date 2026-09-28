@@ -180,6 +180,24 @@ individual symptom:
 
 ## Important Plans And Docs
 
+### Documentation ownership
+
+- The canonical home for all new project documentation is the public
+  [Voxel Biome World documentation repository](https://github.com/lakam99/voxel-godot-docs): architecture notes, design docs, implementation plans, handoffs, phase reports, test/acceptance evidence, performance records, and migration notes all belong there.
+- Do not add new long-form documentation or reports under this game's `docs/`
+  tree. Keep this repository's `AGENTS.md`, concise code-local `README.md` files,
+  and the existing operational references below beside the code; use links to
+  the documentation repository for new supporting material.
+- The operational docs already listed below are grandfathered in this
+  repository and may be maintained in place. Do not create new full-length
+  documents alongside them. If one is deliberately migrated, make the
+  documentation-repository copy canonical and leave only a short pointer here.
+  New reports should cite the game commit/PR and exact test reports or artifacts
+  they describe.
+- The documentation repository is a separate Git repository, not a submodule.
+  Make documentation changes there and publish them to its `main` branch; then
+  update links here if its canonical paths change.
+
 - `docs/architecture/npc-navigation-manifesto.md`: the pathfinding stability
   manifesto. Read it before work that could touch NPC routing, generated
   collision, doors, towns, streaming, navigation publication, or pathfinding

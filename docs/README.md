@@ -1,6 +1,6 @@
 # Project documentation
 
-This folder contains current guidance that should stay next to the game code. Dated investigations, migration evidence, phase reports, and superseded implementation plans are organized in the [Voxel Biome World documentation repository](https://github.com/lakam99/voxel-godot-docs).
+This folder is a concise operational surface for existing guidance that stays next to the game code. The canonical home for all new project documentation—including plans, reports, and verification evidence—is the [Voxel Biome World documentation repository](https://github.com/lakam99/voxel-godot-docs). Do not add new long-form documents here.
 
 ## Start with
 

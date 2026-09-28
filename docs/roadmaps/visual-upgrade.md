@@ -1,6 +1,6 @@
 # Codex Visual Upgrade Plan — Voxel Biome World Godot
 
-Historical visual phase reports are preserved in the [documentation archive](https://github.com/lakam99/voxel-godot-docs/tree/main/art-direction/history). New reports for resumed work belong under `docs/reports/visuals/` in this repository.
+Historical visual phase reports are preserved in the [documentation repository](https://github.com/lakam99/voxel-godot-docs/tree/main/art-direction/history). New reports for resumed work belong under `art-direction/reports/` in that repository.
 
 This plan is written for the uploaded project, not for a generic Godot sample. Execute it one phase at a time. Do not ask Codex to perform the entire roadmap in one run.
 
