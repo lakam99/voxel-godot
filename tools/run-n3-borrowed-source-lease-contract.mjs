@@ -28,9 +28,11 @@ const required = [
   'foreign_issue_cannot_advance_other_owner', 'foreign_issue_cannot_cancel_other_owner',
   'zero_quota_no_work', 'one_quota_bounded', 'active_a_drained', 'active_b_drained',
   'exact_rebegin_issues_fresh_identity', 'between_advance_writer_committed',
+  'old_issue_replay_rejected_while_new_issue_active',
   'between_advance_write_revokes_old_issue', 'stale_issue_drained',
   'source_lease_reaches_ready', 'ready_pin_matches_public_sync_oracle',
   'ready_replay_idempotent', 'ready_issue_drained',
+  'pending_reports_next_atomic_hint', 'shared_frame_work_cap_observed',
 ];
 const requiredChecksPassed = required.every((name) => checks[name] === true);
 const allReportedChecksPassed = Object.values(checks).length > 0

@@ -93,6 +93,14 @@ func advance_until_ready(issue: int) -> Dictionary:
 		result = backend_a.advance_borrowed_source_lease(issue, offered)
 		var consumed := int(result.get("consumedOps", -1))
 		check("advance_bounded_by_offer", consumed >= 0 and consumed <= offered)
+		if result.get("status") == "pending":
+			var next_atomic := int(result.get("nextAtomicOps", -1))
+			# A completed phase may report zero at the exact budget boundary.
+			check("pending_reports_next_atomic_hint", result.has("nextAtomicOps")
+				and next_atomic >= 0 and next_atomic <= 64)
+		if result.has("sharedFrameWorkOps"):
+			var frame_work := int(result.get("sharedFrameWorkOps", -1))
+			check("shared_frame_work_cap_observed", frame_work >= 0 and frame_work <= 64)
 		if offered == 0:
 			zero_seen = zero_seen or consumed == 0
 		if offered == 1:
@@ -136,7 +144,9 @@ func run() -> void:
 		and first_b.get("status") == "pending" and active_a > 0 and active_b > 0)
 	check("global_issue_distinguishes_owners", active_a != active_b)
 	check("begin_charges_one", first_a.get("consumedOps") == 1
-		and first_b.get("consumedOps") == 1)
+		and first_b.get("consumedOps") == 1
+		and first_a.get("nextAtomicOps") == 1
+		and first_b.get("nextAtomicOps") == 1)
 	if active_a <= 0 or active_b <= 0:
 		finish()
 		return
@@ -152,7 +162,8 @@ func run() -> void:
 		"negative_quota_rejected")
 	var zero: Dictionary = backend_a.advance_borrowed_source_lease(active_a, 0)
 	check("zero_quota_no_work", zero.get("status") == "pending"
-		and zero.get("consumedOps") == 0 and zero.get("issue") == active_a)
+		and zero.get("consumedOps") == 0 and zero.get("issue") == active_a
+		and int(zero.get("nextAtomicOps", 0)) >= 1)
 	var one: Dictionary = backend_a.advance_borrowed_source_lease(active_a, 1)
 	check("one_quota_bounded", one.get("status") == "pending"
 		and int(one.get("consumedOps", -1)) in [0, 1])
@@ -174,6 +185,8 @@ func run() -> void:
 	if active_a <= 0:
 		finish()
 		return
+	expect(backend_a.advance_borrowed_source_lease(stale_issue, 1), "failed",
+		"lease_issue_mismatch", "old_issue_replay_rejected_while_new_issue_active")
 	var before_revision := int(backend_a.status().get("terrainDeltaRevision", -1))
 	var first_step: Dictionary = backend_a.advance_borrowed_source_lease(active_a, 1)
 	check("stale_case_started_bounded", first_step.get("status") == "pending"
@@ -217,7 +230,7 @@ func run() -> void:
 		var repeat: Dictionary = backend_a.advance_borrowed_source_lease(active_a, 64)
 		check("ready_replay_idempotent", repeat.get("status") == "ready"
 			and repeat.get("pinIdentity") == ready.get("pinIdentity")
-			and repeat.get("consumedOps") == 0)
+			and repeat.get("consumedOps") == 0 and repeat.get("nextAtomicOps") == 0)
 	var final_drain: Dictionary = backend_a.drain_borrowed_source_lease(active_a)
 	check("ready_issue_drained", final_drain.get("status") == "ready"
 		and final_drain.get("reason") == "lease_drained")
