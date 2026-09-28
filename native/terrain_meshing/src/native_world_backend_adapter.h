@@ -249,7 +249,6 @@ private:
 	static_assert(sizeof(BorrowedSourceLeaseSlot) <= 64U * 1024U,
 		"borrowed source identity slot exceeds its fixed 64 KiB owner capacity");
 	BorrowedSourceLeaseSlot borrowed_source_lease_;
-	std::uint64_t source_lease_next_issue_ = 1;
 	std::uint64_t source_lease_frame_ = 0;
 	std::uint32_t source_lease_frame_ops_ = 0;
 	bool borrowed_source_stamp_matches(const BorrowedSourceLeaseSlot &slot) const noexcept;

@@ -32,6 +32,7 @@
 #include <godot_cpp/variant/vector3i.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <thread>
 #include <stdexcept>
 #include <string>
@@ -48,6 +50,20 @@ using namespace godot;
 using namespace voxel::world_backend;
 
 namespace {
+
+// Issue values are process-unique across backend objects. A foreign backend's
+// issue can never match this object's active slot, even when both begin their
+// first lease. Exhaustion is permanent rather than wrapping an int64 token.
+std::optional<std::uint64_t> claim_borrowed_source_issue() noexcept {
+	static std::atomic<std::uint64_t> next{1U};
+	std::uint64_t current = next.load(std::memory_order_relaxed);
+	const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+	while (current <= maximum) {
+		if (next.compare_exchange_weak(current, current + 1U,
+				std::memory_order_relaxed, std::memory_order_relaxed)) return current;
+	}
+	return std::nullopt;
+}
 
 constexpr const char *ADAPTER_SCHEMA = "n3-native-world-backend-adapter/v1";
 constexpr const char *INITIALIZE_SCHEMA = "n3-native-world-backend-initialize/v1";
@@ -4755,18 +4771,19 @@ Dictionary NativeWorldBackend::begin_borrowed_source_lease(const Vector2i &p_pri
 		return envelope(operation, "failed", "source_owner_unavailable");
 	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
 		return envelope(operation, "pending", "prior_lease_not_drained");
-	if (source_lease_incarnation_ == 0U
-		|| source_lease_next_issue_ > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+	if (source_lease_incarnation_ == 0U)
 		return envelope(operation, "failed", "lease_issue_exhausted");
 	const NativeTerrainPageKey primary{p_primary_page.x, p_primary_page.y};
 	if (!native_terrain_page_bounds(primary))
 		return envelope(operation, "failed", "invalid_primary_page");
 	if (borrowed_source_frame_budget() == 0U)
 		return envelope(operation, "pending", "shared_frame_budget_exhausted");
+	const auto claimed_issue = claim_borrowed_source_issue();
+	if (!claimed_issue) return envelope(operation, "failed", "lease_issue_exhausted");
 	try {
 		WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
 		auto &slot = borrowed_source_lease_;
-		slot.issue = source_lease_next_issue_++;
+		slot.issue = *claimed_issue;
 		slot.incarnation = source_lease_incarnation_;
 		slot.epoch = source_mutation_fence_.epoch();
 		slot.source_identity = state_->source_identity().digest;
@@ -4865,26 +4882,32 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 			slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
 			reason = "source_changed";
 		} else {
-			const auto pin_emit_byte = [&](const std::uint8_t byte) {
-				if (limit < 3U) { next_atomic = 3U; return false; }
-				const auto step = slot.pin_hash.update_step(&byte, 1U, 1U, 1U);
-				if (!step.input_complete) throw std::logic_error("pin identity byte refused");
-				consumed = 2U + static_cast<std::uint32_t>(step.compressed_blocks);
-				return true;
-			};
 			const auto le_byte = [](const std::uint64_t value, const std::size_t offset) {
 				return static_cast<std::uint8_t>(value >> (8U * offset));
 			};
+			while (consumed < limit && slot.phase != BorrowedSourceLeaseSlot::Phase::ready
+					&& slot.phase != BorrowedSourceLeaseSlot::Phase::failed
+					&& slot.phase != BorrowedSourceLeaseSlot::Phase::stale) {
+				const std::uint32_t remaining = limit - consumed;
+				std::uint32_t step_consumed = 0U;
+				const auto prior_phase = slot.phase;
+			const auto pin_emit_byte = [&](const std::uint8_t byte) {
+				if (remaining < 3U) { next_atomic = 3U; return false; }
+				const auto step = slot.pin_hash.update_step(&byte, 1U, 1U, 1U);
+				if (!step.input_complete) throw std::logic_error("pin identity byte refused");
+				step_consumed = 2U + static_cast<std::uint32_t>(step.compressed_blocks);
+				return true;
+			};
 			switch (slot.phase) {
 			case BorrowedSourceLeaseSlot::Phase::axes: {
-				const auto step = slot.dependencies.advance_axes(state_->definition(), limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				const auto step = slot.dependencies.advance_axes(state_->definition(), remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.ready) slot.phase = BorrowedSourceLeaseSlot::Phase::count_pages;
 				break;
 			}
 			case BorrowedSourceLeaseSlot::Phase::count_pages: {
-				const auto step = slot.dependencies.next_page(limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				const auto step = slot.dependencies.next_page(remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.has_page) {
 					if (slot.page_count == std::numeric_limits<std::uint64_t>::max()) {
 						slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
@@ -4894,8 +4917,8 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 				break;
 			}
 			case BorrowedSourceLeaseSlot::Phase::rewind_pages: {
-				const auto step = slot.dependencies.rewind_pages(limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				const auto step = slot.dependencies.rewind_pages(remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.ready) slot.phase = BorrowedSourceLeaseSlot::Phase::pin_header;
 				break;
 			}
@@ -4918,8 +4941,8 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 				break;
 			}
 			case BorrowedSourceLeaseSlot::Phase::next_page: {
-				const auto step = slot.dependencies.next_page(limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				const auto step = slot.dependencies.next_page(remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.has_page) {
 					slot.current_page = {step.page_x, step.page_z};
 					const auto bounds = native_terrain_page_bounds(slot.current_page);
@@ -4949,15 +4972,15 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 						reason = "town_dependency_capacity_exceeded";
 					} else slot.towns[slot.town_count++] = town;
 				}
-				consumed = 1U;
+				step_consumed = 1U;
 				break;
 			}
 			case BorrowedSourceLeaseSlot::Phase::shaping_ready: {
 				BorrowedShapingPageCursor::Step step;
 				if (slot.page.status() == BorrowedShapingPageCursor::Status::idle)
-					step = slot.page.begin(slot.current_page, limit);
-				else step = shaping_registry_->advance_borrowed_page(slot.page, limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+					step = slot.page.begin(slot.current_page, remaining);
+				else step = shaping_registry_->advance_borrowed_page(slot.page, remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.status == BorrowedShapingPageCursor::Status::ready)
 					slot.phase = BorrowedSourceLeaseSlot::Phase::shaping_digest;
 				else if (step.status == BorrowedShapingPageCursor::Status::failed) {
@@ -4973,8 +4996,8 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 			}
 			case BorrowedSourceLeaseSlot::Phase::shaping_digest: {
 				const auto step = shaping_registry_->advance_borrowed_page_identity(
-					slot.page, slot.shaping, slot.towns, slot.town_count, limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+					slot.page, slot.shaping, slot.towns, slot.town_count, remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.status == BorrowedShapingIdentityCursor::Status::ready) {
 					slot.current_shaping_digest = slot.shaping.digest();
 					slot.phase = BorrowedSourceLeaseSlot::Phase::projection_reset;
@@ -4987,14 +5010,14 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 			case BorrowedSourceLeaseSlot::Phase::projection_reset:
 				slot.projection.reset({slot.current_bounds.x, slot.current_bounds.z,
 					slot.current_bounds.width, slot.current_bounds.depth});
-				consumed = 1U;
+				step_consumed = 1U;
 				slot.phase = BorrowedSourceLeaseSlot::Phase::typed_projection;
 				break;
 			case BorrowedSourceLeaseSlot::Phase::typed_projection: {
 				const auto step = state_->advance_borrowed_typed_projection(slot.projection,
 					{slot.current_bounds.x, slot.current_bounds.z,
-						slot.current_bounds.width, slot.current_bounds.depth}, slot.issue, limit);
-				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+					slot.current_bounds.width, slot.current_bounds.depth}, slot.issue, remaining);
+				step_consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
 				if (step.status == BorrowedTypedProjectionCursor::Status::ready) {
 					slot.current_projection_digest = slot.projection.digest();
 					slot.pin_byte_offset = 0U;
@@ -5027,8 +5050,8 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 				break;
 			}
 			case BorrowedSourceLeaseSlot::Phase::pin_finish: {
-				const auto step = slot.pin_hash.finish_step(limit);
-				consumed = static_cast<std::uint32_t>(step.compressed_blocks);
+				const auto step = slot.pin_hash.finish_step(remaining);
+				step_consumed = static_cast<std::uint32_t>(step.compressed_blocks);
 				next_atomic = step.digest_ready ? 0U : 1U;
 				if (step.digest_ready) {
 					slot.pin_digest = slot.pin_hash.digest();
@@ -5041,9 +5064,21 @@ Dictionary NativeWorldBackend::advance_borrowed_source_lease(
 				reason = "invalid_lease_phase";
 				break;
 			}
+			if (step_consumed > remaining) {
+				slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+				reason = "borrowed_source_step_overreported_work";
+				consumed = limit;
+				break;
+			}
+			if (step_consumed == 0U && slot.phase != prior_phase) step_consumed = 1U;
+			if (step_consumed == 0U) break;
+			consumed += step_consumed;
 			if (!borrowed_source_stamp_matches(slot)) {
 				slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
 				reason = "source_changed_during_advance";
+				break;
+			}
+			if (next_atomic > limit - consumed) break;
 			}
 		}
 		completed_quantum = true;

@@ -8,6 +8,7 @@
 #include "native_value.hpp"
 #include "sha256.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -210,11 +211,31 @@ private:
     Sha256State hash_;
     NativeValueCanonicalCursor metadata_;
     std::size_t scan_index_ = 0;
+    // One fixed 65,536-record selector is reused for durable then overlay.
+    // Words plus generation tags occupy exactly 16 KiB on every platform;
+    // tags avoid clearing 1,024 words for an empty projected page.
+    static constexpr std::size_t SELECTOR_WORDS = 1024U;
+    std::array<std::uint64_t, SELECTOR_WORDS> selected_words_{};
+    std::array<std::uint64_t, SELECTOR_WORDS> selected_generations_{};
+    std::uint64_t selection_generation_ = 0U;
+    std::size_t selection_low_ = 0U;
+    std::size_t selection_high_ = 0U;
+    std::size_t selection_index_ = 0U;
+    std::size_t selected_count_ = 0U;
+    std::size_t selected_min_word_ = SELECTOR_WORDS;
+    std::size_t selected_max_word_ = 0U;
+    std::size_t emit_word_ = 0U;
+    std::int32_t selection_x_ = 0;
+    std::int32_t active_x_ = 0;
+    std::uint8_t selection_stage_ = 0U;
+    bool record_selected_ = false;
     std::uint64_t durable_count_ = 0;
     std::uint64_t overlay_count_ = 0;
     std::uint64_t metadata_bytes_ = 0;
     std::uint64_t metadata_emitted_ = 0;
     std::uint64_t source_token_ = 0;
+    std::uint64_t source_revision_ = 0;
+    Sha256Digest source_content_{};
     std::size_t byte_offset_ = 0;
     Phase phase_ = Phase::count_durable;
     RecordPhase record_phase_ = RecordPhase::start;
@@ -342,6 +363,9 @@ public:
     WorldDeltaCommitReceipt admit_feature_deltas(const WorldFeatureDeltaAdmission &admission);
 
 private:
+    BorrowedTypedProjectionCursor::Step advance_borrowed_projection_one(
+        BorrowedTypedProjectionCursor &cursor, WorldDeltaHorizontalBounds bounds,
+        std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
     WorldDeltaStoreLimits limits_;
     // Configuration is immutable for this store lifetime. It is not persisted
     // delta state: the owning generated-world source recreates and verifies it

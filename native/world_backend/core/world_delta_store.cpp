@@ -760,7 +760,13 @@ void BorrowedTypedProjectionCursor::reset(const WorldDeltaHorizontalBounds bound
     bounds_ = bounds;
     hash_.reset(); metadata_.reset();
     scan_index_ = 0U; durable_count_ = 0U; overlay_count_ = 0U;
-    metadata_bytes_ = 0U; metadata_emitted_ = 0U; source_token_ = 0U; byte_offset_ = 0U;
+    selection_low_ = 0U; selection_high_ = 0U; selection_index_ = 0U;
+    selected_count_ = 0U; selected_min_word_ = SELECTOR_WORDS;
+    selected_max_word_ = 0U; emit_word_ = 0U;
+    selection_x_ = 0; active_x_ = 0; selection_stage_ = 0U;
+    record_selected_ = false;
+    metadata_bytes_ = 0U; metadata_emitted_ = 0U; source_token_ = 0U;
+    source_revision_ = 0U; source_content_ = {}; byte_offset_ = 0U;
     phase_ = Phase::count_durable; record_phase_ = RecordPhase::start;
     status_ = Status::idle;
 }
@@ -936,7 +942,7 @@ const Sha256Digest &WorldDeltaStore::current_content_digest() const noexcept {
     return state_->content_digest;
 }
 
-BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection(
+BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection_one(
     BorrowedTypedProjectionCursor &cursor, const WorldDeltaHorizontalBounds bounds,
     const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
     using Cursor = BorrowedTypedProjectionCursor;
@@ -949,6 +955,12 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
     }
     if (cursor.status_ != Cursor::Status::idle && cursor.source_token_ != source_token) {
+        cursor.status_ = Cursor::Status::source_changed;
+        result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ != Cursor::Status::idle
+        && (cursor.source_revision_ != state_->revision
+            || cursor.source_content_ != state_->content_digest)) {
         cursor.status_ = Cursor::Status::source_changed;
         result.status = cursor.status_; return result;
     }
@@ -968,12 +980,89 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
     if (cursor.status_ == Cursor::Status::idle) {
         cursor.reset(bounds);
         cursor.source_token_ = source_token;
+        cursor.source_revision_ = state_->revision;
+        cursor.source_content_ = state_->content_digest;
         cursor.status_ = Cursor::Status::pending;
         result.status = cursor.status_; result.consumed_ops = 1U;
         return result;
     }
     const auto &durable = state_->terrain_volume.durable_snapshot.records();
     const auto &overlay = state_->typed_transient_overlays;
+    constexpr std::size_t selector_capacity = BorrowedTypedProjectionCursor::SELECTOR_WORDS * 64U;
+    const bool selected_durable = durable.size() <= selector_capacity;
+    const bool selected_overlay = overlay.size() <= selector_capacity;
+    const auto select_step = [&](const std::size_t layer) {
+        const auto &entries = layer == 0U ? state_->durable_column_index : state_->overlay_column_index;
+        auto &selection = cursor;
+        const std::int64_t x_end = static_cast<std::int64_t>(bounds.x) + bounds.width;
+        const std::int64_t z_end = static_cast<std::int64_t>(bounds.z) + bounds.depth;
+        switch (selection.selection_stage_) {
+        case 0U:
+            if (selection.selection_generation_ == std::numeric_limits<std::uint64_t>::max())
+                throw std::overflow_error("borrowed projection selector generation exhausted");
+            ++selection.selection_generation_;
+            selection.selection_x_ = bounds.x;
+            selection.selection_low_ = 0U;
+            selection.selection_high_ = entries.size();
+            selection.selected_count_ = 0U;
+            selection.selected_min_word_ = BorrowedTypedProjectionCursor::SELECTOR_WORDS;
+            selection.selected_max_word_ = 0U;
+            selection.emit_word_ = 0U;
+            selection.record_selected_ = false;
+            selection.selection_stage_ = 1U;
+            break;
+        case 1U: // charged binary search for (next x, first z in bounds)
+            if (selection.selection_low_ < selection.selection_high_) {
+                const std::size_t mid = selection.selection_low_
+                    + (selection.selection_high_ - selection.selection_low_) / 2U;
+                const auto &entry = entries[mid];
+                if (entry.x < selection.selection_x_
+                    || (entry.x == selection.selection_x_ && entry.z < bounds.z))
+                    selection.selection_low_ = mid + 1U;
+                else selection.selection_high_ = mid;
+            } else {
+                selection.selection_index_ = selection.selection_low_;
+                if (selection.selection_index_ == entries.size()
+                    || static_cast<std::int64_t>(entries[selection.selection_index_].x) >= x_end)
+                    selection.selection_stage_ = 3U;
+                else {
+                    selection.active_x_ = entries[selection.selection_index_].x;
+                    selection.selection_stage_ = 2U;
+                }
+            }
+            break;
+        case 2U: {
+            const bool at_end = selection.selection_index_ == entries.size();
+            if (at_end || entries[selection.selection_index_].x != selection.active_x_
+                || static_cast<std::int64_t>(entries[selection.selection_index_].z) >= z_end) {
+                selection.selection_x_ = selection.active_x_ + 1;
+                selection.selection_low_ = selection.selection_index_;
+                selection.selection_high_ = entries.size();
+                selection.selection_stage_ = 1U;
+                break;
+            }
+            const std::size_t record = entries[selection.selection_index_++].record_index;
+            if (record >= selector_capacity)
+                throw std::logic_error("borrowed projection candidate outside selector capacity");
+            const std::size_t word = record / 64U;
+            if (selection.selected_generations_[word] != selection.selection_generation_) {
+                selection.selected_generations_[word] = selection.selection_generation_;
+                selection.selected_words_[word] = 0U;
+            }
+            const std::uint64_t mask = std::uint64_t{1} << (record % 64U);
+            if (!(selection.selected_words_[word] & mask)) {
+                selection.selected_words_[word] |= mask;
+                ++selection.selected_count_;
+                selection.selected_min_word_ = std::min(selection.selected_min_word_, word);
+                selection.selected_max_word_ = std::max(selection.selected_max_word_, word);
+            }
+            break;
+        }
+        default: break;
+        }
+        result.consumed_ops = 1U;
+        return selection.selection_stage_ == 3U;
+    };
     struct CountSink final : NativeValueCanonicalSink {
         std::size_t count = 0U;
         void append(const std::uint8_t *, const std::size_t size) override { count += size; }
@@ -1006,11 +1095,24 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
             return cursor.byte_offset_ == 8U;
         };
         if (cursor.phase_ == Cursor::Phase::count_durable || cursor.phase_ == Cursor::Phase::count_overlay) {
+            const std::size_t layer = cursor.phase_ == Cursor::Phase::count_durable ? 0U : 1U;
+            const bool selected = layer == 0U ? selected_durable : selected_overlay;
+            if (selected) {
+                if (cursor.selection_stage_ != 3U) {
+                    select_step(layer);
+                    return result;
+                }
+                if (layer == 0U) cursor.durable_count_ = cursor.selected_count_;
+                else cursor.overlay_count_ = cursor.selected_count_;
+                cursor.phase_ = layer == 0U ? Cursor::Phase::header : Cursor::Phase::overlay_count;
+                result.consumed_ops = 1U;
+                return result;
+            }
             const auto &records = cursor.phase_ == Cursor::Phase::count_durable ? durable : overlay;
             if (cursor.scan_index_ == records.size()) {
                 cursor.scan_index_ = 0U;
                 cursor.phase_ = cursor.phase_ == Cursor::Phase::count_durable
-                    ? Cursor::Phase::count_overlay : Cursor::Phase::header;
+                    ? Cursor::Phase::header : Cursor::Phase::overlay_count;
                 return result;
             }
             if (cell_inside_horizontal_bounds(records[cursor.scan_index_].state.cell, bounds)) {
@@ -1044,15 +1146,60 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
             }
         } else if (cursor.phase_ == Cursor::Phase::durable_records
             || cursor.phase_ == Cursor::Phase::overlay_records) {
-            const auto &records = cursor.phase_ == Cursor::Phase::durable_records ? durable : overlay;
-            if (cursor.scan_index_ == records.size()) {
+            const std::size_t layer = cursor.phase_ == Cursor::Phase::durable_records ? 0U : 1U;
+            const bool selected = layer == 0U ? selected_durable : selected_overlay;
+            const auto &records = layer == 0U ? durable : overlay;
+            if (selected && cursor.selection_stage_ != 3U) {
+                select_step(layer);
+                return result;
+            }
+            if (selected && !cursor.record_selected_) {
+                if (cursor.selected_count_ == 0U) {
+                    cursor.selection_stage_ = 0U;
+                    cursor.scan_index_ = 0U;
+                    cursor.phase_ = layer == 0U ? Cursor::Phase::count_overlay : Cursor::Phase::finish;
+                    result.consumed_ops = 1U;
+                    return result;
+                }
+                if (cursor.emit_word_ < cursor.selected_min_word_) {
+                    cursor.emit_word_ = cursor.selected_min_word_;
+                    result.consumed_ops = 1U;
+                    return result;
+                }
+                if (cursor.emit_word_ >= BorrowedTypedProjectionCursor::SELECTOR_WORDS) {
+                    throw std::logic_error("borrowed projection selected record missing");
+                }
+                const std::uint64_t word = cursor.selected_generations_[cursor.emit_word_]
+                    == cursor.selection_generation_ ? cursor.selected_words_[cursor.emit_word_] : 0U;
+                if (word == 0U) {
+                    ++cursor.emit_word_;
+                    result.consumed_ops = 1U;
+                    return result;
+                }
+                if (limit < 7U) { result.next_atomic_ops = 7U; return result; }
+                // A six-comparison bit search has a fixed work ceiling; no
+                // bit-by-bit 64-step loop is hidden in one charged atom.
+                std::uint64_t shifted = word;
+                std::size_t bit = 0U;
+                if ((shifted & 0xffffffffULL) == 0U) { shifted >>= 32U; bit += 32U; }
+                if ((shifted & 0xffffULL) == 0U) { shifted >>= 16U; bit += 16U; }
+                if ((shifted & 0xffULL) == 0U) { shifted >>= 8U; bit += 8U; }
+                if ((shifted & 0xfULL) == 0U) { shifted >>= 4U; bit += 4U; }
+                if ((shifted & 0x3ULL) == 0U) { shifted >>= 2U; bit += 2U; }
+                if ((shifted & 0x1ULL) == 0U) bit += 1U;
+                cursor.scan_index_ = cursor.emit_word_ * 64U + bit;
+                cursor.record_selected_ = true;
+                result.consumed_ops = 7U;
+                return result;
+            }
+            if (!selected && cursor.scan_index_ == records.size()) {
                 cursor.scan_index_ = 0U;
                 cursor.phase_ = cursor.phase_ == Cursor::Phase::durable_records
-                    ? Cursor::Phase::overlay_count : Cursor::Phase::finish;
+                    ? Cursor::Phase::count_overlay : Cursor::Phase::finish;
                 return result;
             }
             const NativeTypedWorldStateRecord &record = records[cursor.scan_index_];
-            if (!cell_inside_horizontal_bounds(record.state.cell, bounds)) {
+            if (!selected && !cell_inside_horizontal_bounds(record.state.cell, bounds)) {
                 ++cursor.scan_index_; result.consumed_ops = 1U;
                 return result;
             }
@@ -1166,7 +1313,13 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
                     cursor.record_phase_ = Cursor::RecordPhase::end;
                 break;
             case Cursor::RecordPhase::end:
-                ++cursor.scan_index_; cursor.record_phase_ = Cursor::RecordPhase::start;
+                if (selected) {
+                    const std::size_t word = cursor.scan_index_ / 64U;
+                    cursor.selected_words_[word] &= ~(std::uint64_t{1} << (cursor.scan_index_ % 64U));
+                    --cursor.selected_count_;
+                    cursor.record_selected_ = false;
+                } else ++cursor.scan_index_;
+                cursor.record_phase_ = Cursor::RecordPhase::start;
                 cursor.byte_offset_ = 0U; result.consumed_ops = 1U; break;
             }
         } else if (cursor.phase_ == Cursor::Phase::finish) {
@@ -1189,6 +1342,58 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         result.consumed_ops = limit;
     }
     return result;
+}
+
+BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection(
+    BorrowedTypedProjectionCursor &cursor, const WorldDeltaHorizontalBounds bounds,
+    const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
+    BorrowedTypedProjectionCursor::Step aggregate;
+    aggregate.status = cursor.status_;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    if (limit == 0U) return aggregate;
+    while (aggregate.consumed_ops < limit) {
+        const auto prior_phase = cursor.phase_;
+        const auto prior_record_phase = cursor.record_phase_;
+        const std::size_t prior_scan = cursor.scan_index_;
+        const auto prior_selection_stage = cursor.selection_stage_;
+        const auto prior_selection_index = cursor.selection_index_;
+        const auto prior_selection_generation = cursor.selection_generation_;
+        const auto prior_selected_count = cursor.selected_count_;
+        const auto prior_emit_word = cursor.emit_word_;
+        const auto prior_byte_offset = cursor.byte_offset_;
+        const auto prior_record_selected = cursor.record_selected_;
+        const auto step = advance_borrowed_projection_one(
+            cursor, bounds, source_token, limit - aggregate.consumed_ops);
+        aggregate.status = step.status;
+        aggregate.next_atomic_ops = step.next_atomic_ops;
+        if (step.consumed_ops > limit - aggregate.consumed_ops) {
+            cursor.status_ = BorrowedTypedProjectionCursor::Status::failed;
+            aggregate.status = cursor.status_;
+            aggregate.consumed_ops = limit;
+            break;
+        }
+        aggregate.consumed_ops += step.consumed_ops;
+        if (aggregate.status == BorrowedTypedProjectionCursor::Status::ready
+            || aggregate.status == BorrowedTypedProjectionCursor::Status::failed
+            || aggregate.status == BorrowedTypedProjectionCursor::Status::source_changed) break;
+        if (step.consumed_ops == 0U) {
+            if (cursor.phase_ == prior_phase && cursor.record_phase_ == prior_record_phase
+                && cursor.scan_index_ == prior_scan
+                && cursor.selection_stage_ == prior_selection_stage
+                && cursor.selection_index_ == prior_selection_index
+                && cursor.selection_generation_ == prior_selection_generation
+                && cursor.selected_count_ == prior_selected_count
+                && cursor.emit_word_ == prior_emit_word
+                && cursor.byte_offset_ == prior_byte_offset
+                && cursor.record_selected_ == prior_record_selected) break;
+            // A phase-only transition is source work, too. This also makes the
+            // loop finite even when an empty layer has no bytes to emit.
+            ++aggregate.consumed_ops;
+            aggregate.next_atomic_ops = 1U;
+        }
+        if (aggregate.next_atomic_ops > limit - aggregate.consumed_ops) break;
+    }
+    return aggregate;
 }
 
 WorldDeltaPinnedSnapshot WorldDeltaStore::pin() const { return WorldDeltaPinnedSnapshot(state_); }
