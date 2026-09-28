@@ -182,6 +182,53 @@ struct WorldDeltaHorizontalBounds {
     std::int32_t depth = 0;
 };
 
+// A bounded header for one live typed edit. Arbitrarily sized metadata and
+// strings stay in the source owner; this is not a complete NativeCellState.
+struct BorrowedTypedCellHeader {
+    enum class SourceLayer : std::uint8_t { durable, overlay };
+    CellCoord cell{};
+    CellCoord section{};
+    CellCoord local_cell{};
+    SourceLayer source_layer = SourceLayer::durable;
+    TerrainMaterialId material = TerrainMaterialId::air;
+    TerrainBiomeId biome = TerrainBiomeId::plains;
+    bool solid = false;
+    double density = 0.0;
+    TerrainFluidId fluid = TerrainFluidId::none;
+    NativeCellLight light{};
+    bool generated = false;
+    bool edited = false;
+    bool has_block_id = false;
+    bool has_edit_reason = false;
+};
+
+class BorrowedTypedCellCursor final {
+public:
+    enum class Status : std::uint8_t {
+        idle, pending, ready_present, ready_absent, source_changed, failed
+    };
+    struct Step {
+        Status status = Status::idle;
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+    };
+    void reset() noexcept;
+    Status status() const noexcept;
+private:
+    friend class WorldDeltaStore;
+    enum class Layer : std::uint8_t { overlay, durable };
+    CellCoord cell_{};
+    CellCoord section_{};
+    std::size_t low_ = 0;
+    std::size_t high_ = 0;
+    std::size_t found_index_ = 0;
+    std::uint64_t source_token_ = 0;
+    std::uint64_t source_revision_ = 0;
+    Sha256Digest source_content_{};
+    Layer layer_ = Layer::overlay;
+    Status status_ = Status::idle;
+};
+
 // A borrowed WDP1/v1 projection has fixed owner storage. Record indices and
 // byte offsets are reacquired only during a guarded, same-incarnation step;
 // no WorldDeltaSnapshotState, NativeValue, string or iterator is retained.
@@ -345,6 +392,13 @@ public:
     BorrowedTypedProjectionCursor::Step advance_borrowed_projection(
         BorrowedTypedProjectionCursor &cursor, WorldDeltaHorizontalBounds bounds,
         std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
+    BorrowedTypedCellCursor::Step advance_borrowed_typed_cell(
+        BorrowedTypedCellCursor &cursor, CellCoord cell,
+        std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
+    // Revalidates the live source before copying bounded scalar fields. No
+    // cursor-only getter can expose a header after mutation or drain.
+    std::optional<BorrowedTypedCellHeader> borrowed_typed_cell_header(
+        const BorrowedTypedCellCursor &cursor, std::uint64_t source_token) const noexcept;
     WorldDeltaPinnedSnapshot pin() const;
     bool bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept;
     void require_source_writer_entry() const;

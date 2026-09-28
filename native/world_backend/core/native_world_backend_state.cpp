@@ -61,6 +61,17 @@ BorrowedTypedProjectionCursor::Step NativeWorldBackendState::advance_borrowed_ty
     return deltas_.advance_borrowed_projection(cursor, bounds, source_token, offered_ops);
 }
 
+BorrowedTypedCellCursor::Step NativeWorldBackendState::advance_borrowed_typed_cell(
+    BorrowedTypedCellCursor &cursor, const CellCoord cell,
+    const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
+    return deltas_.advance_borrowed_typed_cell(cursor, cell, source_token, offered_ops);
+}
+
+std::optional<BorrowedTypedCellHeader> NativeWorldBackendState::borrowed_typed_cell_header(
+    const BorrowedTypedCellCursor &cursor, const std::uint64_t source_token) const noexcept {
+    return deltas_.borrowed_typed_cell_header(cursor, source_token);
+}
+
 bool NativeWorldBackendState::bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept {
     return deltas_.bind_source_mutation_fence(fence);
 }

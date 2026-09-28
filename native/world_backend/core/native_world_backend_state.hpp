@@ -67,6 +67,11 @@ public:
     BorrowedTypedProjectionCursor::Step advance_borrowed_typed_projection(
         BorrowedTypedProjectionCursor &cursor, WorldDeltaHorizontalBounds bounds,
         std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
+    BorrowedTypedCellCursor::Step advance_borrowed_typed_cell(
+        BorrowedTypedCellCursor &cursor, CellCoord cell,
+        std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
+    std::optional<BorrowedTypedCellHeader> borrowed_typed_cell_header(
+        const BorrowedTypedCellCursor &cursor, std::uint64_t source_token) const noexcept;
     bool bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept;
     // One immutable snapshot for a composite multi-page admission. Callers
     // must serialize this with registry/town-owner mutation and recheck before

@@ -154,6 +154,12 @@ public:
 	godot::Dictionary advance_borrowed_source_lease(std::int64_t p_issue, std::int64_t p_offered_ops);
 	godot::Dictionary cancel_borrowed_source_lease(std::int64_t p_issue);
 	godot::Dictionary drain_borrowed_source_lease(std::int64_t p_issue);
+	// A2a: one live typed-edit scalar header within a ready A1 primary page.
+	// Metadata, block identity text, and edit reason text are deliberately omitted.
+	godot::Dictionary begin_borrowed_typed_cell(std::int64_t p_lease_issue, const godot::Vector3i &p_cell);
+	godot::Dictionary advance_borrowed_typed_cell(std::int64_t p_cell_issue, std::int64_t p_offered_ops);
+	godot::Dictionary cancel_borrowed_typed_cell(std::int64_t p_cell_issue);
+	godot::Dictionary drain_borrowed_typed_cell(std::int64_t p_cell_issue);
 	// Serialized, shadow-service-only composite admission. Not a Voxel Tools
 	// worker callback or a production publication authority.
 	godot::Dictionary encode_voxel_block_shadow(const godot::Dictionary &p_request) const;
@@ -249,6 +255,19 @@ private:
 	static_assert(sizeof(BorrowedSourceLeaseSlot) <= 64U * 1024U,
 		"borrowed source identity slot exceeds its fixed 64 KiB owner capacity");
 	BorrowedSourceLeaseSlot borrowed_source_lease_;
+	struct BorrowedTypedCellSlot {
+		enum class Phase : std::uint8_t { empty, pending, ready, cancelled, stale, failed };
+		Phase phase = Phase::empty;
+		std::uint64_t issue = 0;
+		std::uint64_t lease_issue = 0;
+		voxel::world_backend::CellCoord cell{};
+		voxel::world_backend::BorrowedTypedCellCursor cursor;
+	};
+	static_assert(sizeof(BorrowedTypedCellSlot) <= 1024U,
+		"borrowed typed-cell slot exceeds its fixed 1 KiB capacity");
+	static_assert(sizeof(BorrowedSourceLeaseSlot) + sizeof(BorrowedTypedCellSlot) <= 64U * 1024U,
+		"combined borrowed source and typed-cell slots exceed the 64 KiB owner capacity");
+	BorrowedTypedCellSlot borrowed_typed_cell_;
 	std::uint64_t source_lease_frame_ = 0;
 	std::uint32_t source_lease_frame_ops_ = 0;
 	bool borrowed_source_stamp_matches(const BorrowedSourceLeaseSlot &slot) const noexcept;

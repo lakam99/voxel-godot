@@ -1868,6 +1868,14 @@ void NativeWorldBackend::_bind_methods() {
 		&NativeWorldBackend::cancel_borrowed_source_lease);
 	ClassDB::bind_method(D_METHOD("drain_borrowed_source_lease", "issue"),
 		&NativeWorldBackend::drain_borrowed_source_lease);
+	ClassDB::bind_method(D_METHOD("begin_borrowed_typed_cell", "lease_issue", "cell"),
+		&NativeWorldBackend::begin_borrowed_typed_cell);
+	ClassDB::bind_method(D_METHOD("advance_borrowed_typed_cell", "cell_issue", "offered_ops"),
+		&NativeWorldBackend::advance_borrowed_typed_cell);
+	ClassDB::bind_method(D_METHOD("cancel_borrowed_typed_cell", "cell_issue"),
+		&NativeWorldBackend::cancel_borrowed_typed_cell);
+	ClassDB::bind_method(D_METHOD("drain_borrowed_typed_cell", "cell_issue"),
+		&NativeWorldBackend::drain_borrowed_typed_cell);
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_insertion_receipt", "key", "generation", "accepted"), &NativeWorldBackend::voxel_block_shadow_insertion_receipt);
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_mesh_receipt", "key", "generation", "mesh_ready", "physics_ready", "physics_required"), &NativeWorldBackend::voxel_block_shadow_mesh_receipt, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_unloaded", "key"), &NativeWorldBackend::voxel_block_shadow_unloaded);
@@ -1927,6 +1935,9 @@ void NativeWorldBackend::borrowed_source_seal() noexcept {
 	// after owner destruction or publication into a new incarnation.
 	borrowed_source_lease_.phase = BorrowedSourceLeaseSlot::Phase::empty;
 	borrowed_source_lease_.issue = 0U;
+	borrowed_typed_cell_.phase = BorrowedTypedCellSlot::Phase::empty;
+	borrowed_typed_cell_.issue = 0U;
+	borrowed_typed_cell_.lease_issue = 0U;
 }
 
 struct NativeWorldBackend::PrivateStagedSaveRetirementJob {
@@ -5124,6 +5135,9 @@ Dictionary NativeWorldBackend::cancel_borrowed_source_lease(const std::int64_t p
 		|| borrowed_source_lease_.issue != static_cast<std::uint64_t>(p_issue))
 		return envelope(operation, "failed", "lease_issue_mismatch");
 	borrowed_source_lease_.phase = BorrowedSourceLeaseSlot::Phase::cancelled;
+	if (borrowed_typed_cell_.phase != BorrowedTypedCellSlot::Phase::empty
+		&& borrowed_typed_cell_.lease_issue == static_cast<std::uint64_t>(p_issue))
+		borrowed_typed_cell_.phase = BorrowedTypedCellSlot::Phase::cancelled;
 	Dictionary result = envelope(operation, "ready", "lease_cancelled");
 	result["issue"] = p_issue;
 	return result;
@@ -5138,6 +5152,9 @@ Dictionary NativeWorldBackend::drain_borrowed_source_lease(const std::int64_t p_
 	if (p_issue <= 0 || borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::empty
 		|| borrowed_source_lease_.issue != static_cast<std::uint64_t>(p_issue))
 		return envelope(operation, "failed", "lease_issue_mismatch");
+	if (borrowed_typed_cell_.phase != BorrowedTypedCellSlot::Phase::empty
+		&& borrowed_typed_cell_.lease_issue == static_cast<std::uint64_t>(p_issue))
+		return envelope(operation, "pending", "borrowed_typed_cell_drain_required");
 	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::cancelled
 		&& borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::stale
 		&& borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::failed
@@ -5149,6 +5166,199 @@ Dictionary NativeWorldBackend::drain_borrowed_source_lease(const std::int64_t p_
 	borrowed_source_seal();
 	Dictionary result = envelope(operation, "ready", "lease_drained");
 	result["issue"] = p_issue;
+	return result;
+}
+
+Dictionary NativeWorldBackend::begin_borrowed_typed_cell(
+	const std::int64_t p_lease_issue, const Vector3i &p_cell) {
+	constexpr const char *operation = "begin_borrowed_typed_cell";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (borrowed_typed_cell_.phase != BorrowedTypedCellSlot::Phase::empty)
+		return envelope(operation, "pending", "prior_cell_not_drained");
+	const auto &lease = borrowed_source_lease_;
+	if (p_lease_issue <= 0 || lease.phase != BorrowedSourceLeaseSlot::Phase::ready
+		|| lease.issue != static_cast<std::uint64_t>(p_lease_issue))
+		return envelope(operation, "failed", "ready_source_lease_required");
+	if (!state_ || !shaping_registry_)
+		return envelope(operation, "failed", "source_owner_unavailable");
+	const CellCoord cell{p_cell.x, p_cell.y, p_cell.z};
+	const std::int64_t end_x = static_cast<std::int64_t>(lease.primary_bounds.x)
+		+ lease.primary_bounds.width;
+	const std::int64_t end_z = static_cast<std::int64_t>(lease.primary_bounds.z)
+		+ lease.primary_bounds.depth;
+	if (cell.x < lease.primary_bounds.x || static_cast<std::int64_t>(cell.x) >= end_x
+		|| cell.z < lease.primary_bounds.z || static_cast<std::int64_t>(cell.z) >= end_z)
+		return envelope(operation, "failed", "cell_outside_primary_page");
+	if (borrowed_source_frame_budget() == 0U)
+		return envelope(operation, "pending", "shared_frame_budget_exhausted");
+	const auto claimed_issue = claim_borrowed_source_issue();
+	if (!claimed_issue) return envelope(operation, "failed", "cell_issue_exhausted");
+	try {
+		WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
+		if (!borrowed_source_stamp_matches(lease))
+			return envelope(operation, "failed", "source_changed");
+		borrowed_typed_cell_.phase = BorrowedTypedCellSlot::Phase::pending;
+		borrowed_typed_cell_.issue = *claimed_issue;
+		borrowed_typed_cell_.lease_issue = lease.issue;
+		borrowed_typed_cell_.cell = cell;
+		borrowed_typed_cell_.cursor.reset();
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+	borrowed_source_charge(1U);
+	Dictionary result = envelope(operation, "pending", "borrowed_typed_cell_started");
+	result["cellIssue"] = static_cast<std::int64_t>(*claimed_issue);
+	result["leaseIssue"] = p_lease_issue;
+	result["completeness"] = "scalar_header_only";
+	result["consumedOps"] = 1;
+	result["nextAtomicOps"] = 1;
+	return result;
+}
+
+Dictionary NativeWorldBackend::advance_borrowed_typed_cell(
+	const std::int64_t p_cell_issue, const std::int64_t p_offered_ops) {
+	constexpr const char *operation = "advance_borrowed_typed_cell";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	auto &cell_slot = borrowed_typed_cell_;
+	if (p_cell_issue <= 0 || cell_slot.phase == BorrowedTypedCellSlot::Phase::empty
+		|| cell_slot.issue != static_cast<std::uint64_t>(p_cell_issue))
+		return envelope(operation, "failed", "cell_issue_mismatch");
+	if (p_offered_ops < 0) return envelope(operation, "failed", "invalid_work_quota");
+	if (cell_slot.phase == BorrowedTypedCellSlot::Phase::cancelled
+		|| cell_slot.phase == BorrowedTypedCellSlot::Phase::stale
+		|| cell_slot.phase == BorrowedTypedCellSlot::Phase::failed)
+		return envelope(operation, "failed", "cell_terminal_drain_required");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::ready
+		|| borrowed_source_lease_.issue != cell_slot.lease_issue || !state_) {
+		cell_slot.phase = BorrowedTypedCellSlot::Phase::stale;
+		return envelope(operation, "failed", "source_lease_not_ready");
+	}
+	const std::uint32_t limit = static_cast<std::uint32_t>(std::min<std::int64_t>(
+		p_offered_ops, borrowed_source_frame_budget()));
+	std::uint32_t consumed = 0U;
+	std::optional<BorrowedTypedCellHeader> header;
+	try {
+		WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
+		if (!borrowed_source_stamp_matches(borrowed_source_lease_)) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::stale;
+			return envelope(operation, "failed", "source_changed");
+		}
+		// Reserve the whole quantum before entry; an exception cannot reopen
+		// this frame's shared source-work bank.
+		borrowed_source_charge(limit);
+		const auto step = state_->advance_borrowed_typed_cell(
+			cell_slot.cursor, cell_slot.cell, cell_slot.issue, limit);
+		consumed = step.consumed_ops;
+		if (consumed > limit) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::failed;
+			return envelope(operation, "failed", "borrowed_typed_cell_overreported_work");
+		}
+		source_lease_frame_ops_ -= limit - consumed;
+		if (!borrowed_source_stamp_matches(borrowed_source_lease_)) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::stale;
+			return envelope(operation, "failed", "source_changed");
+		}
+		if (step.status == BorrowedTypedCellCursor::Status::ready_present) {
+			header = state_->borrowed_typed_cell_header(cell_slot.cursor, cell_slot.issue);
+			if (!header) {
+				cell_slot.phase = BorrowedTypedCellSlot::Phase::stale;
+				return envelope(operation, "failed", "source_changed");
+			}
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::ready;
+		} else if (step.status == BorrowedTypedCellCursor::Status::ready_absent) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::ready;
+		} else if (step.status == BorrowedTypedCellCursor::Status::source_changed) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::stale;
+		} else if (step.status == BorrowedTypedCellCursor::Status::failed) {
+			cell_slot.phase = BorrowedTypedCellSlot::Phase::failed;
+		}
+	} catch (const std::exception &error) {
+		cell_slot.phase = BorrowedTypedCellSlot::Phase::failed;
+		return failure(operation, error);
+	}
+	const bool ready = cell_slot.phase == BorrowedTypedCellSlot::Phase::ready;
+	Dictionary result = envelope(operation,
+		cell_slot.phase == BorrowedTypedCellSlot::Phase::stale
+			|| cell_slot.phase == BorrowedTypedCellSlot::Phase::failed ? "failed"
+			: ready ? "ready" : "pending",
+		ready ? "typed_cell_lookup_complete" : cell_slot.phase == BorrowedTypedCellSlot::Phase::pending
+			? "typed_cell_lookup_pending" : "source_changed");
+	result["cellIssue"] = p_cell_issue;
+	result["leaseIssue"] = static_cast<std::int64_t>(cell_slot.lease_issue);
+	result["completeness"] = "scalar_header_only";
+	result["consumedOps"] = static_cast<std::int64_t>(consumed);
+	result["nextAtomicOps"] = 1;
+	result["sharedFrameWorkOps"] = static_cast<std::int64_t>(source_lease_frame_ops_);
+	if (ready) {
+		result["presence"] = header ? "present" : "absent";
+		result["sourceIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{borrowed_source_lease_.source_identity});
+		result["pinIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{borrowed_source_lease_.pin_digest});
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(borrowed_source_lease_.delta_revision);
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(borrowed_source_lease_.registry_revision);
+		if (header) {
+			Dictionary fields;
+			fields["cell"] = Vector3i(header->cell.x, header->cell.y, header->cell.z);
+			fields["section"] = Vector3i(header->section.x, header->section.y, header->section.z);
+			fields["localCell"] = Vector3i(header->local_cell.x, header->local_cell.y, header->local_cell.z);
+			fields["sourceLayer"] = header->source_layer == BorrowedTypedCellHeader::SourceLayer::overlay
+				? "overlay" : "durable";
+			fields["materialId"] = static_cast<std::int64_t>(header->material);
+			fields["biomeId"] = static_cast<std::int64_t>(header->biome);
+			fields["solid"] = header->solid;
+			fields["density"] = header->density;
+			fields["fluidId"] = static_cast<std::int64_t>(header->fluid);
+			fields["skyLight"] = static_cast<std::int64_t>(header->light.sky);
+			fields["blockLight"] = static_cast<std::int64_t>(header->light.block);
+			fields["generated"] = header->generated;
+			fields["edited"] = header->edited;
+			fields["hasBlockId"] = header->has_block_id;
+			fields["hasEditReason"] = header->has_edit_reason;
+			fields["metadataOmitted"] = true;
+			fields["blockIdOmitted"] = true;
+			fields["editReasonOmitted"] = true;
+			result["header"] = fields;
+		}
+	}
+	return result;
+}
+
+Dictionary NativeWorldBackend::cancel_borrowed_typed_cell(const std::int64_t p_cell_issue) {
+	constexpr const char *operation = "cancel_borrowed_typed_cell";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (p_cell_issue <= 0 || borrowed_typed_cell_.phase == BorrowedTypedCellSlot::Phase::empty
+		|| borrowed_typed_cell_.issue != static_cast<std::uint64_t>(p_cell_issue))
+		return envelope(operation, "failed", "cell_issue_mismatch");
+	borrowed_typed_cell_.phase = BorrowedTypedCellSlot::Phase::cancelled;
+	Dictionary result = envelope(operation, "ready", "typed_cell_cancelled");
+	result["cellIssue"] = p_cell_issue;
+	return result;
+}
+
+Dictionary NativeWorldBackend::drain_borrowed_typed_cell(const std::int64_t p_cell_issue) {
+	constexpr const char *operation = "drain_borrowed_typed_cell";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (p_cell_issue <= 0 || borrowed_typed_cell_.phase == BorrowedTypedCellSlot::Phase::empty
+		|| borrowed_typed_cell_.issue != static_cast<std::uint64_t>(p_cell_issue))
+		return envelope(operation, "failed", "cell_issue_mismatch");
+	if (borrowed_typed_cell_.phase == BorrowedTypedCellSlot::Phase::pending)
+		return envelope(operation, "pending", "cancel_before_drain");
+	borrowed_typed_cell_.phase = BorrowedTypedCellSlot::Phase::empty;
+	borrowed_typed_cell_.issue = 0U;
+	borrowed_typed_cell_.lease_issue = 0U;
+	Dictionary result = envelope(operation, "ready", "typed_cell_drained");
+	result["cellIssue"] = p_cell_issue;
 	return result;
 }
 

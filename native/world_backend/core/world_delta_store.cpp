@@ -944,6 +944,125 @@ const Sha256Digest &WorldDeltaStore::current_content_digest() const noexcept {
     return state_->content_digest;
 }
 
+void BorrowedTypedCellCursor::reset() noexcept { *this = BorrowedTypedCellCursor{}; }
+BorrowedTypedCellCursor::Status BorrowedTypedCellCursor::status() const noexcept { return status_; }
+
+BorrowedTypedCellCursor::Step WorldDeltaStore::advance_borrowed_typed_cell(
+    BorrowedTypedCellCursor &cursor, const CellCoord cell,
+    const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
+    using Cursor = BorrowedTypedCellCursor;
+    Cursor::Step result; result.status = cursor.status_;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    // Zero work is observational: it never reads mutable source state or
+    // binds an issue and cannot make an unrelated later request stale.
+    if (limit == 0U) return result;
+    if (cursor.status_ == Cursor::Status::source_changed || cursor.status_ == Cursor::Status::failed)
+        return result;
+    if (source_mutation_fence_ && (!source_mutation_fence_->on_owner_thread()
+        || !source_mutation_fence_->read_active())) {
+        cursor.status_ = Cursor::Status::failed;
+        result.status = cursor.status_; return result;
+    }
+    if (source_token == 0U) {
+        cursor.status_ = Cursor::Status::failed;
+        result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ != Cursor::Status::idle
+        && (cursor.source_token_ != source_token || !(cursor.cell_ == cell)
+            || cursor.source_revision_ != state_->revision
+            || cursor.source_content_ != state_->content_digest)) {
+        cursor.status_ = Cursor::Status::source_changed;
+        result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ == Cursor::Status::ready_present
+        || cursor.status_ == Cursor::Status::ready_absent) return result;
+    if (cursor.status_ == Cursor::Status::idle) {
+        const auto split = split_cell(cell, SECTION_SIZE);
+        if (!split) {
+            cursor.status_ = Cursor::Status::failed;
+            result.status = cursor.status_; return result;
+        }
+        cursor.cell_ = cell;
+        cursor.section_ = split->section;
+        cursor.source_token_ = source_token;
+        cursor.source_revision_ = state_->revision;
+        cursor.source_content_ = state_->content_digest;
+        cursor.low_ = 0U;
+        cursor.high_ = state_->typed_transient_overlays.size();
+        cursor.layer_ = Cursor::Layer::overlay;
+        cursor.status_ = Cursor::Status::pending;
+        result.consumed_ops = 1U;
+    }
+    const CellCoordLess less;
+    while (result.consumed_ops < limit && cursor.status_ == Cursor::Status::pending) {
+        const auto &records = cursor.layer_ == Cursor::Layer::overlay
+            ? state_->typed_transient_overlays : state_->terrain_volume.durable_snapshot.records();
+        if (cursor.low_ == cursor.high_) {
+            if (cursor.layer_ == Cursor::Layer::overlay) {
+                cursor.layer_ = Cursor::Layer::durable;
+                cursor.low_ = 0U;
+                cursor.high_ = state_->terrain_volume.durable_snapshot.records().size();
+            } else {
+                cursor.status_ = Cursor::Status::ready_absent;
+            }
+            ++result.consumed_ops;
+            continue;
+        }
+        const std::size_t middle = cursor.low_ + (cursor.high_ - cursor.low_) / 2U;
+        const NativeCellState &candidate = records[middle].state;
+        // Records are already sorted by (section z,y,x; cell z,y,x).
+        // One comparison is one charged atom; no vector copy or search helper.
+        if (less(candidate.section, cursor.section_)
+            || (candidate.section == cursor.section_ && less(candidate.cell, cell))) {
+            cursor.low_ = middle + 1U;
+        } else {
+            cursor.high_ = middle;
+        }
+        ++result.consumed_ops;
+        if (cursor.low_ == cursor.high_ && cursor.low_ < records.size()
+            && records[cursor.low_].state.cell == cell) {
+            cursor.found_index_ = cursor.low_;
+            cursor.status_ = Cursor::Status::ready_present;
+        }
+    }
+    result.status = cursor.status_;
+    return result;
+}
+
+std::optional<BorrowedTypedCellHeader> WorldDeltaStore::borrowed_typed_cell_header(
+    const BorrowedTypedCellCursor &cursor, const std::uint64_t source_token) const noexcept {
+    using Cursor = BorrowedTypedCellCursor;
+    if (cursor.status_ != Cursor::Status::ready_present || source_token == 0U
+        || cursor.source_token_ != source_token
+        || (source_mutation_fence_ && (!source_mutation_fence_->on_owner_thread()
+            || !source_mutation_fence_->read_active()))
+        || cursor.source_revision_ != state_->revision
+        || cursor.source_content_ != state_->content_digest) return std::nullopt;
+    const auto &records = cursor.layer_ == Cursor::Layer::overlay
+        ? state_->typed_transient_overlays : state_->terrain_volume.durable_snapshot.records();
+    if (cursor.found_index_ >= records.size()) return std::nullopt;
+    const NativeCellState &state = records[cursor.found_index_].state;
+    if (!(state.cell == cursor.cell_)) return std::nullopt;
+    BorrowedTypedCellHeader result;
+    result.cell = state.cell;
+    result.section = state.section;
+    result.local_cell = state.local_cell;
+    result.source_layer = cursor.layer_ == Cursor::Layer::overlay
+        ? BorrowedTypedCellHeader::SourceLayer::overlay
+        : BorrowedTypedCellHeader::SourceLayer::durable;
+    result.material = state.material;
+    result.biome = state.biome;
+    result.solid = state.solid;
+    result.density = state.density;
+    result.fluid = state.fluid;
+    result.light = state.light;
+    result.generated = state.generated;
+    result.edited = state.edited;
+    result.has_block_id = state.block_id.has_value();
+    result.has_edit_reason = state.edit_reason.has_value();
+    return result;
+}
+
 BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection_one(
     BorrowedTypedProjectionCursor &cursor, const WorldDeltaHorizontalBounds bounds,
     const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
