@@ -368,6 +368,71 @@ VWB_TEST(world_delta_store_borrowed_typed_cell_checks_full_coordinate_and_sorted
     VWB_EXPECT(!overlay_header->solid);
 }
 
+VWB_TEST(world_delta_store_borrowed_typed_cell_finds_sorted_edges_across_negative_sections) {
+    WorldDeltaStore store;
+    const std::array<CellCoord, 5> durable{{
+        {-15, -17, -17}, {-14, -16, -16}, {-13, -1, -1},
+        {-12, 0, 0}, {-11, 16, 16},
+    }};
+    const std::array<CellCoord, 5> overlays{{
+        {1, -17, -17}, {2, -16, -16}, {3, -1, -1},
+        {4, 0, 0}, {5, 16, 16},
+    }};
+    const auto admitted = store.admit_typed_state(typed_admission("a2a:sorted-five", 0U,
+        {typed_stone(durable[0]), typed_durable(durable[1]), typed_stone(durable[2]),
+            typed_durable(durable[3]), typed_stone(durable[4])},
+        {typed_overlay_without_persistence_metadata(overlays[0]), typed_overlay(overlays[1]),
+            typed_overlay_without_persistence_metadata(overlays[2]), typed_overlay(overlays[3]),
+            typed_overlay_without_persistence_metadata(overlays[4])}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    constexpr std::uint64_t token = 0x41326104U;
+
+    const auto expect_lookup = [&](const CellCoord cell, const bool present,
+                                   const BorrowedTypedCellHeader::SourceLayer layer) {
+        BorrowedTypedCellCursor cursor;
+        std::uint32_t charged = 0U;
+        for (std::size_t call = 0U; call < 1000U; ++call) {
+            const std::uint32_t offered = call % 2U == 0U ? 1U : 64U;
+            const auto step = store.advance_borrowed_typed_cell(cursor, cell, token, offered);
+            VWB_EXPECT(step.consumed_ops <= offered);
+            VWB_EXPECT(step.consumed_ops <= 64U);
+            VWB_EXPECT(step.status != BorrowedTypedCellCursor::Status::failed);
+            VWB_EXPECT(step.status != BorrowedTypedCellCursor::Status::source_changed);
+            charged += step.consumed_ops;
+            if (step.status == BorrowedTypedCellCursor::Status::ready_present
+                || step.status == BorrowedTypedCellCursor::Status::ready_absent) break;
+        }
+        VWB_EXPECT(charged > 0U);
+        const auto expected = store.pin().effective_typed_cell_at(cell);
+        VWB_EXPECT_EQ(present, expected.has_value());
+        VWB_EXPECT_EQ(present ? BorrowedTypedCellCursor::Status::ready_present
+                              : BorrowedTypedCellCursor::Status::ready_absent, cursor.status());
+        const auto header = store.borrowed_typed_cell_header(cursor, token);
+        VWB_EXPECT_EQ(present, header.has_value());
+        if (present) expect_borrowed_scalar_header(*header, *expected, layer);
+    };
+
+    // Each vector contributes first, middle, and last hits. Durable queries
+    // also have to miss the five overlay records before falling through.
+    for (const std::size_t index : {0U, 2U, 4U}) {
+        expect_lookup(durable[index], true, BorrowedTypedCellHeader::SourceLayer::durable);
+        expect_lookup(overlays[index], true, BorrowedTypedCellHeader::SourceLayer::overlay);
+    }
+    // These positions are before, between, and after the ordered records in
+    // each layer. Both axes cross negative section boundaries; the middle
+    // probes share a section with their neighboring records.
+    const std::array<CellCoord, 3> durable_misses{{
+        {-16, -17, -17}, {-14, -15, -8}, {-10, 16, 17},
+    }};
+    const std::array<CellCoord, 3> overlay_misses{{
+        {0, -17, -17}, {2, -15, -8}, {6, 17, 17},
+    }};
+    for (const CellCoord cell : durable_misses)
+        expect_lookup(cell, false, BorrowedTypedCellHeader::SourceLayer::durable);
+    for (const CellCoord cell : overlay_misses)
+        expect_lookup(cell, false, BorrowedTypedCellHeader::SourceLayer::overlay);
+}
+
 VWB_TEST(borrowed_typed_projection_wdp1_matches_immutable_pin_with_nested_metadata_and_remote_rows) {
     WorldDeltaStore store;
     const auto receipt = store.admit_typed_state(typed_admission("borrowed:projection", 0U,
