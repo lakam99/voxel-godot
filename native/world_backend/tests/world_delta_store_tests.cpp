@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace voxel::world_backend::tests {
@@ -36,6 +37,9 @@ struct WorldDeltaState {
             && resolved_biome == other.resolved_biome && fluid == other.fluid;
     }
 };
+
+static_assert(sizeof(BorrowedTypedCellCursor) <= 256U);
+static_assert(std::is_trivially_copyable_v<BorrowedTypedCellCursor>);
 
 NativeCellState typed_from_legacy(const WorldDeltaState &state, const CellCoord cell,
     const WorldDeltaNamespace name_space) {
@@ -155,6 +159,160 @@ NativeTypedWorldStateRecord typed_overlay_without_persistence_metadata(const Cel
 WorldTypedStateAdmission typed_admission(const std::string &id, const std::uint64_t expected,
     std::vector<NativeTypedWorldStateRecord> durable, std::vector<NativeTypedWorldStateRecord> overlays = {}) {
     return {id, expected, NativeTypedWorldStateSnapshot::create(std::move(durable)), std::move(overlays)};
+}
+
+BorrowedTypedCellCursor::Status finish_borrowed_typed_cell(
+    const WorldDeltaStore &store, BorrowedTypedCellCursor &cursor,
+    const CellCoord cell, const std::uint64_t token) {
+    constexpr std::array<std::uint32_t, 4> offers{1U, 0U, 2U, 64U};
+    for (std::size_t call = 0; call < 100000U; ++call) {
+        const auto step = store.advance_borrowed_typed_cell(cursor, cell, token,
+            offers[call % offers.size()]);
+        VWB_EXPECT(step.consumed_ops <= offers[call % offers.size()]);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+        VWB_EXPECT(step.status != BorrowedTypedCellCursor::Status::failed);
+        if (step.status == BorrowedTypedCellCursor::Status::ready_present
+            || step.status == BorrowedTypedCellCursor::Status::ready_absent
+            || step.status == BorrowedTypedCellCursor::Status::source_changed)
+            return step.status;
+    }
+    fail("borrowed typed cell bounded progress", __FILE__, __LINE__, "cursor did not finish");
+    return BorrowedTypedCellCursor::Status::failed;
+}
+
+void expect_borrowed_scalar_header(const BorrowedTypedCellHeader &header,
+    const NativeCellState &expected, const BorrowedTypedCellHeader::SourceLayer layer) {
+    VWB_EXPECT(header.cell == expected.cell);
+    VWB_EXPECT(header.section == expected.section);
+    VWB_EXPECT(header.local_cell == expected.local_cell);
+    VWB_EXPECT_EQ(layer, header.source_layer);
+    VWB_EXPECT_EQ(expected.material, header.material);
+    VWB_EXPECT_EQ(expected.biome, header.biome);
+    VWB_EXPECT_EQ(expected.solid, header.solid);
+    VWB_EXPECT_EQ(expected.density, header.density);
+    VWB_EXPECT_EQ(expected.fluid, header.fluid);
+    VWB_EXPECT_EQ(expected.light, header.light);
+    VWB_EXPECT_EQ(expected.generated, header.generated);
+    VWB_EXPECT_EQ(expected.edited, header.edited);
+    VWB_EXPECT_EQ(expected.block_id.has_value(), header.has_block_id);
+    VWB_EXPECT_EQ(expected.edit_reason.has_value(), header.has_edit_reason);
+}
+
+VWB_TEST(world_delta_store_borrowed_typed_cell_scalar_header_matches_pin_layers_and_absence) {
+    WorldDeltaStore store;
+    const CellCoord overlap{-16, -1, 16};
+    const CellCoord durable_only{15, 0, 15};
+    const CellCoord absent{-17, 0, 16};
+    const auto admitted = store.admit_typed_state(typed_admission("a2a:layers", 0U,
+        {typed_stone(overlap), typed_durable(durable_only)},
+        {typed_overlay_without_persistence_metadata(overlap)}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    constexpr std::uint64_t token = 0x41326101U;
+
+    BorrowedTypedCellCursor overlay_cursor;
+    const auto zero = store.advance_borrowed_typed_cell(overlay_cursor, overlap, token, 0U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::idle, zero.status);
+    VWB_EXPECT_EQ(0U, zero.consumed_ops);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(overlay_cursor, token));
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, overlay_cursor, overlap, token));
+    const auto overlay_header = store.borrowed_typed_cell_header(overlay_cursor, token);
+    VWB_EXPECT(overlay_header.has_value());
+    expect_borrowed_scalar_header(*overlay_header,
+        store.pin().effective_typed_cell_at(overlap).value(),
+        BorrowedTypedCellHeader::SourceLayer::overlay);
+    VWB_EXPECT(!overlay_header->has_block_id);
+    VWB_EXPECT(!overlay_header->has_edit_reason);
+    const auto repeated = store.advance_borrowed_typed_cell(overlay_cursor, overlap, token, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present, repeated.status);
+    VWB_EXPECT_EQ(0U, repeated.consumed_ops);
+
+    BorrowedTypedCellCursor durable_cursor;
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, durable_cursor, durable_only, token));
+    const auto durable_header = store.borrowed_typed_cell_header(durable_cursor, token);
+    VWB_EXPECT(durable_header.has_value());
+    expect_borrowed_scalar_header(*durable_header,
+        store.pin().effective_typed_cell_at(durable_only).value(),
+        BorrowedTypedCellHeader::SourceLayer::durable);
+
+    BorrowedTypedCellCursor absent_cursor;
+    VWB_EXPECT(!store.pin().effective_typed_cell_at(absent));
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_absent,
+        finish_borrowed_typed_cell(store, absent_cursor, absent, token));
+    VWB_EXPECT(!store.borrowed_typed_cell_header(absent_cursor, token));
+
+    const auto cleared = store.commit_typed_cells(transaction("a2a:clear-overlay", 1U,
+        {clear(WorldDeltaNamespace::scene_overlay, overlap)}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, cleared.status);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(overlay_cursor, token));
+    overlay_cursor.reset();
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, overlay_cursor, overlap, token + 1U));
+    const auto revealed = store.borrowed_typed_cell_header(overlay_cursor, token + 1U);
+    VWB_EXPECT(revealed.has_value());
+    expect_borrowed_scalar_header(*revealed,
+        store.pin().effective_typed_cell_at(overlap).value(),
+        BorrowedTypedCellHeader::SourceLayer::durable);
+}
+
+VWB_TEST(world_delta_store_borrowed_typed_cell_stales_on_mutation_and_token_change) {
+    WorldDeltaStore store;
+    const CellCoord cell{16, -16, -1};
+    const auto admitted = store.admit_typed_state(typed_admission("a2a:stale", 0U,
+        {typed_stone(cell)}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    BorrowedTypedCellCursor cursor;
+    constexpr std::uint64_t token = 0x41326102U;
+    const auto begun = store.advance_borrowed_typed_cell(cursor, cell, token, 1U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::pending, begun.status);
+    VWB_EXPECT(begun.consumed_ops <= 1U);
+    const auto changed = store.commit_typed_cells(transaction("a2a:mutate", 1U,
+        {set(WorldDeltaNamespace::scene_overlay, cell, water())}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, changed.status);
+    const auto stale = store.advance_borrowed_typed_cell(cursor, cell, token, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::source_changed, stale.status);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, token));
+
+    cursor.reset();
+    const auto restarted = store.advance_borrowed_typed_cell(cursor, cell, token + 1U, 1U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::pending, restarted.status);
+    const auto wrong_token = store.advance_borrowed_typed_cell(cursor, cell, token + 2U, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::source_changed, wrong_token.status);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, token + 1U));
+
+    cursor.reset();
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, cursor, cell, token + 3U));
+    const auto header = store.borrowed_typed_cell_header(cursor, token + 3U);
+    VWB_EXPECT(header.has_value());
+    expect_borrowed_scalar_header(*header,
+        store.pin().effective_typed_cell_at(cell).value(),
+        BorrowedTypedCellHeader::SourceLayer::overlay);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, token + 2U));
+    cursor.reset();
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::idle, cursor.status());
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, token + 3U));
+}
+
+VWB_TEST(world_delta_store_borrowed_typed_cell_rejects_unbound_token_and_changed_request) {
+    WorldDeltaStore store;
+    BorrowedTypedCellCursor cursor;
+    const CellCoord first{-1, 0, 16};
+    const CellCoord second{0, 0, 16};
+    const auto invalid = store.advance_borrowed_typed_cell(cursor, first, 0U, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::failed, invalid.status);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, 0U));
+    cursor.reset();
+    const auto begun = store.advance_borrowed_typed_cell(cursor, first, 51U, 1U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::pending, begun.status);
+    VWB_EXPECT_EQ(1U, begun.consumed_ops);
+    const auto different_cell = store.advance_borrowed_typed_cell(cursor, second, 51U, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::source_changed, different_cell.status);
+    VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, 51U));
+    cursor.reset();
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_absent,
+        finish_borrowed_typed_cell(store, cursor, second, 52U));
 }
 
 VWB_TEST(borrowed_typed_projection_wdp1_matches_immutable_pin_with_nested_metadata_and_remote_rows) {
