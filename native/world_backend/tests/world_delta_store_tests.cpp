@@ -1722,11 +1722,11 @@ VWB_TEST(world_delta_store_borrowed_projection_nested_nv1_prefix_honors_three_fo
     const auto after_prefix = direct.advance(metadata, token, 0U, 64U, 64U, sink);
     VWB_EXPECT_EQ(0U, after_prefix.bytes_written);
 
-    // A null root isolates the NV1 marker boundary: metadata_count adds one
+    // An empty object root isolates the NV1 marker boundary: metadata_count adds one
     // sink atom (hint 4), while metadata_emit adds two (hint 5). Nested
     // metadata below is checked separately against the pinned digest.
     NativeTypedWorldStateRecord root = typed_stone({0, 0, 0});
-    root.state.metadata = NativeValue::null();
+    root.state.metadata = NativeValue::object({});
     WorldDeltaStore root_store;
     const auto admitted = root_store.admit_typed_state(typed_admission("wdp1:nv1-boundary", 0, {root}));
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
