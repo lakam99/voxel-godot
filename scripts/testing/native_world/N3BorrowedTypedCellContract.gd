@@ -31,6 +31,15 @@ func expected(value: Dictionary, status: String, label: String) -> void:
 func expected_reason(value: Dictionary, status: String, reason: String, label: String) -> void:
 	check(label, value.get("status") == status and value.get("reason") == reason)
 
+func reject_wrong_child_issue(issue: int, label: String) -> void:
+	var advanced: Dictionary = backend.advance_borrowed_typed_cell(issue, 1)
+	check(label + "_advance", advanced.get("status") == "failed"
+		and advanced.get("reason") == "cell_issue_mismatch" and not advanced.has("header"))
+	expected_reason(backend.cancel_borrowed_typed_cell(issue),
+		"failed", "cell_issue_mismatch", label + "_cancel")
+	expected_reason(backend.drain_borrowed_typed_cell(issue),
+		"failed", "cell_issue_mismatch", label + "_drain")
+
 func initialization() -> Dictionary:
 	return {"schema":"n3-native-world-backend-initialize/v1", "seedText":"atlas-1492",
 		"revisions":{"sourceSchema":2,"terrainGenerator":1,"biomeRegionField":2,
@@ -199,7 +208,7 @@ func check_present_header(result: Dictionary, cell: Vector3i, layer: String,
 	check("present_source_layer_" + layer, header.sourceLayer == layer)
 	check("present_scalar_values_" + layer, header.materialId == material
 		and header.biomeId == 13 and header.fluidId == 0
-		and header.solid == solid and is_equal_approx(float(header.density), density)
+		and header.solid == solid and float(header.density) == density
 		and header.skyLight == sky and header.blockLight == block
 		and header.generated == false and header.edited == true)
 	check("present_payload_explicitly_omitted_" + layer,
@@ -288,7 +297,15 @@ func run() -> void:
 	if cell_issue <= 0:
 		finish()
 		return
+	var negative_quota: Dictionary = backend.advance_borrowed_typed_cell(cell_issue, -1)
+	check("child_negative_quota_rejected_without_header", negative_quota.get("status") == "failed"
+		and negative_quota.get("reason") == "invalid_work_quota"
+		and not negative_quota.has("header"))
+	reject_wrong_child_issue(cell_issue + 1, "unissued_child_issue_rejected")
+	reject_wrong_child_issue(cancelled_issue, "drained_child_issue_rejected_while_new_active")
 	var durable: Dictionary = await ready_cell()
+	check("valid_child_survives_bad_issue_and_quota", durable.get("status") == "ready"
+		and durable.get("cellIssue") == cell_issue)
 	check_ready_identity(durable, parent)
 	check_present_header(durable, durable_cell, "durable", 3, true, 1.5, 6, 10)
 	drain_cell()
