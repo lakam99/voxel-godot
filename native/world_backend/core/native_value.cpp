@@ -455,15 +455,19 @@ NativeValueCanonicalCursorProgress NativeValueCanonicalCursor::advance(
             || frame.phase == Phase::array_items || frame.phase == Phase::object_items;
         const bool empty_payload_phase = (frame.phase == Phase::string_bytes && frame.declared_length == 0U)
             || (frame.phase == Phase::object_key_bytes && frame.segment_length == 0U);
+        // A byte-producing phase must be able to pay for both its borrowed
+        // parent walk and at least one emitted byte. Otherwise it can spend
+        // the whole offer on the walk and leave this phase unchanged.
+        const std::size_t phase_cost = depth_ + 2U;
+        const std::size_t minimum_work = phase_cost + (structural_phase || empty_payload_phase ? 0U : 1U);
         if (bytes_remaining == 0U && !structural_phase && !empty_payload_phase) {
-            progress.next_atomic_units = depth_ + 2U;
+            progress.next_atomic_units = minimum_work;
             break;
         }
         // resolve_value follows at most MAX_DEPTH parent links. Charge each
         // link plus the phase transition before touching borrowed children.
-        const std::size_t phase_cost = depth_ + 2U;
-        if (work_remaining < phase_cost) {
-            progress.next_atomic_units = phase_cost;
+        if (work_remaining < minimum_work) {
+            progress.next_atomic_units = minimum_work;
             break;
         }
         work_remaining -= phase_cost;
