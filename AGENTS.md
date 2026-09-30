@@ -159,6 +159,71 @@ individual symptom:
 6. Leave the repository legible: update the relevant plan/Linear item when
    requested, preserve unrelated files, and commit only the requested scope.
 
+## Mandatory Refinement, Migration, And Handoff Gates
+
+These gates are required for cross-cutting gameplay work, architectural
+changes, and migrations. A task that has not passed its current gate must not
+be described as implementation-complete or ready for the next stage.
+
+### Before implementation
+
+- Write a short task charter before changing code: user-visible outcome and
+  explicit non-goals; authoritative source and affected consumers; current
+  branch/worktree and pre-existing edits; known baseline failures; dependencies
+  and risks; and observable acceptance evidence. Put durable plans, matrices,
+  and handoffs in the documentation repository, then link them here or in the
+  task summary.
+- Map the data path end to end before moving an authority: producer, immutable
+  inputs, revisions/identity, worker or queue boundary, publication/acknowledgment,
+  gameplay consumers, edits/saves, and retirement of the old path. Name every
+  consumer that must move. A “port” or similar output is not proof of semantic
+  parity; compare the actual contract and boundary cases.
+- If a material dependency, owner, or acceptance criterion is unknown, make
+  bounded discovery the first stage. Do not silently treat discovery, risk
+  resolution, or integration as negligible work or give a confident single
+  estimate before that uncertainty is reduced.
+
+### Baselines and stage exits
+
+- Before edits, preserve relevant failing reports and record the exact command,
+  revision/build, seed or fixture, and environment. Classify each failure as
+  pre-existing, introduced, test/setup, reporting, or unresolved; never attribute
+  it to the migration without comparison evidence, and never change production
+  code merely to make a test start or turn green.
+- Define each migration stage's entry conditions, proof, and exit criteria
+  before implementation. Report passed, failed, blocked, and untested rows
+  separately. Passing a focused or intermediate gate proves only its named
+  contract; it does not waive later stages or the original project acceptance
+  matrix. HEAD/goal owner makes stage advancement and completion decisions.
+- For uncertain defects, choose the smallest falsifiable check that separates
+  likely causes, then make one evidence-led change. Run a long/integrated gate
+  when new evidence warrants it; do not repeatedly relaunch an unchanged costly
+  suite. Set the question and stop/timeout conditions before launch, use the
+  owned-process watchdog, and inspect its report before retrying.
+- Keep independent verification independent of implementation. Review the
+  exact final diff and build/source identity; a reviewer recommendation is
+  evidence, not acceptance by itself. Record remaining limitations and the next
+  safe action in the handoff.
+
+### Delegation and repository boundaries
+
+- When work is delegated, assign one accountable lead per subsystem, explicit
+  parent/worker roles, dependencies, and non-overlapping mutable file/worktree
+  scopes. Keep final acceptance and global stage decisions with the goal owner.
+  Reuse an agent only after its changes/findings are preserved, processes are
+  drained, unresolved issues are handed off, and ownership is unambiguous.
+- Before committing, inspect the staged names and diff; stage explicit task
+  files rather than blanket-adding a dirty tree. Exclude editor/import churn,
+  generated scratch, and unrelated user work unless explicitly requested.
+- Before pushing, inspect the upstream and every commit ahead of it. Push only
+  when the complete outbound commit set is within the user's requested scope;
+  if it includes unrelated or unreviewed work, stop and obtain direction or
+  isolate the requested changes. Report exactly what commits were pushed.
+- Keep the game repository and documentation repository distinct. Do not leave
+  long-term plans, reports, or handoffs only in a local worktree or game repo;
+  publish canonical documentation to the documentation repository and link it
+  from the code/task handoff.
+
 ## DO NOT FAKE GAMEPLAY TESTS
 
 - Tests may use mocks only when they are explicitly named and reported as unit, contract, synthetic, static-audit, or service-level tests.
