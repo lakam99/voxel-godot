@@ -4,8 +4,10 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace voxel::world_backend {
@@ -200,7 +202,8 @@ struct NativeEffectiveTerrainSource::GeneratedFacts {
 };
 
 NativeEffectiveTerrainSource::NativeEffectiveTerrainSource(WorldSourcePin pin)
-    : pin_(std::move(pin)), natural_(pin_.definition()) {}
+    : pin_(std::move(pin)), natural_(pin_.definition()),
+      caves_(std::make_unique<NativeProceduralCaveField>(pin_.definition())) {}
 
 const WorldSourcePin &NativeEffectiveTerrainSource::pin() const noexcept { return pin_; }
 
@@ -224,6 +227,57 @@ double NativeEffectiveTerrainSource::shaped_surface(const std::int32_t x, const 
         return natural_surface(sample_x, sample_z);
     };
     return shaping_for(x, z).surface_y(x, z, sampler);
+}
+
+bool NativeEffectiveTerrainSource::cave_bounds_protected(const CaveBounds &bounds) const {
+    const double cell_size = pin_.definition().constants().cell_size_meters;
+    const double low_x = static_cast<double>(bounds.position.x) / cell_size;
+    const double low_z = static_cast<double>(bounds.position.z) / cell_size;
+    const double high_x = (static_cast<double>(bounds.position.x) + bounds.size.x) / cell_size;
+    const double high_z = (static_cast<double>(bounds.position.z) + bounds.size.z) / cell_size;
+    const std::int32_t footprint_low_x = checked_cell_coordinate(std::floor(low_x));
+    const std::int32_t footprint_low_z = checked_cell_coordinate(std::floor(low_z));
+    const std::int32_t footprint_high_x = checked_cell_coordinate(std::ceil(high_x));
+    const std::int32_t footprint_high_z = checked_cell_coordinate(std::ceil(high_z));
+    const NativeTerrainPageKey first_page = page_for(footprint_low_x, footprint_low_z);
+    const NativeTerrainPageKey last_page = page_for(footprint_high_x, footprint_high_z);
+    const auto natural_sampler = [this](const std::int32_t x, const std::int32_t z) {
+        return natural_surface(x, z);
+    };
+    std::set<std::pair<std::int32_t, std::int32_t>> inspected_towns;
+    for (std::int64_t page_z = first_page.z; page_z <= last_page.z; ++page_z) {
+        for (std::int64_t page_x = first_page.x; page_x <= last_page.x; ++page_x) {
+            const auto &shaping = pin_.terrain_shaping_for_page({
+                static_cast<std::int32_t>(page_x), static_cast<std::int32_t>(page_z)});
+            for (const NativeSiteTerrainFragment &site : shaping.site_fragments()) {
+                const NativeHorizontalRect &rect = site.cropped_cells;
+                if (static_cast<std::int64_t>(rect.x) < static_cast<std::int64_t>(footprint_high_x) + 1
+                    && static_cast<std::int64_t>(footprint_low_x) < static_cast<std::int64_t>(rect.x) + rect.width
+                    && static_cast<std::int64_t>(rect.z) < static_cast<std::int64_t>(footprint_high_z) + 1
+                    && static_cast<std::int64_t>(footprint_low_z) < static_cast<std::int64_t>(rect.z) + rect.depth)
+                    return true;
+            }
+            for (std::int32_t town_z = shaping.page_key().z - 1;
+                 town_z <= shaping.page_key().z + 1; ++town_z) {
+                for (std::int32_t town_x = shaping.page_key().x - 1;
+                     town_x <= shaping.page_key().x + 1; ++town_x) {
+                    if (!inspected_towns.emplace(town_x, town_z).second) continue;
+                    const auto town = shaping.town_dependency(town_x, town_z, natural_sampler);
+                    if (!town) continue;
+                    const double apron = shaping.town_slope_apron_cells(*town, natural_sampler);
+                    const double radius = static_cast<double>(town->radius_cells) + apron;
+                    const double nearest_x = std::clamp(
+                        static_cast<double>(town->center_x), low_x, high_x);
+                    const double nearest_z = std::clamp(
+                        static_cast<double>(town->center_z), low_z, high_z);
+                    const double dx = nearest_x - town->center_x;
+                    const double dz = nearest_z - town->center_z;
+                    if (dx * dx + dz * dz <= radius * radius) return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 TerrainBiomeId NativeEffectiveTerrainSource::shaped_surface_biome(
@@ -250,21 +304,30 @@ NativeEffectiveTerrainSource::GeneratedFacts NativeEffectiveTerrainSource::gener
     const double surface = column && column->source_surface_y
         ? *column->source_surface_y : shaping.surface_y(source.x, source.z, sampler);
     if (column && !column->source_surface_y) column->source_surface_y = surface;
-    const double depth_cells = std::max(0.0, surface - static_cast<double>(position.y))
-        / std::max(0.001, cell_size);
     double density = surface - static_cast<double>(position.y);
-    if (density > 0.0) {
-        const bool protected_column = column && column->source_protects_overburden
-            ? *column->source_protects_overburden
-            : shaping.protects_minimum_overburden(source.x, source.z, sampler);
-        if (column && !column->source_protects_overburden)
-            column->source_protects_overburden = protected_column;
-        const double overburden = protected_column ? 8.0 : 3.0;
-        density = std::min(density,
-            natural_.underground_air_density(position, source, surface, depth_cells, overburden));
-        if (position.y <= pin_.definition().constants().world_bottom_cell_y * cell_size)
-            density = std::max(density, cell_size * 4.0);
-    }
+    // Match WorldGenerationSystem.density_from_components: compose the cave
+    // field through the near-surface band so Transvoxel sees one continuous
+    // entrance, and retain the authoritative world-bottom bedrock clamp.
+    const NativeProceduralCaveField::SurfaceSampler cave_surface =
+        [this](const float x, const float z) {
+            const std::int32_t cell_x = checked_cell_coordinate(
+                std::floor(static_cast<double>(x)
+                    / pin_.definition().constants().cell_size_meters));
+            const std::int32_t cell_z = checked_cell_coordinate(
+                std::floor(static_cast<double>(z)
+                    / pin_.definition().constants().cell_size_meters));
+            return shaped_surface(cell_x, cell_z);
+        };
+    const NativeProceduralCaveField::ProtectedBounds protected_bounds =
+        [this](const CaveBounds &candidate) { return cave_bounds_protected(candidate); };
+    const double cave_density = position.y
+            <= static_cast<double>(pin_.definition().constants().world_bottom_cell_y + 2) * cell_size
+        ? cell_size
+        : caves_->density({position.x, position.y, position.z},
+            std::max(0.0, surface - position.y), cave_surface, protected_bounds);
+    density = std::min(density, cave_density);
+    if (position.y <= pin_.definition().constants().world_bottom_cell_y * cell_size)
+        density = std::max(density, cell_size * 4.0);
     const bool solid = density >= 0.0;
     return {source, surface, density, solid,
         !solid && surface - static_cast<double>(position.y) > cell_size * 0.35};

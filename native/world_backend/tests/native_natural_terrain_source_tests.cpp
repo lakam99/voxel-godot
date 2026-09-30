@@ -116,28 +116,12 @@ struct NumericNoiseFixture {
 };
 }
 
-VWB_TEST(borrowed_natural_surface_and_cave_match_independent_script_numeric_goldens) {
+VWB_TEST(borrowed_natural_surface_and_biome_match_independent_script_numeric_goldens) {
     const auto definition = atlas_definition(); NumericNoiseFixture fixture(definition);
     NaturalRequest request; request.x = -1; request.z = -2000;
     VWB_EXPECT(near(25.088331637806284, fixture.evaluate(definition, request).value));
     request.x = -2;
     VWB_EXPECT(near(25.111184615739269, fixture.evaluate(definition, request).value));
-    const NativeNaturalTerrainSource legacy(definition);
-    const std::array<std::pair<CellCoord, double>, 2> caves{{
-        {{-33, -2, -5}, -0.6017665929014142}, {{-32, -2, -5}, -0.35286612593816424}
-    }};
-    for (const auto &golden : caves) {
-        request.component = NaturalComponent::underground_density;
-        request.position = resolve_world_query(definition, WorldLatticeQuery{golden.first, WorldQueryIntent::terrain_mesh}).lattice_position;
-        const auto cell_size = definition.constants().cell_size_meters;
-        const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.x) / cell_size));
-        const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.z) / cell_size));
-        const double surface = legacy.sample_surface_column({x, z, WorldQueryIntent::terrain_mesh}).reference_surface_y;
-        request.depth_cells = std::max(0.0, surface - static_cast<double>(request.position.y)) / std::max(0.001, cell_size);
-        VWB_EXPECT(near(golden.second, fixture.evaluate(definition, request).value));
-        request.depth_cells = 3.0;
-        VWB_EXPECT_EQ(cell_size, fixture.evaluate(definition, request).value);
-    }
     request.component = NaturalComponent::regional_biome; request.x = 9; request.z = -1;
     VWB_EXPECT_EQ(RegionalBiome::swamp, fixture.evaluate(definition, request).regional.biome);
 }
@@ -156,23 +140,6 @@ VWB_TEST(shared_natural_scalar_stages_match_synchronous_source_across_quota_part
             const double expected = synchronous.sample_surface_column({cell.x, cell.z,
                 WorldQueryIntent::terrain_mesh}).reference_surface_y;
             VWB_EXPECT_EQ(expected, fixture.evaluate(definition, request, partition).value);
-        }
-        for (const CellCoord cell : {CellCoord{-33, -2, -5}, CellCoord{-32, -2, -5}}) {
-            NaturalRequest request; request.component = NaturalComponent::underground_density;
-            request.position = resolve_world_query(definition,
-                WorldLatticeQuery{cell, WorldQueryIntent::terrain_mesh}).lattice_position;
-            const double cell_size = definition.constants().cell_size_meters;
-            const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.x) / cell_size));
-            const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.z) / cell_size));
-            const double surface = synchronous.sample_surface_column({x, z,
-                WorldQueryIntent::terrain_mesh}).reference_surface_y;
-            request.depth_cells = std::max(0.0, surface - static_cast<double>(request.position.y))
-                / std::max(0.001, cell_size);
-            const double expected = synchronous.sample_lattice_numeric({cell,
-                WorldQueryIntent::terrain_mesh}).density;
-            VWB_EXPECT_EQ(expected, fixture.evaluate(definition, request, partition).value);
-            request.depth_cells = 3.0;
-            VWB_EXPECT_EQ(cell_size, fixture.evaluate(definition, request, partition).value);
         }
         NaturalRequest region; region.component = NaturalComponent::regional_biome;
         region.x = 9; region.z = -1;
@@ -244,7 +211,7 @@ VWB_TEST(borrowed_natural_zero_quota_reentry_cancel_and_sticky_context_contract)
         fixture.noise, fixture.storage, cancelled_repeat).step.status);
     VWB_EXPECT_EQ(8U, cancelled_repeat.remaining());
     VWB_EXPECT_EQ(EvalStatus::idle, reset_natural(cursor).status);
-    request.position.x = std::numeric_limits<float>::infinity(); WorkQuota invalid(1U);
+    request.component = static_cast<NaturalComponent>(255U); WorkQuota invalid(1U);
     VWB_EXPECT_EQ(EvalReason::input, begin_natural(cursor, fixture.context.stamp, fixture.context, request, invalid).reason);
     VWB_EXPECT_EQ(1U, invalid.remaining());
 }
@@ -269,7 +236,7 @@ VWB_TEST(borrowed_natural_refuses_pending_noise_dependency_without_advancing_its
     VWB_EXPECT_EQ(0U, pending_dependency.step.consumed_work);
     VWB_EXPECT_EQ(0U, pending_dependency.step.next_atomic_work);
     VWB_EXPECT_EQ(8U, premature.remaining()); VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
-    VWB_EXPECT_EQ(0U, cursor.stage); VWB_EXPECT_EQ(EvalStatus::idle, cursor.key.hash.status);
+    VWB_EXPECT_EQ(2U, cursor.stage);
     for (std::size_t calls = 0U; noise.status() == EvalStatus::pending && calls < 100U; ++calls) {
         WorkQuota quota(4U); (void)advance_noise(noise, storage, identity, quota);
     }
@@ -312,20 +279,25 @@ VWB_TEST(native_natural_terrain_matches_gdscript_fixed_biome_material_fluid_and_
         {{62208, 21, -65536}, TerrainBiomeId::savanna, TerrainMaterialId::grass, TerrainFluidId::none, true, 0},
         {{-44288, 13, -65536}, TerrainBiomeId::taiga, TerrainMaterialId::grass, TerrainFluidId::none, true, 0},
         {{15104, 7, -65536}, TerrainBiomeId::ocean, TerrainMaterialId::grass, TerrainFluidId::none, true, 0},
-        {{-56, -56, -128}, TerrainBiomeId::underground_air, TerrainMaterialId::lava, TerrainFluidId::lava, false, 0},
-        {{-125, 3, -128}, TerrainBiomeId::underground_air, TerrainMaterialId::water, TerrainFluidId::water, false, 0},
+        {{-56, -56, -128}, TerrainBiomeId::deep_underground, TerrainMaterialId::deep_stone, TerrainFluidId::none, true, 0},
+        {{-125, 3, -128}, TerrainBiomeId::underground, TerrainMaterialId::stone, TerrainFluidId::none, true, 0},
+        {{-127, 16, -128}, TerrainBiomeId::underground, TerrainMaterialId::stone, TerrainFluidId::none, true, 0},
         {{-128, -62, -128}, TerrainBiomeId::deep_underground, TerrainMaterialId::copper_ore, TerrainFluidId::none, true, 0},
         {{-43, -59, -128}, TerrainBiomeId::deep_underground, TerrainMaterialId::iron_ore, TerrainFluidId::none, true, 0},
         {{-128, -59, -128}, TerrainBiomeId::deep_underground, TerrainMaterialId::deep_stone, TerrainFluidId::none, true, 0},
         {{9, 9, -128}, TerrainBiomeId::beach, TerrainMaterialId::air, TerrainFluidId::none, false, 15},
-        {{-127, 16, -128}, TerrainBiomeId::underground_air, TerrainMaterialId::air, TerrainFluidId::none, false, 0},
         {{-128, 18, -128}, TerrainBiomeId::underground, TerrainMaterialId::stone, TerrainFluidId::none, true, 0},
-        {{-128, -26, -128}, TerrainBiomeId::underground_air, TerrainMaterialId::air, TerrainFluidId::none, false, 0},
+        {{-128, -26, -128}, TerrainBiomeId::deep_underground, TerrainMaterialId::deep_stone, TerrainFluidId::none, true, 0},
     };
     for (const Golden &golden : goldens) {
         const NativeCellState actual = source.sample_cell_state({golden.cell, WorldQueryIntent::gameplay});
-        VWB_EXPECT_EQ(golden.biome, actual.biome); VWB_EXPECT_EQ(golden.material, actual.material); VWB_EXPECT_EQ(golden.fluid, actual.fluid);
-        VWB_EXPECT_EQ(golden.solid, actual.solid); VWB_EXPECT_EQ(golden.sky, static_cast<unsigned>(actual.light.sky));
+        const std::string cell_label = "cell (" + std::to_string(golden.cell.x) + ","
+            + std::to_string(golden.cell.y) + "," + std::to_string(golden.cell.z) + ")";
+        VWB_EXPECT_MSG(golden.biome == actual.biome, cell_label + " biome mismatch");
+        VWB_EXPECT_MSG(golden.material == actual.material, cell_label + " material mismatch");
+        VWB_EXPECT_MSG(golden.fluid == actual.fluid, cell_label + " fluid mismatch");
+        VWB_EXPECT_MSG(golden.solid == actual.solid, cell_label + " solidity mismatch");
+        VWB_EXPECT_MSG(golden.sky == static_cast<unsigned>(actual.light.sky), cell_label + " sky-light mismatch");
     }
 }
 
@@ -374,19 +346,19 @@ VWB_TEST(native_natural_terrain_preserves_bottom_density_and_surface_water_prece
     VWB_EXPECT_EQ(15U, static_cast<unsigned>(classified_water.light.sky));
 }
 
-// Fixed GDScript `generate_cell_state()` cases captured by N3CoverageOracle:
-// shallow air, a deep non-lava hash that falls through to aquifer water, an
-// above-aquifer void, and a deep desert void that must not become aquifer.
-VWB_TEST(native_natural_terrain_matches_gdscript_underground_fluid_negative_goldens) {
+// These were formerly sampled as isolated noise-only air pockets. The new
+// recipe field leaves them solid unless an authored regional recipe reaches
+// them; this keeps old accidental holes from masquerading as reachable caves.
+VWB_TEST(native_natural_terrain_retires_legacy_noise_only_void_samples) {
     const NativeNaturalTerrainSource source(atlas_definition());
-    const NativeCellState shallow = source.sample_cell_state({{-127, 16, -128}, WorldQueryIntent::gameplay});
-    const NativeCellState lava_hash_false = source.sample_cell_state({{-62, -55, -128}, WorldQueryIntent::gameplay});
-    const NativeCellState above_aquifer = source.sample_cell_state({{-128, 7, -128}, WorldQueryIntent::gameplay});
-    const NativeCellState desert = source.sample_cell_state({{-53543, -37, -57728}, WorldQueryIntent::gameplay});
-    VWB_EXPECT_EQ(TerrainMaterialId::air, shallow.material); VWB_EXPECT_EQ(TerrainFluidId::none, shallow.fluid);
-    VWB_EXPECT_EQ(TerrainMaterialId::water, lava_hash_false.material); VWB_EXPECT_EQ(TerrainFluidId::water, lava_hash_false.fluid);
-    VWB_EXPECT_EQ(TerrainMaterialId::air, above_aquifer.material); VWB_EXPECT_EQ(TerrainFluidId::none, above_aquifer.fluid);
-    VWB_EXPECT_EQ(TerrainBiomeId::underground_air, desert.biome); VWB_EXPECT_EQ(TerrainMaterialId::air, desert.material); VWB_EXPECT_EQ(TerrainFluidId::none, desert.fluid);
+    for (const CellCoord cell : {CellCoord{-62, -55, -128}, CellCoord{-128, 7, -128},
+            CellCoord{-53543, -37, -57728}}) {
+        const NativeCellState state = source.sample_cell_state({cell, WorldQueryIntent::gameplay});
+        VWB_EXPECT(state.solid);
+        VWB_EXPECT(state.fluid == TerrainFluidId::none);
+        VWB_EXPECT(state.material == TerrainMaterialId::deep_stone
+            || state.material == TerrainMaterialId::stone);
+    }
 }
 
 VWB_TEST(native_natural_terrain_keeps_lava_depth_threshold_for_a_nondefault_pinned_source) {
@@ -450,8 +422,8 @@ VWB_TEST(native_natural_terrain_matches_gdscript_natural_lattice_goldens) {
     const auto cave_a = source.sample_lattice_numeric({{-33, -2, -5}, WorldQueryIntent::terrain_mesh});
     const auto cave_b = source.sample_lattice_numeric({{-32, -2, -5}, WorldQueryIntent::terrain_mesh});
     VWB_EXPECT(near(surface.density, 0.35099885559082367)); VWB_EXPECT(!surface.underground_air_void);
-    VWB_EXPECT(near(cave_a.density, -0.6017665929014142)); VWB_EXPECT(cave_a.underground_air_void);
-    VWB_EXPECT(near(cave_b.density, -0.35286612593816424)); VWB_EXPECT(cave_b.underground_air_void);
+    VWB_EXPECT(near(cave_a.density, 8.0)); VWB_EXPECT(!cave_a.underground_air_void);
+    VWB_EXPECT(near(cave_b.density, 8.0)); VWB_EXPECT(!cave_b.underground_air_void);
     const auto resolved = resolve_world_query(source.definition(), WorldLatticeQuery{{-20, 13, -2}, WorldQueryIntent::terrain_mesh});
     VWB_EXPECT_EQ(0xc1d80000U, bits(resolved.lattice_position.x));
 }

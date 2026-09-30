@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <cmath>
+#include <string_view>
 
 namespace voxel::world_backend {
 namespace {
@@ -34,6 +35,54 @@ fastnoiselite::FastNoiseLite make_noise(const std::uint32_t legacy_hash, const F
     noise.SetFractalGain(configuration.gain);
     noise.SetFractalLacunarity(configuration.lacunarity);
     noise.SetFractalWeightedStrength(configuration.weighted_strength);
+    noise.SetDomainWarpType(fastnoiselite::FastNoiseLite::DomainWarpType_OpenSimplex2);
+    noise.SetDomainWarpAmp(0.0F);
+    return noise;
+}
+
+struct CaveNoiseConfiguration {
+    CaveNoiseChannel channel;
+    const char *salt;
+    float frequency;
+};
+
+constexpr std::array<CaveNoiseConfiguration, 4> CAVE_CONFIGURATIONS{{
+    {CaveNoiseChannel::chambers, "chambers", 0.032F},
+    {CaveNoiseChannel::passages, "passages", 0.022F},
+    {CaveNoiseChannel::crossings, "passage-crossings", 0.024F},
+    {CaveNoiseChannel::detail, "rock", 0.19F},
+}};
+
+std::size_t cave_channel_index(const CaveNoiseChannel channel) noexcept {
+    const auto value = static_cast<std::size_t>(channel);
+    return value < CAVE_CONFIGURATIONS.size() ? value : 0U;
+}
+
+std::uint32_t cave_seed(const std::vector<std::uint32_t> &seed_code_points, const char *salt) noexcept {
+    std::uint32_t result = 2166136261U;
+    const auto append = [&result](const std::uint32_t code_point) {
+        result = (result ^ code_point) * 16777619U;
+    };
+    for (const std::uint32_t code_point : seed_code_points) append(code_point);
+    constexpr char prefix[] = ":caves:";
+    for (const char value : prefix) {
+        if (value == '\0') break;
+        append(static_cast<std::uint8_t>(value));
+    }
+    for (const char value : std::string_view(salt)) append(static_cast<std::uint8_t>(value));
+    return result & 0x7fffffffU;
+}
+
+fastnoiselite::FastNoiseLite make_cave_noise(
+    const std::vector<std::uint32_t> &seed_code_points,
+    const CaveNoiseConfiguration &configuration) {
+    fastnoiselite::FastNoiseLite noise;
+    noise.SetSeed(static_cast<std::int32_t>(cave_seed(seed_code_points, configuration.salt)));
+    noise.SetNoiseType(fastnoiselite::FastNoiseLite::NoiseType_OpenSimplex2);
+    noise.SetFrequency(configuration.frequency);
+    noise.SetFractalType(fastnoiselite::FastNoiseLite::FractalType_FBm);
+    noise.SetFractalOctaves(2);
+    noise.SetFractalGain(0.45F);
     noise.SetDomainWarpType(fastnoiselite::FastNoiseLite::DomainWarpType_OpenSimplex2);
     noise.SetDomainWarpAmp(0.0F);
     return noise;
@@ -77,6 +126,40 @@ FastNoiseCompat::FastNoiseCompat(const std::uint32_t legacy_hash)
 FastNoiseCompat::~FastNoiseCompat() = default;
 FastNoiseCompat::FastNoiseCompat(FastNoiseCompat &&) noexcept = default;
 FastNoiseCompat &FastNoiseCompat::operator=(FastNoiseCompat &&) noexcept = default;
+
+struct CaveNoiseCompat::Impl {
+    explicit Impl(const std::vector<std::uint32_t> &seed_code_points)
+        : noises{{
+              make_cave_noise(seed_code_points, CAVE_CONFIGURATIONS[0]),
+              make_cave_noise(seed_code_points, CAVE_CONFIGURATIONS[1]),
+              make_cave_noise(seed_code_points, CAVE_CONFIGURATIONS[2]),
+              make_cave_noise(seed_code_points, CAVE_CONFIGURATIONS[3]),
+          }},
+          seeds{{
+              static_cast<std::int32_t>(cave_seed(seed_code_points, CAVE_CONFIGURATIONS[0].salt)),
+              static_cast<std::int32_t>(cave_seed(seed_code_points, CAVE_CONFIGURATIONS[1].salt)),
+              static_cast<std::int32_t>(cave_seed(seed_code_points, CAVE_CONFIGURATIONS[2].salt)),
+              static_cast<std::int32_t>(cave_seed(seed_code_points, CAVE_CONFIGURATIONS[3].salt)),
+          }} {}
+
+    std::array<fastnoiselite::FastNoiseLite, 4> noises;
+    std::array<std::int32_t, 4> seeds;
+};
+
+CaveNoiseCompat::CaveNoiseCompat(const std::vector<std::uint32_t> &seed_code_points)
+    : impl_(std::make_unique<Impl>(seed_code_points)) {}
+CaveNoiseCompat::~CaveNoiseCompat() = default;
+CaveNoiseCompat::CaveNoiseCompat(CaveNoiseCompat &&) noexcept = default;
+CaveNoiseCompat &CaveNoiseCompat::operator=(CaveNoiseCompat &&) noexcept = default;
+
+std::int32_t CaveNoiseCompat::seed(const CaveNoiseChannel channel) const noexcept {
+    return impl_->seeds[cave_channel_index(channel)];
+}
+
+float CaveNoiseCompat::sample_3d(
+    const CaveNoiseChannel channel, const float x, const float y, const float z) const noexcept {
+    return impl_->noises[cave_channel_index(channel)].GetNoise<float>(x, y, z);
+}
 
 std::int32_t FastNoiseCompat::seed(const TerrainNoiseChannel channel) const noexcept {
     return impl_->seeds[channel_index(channel)];

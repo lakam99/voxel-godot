@@ -394,15 +394,73 @@ VWB_TEST(native_effective_terrain_applies_site_support_protection_and_town_befor
         candidate->center_z, WorldQueryIntent::gameplay}));
 }
 
-VWB_TEST(native_effective_terrain_overburden_transition_matches_unprotected_and_protected_goldens) {
-    constexpr double cell = 1.35;
-    constexpr double raw = -cell;
-    VWB_EXPECT(near(cell, native_underground_density_from_raw(raw, cell, 3.0, 3.0)));
-    VWB_EXPECT(near(0.0, native_underground_density_from_raw(raw, cell, 5.5, 3.0)));
-    VWB_EXPECT(near(raw, native_underground_density_from_raw(raw, cell, 8.0, 3.0)));
-    VWB_EXPECT(near(cell, native_underground_density_from_raw(raw, cell, 8.0, 8.0)));
-    VWB_EXPECT(near(0.0, native_underground_density_from_raw(raw, cell, 10.5, 8.0)));
-    VWB_EXPECT(near(raw, native_underground_density_from_raw(raw, cell, 13.0, 8.0)));
+VWB_TEST(native_effective_terrain_uses_procedural_cave_recipe_for_generated_density) {
+    const WorldSourceDefinition definition = flat_definition("cave-contract-417", 60.0);
+    NativeProceduralCaveField oracle(definition);
+    const NativeProceduralCaveField::SurfaceSampler flat_surface = [](float, float) { return 60.0; };
+    const NativeProceduralCaveField::ProtectedBounds no_protected_bounds =
+        [](const CaveBounds &) { return false; };
+    std::optional<CaveRecipe> recipe;
+    for (std::int32_t z = -8; z <= 8 && !recipe; ++z) {
+        for (std::int32_t x = -8; x <= 8 && !recipe; ++x)
+            recipe = oracle.recipe_for_region({x, z}, flat_surface, no_protected_bounds);
+    }
+    VWB_EXPECT(recipe.has_value());
+
+    const CaveVector3 point = recipe->route[3];
+    const double cell_size = definition.constants().cell_size_meters;
+    const CellCoord cell{
+        static_cast<std::int32_t>(std::floor(static_cast<double>(point.x) / cell_size)),
+        static_cast<std::int32_t>(std::floor(static_cast<double>(point.y) / cell_size)),
+        static_cast<std::int32_t>(std::floor(static_cast<double>(point.z) / cell_size)),
+    };
+    const NativeTerrainPageKey page{floor_page(cell.x), floor_page(cell.z)};
+    NativeEffectiveTerrainSource source(ready_pin(definition, page, empty_deltas()));
+    NativeEffectiveNumericFacts sample{};
+    CellCoord open_cell = cell;
+    for (std::int32_t y = -2; y <= 2; ++y) {
+        for (std::int32_t z = -2; z <= 2; ++z) {
+            for (std::int32_t x = -2; x <= 2; ++x) {
+                const CellCoord candidate{cell.x + x, cell.y + y, cell.z + z};
+                const NativeEffectiveNumericFacts candidate_sample = source.sample_lattice_numeric(
+                    {candidate, WorldQueryIntent::terrain_mesh});
+                if (candidate_sample.density < sample.density || (x == -2 && y == -2 && z == -2)) {
+                    sample = candidate_sample;
+                    open_cell = candidate;
+                }
+            }
+        }
+    }
+    VWB_EXPECT(sample.density < 0.0);
+    VWB_EXPECT(sample.underground_air_void);
+
+    NativeEffectiveTerrainSource town_protected(ready_pin(
+        definition, page, empty_deltas(), {town(page.x + 1, page.z + 1, 60, 60.0)}));
+    const NativeEffectiveNumericFacts protected_sample = town_protected.sample_lattice_numeric(
+        {open_cell, WorldQueryIntent::terrain_mesh});
+    VWB_EXPECT(protected_sample.density > 0.0);
+    VWB_EXPECT(!protected_sample.underground_air_void);
+
+    const CellCoord floor_cell{cell.x, cell.y - 1, cell.z};
+    const NativeEffectiveNumericFacts generated_floor = source.sample_lattice_numeric(
+        {floor_cell, WorldQueryIntent::terrain_mesh});
+    VWB_EXPECT(generated_floor.generated && generated_floor.density > 0.0);
+    NativeEffectiveTerrainSource dug(ready_pin(definition, page, durable_deltas(
+        floor_cell, -cell_size, TerrainMaterialId::air, TerrainBiomeId::underground_air)));
+    const NativeEffectiveNumericFacts dug_cell = dug.sample_lattice_numeric(
+        {floor_cell, WorldQueryIntent::terrain_mesh});
+    VWB_EXPECT(dug_cell.edited && !dug_cell.generated);
+    VWB_EXPECT(dug_cell.density < 0.0 && dug_cell.underground_air_void);
+
+    const CaveVector3 destination = recipe->route[6];
+    const NativeEffectiveWalkableProjectionFacts after_dig_navigation = dug.sample_walkable_surface_near({
+        {static_cast<std::int32_t>(std::floor(static_cast<double>(destination.x) / cell_size)),
+         static_cast<std::int32_t>(std::floor(static_cast<double>(destination.y) / cell_size)),
+         static_cast<std::int32_t>(std::floor(static_cast<double>(destination.z) / cell_size))},
+        4, 8, WorldQueryIntent::gameplay,
+    });
+    VWB_EXPECT(after_dig_navigation.projection.found);
+    VWB_EXPECT(after_dig_navigation.walkable);
 }
 
 VWB_TEST(native_effective_terrain_preserves_material_bedrock_ore_fluid_order) {

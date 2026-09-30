@@ -13,7 +13,7 @@ const MotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMot
 ## N2-only compatibility harness for the pre-N5 single-body admission contract.
 ## It is deliberately not accepted by MainCore; production binds only the N5
 ## aggregate router exercised by N3N5WindowedPhysicalFixture.
-class N2BarrierAdmissionFacade extends RefCounted:
+class N2BarrierAdmissionFacade extends Node:
 	var barrier: RefCounted
 
 	func native_collision_admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
@@ -619,6 +619,7 @@ func _actor_guard_contract() -> Dictionary:
 	var main_facade = MainFacadeScript.new()
 	var raw_barrier_rejected: bool = not main_facade.bind_native_collision_admission(_body, barrier)
 	var n2_compatibility_facade := N2BarrierAdmissionFacade.new()
+	add_child(n2_compatibility_facade)
 	n2_compatibility_facade.barrier = barrier
 	moving_static.position = Vector3(10, 0, 0)
 	var placement_inside_held: bool = not n2_compatibility_facade.native_collision_admit_placement(

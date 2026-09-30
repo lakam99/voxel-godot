@@ -1,23 +1,18 @@
 #pragma once
 
 #include "native_cell_state.hpp"
+#include "native_procedural_cave_field.hpp"
 #include "world_source.hpp"
 #include "fast_noise_compat.hpp"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 
 namespace voxel::world_backend {
 
 class NativeEffectiveTerrainSource;
-
-// Exact final overburden/deep-compaction blend shared by the natural and
-// shaped generators. Keeping this scalar kernel independently testable avoids
-// validating protected cave thresholds through a coincidental noise sample.
-double native_underground_density_from_raw(
-    double raw_density, double cell_size, double depth_cells,
-    double minimum_overburden_cells) noexcept;
 
 // This initial N3 kernel accepts natural terrain only.  The production source
 // can shape a column through a generated town or BuildingTerrainProfile;
@@ -64,9 +59,7 @@ private:
     double natural_surface_y(std::int32_t x, std::int32_t z) const;
     TerrainBiomeId natural_surface_biome(std::int32_t x, std::int32_t z) const;
     TerrainBiomeId regional_surface_biome(std::int32_t x, std::int32_t z) const;
-    double underground_air_density(
-        const WorldFloat32Position &position, const CellCoord &source_cell, double base_surface_y,
-        double depth_cells, double minimum_overburden_cells = 3.0) const;
+    double cave_density(const WorldFloat32Position &position, double base_surface_y) const;
     TerrainMaterialId solid_material_for(
         const CellCoord &cell, double surface_y, double position_y, TerrainBiomeId biome,
         double density) const;
@@ -79,17 +72,18 @@ private:
 
     WorldSourceDefinition definition_;
     std::uint32_t seed_hash_ = 0;
+    std::unique_ptr<NativeProceduralCaveField> caves_;
 };
 
 // Numeric prerequisite only: no material/fluid or generated-cell-state API.
-enum class NaturalComponent : std::uint8_t { surface_height, regional_biome, underground_density };
+// Cave density is intentionally absent: it depends on complete effective
+// shaping inputs and belongs to NativeEffectiveTerrainSource, not the
+// standalone natural-only quota cursor.
+enum class NaturalComponent : std::uint8_t { surface_height, regional_biome };
 struct NaturalRequest {
     NaturalComponent component = NaturalComponent::surface_height;
     std::int32_t x = 0;
     std::int32_t z = 0;
-    WorldFloat32Position position{};
-    double depth_cells = 0.0;
-    double minimum_overburden_cells = 3.0;
 };
 struct NumericNaturalSample { double value; NumericBiomeSample regional; };
 // Fixed scalar intermediates shared by the synchronous natural sampler and
@@ -102,11 +96,8 @@ struct NaturalCursor {
     EvalStatus status;
     EvalReason reason;
     NaturalRequest request;
-    SeedKeyCursor key;
     BiomeCursor biome;
     NaturalScalarStageState scalars;
-    WorldFloat32Position cells;
-    CellCoord source;
     NumericNaturalSample result;
     std::uint8_t stage;
     std::uint8_t sample;

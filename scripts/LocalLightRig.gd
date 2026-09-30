@@ -162,6 +162,17 @@ static func apply_held_profile(profile: Dictionary, id: String) -> void:
         profile["bounce_energy"] = 2.65
         profile["bounce_range"] = 13.2
         profile["source_position"] = Vector3(0.0, 0.38, -0.12)
+    elif id == "torch":
+        # Spread the carried light through a cave arch while reducing the
+        # previous overexposed ground wash. This is still a local light rig.
+        profile["source_energy"] = 1.90
+        profile["source_range"] = 24.0
+        profile["source_min_scale"] = 0.35
+        profile["source_max_scale"] = 1.20
+        profile["terrain_energy"] = 0.65
+        profile["terrain_range"] = 18.0
+        profile["bounce_energy"] = 0.65
+        profile["bounce_range"] = 24.0
     else:
         profile["source_energy"] = 3.05
         profile["source_range"] = 11.4

@@ -124,7 +124,7 @@ VWB_TEST(borrowed_hash_quota_unicode_drift_and_fresh_key_reset_contract) {
     VWB_EXPECT_EQ(EvalStatus::idle, reset_hash(cursor).status);
 }
 
-VWB_TEST(borrowed_decimal_and_seed_recipes_preserve_signed_and_duplicate_raw_seed_format) {
+VWB_TEST(borrowed_decimal_and_seed_recipes_preserve_signed_decimal_and_raw_seed_format) {
     for (const auto value : {0, -1, 127, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()}) {
         DecimalCursor cursor; WorkQuota start(1U); (void)begin_decimal(cursor, value, start);
         WorkQuota bad_output(1U), zero_output(0U);
@@ -144,24 +144,6 @@ VWB_TEST(borrowed_decimal_and_seed_recipes_preserve_signed_and_duplicate_raw_see
         WorkQuota zero(0U); (void)begin_decimal(cursor, value, zero);
         VWB_EXPECT_EQ(EvalStatus::idle, cursor.status);
     }
-    const std::vector<std::uint32_t> seed{' ', 0x1f332U, 0x00e9U, ' '};
-    auto expected = seed;
-    const auto ascii = [&expected](const std::string &value) {
-        for (const unsigned char byte : value) expected.push_back(byte);
-    };
-    ascii(":underground-volume:"); expected.insert(expected.end(), seed.begin(), seed.end());
-    ascii(":-2147483648,0,2147483647");
-    EvaluatorStamp stamp{}; stamp.generation = 1U;
-    SeedKeyCursor cursor; WorkQuota begin(1U);
-    (void)begin_seed_key(cursor, stamp, SeedKeyKind::underground,
-        std::numeric_limits<std::int32_t>::min(), 0, std::numeric_limits<std::int32_t>::max(), begin);
-    HashStep step{{EvalStatus::pending, EvalReason::none, 0U, 1U}, 0U, 0U};
-    for (std::size_t calls = 0U; step.step.status == EvalStatus::pending && calls < 1000U; ++calls) {
-        WorkQuota quota(1U); step = advance_seed_key(cursor, stamp, {seed.data(), seed.size()}, quota);
-        VWB_EXPECT_EQ(1U - quota.remaining(), step.step.consumed_work);
-    }
-    VWB_EXPECT_EQ(EvalStatus::ready, step.step.status);
-    VWB_EXPECT_EQ(legacy_seed_hash(expected), step.value);
 }
 
 VWB_TEST(resumable_sha256_rfc6234_multiblock_oracles_with_partial_quotas) {

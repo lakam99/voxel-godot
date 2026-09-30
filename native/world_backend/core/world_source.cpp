@@ -156,6 +156,76 @@ bool page_key_less(const NativeTerrainPageKey left, const NativeTerrainPageKey r
     return left.z != right.z ? left.z < right.z : left.x < right.x;
 }
 
+struct CaveShapingPageRange {
+    std::int32_t min_x = 0;
+    std::int32_t max_x = -1;
+    std::int32_t min_z = 0;
+    std::int32_t max_z = -1;
+};
+
+std::int32_t checked_floor_i32(const long double value, const char *message) {
+    const long double rounded = std::floor(value);
+    if (!std::isfinite(value)
+        || rounded < static_cast<long double>(std::numeric_limits<std::int32_t>::min())
+        || rounded > static_cast<long double>(std::numeric_limits<std::int32_t>::max()))
+        throw std::invalid_argument(message);
+    return static_cast<std::int32_t>(rounded);
+}
+
+CaveShapingPageRange cave_shaping_page_range(
+    const WorldSourceDefinition &definition,
+    const std::int32_t source_min_x, const std::int32_t source_max_x,
+    const std::int32_t source_min_z, const std::int32_t source_max_z) {
+    constexpr long double region_size = 192.0L;
+    constexpr long double region_half = region_size * 0.5L;
+    const long double cell_size = definition.constants().cell_size_meters;
+    const auto region_range = [cell_size, region_half, region_size](const std::int32_t source_min,
+        const std::int32_t source_max) {
+        // A remapped source coordinate identifies floor(world / cell_size),
+        // while the cave recipe receives the original float32 world position.
+        // Include one full cell on either side to cover that conversion and
+        // exact region-boundary roundoff without omitting an adjacent recipe.
+        const long double low_world = (static_cast<long double>(source_min) - 1.0L) * cell_size;
+        const long double high_world = (static_cast<long double>(source_max) + 1.0L) * cell_size;
+        const std::int32_t first = checked_floor_i32(
+            (low_world + region_half) / region_size,
+            "native cave source region is outside int32");
+        const std::int32_t last = checked_floor_i32(
+            (high_world + region_half) / region_size,
+            "native cave source region is outside int32");
+        return std::pair<std::int32_t, std::int32_t>{first, last};
+    };
+    const auto [first_region_x, last_region_x] = region_range(source_min_x, source_max_x);
+    const auto [first_region_z, last_region_z] = region_range(source_min_z, source_max_z);
+    const auto region_cell_range = [cell_size, region_half, region_size](const std::int32_t first_region,
+        const std::int32_t last_region) {
+        const long double low_world = static_cast<long double>(first_region) * region_size - region_half;
+        const long double high_world = static_cast<long double>(last_region) * region_size + region_half;
+        // Recipes and their bounds are wholly contained by their source
+        // region. One cell of guard keeps the float32 Vector3 -> floor cell
+        // conversion conservative at both inclusive/exclusive edges.
+        const std::int32_t first_cell = checked_floor_i32(
+            low_world / cell_size - 1.0L,
+            "native cave shaping cell is outside int32");
+        const std::int32_t last_cell = checked_floor_i32(
+            high_world / cell_size + 1.0L,
+            "native cave shaping cell is outside int32");
+        return std::pair<std::int32_t, std::int32_t>{first_cell, last_cell};
+    };
+    const auto [first_cell_x, last_cell_x] = region_cell_range(first_region_x, last_region_x);
+    const auto [first_cell_z, last_cell_z] = region_cell_range(first_region_z, last_region_z);
+    return {floor_page(first_cell_x), floor_page(last_cell_x),
+        floor_page(first_cell_z), floor_page(last_cell_z)};
+}
+
+std::uint64_t cave_shaping_page_count(const CaveShapingPageRange range) noexcept {
+    if (range.max_x < range.min_x || range.max_z < range.min_z) return 0U;
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(range.max_x) - range.min_x + 1)
+        * static_cast<std::uint64_t>(static_cast<std::int64_t>(range.max_z) - range.min_z + 1);
+}
+
+constexpr std::uint64_t MAX_CAVE_SHAPING_DEPENDENCY_PAGES = 4096U;
+
 void validate_intent(const WorldQueryIntent intent) {
     if (!is_valid_world_query_intent(intent)) throw std::invalid_argument("world query has an invalid intent");
 }
@@ -253,10 +323,15 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     std::vector<std::int32_t> center_pages_z;
     std::vector<std::int32_t> grid_pages_x;
     std::vector<std::int32_t> grid_pages_z;
+    std::int32_t source_min_x = std::numeric_limits<std::int32_t>::max();
+    std::int32_t source_max_x = std::numeric_limits<std::int32_t>::min();
+    std::int32_t source_min_z = std::numeric_limits<std::int32_t>::max();
+    std::int32_t source_max_z = std::numeric_limits<std::int32_t>::min();
     const auto append_axis = [&](const std::int32_t start,
         std::vector<std::int32_t> &lattice_pages,
         std::vector<std::int32_t> &center_pages,
-        std::vector<std::int32_t> &grid_pages) {
+        std::vector<std::int32_t> &grid_pages,
+        std::int32_t &source_min, std::int32_t &source_max) {
         for (std::int32_t offset = 0; offset < NativeTerrainShapingSnapshot::PAGE_CELLS; ++offset) {
             const std::int32_t source = remapped_lattice_cell(
                 start + offset, definition.constants().cell_size_meters);
@@ -268,6 +343,8 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
             const std::int32_t lattice_page = floor_page(source);
             const std::int32_t center_page = floor_page(center_source);
             const std::int32_t grid_page = floor_page(grid_source);
+            source_min = std::min({source_min, source, center_source, grid_source});
+            source_max = std::max({source_max, source, center_source, grid_source});
             if (std::find(lattice_pages.begin(), lattice_pages.end(), lattice_page) == lattice_pages.end())
                 lattice_pages.push_back(lattice_page);
             if (std::find(center_pages.begin(), center_pages.end(), center_page) == center_pages.end())
@@ -279,8 +356,10 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
         std::sort(center_pages.begin(), center_pages.end());
         std::sort(grid_pages.begin(), grid_pages.end());
     };
-    append_axis(bounds->x, lattice_pages_x, center_pages_x, grid_pages_x);
-    append_axis(bounds->z, lattice_pages_z, center_pages_z, grid_pages_z);
+    append_axis(bounds->x, lattice_pages_x, center_pages_x, grid_pages_x,
+        source_min_x, source_max_x);
+    append_axis(bounds->z, lattice_pages_z, center_pages_z, grid_pages_z,
+        source_min_z, source_max_z);
     std::vector<NativeTerrainPageKey> result;
     result.push_back(primary_page);
     const auto append_product = [&](const std::vector<std::int32_t> &pages_x,
@@ -292,6 +371,18 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     append_product(lattice_pages_x, lattice_pages_z);
     append_product(center_pages_x, center_pages_z);
     append_product(grid_pages_x, grid_pages_z);
+    const CaveShapingPageRange cave_range = cave_shaping_page_range(
+        definition, source_min_x, source_max_x, source_min_z, source_max_z);
+    if (cave_shaping_page_count(cave_range) > MAX_CAVE_SHAPING_DEPENDENCY_PAGES)
+        throw std::length_error("native cave shaping dependency set exceeds source limit");
+    for (std::int64_t z = cave_range.min_z; z <= cave_range.max_z; ++z) {
+        for (std::int64_t x = cave_range.min_x; x <= cave_range.max_x; ++x) {
+            const NativeTerrainPageKey page{static_cast<std::int32_t>(x), static_cast<std::int32_t>(z)};
+            if (!native_terrain_page_bounds(page))
+                throw std::invalid_argument("native cave shaping dependency page is invalid");
+            result.push_back(page);
+        }
+    }
     std::sort(result.begin(), result.end(), page_key_less);
     result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
@@ -300,9 +391,16 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
 void WorldShapingDependencyCursor::reset(const NativeTerrainPageKey primary) noexcept {
     primary_x_ = primary.x; primary_z_ = primary.z;
     counts_ = {}; product_x_ = {}; product_z_ = {};
+    source_min_x_ = std::numeric_limits<std::int32_t>::max();
+    source_max_x_ = std::numeric_limits<std::int32_t>::min();
+    source_min_z_ = std::numeric_limits<std::int32_t>::max();
+    source_max_z_ = std::numeric_limits<std::int32_t>::min();
+    cave_min_page_x_ = 0; cave_max_page_x_ = -1;
+    cave_min_page_z_ = 0; cave_max_page_z_ = -1;
+    cave_next_page_x_ = 0; cave_next_page_z_ = 0;
     collect_index_ = 0; sort_axis_ = 0; sort_i_ = 1; sort_j_ = 1;
     compact_axis_ = 0; compact_index_ = 0;
-    primary_pending_ = true; last_page_valid_ = false; phase_ = 0;
+    primary_pending_ = true; last_page_valid_ = false; cave_pages_pending_ = false; phase_ = 0;
 }
 
 bool WorldShapingDependencyCursor::axes_ready() const noexcept { return phase_ == 3U; }
@@ -328,6 +426,13 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::advance_axes(
                     ? remapped_center_cell(cell, constants.cell_center_offset_cells, constants.cell_size_meters)
                     : remapped_grid_cell(cell, constants.cell_size_meters);
             axes_[axis][offset] = floor_page(source);
+            if (axis < 3U) {
+                source_min_x_ = std::min(source_min_x_, source);
+                source_max_x_ = std::max(source_max_x_, source);
+            } else {
+                source_min_z_ = std::min(source_min_z_, source);
+                source_max_z_ = std::max(source_max_z_, source);
+            }
             ++collect_index_; ++result.consumed_ops;
             if (collect_index_ == 6U * AXIS_LIMIT) phase_ = 1U;
         } else if (phase_ == 1U) {
@@ -350,7 +455,21 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::advance_axes(
             ++compact_index_; ++result.consumed_ops;
             if (compact_index_ == AXIS_LIMIT) {
                 ++compact_axis_; compact_index_ = 0U;
-                if (compact_axis_ == 6U) phase_ = 3U;
+                if (compact_axis_ == 6U) {
+                    const CaveShapingPageRange cave_range = cave_shaping_page_range(
+                        definition, source_min_x_, source_max_x_, source_min_z_, source_max_z_);
+                    if (cave_shaping_page_count(cave_range) > MAX_CAVE_SHAPING_DEPENDENCY_PAGES)
+                        throw std::length_error("native cave shaping dependency set exceeds source limit");
+                    const NativeTerrainPageKey low{cave_range.min_x, cave_range.min_z};
+                    const NativeTerrainPageKey high{cave_range.max_x, cave_range.max_z};
+                    if (!native_terrain_page_bounds(low) || !native_terrain_page_bounds(high))
+                        throw std::invalid_argument("native cave shaping dependency page is invalid");
+                    cave_min_page_x_ = cave_range.min_x; cave_max_page_x_ = cave_range.max_x;
+                    cave_min_page_z_ = cave_range.min_z; cave_max_page_z_ = cave_range.max_z;
+                    cave_next_page_x_ = cave_min_page_x_; cave_next_page_z_ = cave_min_page_z_;
+                    cave_pages_pending_ = true;
+                    phase_ = 3U;
+                }
             }
         }
     }
@@ -365,6 +484,9 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::rewind_pages(
     if (offered_ops == 0U) return result;
     product_x_ = {}; product_z_ = {};
     primary_pending_ = true; last_page_valid_ = false;
+    cave_next_page_x_ = cave_min_page_x_; cave_next_page_z_ = cave_min_page_z_;
+    cave_pages_pending_ = cave_max_page_x_ >= cave_min_page_x_
+        && cave_max_page_z_ >= cave_min_page_z_;
     result.consumed_ops = 1U; result.ready = true;
     return result;
 }
@@ -374,7 +496,7 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::next_page(
     Step result;
     if (!axes_ready()) return result;
     result.ready = true;
-    // One fixed merge visits at most four heads, then at most three matching
+    // One fixed merge visits at most five heads, then at most four matching
     // product cursors. Reserve 24 scalar comparisons/loads/advances rather
     // than charging one operation for the whole bounded loop.
     result.next_atomic_ops = 24U;
@@ -389,6 +511,10 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::next_page(
                 axes_[stream][product_x_[stream]], axes_[stream + 3U][product_z_[stream]]};
             if (!found || page_key_less(candidate, minimum)) { minimum = candidate; found = true; }
         }
+        if (cave_pages_pending_) {
+            const NativeTerrainPageKey candidate{cave_next_page_x_, cave_next_page_z_};
+            if (!found || page_key_less(candidate, minimum)) { minimum = candidate; found = true; }
+        }
         if (!found) { result.complete = true; result.next_atomic_ops = 0U; return result; }
         if (primary_pending_ && primary_x_ == minimum.x && primary_z_ == minimum.z)
             primary_pending_ = false;
@@ -400,6 +526,14 @@ WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::next_page(
             if (product_x_[stream] == counts_[stream]) {
                 product_x_[stream] = 0U; ++product_z_[stream];
             }
+        }
+        if (cave_pages_pending_ && cave_next_page_x_ == minimum.x
+            && cave_next_page_z_ == minimum.z) {
+            if (cave_next_page_x_ < cave_max_page_x_) ++cave_next_page_x_;
+            else if (cave_next_page_z_ < cave_max_page_z_) {
+                cave_next_page_x_ = cave_min_page_x_;
+                ++cave_next_page_z_;
+            } else cave_pages_pending_ = false;
         }
         result.consumed_ops += 24U;
         if (!last_page_valid_ || minimum.x != last_page_x_ || minimum.z != last_page_z_) {

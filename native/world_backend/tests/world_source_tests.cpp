@@ -442,6 +442,28 @@ VWB_TEST(world_source_effective_pin_canonicalizes_and_binds_float32_dependency_p
         world_effective_shaping_dependencies(WorldSourceDefinition(subnormal_cell), {-7669582, 0}));
 }
 
+VWB_TEST(world_source_effective_dependencies_cover_complete_cave_recipe_regions) {
+    const WorldSourceDefinition definition(atlas_descriptor());
+    const auto pages = world_effective_shaping_dependencies(definition, {0, 0});
+    // A cave recipe belongs to one 192m region and may sample shaped surface
+    // anywhere inside that region even when the query is on its other edge.
+    // For the production 1.35m cell size, page (0,0)'s source cells intersect
+    // three cave regions on each axis; their full recipe domains reach the
+    // immediately adjacent shaping pages in a canonical 3x3 rectangle.
+    for (std::int32_t z = -1; z <= 1; ++z) {
+        for (std::int32_t x = -1; x <= 1; ++x) {
+            VWB_EXPECT(std::find(pages.begin(), pages.end(), NativeTerrainPageKey{x, z})
+                != pages.end());
+        }
+    }
+    VWB_EXPECT(std::is_sorted(pages.begin(), pages.end(), [](const auto left, const auto right) {
+        return left.z != right.z ? left.z < right.z : left.x < right.x;
+    }));
+    VWB_EXPECT(std::adjacent_find(pages.begin(), pages.end(), [](const auto left, const auto right) {
+        return left == right;
+    }) == pages.end());
+}
+
 VWB_TEST(world_source_borrowed_dependency_cursor_matches_complete_canonical_pages_and_rewind) {
     const auto compare = [](const WorldSourceDefinition &definition, const NativeTerrainPageKey primary) {
         const auto expected = world_effective_shaping_dependencies(definition, primary);

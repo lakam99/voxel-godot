@@ -486,14 +486,9 @@ func surface_y_at_position(position: Vector3) -> float:
 
 func ground_y_near_position(position: Vector3) -> float:
     var exterior_y := surface_y_at_position(position)
-    var edit_key := Vector2i(world_to_cell(position.x), world_to_cell(position.z))
-    if volume_edit_markers.has(edit_key):
-        return exterior_y
     if (
         subsurface_system != null
         and position.y < exterior_y - CELL * 0.45
-        and subsurface_system.has_method("is_air_at_world")
-        and bool(subsurface_system.call("is_air_at_world", position + Vector3(0.0, CELL * 0.55, 0.0)))
         and subsurface_system.has_method("ground_y_near_position")
     ):
         var subsurface_y := float(subsurface_system.call("ground_y_near_position", position))

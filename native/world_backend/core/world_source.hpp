@@ -187,17 +187,18 @@ std::uint32_t query_revision(const WorldSourceDefinition &definition, const Worl
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &query) noexcept;
 
 // Complete canonical shaping-page dependency set for effective terrain
-// sampling across one primary integer page. Godot's distinct float32 voxel
-// lattice, one-boundary grid numeric, and cell-center round-trips can each
-// select a source cell in a neighbouring page, so the exact Cartesian
-// dependency set for each convention participates in this bounded union.
+// sampling across one primary integer page. Besides the three Godot float32
+// remap conventions, this includes every page needed to sample complete
+// ProceduralCaveField regions that can affect the primary page. Cave recipes
+// are bounded to their 192m source region; that region's full surface and
+// exclusion inputs participate in the same immutable source identity.
 std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     const WorldSourceDefinition &definition, NativeTerrainPageKey primary_page);
 
-// Fixed-storage version of the three exact float32 remap dependency sets.
-// The caller owns and stamps the immutable definition across calls. Axis
-// preparation charges every remap, insertion-sort comparison, and compaction;
-// page emission merges four sorted streams without allocating a page vector.
+// Fixed-storage version of effective source dependencies. The caller owns and
+// stamps the immutable definition across calls. Axis preparation charges each
+// remap, insertion-sort comparison and compaction; page emission merges the
+// exact remap streams with the bounded cave-region page rectangle.
 class WorldShapingDependencyCursor final {
 public:
     static constexpr std::size_t AXIS_LIMIT = 280U;
@@ -226,6 +227,16 @@ private:
     std::int32_t primary_z_ = 0;
     std::int32_t last_page_x_ = 0;
     std::int32_t last_page_z_ = 0;
+    std::int32_t source_min_x_ = 0;
+    std::int32_t source_max_x_ = 0;
+    std::int32_t source_min_z_ = 0;
+    std::int32_t source_max_z_ = 0;
+    std::int32_t cave_min_page_x_ = 0;
+    std::int32_t cave_max_page_x_ = -1;
+    std::int32_t cave_min_page_z_ = 0;
+    std::int32_t cave_max_page_z_ = -1;
+    std::int32_t cave_next_page_x_ = 0;
+    std::int32_t cave_next_page_z_ = 0;
     std::uint16_t collect_index_ = 0;
     std::uint16_t sort_axis_ = 0;
     std::uint16_t sort_i_ = 1;
@@ -234,6 +245,7 @@ private:
     std::uint16_t compact_index_ = 0;
     bool primary_pending_ = true;
     bool last_page_valid_ = false;
+    bool cave_pages_pending_ = false;
     std::uint8_t phase_ = 0;
 };
 

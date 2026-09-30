@@ -1,8 +1,10 @@
 #pragma once
 
 #include "native_natural_terrain_source.hpp"
+#include "native_procedural_cave_field.hpp"
 #include "native_terrain_shaping_snapshot.hpp"
 #include <cstddef>
+#include <memory>
 #include <optional>
 
 namespace voxel::world_backend {
@@ -154,7 +156,6 @@ public:
         std::int32_t requested_x;
         std::int32_t requested_z;
         std::optional<double> source_surface_y;
-        std::optional<bool> source_protects_overburden;
         std::optional<TerrainBiomeId> requested_surface_biome;
     };
     explicit NativeEffectiveTerrainSource(WorldSourcePin pin);
@@ -215,6 +216,7 @@ private:
     const NativeTerrainShapingSnapshot &shaping_for(std::int32_t x, std::int32_t z) const;
     double natural_surface(std::int32_t x, std::int32_t z) const;
     double shaped_surface(std::int32_t x, std::int32_t z) const;
+    bool cave_bounds_protected(const CaveBounds &bounds) const;
     double continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId shaped_surface_biome(std::int32_t x, std::int32_t z) const;
     GeneratedFacts generated_at(WorldFloat32Position position,
@@ -228,6 +230,7 @@ private:
 
     WorldSourcePin pin_;
     NativeNaturalTerrainSource natural_;
+    std::unique_ptr<NativeProceduralCaveField> caves_;
 };
 
 } // namespace voxel::world_backend

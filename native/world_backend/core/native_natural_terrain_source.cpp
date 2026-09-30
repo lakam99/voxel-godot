@@ -130,15 +130,6 @@ TerrainFluidId underground_fluid(const AdmittedTerrainSeed &seed, const CellCoor
 }
 } // namespace
 
-double native_underground_density_from_raw(
-    const double raw_density, const double cell_size, const double depth_cells,
-    const double minimum_overburden_cells) noexcept {
-    if (depth_cells <= minimum_overburden_cells) return cell_size;
-    const double fade = clamp01(smoothstep(depth_cells, minimum_overburden_cells,
-        minimum_overburden_cells + 5.0) * (1.0 - smoothstep(depth_cells, 58.0, 74.0)));
-    return lerp(cell_size, raw_density, fade);
-}
-
 namespace {
 // One fixed, pure scalar stage owner for both evaluation schedules. Callers
 // supply genuine noise/hash values and choose when a stage may run; this code
@@ -166,27 +157,6 @@ NaturalScalarStageState surface_scalar_stage(NaturalScalarStageState state,
     }
     return state;
 }
-NaturalScalarStageState cave_scalar_stage(NaturalScalarStageState state,
-    const std::uint8_t stage, const WorldSourceConstants &constants,
-    const double depth_cells, const double minimum_overburden_cells) noexcept {
-    auto &v = state.values;
-    switch (stage) {
-    case 22: v[7] = smoothstep(1.0 - std::abs(v[3] - v[4]), 0.44, 0.82); break;
-    case 23: v[8] = smoothstep(v[0] * 0.66 + v[1] * 0.34, 0.48, 0.72); break;
-    case 24: v[9] = smoothstep(v[2], 0.48, 0.66);
-        v[10] = v[7] * smoothstep(v[1], 0.52, 0.82); break;
-    case 25: v[11] = smoothstep(depth_cells, 8.0, 18.0)
-        * (1.0 - smoothstep(depth_cells, 48.0, 64.0)); break;
-    case 26: v[12] = clamp01(std::max({v[8], v[9] * 0.96, v[10] * 0.90})
-        + v[11] * 0.10 + v[6] * 0.025); break;
-    case 27: v[13] = (lerp(0.50, 0.60, v[5]) - v[11] * 0.04 - v[12])
-        * constants.cell_size_meters * 4.25; break;
-    case 28: state.result = native_underground_density_from_raw(v[13], constants.cell_size_meters,
-        depth_cells, minimum_overburden_cells); break;
-    default: break;
-    }
-    return state;
-}
 enum class SurfaceWaterThreshold : std::uint8_t { ocean, beach, regional };
 SurfaceWaterThreshold surface_water_threshold(const double surface, const double water_level) noexcept {
     if (surface < water_level + 0.3) return SurfaceWaterThreshold::ocean;
@@ -204,7 +174,8 @@ NativeNaturalTerrainUnsupported::NativeNaturalTerrainUnsupported(const NativeTer
     : std::runtime_error("native natural terrain requires generated town and site profile migration"), input_(input) {}
 NativeTerrainShapingInput NativeNaturalTerrainUnsupported::input() const noexcept { return input_; }
 NativeNaturalTerrainSource::NativeNaturalTerrainSource(WorldSourceDefinition definition, const NativeNaturalTerrainRequest request)
-    : definition_(std::move(definition)), seed_hash_(legacy_seed_hash(definition_.raw_terrain_seed().code_points)) {
+    : definition_(std::move(definition)), seed_hash_(legacy_seed_hash(definition_.raw_terrain_seed().code_points)),
+      caves_(std::make_unique<NativeProceduralCaveField>(definition_)) {
     if (request.shaping_input != NativeTerrainShapingInput::declared_absent) throw NativeNaturalTerrainUnsupported(request.shaping_input);
 }
 const WorldSourceDefinition &NativeNaturalTerrainSource::definition() const noexcept { return definition_; }
@@ -245,29 +216,19 @@ TerrainBiomeId NativeNaturalTerrainSource::regional_surface_biome(const std::int
     return regional_biome_id(BiomeRegionField::sample(definition_.admitted_biome_seed(), {position.x, position.z}).biome);
 }
 
-double NativeNaturalTerrainSource::underground_air_density(const WorldFloat32Position &position, const CellCoord &source,
-    const double /*surface_y*/, const double depth_cells, const double minimum_overburden_cells) const {
+double NativeNaturalTerrainSource::cave_density(
+    const WorldFloat32Position &position, const double base_surface_y) const {
     const double cell_size = definition_.constants().cell_size_meters;
     if (static_cast<double>(position.y) <= static_cast<double>(definition_.constants().world_bottom_cell_y + 2) * cell_size) return cell_size;
-    const FastNoiseCompat noise(seed_hash_);
-    const float x = static_cast<float>(static_cast<double>(position.x) / cell_size);
-    const float y = static_cast<float>(static_cast<double>(position.y) / cell_size);
-    const float z = static_cast<float>(static_cast<double>(position.z) / cell_size);
-    NaturalScalarStageState state{};
-    auto &v = state.values;
-    v[0] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.44 + 4100.0, y * 0.58 - 2300.0, z * 0.44 + 1700.0);
-    v[1] = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.82 - 6200.0, y * 0.76 + 910.0, z * 0.82 + 3600.0);
-    v[2] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.23 + 8100.0, y * 0.30 - 5400.0, z * 0.23 + 2600.0);
-    v[3] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.92 - 7100.0, y * 0.46 + 1900.0, z * 0.74 + 800.0);
-    v[4] = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.62 + 2200.0, y * 0.68 - 3600.0, z - 4900.0);
-    state = cave_scalar_stage(state, 22U, definition_.constants(), depth_cells, minimum_overburden_cells);
-    v[6] = script_hash01(definition_.raw_terrain_seed(), "underground-volume:", ":" + cell_text(source));
-    for (std::uint8_t stage = 23U; stage <= 26U; ++stage)
-        state = cave_scalar_stage(state, stage, definition_.constants(), depth_cells, minimum_overburden_cells);
-    v[5] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0);
-    state = cave_scalar_stage(state, 27U, definition_.constants(), depth_cells, minimum_overburden_cells);
-    state = cave_scalar_stage(state, 28U, definition_.constants(), depth_cells, minimum_overburden_cells);
-    return state.result;
+    const CaveVector3 cave_position{position.x, position.y, position.z};
+    const NativeProceduralCaveField::SurfaceSampler surface = [this, cell_size](
+        const float x, const float z) {
+        return natural_surface_y(floor_cell(x, cell_size), floor_cell(z, cell_size));
+    };
+    const NativeProceduralCaveField::ProtectedBounds unprotected =
+        [](const CaveBounds &) { return false; };
+    return caves_->density(cave_position, std::max(0.0, base_surface_y - position.y),
+        surface, unprotected);
 }
 
 TerrainMaterialId NativeNaturalTerrainSource::solid_material_for(
@@ -301,8 +262,9 @@ NativeNaturalTerrainSource::GeneratedSample NativeNaturalTerrainSource::sample_g
     const double surface = natural_surface_y(source.x, source.z);
     double density = surface - position.y;
     const double depth_cells = std::max(0.0, surface - static_cast<double>(position.y)) / std::max(0.001, cell_size);
-    if (density > 0.0) density = std::min(density, underground_air_density(position, source, surface, depth_cells));
-    if (density > 0.0 && position.y <= definition_.constants().world_bottom_cell_y * cell_size) density = std::max(density, cell_size * 4.0);
+    density = std::min(density, cave_density(position, surface));
+    if (position.y <= definition_.constants().world_bottom_cell_y * cell_size)
+        density = std::max(density, cell_size * 4.0);
     const bool solid = density >= 0.0;
     const TerrainBiomeId surface_biome = natural_surface_biome(source.x, source.z);
     TerrainBiomeId biome = surface_biome;
@@ -329,8 +291,9 @@ NativeCellState NativeNaturalTerrainSource::sample_cell_state(const WorldCellCen
     const double cell_size = definition_.constants().cell_size_meters;
     const double depth = std::max(0.0, sample.surface_y - resolved.center_position.y); const double depth_cells = depth / std::max(0.001, cell_size);
     double density = sample.surface_y - resolved.center_position.y;
-    if (density > 0.0) density = std::min(density, underground_air_density(resolved.center_position, sample.source_cell, sample.surface_y, depth_cells));
-    if (density > 0.0 && resolved.center_position.y <= definition_.constants().world_bottom_cell_y * cell_size) density = std::max(density, cell_size * 4.0);
+    density = std::min(density, cave_density(resolved.center_position, sample.surface_y));
+    if (resolved.center_position.y <= definition_.constants().world_bottom_cell_y * cell_size)
+        density = std::max(density, cell_size * 4.0);
     bool solid = density >= 0.0; const TerrainBiomeId surface_biome = natural_surface_biome(query.coordinate.x, query.coordinate.z);
     TerrainMaterialId material = TerrainMaterialId::air; TerrainBiomeId biome = sample.biome; TerrainFluidId fluid = TerrainFluidId::none;
     if (query.coordinate.y <= definition_.constants().world_bottom_cell_y + 1) { solid = true; density = std::max(density, cell_size * 4.0); material = TerrainMaterialId::bedrock; biome = TerrainBiomeId::deep_underground; }
@@ -350,7 +313,7 @@ NativeCellState NativeNaturalTerrainSource::sample_cell_state(const WorldCellCen
 }
 
 NaturalCursor::NaturalCursor() noexcept : stamp{}, context{}, status(EvalStatus::idle), reason(EvalReason::none),
-    request{}, key{}, biome{}, scalars{}, cells{}, source{}, result{}, stage(0), sample(0) {}
+    request{}, biome{}, scalars{}, result{}, stage(0), sample(0) {}
 EvalStep begin_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
     const ContextIdentity context, const NaturalRequest request, WorkQuota &quota) noexcept {
     if (cursor.status != EvalStatus::idle && cursor.status != EvalStatus::drained)
@@ -359,13 +322,12 @@ EvalStep begin_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
         if (quota.remaining() != 0U) { cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; }
         return {EvalStatus::rejected, EvalReason::identity, 0U, 0U};
     }
-    if (static_cast<std::uint8_t>(request.component) > static_cast<std::uint8_t>(NaturalComponent::underground_density)
-        || !std::isfinite(request.position.x) || !std::isfinite(request.position.y) || !std::isfinite(request.position.z)
-        || !std::isfinite(request.depth_cells) || !std::isfinite(request.minimum_overburden_cells))
+    if (static_cast<std::uint8_t>(request.component) > static_cast<std::uint8_t>(NaturalComponent::regional_biome))
         return {EvalStatus::rejected, EvalReason::input, 0U, 0U};
     if (!quota.try_debit(1U)) return {EvalStatus::pending, EvalReason::quota, 0U, 1U};
     cursor = NaturalCursor{}; cursor.stamp = stamp; cursor.context = context; cursor.request = request;
     cursor.status = EvalStatus::pending;
+    cursor.stage = 2U;
     return {cursor.status, EvalReason::none, 1U, 1U};
 }
 namespace {
@@ -382,32 +344,12 @@ NoiseArguments surface_arguments(const NaturalCursor &cursor) noexcept {
     default: return {TerrainNoiseChannel::ridge, x + 7800.0, 0, z - 9100.0};
     }
 }
-NoiseArguments cave_arguments(const NaturalCursor &cursor) noexcept {
-    const float x = cursor.cells.x, y = cursor.cells.y, z = cursor.cells.z;
-    switch (cursor.sample) {
-    case 0: return {TerrainNoiseChannel::ridge, x * 0.44 + 4100.0, y * 0.58 - 2300.0, z * 0.44 + 1700.0};
-    case 1: return {TerrainNoiseChannel::height, x * 0.82 - 6200.0, y * 0.76 + 910.0, z * 0.82 + 3600.0};
-    case 2: return {TerrainNoiseChannel::ridge, x * 0.23 + 8100.0, y * 0.30 - 5400.0, z * 0.23 + 2600.0};
-    case 3: return {TerrainNoiseChannel::ridge, x * 0.92 - 7100.0, y * 0.46 + 1900.0, z * 0.74 + 800.0};
-    case 4: return {TerrainNoiseChannel::height, x * 0.62 + 2200.0, y * 0.68 - 3600.0, z - 4900.0};
-    default: return {TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0};
-    }
-}
-bool cave_cell_domain(const WorldFloat32Position position, const double cell_size) noexcept {
-    const double components[3] = {position.x / cell_size, position.y / cell_size, position.z / cell_size};
-    for (const auto component : components)
-        if (!std::isfinite(component) || component < static_cast<double>(std::numeric_limits<std::int32_t>::min())
-            || component >= static_cast<double>(std::numeric_limits<std::int32_t>::max())) return false;
-    return true;
-}
 std::size_t natural_next_work(const NaturalCursor &cursor) noexcept {
-    if (cursor.stage == 3U || cursor.stage == 19U) {
-        const auto arguments = cursor.stage == 3U ? surface_arguments(cursor) : cave_arguments(cursor);
+    if (cursor.stage == 3U) {
+        const auto arguments = surface_arguments(cursor);
         return static_cast<std::size_t>(terrain_noise_configurations()[static_cast<std::size_t>(arguments.channel)].octaves);
     }
-    if (cursor.stage == 4U || cursor.stage == 9U || cursor.stage == 22U
-        || cursor.stage == 24U || cursor.stage == 25U) return 2U;
-    if (cursor.stage == 28U && cursor.request.depth_cells > cursor.request.minimum_overburden_cells) return 3U;
+    if (cursor.stage == 4U || cursor.stage == 9U) return 2U;
     return 1U;
 }
 }
@@ -443,31 +385,13 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
     const auto before = quota.remaining();
     std::size_t next = 1U;
     while (quota.remaining() != 0U && cursor.status == EvalStatus::pending) {
-        if (cursor.stage == 0U || cursor.stage == 20U) {
-            const auto begun = begin_seed_key(cursor.key, stamp,
-                cursor.stage == 0U ? SeedKeyKind::raw : SeedKeyKind::underground,
-                cursor.source.x, cursor.source.y, cursor.source.z, quota);
-            if (begun.consumed_work == 0U) break;
-            ++cursor.stage; continue;
-        }
-        if (cursor.stage == 1U || cursor.stage == 21U) {
-            const auto &seed = definition.raw_terrain_seed().code_points;
-            const auto hash = advance_seed_key(cursor.key, stamp, {seed.data(), seed.size()}, quota);
-            if (hash.step.status == EvalStatus::rejected) { cursor.status = hash.step.status; cursor.reason = hash.step.reason; break; }
-            if (hash.step.status != EvalStatus::ready) break;
-            if (cursor.stage == 1U && hash.value != cursor.context.legacy_hash) {
-                cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; break;
-            }
-            if (cursor.stage == 21U) cursor.scalars.values[6] = static_cast<double>(hash.value % 100000U) / 100000.0;
-            ++cursor.stage; continue;
-        }
-        if (cursor.stage == 3U || cursor.stage == 19U) {
-            const auto arguments = cursor.stage == 3U ? surface_arguments(cursor) : cave_arguments(cursor);
+        if (cursor.stage == 3U) {
+            const auto arguments = surface_arguments(cursor);
             const auto sampled = sample_noise(use, storage, cursor.context, arguments.channel,
-                arguments.x, arguments.y, arguments.z, cursor.stage == 19U, quota);
+                arguments.x, arguments.y, arguments.z, false, quota);
             if (sampled.step.status != EvalStatus::ready) { next = sampled.step.next_atomic_work; break; }
             cursor.scalars.values[cursor.sample++] = sampled.value;
-            if (cursor.sample == (cursor.stage == 3U ? 7U : 6U)) ++cursor.stage;
+            if (cursor.sample == 7U) ++cursor.stage;
             continue;
         }
         if (cursor.stage == 30U) {
@@ -492,21 +416,7 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
         switch (cursor.stage) {
         case 2:
             if (cursor.request.component == NaturalComponent::regional_biome) cursor.stage = 30U;
-            else if (cursor.request.component == NaturalComponent::surface_height) cursor.stage = 3U;
-            else {
-                if (!cave_cell_domain(cursor.request.position, constants.cell_size_meters)) {
-                    cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::input; break;
-                }
-                if (static_cast<double>(cursor.request.position.y)
-                    <= static_cast<double>(constants.world_bottom_cell_y + 2) * constants.cell_size_meters) {
-                    cursor.result.value = constants.cell_size_meters; cursor.status = EvalStatus::ready; break;
-                }
-                cursor.source = source_cell(cursor.request.position, constants.cell_size_meters);
-                cursor.cells = {static_cast<float>(static_cast<double>(cursor.request.position.x) / constants.cell_size_meters),
-                    static_cast<float>(static_cast<double>(cursor.request.position.y) / constants.cell_size_meters),
-                    static_cast<float>(static_cast<double>(cursor.request.position.z) / constants.cell_size_meters)};
-                cursor.stage = 19U;
-            }
+            else cursor.stage = 3U;
             break;
         case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 11: case 12: case 13:
             cursor.scalars = surface_scalar_stage(cursor.scalars, cursor.stage, constants);
@@ -515,25 +425,17 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
                 cursor.status = EvalStatus::ready;
             }
             break;
-        case 22: case 23: case 24: case 25: case 26: case 27: case 28:
-            cursor.scalars = cave_scalar_stage(cursor.scalars, cursor.stage, constants,
-                cursor.request.depth_cells, cursor.request.minimum_overburden_cells);
-            if (cursor.stage == 28U) {
-                cursor.result.value = cursor.scalars.result;
-                cursor.status = EvalStatus::ready;
-            }
-            break;
         default: cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::phase; break;
         }
         // Branching stages set their own successor; scalar pipelines advance.
-        if ((cursor.stage >= 4U && cursor.stage <= 12U) || (cursor.stage >= 22U && cursor.stage <= 27U)) ++cursor.stage;
+        if (cursor.stage >= 4U && cursor.stage <= 12U) ++cursor.stage;
     }
     if (cursor.status == EvalStatus::pending) next = natural_next_work(cursor);
     return {{cursor.status, cursor.status == EvalStatus::pending ? EvalReason::quota : cursor.reason,
         before - quota.remaining(), cursor.status == EvalStatus::pending ? next : 0U}, cursor.result};
 }
 ControlResult cancel_natural(NaturalCursor &cursor) noexcept {
-    cursor.status = EvalStatus::cancelled; (void)cancel_hash(cursor.key.hash); (void)cancel_biome(cursor.biome);
+    cursor.status = EvalStatus::cancelled; (void)cancel_biome(cursor.biome);
     return {cursor.status, EvalReason::none, 1U};
 }
 ControlResult reset_natural(NaturalCursor &cursor) noexcept {

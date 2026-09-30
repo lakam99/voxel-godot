@@ -452,36 +452,42 @@ VWB_TEST(n2_lattice_origin_frozen_surface_density_and_material_anchors_match) {
     const TerrainSnapshot snapshot = build();
     const TerrainCell &slope_a = snapshot.at({-20, 13, -2});
     const TerrainCell &slope_b = snapshot.at({-20, 13, -1});
-    VWB_EXPECT(near(slope_a.surface_y, 17.901000000000003));
-    VWB_EXPECT(near(slope_b.surface_y, 17.901000000000003));
-    VWB_EXPECT(near(slope_b.surface_y - slope_a.surface_y, 0.0));
+    VWB_EXPECT_MSG(near(slope_a.surface_y, 17.901000000000003), "slope_a surface=" + std::to_string(slope_a.surface_y));
+    VWB_EXPECT_MSG(near(slope_b.surface_y, 17.901000000000003), "slope_b surface=" + std::to_string(slope_b.surface_y));
+    VWB_EXPECT_MSG(near(slope_b.surface_y - slope_a.surface_y, 0.0), "slope delta=" + std::to_string(slope_b.surface_y - slope_a.surface_y));
 
     const TerrainCell &cave_a = snapshot.at({-33, -2, -5});
     const TerrainCell &cave_b = snapshot.at({-32, -2, -5});
-    VWB_EXPECT(near(cave_a.density, -0.6017665929014142));
-    VWB_EXPECT(near(cave_b.density, -0.35286612593816424));
-    VWB_EXPECT(!cave_a.solid && !cave_b.solid);
-    VWB_EXPECT_EQ(TerrainMaterialId::air, cave_a.material);
-    VWB_EXPECT_EQ(TerrainMaterialId::air, cave_b.material);
-    VWB_EXPECT_EQ(TerrainBiomeId::swamp, cave_a.surface_biome);
-    VWB_EXPECT_EQ(TerrainBiomeId::swamp, cave_b.surface_biome);
-    VWB_EXPECT_EQ(TerrainBiomeId::underground_air, cave_a.resolved_biome);
-    VWB_EXPECT_EQ(TerrainBiomeId::underground_air, cave_b.resolved_biome);
+    VWB_EXPECT_MSG(near(cave_a.density, 8.0), "cave_a density=" + std::to_string(cave_a.density));
+    VWB_EXPECT_MSG(near(cave_b.density, 8.0), "cave_b density=" + std::to_string(cave_b.density));
+    VWB_EXPECT_MSG(cave_a.solid && cave_b.solid, "cave solidity a=" + std::to_string(cave_a.solid) + " b=" + std::to_string(cave_b.solid));
+    VWB_EXPECT_MSG(cave_a.material == TerrainMaterialId::stone, "cave_a material id=" + std::to_string(static_cast<unsigned>(cave_a.material)));
+    VWB_EXPECT_MSG(cave_b.material == TerrainMaterialId::stone, "cave_b material id=" + std::to_string(static_cast<unsigned>(cave_b.material)));
+    VWB_EXPECT_MSG(cave_a.surface_biome == TerrainBiomeId::swamp, "cave_a surface biome id=" + std::to_string(static_cast<unsigned>(cave_a.surface_biome)));
+    VWB_EXPECT_MSG(cave_b.surface_biome == TerrainBiomeId::swamp, "cave_b surface biome id=" + std::to_string(static_cast<unsigned>(cave_b.surface_biome)));
+    VWB_EXPECT_MSG(cave_a.resolved_biome == TerrainBiomeId::underground, "cave_a resolved biome id=" + std::to_string(static_cast<unsigned>(cave_a.resolved_biome)));
+    VWB_EXPECT_MSG(cave_b.resolved_biome == TerrainBiomeId::underground, "cave_b resolved biome id=" + std::to_string(static_cast<unsigned>(cave_b.resolved_biome)));
 
-    // Exercises the five-cell underground-air transition band. The cave
-    // anchors above are already beyond it and would not catch a mistranslated
-    // transition-width constant.
-    VWB_EXPECT(near(snapshot.at({-36, 2, -17}).density, 0.9741575565764948));
+    // Frozen against the current GDScript source oracle. This was formerly a
+    // shallow noise-only void (0.974...), but the recipe field returns solid
+    // rock here; the old native hole is intentionally retired.
+    const double transition_density = snapshot.at({-36, 2, -17}).density;
+    VWB_EXPECT_MSG(near(transition_density, 8.0),
+        "transition density actual=" + std::to_string(transition_density));
 
     for (const CellCoord coordinate : std::array<CellCoord, 4>{{
              {-33, 12, -5}, {-32, 12, -5}, {-33, 12, -4}, {-32, 12, -4}}}) {
         const TerrainCell &cell = snapshot.at(coordinate);
-        VWB_EXPECT(near(cell.density, 0.3260338576977162));
-        VWB_EXPECT(cell.solid);
-        VWB_EXPECT_EQ(TerrainMaterialId::mud, cell.material);
-        VWB_EXPECT_EQ(TerrainProvenanceKind::generated, cell.provenance);
-        VWB_EXPECT_EQ(std::string("generator:atlas-1492"), cell.provenance_id);
-        VWB_EXPECT_EQ(13ULL, cell.provenance_revision);
+        const std::string label = "cell (" + std::to_string(coordinate.x) + ","
+            + std::to_string(coordinate.y) + "," + std::to_string(coordinate.z) + ")";
+        VWB_EXPECT_MSG(near(cell.density, 0.3260338576977162), label + " density=" + std::to_string(cell.density));
+        VWB_EXPECT_MSG(cell.solid, label + " not solid");
+        VWB_EXPECT_MSG(cell.material == TerrainMaterialId::mud,
+            label + " material id=" + std::to_string(static_cast<unsigned>(cell.material)));
+        VWB_EXPECT_MSG(cell.provenance == TerrainProvenanceKind::generated, label + " provenance kind mismatch");
+        VWB_EXPECT_MSG(cell.provenance_id == "generator:atlas-1492", label + " provenance id=" + cell.provenance_id);
+        VWB_EXPECT_MSG(cell.provenance_revision == 13ULL,
+            label + " provenance revision=" + std::to_string(cell.provenance_revision));
     }
 }
 

@@ -139,18 +139,6 @@ enum class TokenType { end, ascii, seed, decimal };
 struct KeyToken { TokenType type; const char *ascii; std::size_t coordinate; };
 KeyToken key_token(const SeedKeyKind kind, const std::size_t segment) noexcept {
     if (kind == SeedKeyKind::raw) return {segment == 0U ? TokenType::seed : TokenType::end, nullptr, 0U};
-    if (kind == SeedKeyKind::underground) {
-        switch (segment) {
-        case 0: case 3: return {TokenType::seed, nullptr, 0U};
-        case 1: case 4: return {TokenType::ascii, ":", 0U};
-        case 2: return {TokenType::ascii, "underground-volume:", 0U};
-        case 5: return {TokenType::decimal, nullptr, 0U};
-        case 6: case 8: return {TokenType::ascii, ",", 0U};
-        case 7: return {TokenType::decimal, nullptr, 1U};
-        case 9: return {TokenType::decimal, nullptr, 2U};
-        default: return {TokenType::end, nullptr, 0U};
-        }
-    }
     const bool site = kind == SeedKeyKind::site_x || kind == SeedKeyKind::site_z;
     const bool climate = kind == SeedKeyKind::climate_temperature || kind == SeedKeyKind::climate_moisture;
     const bool temperature = kind == SeedKeyKind::climate_temperature || kind == SeedKeyKind::lattice_temperature;

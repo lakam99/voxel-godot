@@ -79,7 +79,7 @@ ControlResult reset_decimal(DecimalCursor &) noexcept;
 // reset discards its prefix and may reuse a source stamp for another key;
 // placement NoiseCursor generation nonreuse is a separate ownership rule.
 enum class SeedKeyKind : std::uint8_t {
-    raw, underground, site_x, site_z, climate_temperature, climate_moisture,
+    raw, site_x, site_z, climate_temperature, climate_moisture,
     lattice_temperature, lattice_moisture
 };
 struct SeedKeyCursor {

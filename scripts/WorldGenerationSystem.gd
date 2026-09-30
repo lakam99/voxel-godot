@@ -4,6 +4,7 @@ class_name WorldGenerationSystem
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 const BiomeRegionFieldScript := preload("res://scripts/world/BiomeRegionField.gd")
 const BuildingTerrainProfileScript := preload("res://scripts/world/BuildingTerrainProfile.gd")
+const ProceduralCaveFieldScript := preload("res://scripts/world/ProceduralCaveField.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
 const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
@@ -29,6 +30,10 @@ var surface_biome_cache := {}
 var minimum_overburden_cache := {}
 var terrain_volume_service
 var biome_region_field = BiomeRegionFieldScript.new()
+var cave_field = ProceduralCaveFieldScript.new()
+var ground_query_count := 0
+var ground_query_total_usec := 0
+var ground_query_max_usec := 0
 var generated_site_profiles: Array = []
 var generated_site_profile_store
 
@@ -39,6 +44,7 @@ func setup(main_node) -> void:
 		# Worker contexts carry an immutable, already admitted source snapshot.
 		# They share it read-only; do not deep-copy every recipe root per voxel block.
 		generated_site_profiles = source_profiles
+	cave_field.setup(String(main.get("seed_text")) if main != null else "default")
 	if terrain_volume_service == null:
 		terrain_volume_service = TerrainVolumeServiceScript.new()
 	terrain_volume_service.setup(main, self)
@@ -46,6 +52,7 @@ func setup(main_node) -> void:
 func reset() -> void:
 	generated_site_profile_store = null
 	generated_site_profiles = []
+	cave_field.clear()
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset"):
 		terrain_volume_service.reset()
@@ -54,11 +61,12 @@ func reset() -> void:
 	natural_surface_y_cache.clear()
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
-	minimum_overburden_cache.clear()
 
 func reset_for_seed() -> void:
 	generated_site_profile_store = null
 	generated_site_profiles = []
+	cave_field.setup(String(main.get("seed_text")) if main != null else "default")
+	cave_field.clear()
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset_for_seed"):
 		terrain_volume_service.reset_for_seed()
@@ -67,7 +75,6 @@ func reset_for_seed() -> void:
 	natural_surface_y_cache.clear()
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
-	minimum_overburden_cache.clear()
 
 func configure_generated_site_profiles(profiles: Array) -> Dictionary:
 	# Generation-input admission only. The lifecycle owner MUST call before
@@ -178,11 +185,13 @@ func density_from_components(position: Vector3, surface_y: float, base_surface_y
 	if is_nan(base_surface_y):
 		base_surface_y = surface_y
 	var density := surface_y - position.y
-	if density > 0.0:
-		var depth_cells := maxf(0.0, base_surface_y - position.y) / maxf(0.001, cell_size())
-		density = minf(density, underground_air_density_at(position, base_surface_y, depth_cells))
-		if position.y <= float(world_bottom_cell_y()) * cell_size():
-			density = maxf(density, cell_size() * 4.0)
+	# Compose both signed fields across the surface as well. Clipping carving
+	# at the heightfield's zero changes nearby negative samples abruptly and
+	# creates false lips when Transvoxel interpolates an entrance boundary.
+	var depth_cells := maxf(0.0, base_surface_y - position.y) / maxf(0.001, cell_size())
+	density = minf(density, underground_air_density_at(position, base_surface_y, depth_cells))
+	if position.y <= float(world_bottom_cell_y()) * cell_size():
+		density = maxf(density, cell_size() * 4.0)
 	return density
 
 func solid_at(position: Vector3) -> bool:
@@ -278,6 +287,58 @@ func volume_surface_numeric_sample_at_grid_cell(cell: Vector3i) -> Vector3:
 		0.0 if sample_underground_air else INF,
 		float(sample.get("surfaceY", position.y))
 	)
+
+func volume_ground_height_near(position: Vector3) -> float:
+	var started := Time.get_ticks_usec()
+	var result := sample_volume_ground_height_near(position)
+	var elapsed := Time.get_ticks_usec() - started
+	ground_query_count += 1
+	ground_query_total_usec += elapsed
+	ground_query_max_usec = maxi(ground_query_max_usec, elapsed)
+	return result
+
+func sample_volume_ground_height_near(position: Vector3) -> float:
+	# Match the smooth volume lattice instead of treating an occupied sample as
+	# a cube with its floor one whole cell higher. That invented step can reject
+	# a walk on a shallow, collision-backed cave slope.
+	var s := cell_size()
+	var lattice := position / s
+	var x := floori(lattice.x)
+	var z := floori(lattice.z)
+	var fraction := Vector2(lattice.x - x, lattice.z - z)
+	# Start within the actor's lower-body air, not above its head where an
+	# upper storey/overhang could be mistaken for the floor beneath it.
+	var start_height := lattice.y + 0.95
+	var start_y := floori(start_height)
+	var lower_density := volume_column_density(x, start_y, z, fraction)
+	var upper_density := volume_column_density(x, start_y + 1, z, fraction)
+	var previous_density := lerpf(lower_density, upper_density, start_height - start_y)
+	if previous_density >= 0.0:
+		return NAN
+	var previous_height := start_height
+	for y in range(start_y, floori(lattice.y - 14.0) - 1, -1):
+		var density := volume_column_density(x, y, z, fraction)
+		if density >= 0.0 and previous_density < 0.0:
+			return lerpf(float(y), previous_height, density / maxf(density - previous_density, 0.0001)) * s
+		previous_density = density
+		previous_height = float(y)
+	return NAN
+
+func volume_column_density(x: int, y: int, z: int, fraction: Vector2) -> float:
+	var a := volume_density_at_grid_cell(Vector3i(x, y, z))
+	var b := volume_density_at_grid_cell(Vector3i(x + 1, y, z))
+	var c := volume_density_at_grid_cell(Vector3i(x, y, z + 1))
+	var d := volume_density_at_grid_cell(Vector3i(x + 1, y, z + 1))
+	return lerpf(lerpf(a, b, fraction.x), lerpf(c, d, fraction.x), fraction.y)
+
+func volume_density_at_grid_cell(cell: Vector3i) -> float:
+	if terrain_volume_service != null and terrain_volume_service.edited_cells.has(cell):
+		return volume_surface_numeric_sample_at_grid_cell(cell).x
+	# Grounding only needs density. Avoid generating material, biome, fluid and
+	# light dictionaries for every corner of an unchanged lattice sample.
+	var position := Vector3(cell) * cell_size()
+	var reference_y := terrain_reference_surface_y_at(position)
+	return density_from_components(position, terrain_deformed_surface_y_at(position), reference_y)
 
 func generated_solid_material_for_cell(cell: Vector3i, surface_y: float, surface_biome: String, depth: float) -> String:
 	var s := cell_size()
@@ -814,43 +875,13 @@ func material_from_sample_components(position: Vector3, density: float, surface_
 		return ore
 	return "stone"
 
-func underground_air_density_at(position: Vector3, surface_y: float, depth_cells: float) -> float:
+func underground_air_density_at(position: Vector3, surface_y: float, _depth_cells: float) -> float:
 	if position.y <= float(world_bottom_cell_y() + 2) * cell_size():
 		return cell_size()
-	if main == null or main.get("ridge_noise") == null:
-		return cell_size()
-	var s := cell_size()
-	var cell_pos := Vector3(position.x / s, position.y / s, position.z / s)
-	var ridge = main.get("ridge_noise") as FastNoiseLite
-	var height = main.get("height_noise") as FastNoiseLite
-	var broad_air := noise3d01(ridge, cell_pos.x * 0.44 + 4100.0, cell_pos.y * 0.58 - 2300.0, cell_pos.z * 0.44 + 1700.0)
-	var local_air := noise3d01(height, cell_pos.x * 0.82 - 6200.0, cell_pos.y * 0.76 + 910.0, cell_pos.z * 0.82 + 3600.0) if height != null else broad_air
-	var mixed_air := broad_air * 0.66 + local_air * 0.34
-	var chamber_air := noise3d01(ridge, cell_pos.x * 0.23 + 8100.0, cell_pos.y * 0.30 - 5400.0, cell_pos.z * 0.23 + 2600.0)
-	var porous_a_raw := noise3d01(ridge, cell_pos.x * 0.92 - 7100.0, cell_pos.y * 0.46 + 1900.0, cell_pos.z * 0.74 + 800.0)
-	var porous_b_raw := noise3d01(height, cell_pos.x * 0.62 + 2200.0, cell_pos.y * 0.68 - 3600.0, cell_pos.z * 1.00 - 4900.0) if height != null else porous_a_raw
-	var porous_air := smoothstep_local(1.0 - absf(porous_a_raw - porous_b_raw), 0.44, 0.82)
-	var cellular := underground_cell_hash01(world_to_cell3(position))
-	var broad_strength := smoothstep_local(mixed_air, 0.48, 0.72)
-	var chamber_strength := smoothstep_local(chamber_air, 0.48, 0.66)
-	var porous_strength := porous_air * smoothstep_local(local_air, 0.52, 0.82)
-	var chamber_depth := smoothstep_local(depth_cells, 8.0, 18.0) * (1.0 - smoothstep_local(depth_cells, 48.0, 64.0))
-	var air_signal := clampf(maxf(maxf(broad_strength, chamber_strength * 0.96), porous_strength * 0.90) + chamber_depth * 0.10 + cellular * 0.025, 0.0, 1.0)
-	var minimum_overburden := minimum_overburden_cells_for_position(position)
-	if depth_cells <= minimum_overburden:
-		return s
-	var depth_open := smoothstep_local(
-		depth_cells,
-		minimum_overburden,
-		minimum_overburden + UNDERGROUND_AIR_TRANSITION_DEPTH_CELLS
-	)
-	var deep_compaction := 1.0 - smoothstep_local(depth_cells, 58.0, 74.0)
-	var depth_fade := clampf(depth_open * deep_compaction, 0.0, 1.0)
-	var strata := noise3d01(ridge, cell_pos.x * 0.38 - 1400.0, cell_pos.y * 0.62 + 2500.0, cell_pos.z * 0.38 - 3700.0)
-	var threshold := lerpf(0.50, 0.60, strata) - chamber_depth * 0.04
-	var raw_density := (threshold - air_signal) * s * 4.25
-	return lerpf(s, raw_density, depth_fade)
+	return cave_field.density(position, maxf(0.0, surface_y - position.y), self)
 
+func cave_recipe_for_region(region: Vector2i) -> Dictionary:
+	return cave_field.recipe_for_region(region, self)
 
 func minimum_overburden_cells_for_position(position: Vector3) -> float:
 	var cell := world_to_cell3(position)
@@ -864,23 +895,25 @@ func minimum_overburden_cells_for_position(position: Vector3) -> float:
 	minimum_overburden_cache[key] = result
 	return result
 
-func noise3d01(noise: FastNoiseLite, x: float, y: float, z: float) -> float:
-	if noise == null:
-		return 0.5
-	return noise.get_noise_3d(x, y, z) * 0.5 + 0.5
+func generated_cave_near_surface_footprint(position: Vector3, radius: float) -> bool:
+	var low: Vector2i = cave_field.region_at(position - Vector3(radius, 0, radius))
+	var high: Vector2i = cave_field.region_at(position + Vector3(radius, 0, radius))
+	for z in range(low.y, high.y + 1):
+		for x in range(low.x, high.x + 1):
+			var recipe: Dictionary = cave_field.recipe_for_region(Vector2i(x, z), self)
+			if recipe.is_empty():
+				continue
+			var bounds: AABB = recipe.bounds
+			if position.x + radius >= bounds.position.x and position.x - radius <= bounds.end.x and position.z + radius >= bounds.position.z and position.z - radius <= bounds.end.z:
+				return true
+	return false
+
 
 func smoothstep_local(value: float, low: float, high: float) -> float:
 	if high <= low:
 		return 1.0 if value >= high else 0.0
 	var t := clampf((value - low) / (high - low), 0.0, 1.0)
 	return t * t * (3.0 - 2.0 * t)
-
-func underground_cell_hash01(cell: Vector3i) -> float:
-	var text := "underground-volume:%s:%d,%d,%d" % [String(main.get("seed_text")) if main != null else "", cell.x, cell.y, cell.z]
-	if main != null and main.has_method("hash01"):
-		return float(main.call("hash01", text))
-	var h := hash(text)
-	return float(abs(h) % 100000) / 100000.0
 
 func register_excavation_brush(brush: Dictionary) -> void:
 	var brush_id := String(brush.get("id", ""))
@@ -1336,6 +1369,35 @@ func town_region_for_surface_cell3(cell: Vector3i) -> Dictionary:
 				best_distance = distance
 	return best_town
 
+func surface_town_intersects_bounds(bounds: AABB) -> bool:
+	if main == null:
+		return false
+	var s := cell_size()
+	var low := Vector2(bounds.position.x / s, bounds.position.z / s)
+	var high := Vector2(bounds.end.x / s, bounds.end.z / s)
+	var region_cells := float(main.TOWN_REGION_CELLS)
+	for rz in range(floori(low.y / region_cells) - 1, floori(high.y / region_cells) + 2):
+		for rx in range(floori(low.x / region_cells) - 1, floori(high.x / region_cells) + 2):
+			var town: Dictionary = main.town_region(rx, rz)
+			if town.is_empty():
+				continue
+			var center := Vector2(float(town.centerX), float(town.centerZ))
+			var nearest := Vector2(clampf(center.x, low.x, high.x), clampf(center.y, low.y, high.y))
+			var radius := float(town.radius) + float(town_slope_apron_cells(town))
+			if nearest.distance_squared_to(center) <= radius * radius:
+				return true
+	return false
+
+func generated_site_intersects_bounds(bounds: AABB) -> bool:
+	var s := cell_size()
+	var low := Vector2i(floori(bounds.position.x / s), floori(bounds.position.z / s))
+	var high := Vector2i(ceili(bounds.end.x / s), ceili(bounds.end.z / s))
+	var footprint := Rect2i(low, high - low + Vector2i.ONE)
+	for profile: Dictionary in generated_site_profiles:
+		if (profile.envelopeCells as Rect2i).intersects(footprint):
+			return true
+	return false
+
 func town_slope_apron_cells(town: Dictionary) -> int:
 	if main == null:
 		return 18
@@ -1426,6 +1488,10 @@ func underground_fluid_for_cell(cell: Vector3i, position: Vector3, _depth: float
 	if main == null:
 		return ""
 	if depth_cells < 6.0:
+		return ""
+	# Entrance-connected carvers have a dry floor. Deep noise caves continue to
+	# use the ordinary aquifer/lava channels in the terrain volume.
+	if cave_field.dry_carver_at(position, self):
 		return ""
 	var seed := String(main.get("seed_text"))
 	var bottom_y := world_bottom_cell_y()

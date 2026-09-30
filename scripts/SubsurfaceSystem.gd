@@ -461,17 +461,7 @@ func restore(snapshot_value) -> void:
 				main.call("rebuild_chunks_around_cell", cell)
 
 func ground_y_near_position(position: Vector3) -> float:
-	var s := float(main.CELL)
-	var base_cell_x := floori(position.x / s)
-	var base_cell_z := floori(position.z / s)
-	var start_y := roundi((position.y + s * 2.0) / s)
-	var end_y := roundi((position.y - s * 14.0) / s)
-	for y in range(start_y, end_y - 1, -1):
-		var solid_cell := Vector3i(base_cell_x, y, base_cell_z)
-		var air_cell := Vector3i(base_cell_x, y + 1, base_cell_z)
-		if subsurface_is_solid(solid_cell) and not subsurface_is_solid(air_cell):
-			return float(y + 1) * s
-	return NAN
+	return float(sampler().volume_ground_height_near(position))
 
 func is_air_at_world(world_pos: Vector3) -> bool:
 	return bool(sampler().call("is_air_at_world", world_pos)) if sampler().has_method("is_air_at_world") else not bool(sampler().call("solid_at", world_pos))

@@ -3634,6 +3634,20 @@ func surface_volume_spawn_sample_at_cell(cell_x: int, cell_z: int) -> Dictionary
         }
     if world_generation_system.has_method("terrain_volume_column_has_surface_projection_affecting_edits") \
         and not bool(world_generation_system.call("terrain_volume_column_has_surface_projection_affecting_edits", column_cell)):
+        # Unedited does not imply an intact surface: generated cave mouths can
+        # remove the root/support location. Surface ecology must not float over
+        # that air or grow down into it from the old heightfield projection.
+        var footprint_center := Vector3(float(cell_x) * CELL, fallback_height, float(cell_z) * CELL)
+        if world_generation_system.generated_cave_near_surface_footprint(footprint_center, 1.5):
+            for offset in [Vector2.ZERO, Vector2(1.5, 0), Vector2(-1.5, 0), Vector2(0, 1.5), Vector2(0, -1.5)]:
+                var root_position := footprint_center + Vector3(offset.x, 0, offset.y)
+                var reference_y := float(world_generation_system.terrain_reference_surface_y_at(root_position))
+                var surface_y := float(world_generation_system.terrain_deformed_surface_y_at(root_position))
+                # Check carving at each support point, independently of ordinary
+                # hillside variation; a tree's base must not overhang a void.
+                root_position.y = surface_y - 0.2
+                if float(world_generation_system.density_from_components(root_position, surface_y, reference_y)) < 0.0:
+                    return {"found": false, "height": fallback_height, "biome": fallback_biome, "authority": "generated_volume"}
         if runtime_perf_monitor != null:
             runtime_perf_monitor.increment_counter("surface_prop_generated_surface_fast_queries")
         return {

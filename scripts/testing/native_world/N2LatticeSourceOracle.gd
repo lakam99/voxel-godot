@@ -339,9 +339,17 @@ func _anchors(by_coordinate: Dictionary, baseline: bool) -> Dictionary:
 	if float(rows["-20,13,-2"].surfaceY) != 17.901000000000003 \
 			or float(rows["-20,13,-1"].surfaceY) != 17.901000000000003:
 		return {"ok": false, "reason": "frozen_surface_anchor_mismatch", "anchors": rows}
-	if float(rows["-33,-2,-5"].density) != -0.6017665929014142 \
-			or float(rows["-32,-2,-5"].density) != -0.35286612593816424:
-		return {"ok": false, "reason": "frozen_cave_anchor_mismatch", "anchors": rows}
+	# These coordinates were caves only under the retired noise-only native
+	# pocket. The recipe field leaves them as generated underground rock; keep
+	# that distinction frozen so stale synthetic holes cannot pass as caves.
+	if float(rows["-33,-2,-5"].density) != 8.0 \
+			or float(rows["-32,-2,-5"].density) != 8.0 \
+			or not bool(rows["-33,-2,-5"].solid) or not bool(rows["-32,-2,-5"].solid) \
+			or String(rows["-33,-2,-5"].materialName) != "stone" \
+			or String(rows["-32,-2,-5"].materialName) != "stone" \
+			or String(rows["-33,-2,-5"].resolvedBiomeName) != "underground" \
+			or String(rows["-32,-2,-5"].resolvedBiomeName) != "underground":
+		return {"ok": false, "reason": "retired_noise_pocket_is_not_recipe_cave", "anchors": rows}
 	if baseline:
 		for cell in EDIT_COORDINATES:
 			if not by_coordinate.has(_key(cell)):

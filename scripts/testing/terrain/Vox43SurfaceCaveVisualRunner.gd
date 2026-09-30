@@ -7,6 +7,7 @@ const CAPTURE_SIZE := Vector2i(1280, 720)
 var main: Node3D
 var startup_failure_result: Dictionary = {}
 var world_generation
+var voxel_runtime
 var camera: Camera3D
 var light: OmniLight3D
 var seed := ""
@@ -54,8 +55,6 @@ func run() -> void:
 		add_result("vox43_surface_cave_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
 		finish()
 		return
-	main.set_process(false)
-	main.set_physics_process(false)
 	world_generation = main.get("world_generation_system")
 	if world_generation == null:
 		add_result("vox43_surface_cave_scene_ready", false, {"reason": "world_generation_missing"})
@@ -67,25 +66,43 @@ func run() -> void:
 	if entrance.is_empty():
 		finish()
 		return
+	var authority_result: Dictionary = await main.call("reinitialize_voxel_terrain_authority_staged")
+	if authority_result.get("status") != "ready":
+		add_result("vox43_surface_cave_terrain_authority_ready", false, authority_result)
+		finish()
+		return
+	voxel_runtime = main.get("voxel_terrain_runtime")
+	if voxel_runtime == null or voxel_runtime.get("terrain") == null:
+		add_result("vox43_surface_cave_terrain_authority_ready", false, {"reason": "voxel_terrain_runtime_missing", "authorityResult": authority_result})
+		finish()
+		return
+	add_result("vox43_surface_cave_terrain_authority_ready", true, authority_result)
 	await load_entrance_chunk(entrance)
 	configure_camera(entrance)
-	await wait_frames(8)
+	var geometry := await wait_for_authoritative_geometry(entrance)
 	var image := get_viewport().get_texture().get_image()
 	var path := screenshot_dir.path_join("fresh_surface_cave_entrance.png")
 	var error := image.save_png(path)
 	var line := volume_line_summary(camera.global_position, entrance.get("targetPosition", Vector3.ZERO))
-	var geometry := chunk_geometry_summary(entrance.get("chunk", Vector2i.ZERO))
+	var camera_surface_y := float(world_generation.call("terrain_deformed_surface_y_at", camera.global_position))
+	var camera_clearance := camera.global_position.y - camera_surface_y
 	capture = {
 		"stage": "fresh_surface_cave_entrance",
 		"path": path,
 		"saved": error == OK,
 		"seed": seed,
 		"entrance": sanitize(entrance),
+		"cameraPosition": vec3(camera.global_position),
+		"cameraTerrainSurfaceY": snappedf(camera_surface_y, 0.001),
+		"cameraSurfaceClearance": snappedf(camera_clearance, 0.001),
 		"volumeLine": line,
 		"geometry": geometry
 	}
 	timeline.append({"event": "capture", "stage": "fresh_surface_cave_entrance", "elapsed": snappedf(elapsed, 0.001), "path": path})
 	add_result("vox43_surface_cave_volume_line_open", int(line.get("undergroundAirSamples", 0)) > 0 and int(line.get("airSamples", 0)) > int(line.get("solidSamples", 0)), line)
+	add_result("vox43_surface_cave_camera_outside_terrain", camera_clearance >= CELL * 3.0,
+		{"cameraPosition": vec3(camera.global_position), "terrainSurfaceY": snappedf(camera_surface_y, 0.001),
+		"clearance": snappedf(camera_clearance, 0.001), "minimum": CELL * 3.0})
 	add_result("vox43_surface_cave_volume_geometry_loaded", bool(geometry.get("passed", false)), geometry)
 	add_result("capture_fresh_surface_cave_entrance_saved", error == OK and FileAccess.file_exists(path), {"path": path})
 	finish()
@@ -146,26 +163,55 @@ func vertical_column_is_open(target: Vector3i, top_y: int) -> bool:
 	return true
 
 func load_entrance_chunk(entrance: Dictionary) -> void:
-	var chunks: Dictionary = main.get("chunks")
-	for key in chunks.keys().duplicate():
-		var node := chunks[key] as Node
-		if node != null and is_instance_valid(node):
-			node.queue_free()
-		chunks.erase(key)
-	await wait_frames(2)
-	var center: Vector2i = entrance.get("chunk", Vector2i.ZERO)
-	for dz in range(-1, 2):
-		for dx in range(-1, 2):
-			main.call("create_chunk", center.x + dx, center.y + dz, false)
-	await wait_frames(4)
+	var target: Vector3 = entrance.get("targetPosition", Vector3.ZERO)
+	var player := main.get("player") as CharacterBody3D
+	var spawn_position := camera_approach_position(entrance)
+	if player != null:
+		player.global_position = spawn_position
+		player.velocity = Vector3.ZERO
+	# This runner is diagnostic, but terrain demand still uses the production
+	# Main -> runtime -> VoxelViewer lifecycle. Only actor motion is paused.
+	main.set_process(true)
+	main.set_physics_process(true)
+	main.call("update_chunks", true)
+
+func wait_for_authoritative_geometry(entrance: Dictionary) -> Dictionary:
+	var target: Vector3 = entrance.get("targetPosition", Vector3.ZERO)
+	var key: Vector2i = entrance.get("chunk", Vector2i.ZERO)
+	var started := Time.get_ticks_msec()
+	var last_state := {}
+	while float(Time.get_ticks_msec() - started) / 1000.0 < 60.0:
+		var terrain = voxel_runtime.get("terrain")
+		var published_value = voxel_runtime.get("published_gameplay_chunks")
+		var published: Dictionary = published_value if published_value is Dictionary else {}
+		var receipt_value = published.get(key, {})
+		var receipt: Dictionary = receipt_value if receipt_value is Dictionary else {}
+		var mesh_state: Dictionary = voxel_runtime.call("collision_mesh_ready_for_world_position", target, CELL * 2.0)
+		var area: AABB = mesh_state.get("area", AABB())
+		var mesh_ready: bool = terrain != null and bool(mesh_state.get("passed", false)) \
+				and terrain.is_area_meshed(area)
+		last_state = {
+			"chunk": vec2i(key),
+			"published": not receipt.is_empty(),
+			"receipt": receipt,
+			"meshReady": mesh_ready,
+			"meshState": mesh_state,
+			"terrainAuthority": "VoxelTerrainAuthority" if terrain != null else ""
+		}
+		if not receipt.is_empty() and mesh_ready:
+			last_state["passed"] = true
+			return last_state
+		await get_tree().physics_frame
+	last_state["passed"] = false
+	last_state["reason"] = "voxel_terrain_publication_timeout"
+	return last_state
 
 func configure_camera(entrance: Dictionary) -> void:
 	var target: Vector3 = entrance.get("targetPosition", Vector3.ZERO)
-	var surface_y := (float(entrance.get("surfaceCellY", 0)) + 1.0) * CELL
 	camera = Camera3D.new()
 	camera.fov = 55.0
 	add_child(camera)
-	camera.global_position = Vector3(target.x + CELL * 4.0, surface_y + CELL * 3.2, target.z + CELL * 4.0)
+	camera.global_position = camera_approach_position(entrance)
 	camera.look_at(target + Vector3(0.0, CELL * 0.5, 0.0), Vector3.UP)
 	camera.current = true
 	light = OmniLight3D.new()
@@ -173,7 +219,15 @@ func configure_camera(entrance: Dictionary) -> void:
 	light.omni_range = CELL * 16.0
 	light.shadow_enabled = false
 	add_child(light)
-	light.global_position = Vector3(target.x, surface_y + CELL * 2.0, target.z)
+	var entrance_surface_y := float(world_generation.call("terrain_deformed_surface_y_at", target))
+	light.global_position = Vector3(target.x, entrance_surface_y + CELL * 2.0, target.z)
+
+func camera_approach_position(entrance: Dictionary) -> Vector3:
+	var target: Vector3 = entrance.get("targetPosition", Vector3.ZERO)
+	var position := Vector3(target.x + CELL * 10.0, target.y, target.z + CELL * 10.0)
+	var surface_y := float(world_generation.call("terrain_deformed_surface_y_at", position))
+	position.y = surface_y + CELL * 4.0
+	return position
 
 func volume_line_summary(from: Vector3, to: Vector3) -> Dictionary:
 	var solid := 0
@@ -188,21 +242,6 @@ func volume_line_summary(from: Vector3, to: Vector3) -> Dictionary:
 			if String(sample.get("biome", "")) == "underground_air":
 				underground += 1
 	return {"solidSamples": solid, "airSamples": air, "undergroundAirSamples": underground, "from": vec3(from), "to": vec3(to)}
-
-func chunk_geometry_summary(key: Vector2i) -> Dictionary:
-	var chunks: Dictionary = main.get("chunks")
-	var chunk := chunks.get(key) as Node
-	var mesh_instance := chunk.get_node_or_null("TerrainMesh") as MeshInstance3D if chunk != null else null
-	var body := chunk.get_node_or_null("TerrainBody/TerrainCollision") as CollisionShape3D if chunk != null else null
-	var mesh := mesh_instance.mesh if mesh_instance != null else null
-	return {
-		"passed": mesh != null and body != null and body.shape != null,
-		"chunk": vec2i(key),
-		"meshPresent": mesh != null,
-		"collisionPresent": body != null and body.shape != null,
-		"backend": String(mesh.get_meta("terrainMeshingBackend", "")) if mesh != null else "",
-		"volumeFaces": int(mesh.get_meta("chunk_volume_faces", 0)) if mesh != null else 0
-	}
 
 func add_result(name: String, passed: bool, details) -> void:
 	results.append({"name": name, "passed": passed, "details": details})

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "legacy_seed_hash.hpp"
 
 namespace voxel::world_backend {
@@ -48,6 +49,28 @@ public:
     float sample_3d(TerrainNoiseChannel channel, double x, double y, double z) const noexcept;
     double sample_2d_01(TerrainNoiseChannel channel, double x, double z) const noexcept;
     double sample_3d_01(TerrainNoiseChannel channel, double x, double y, double z) const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// FastNoiseLite profile used by scripts/world/ProceduralCaveField.gd. Kept
+// separate from the legacy terrain channels because cave seeds, frequencies,
+// and fractal settings are part of that field's deterministic contract.
+enum class CaveNoiseChannel : std::uint8_t { chambers, passages, crossings, detail };
+
+class CaveNoiseCompat final {
+public:
+    explicit CaveNoiseCompat(const std::vector<std::uint32_t> &seed_code_points);
+    ~CaveNoiseCompat();
+    CaveNoiseCompat(CaveNoiseCompat &&) noexcept;
+    CaveNoiseCompat &operator=(CaveNoiseCompat &&) noexcept;
+    CaveNoiseCompat(const CaveNoiseCompat &) = delete;
+    CaveNoiseCompat &operator=(const CaveNoiseCompat &) = delete;
+
+    std::int32_t seed(CaveNoiseChannel channel) const noexcept;
+    float sample_3d(CaveNoiseChannel channel, float x, float y, float z) const noexcept;
 
 private:
     struct Impl;

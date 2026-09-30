@@ -1,4 +1,5 @@
 #include "../core/thirdparty/fast_noise_lite/FastNoiseLite.h"
+#include "../core/fast_noise_compat.hpp"
 #include "test_harness.hpp"
 
 #include <array>
@@ -41,6 +42,25 @@ VWB_TEST(fast_noise_vendor_wrapped_lattice_preserves_existing_world_golden_bits)
         auto noise = configured(seeds[i], frequency[i], octaves[i]);
         VWB_EXPECT_EQ(expected2[i], bits(noise.GetNoise<float>(-3900.25f, 2600.75f)));
         VWB_EXPECT_EQ(expected3[i], bits(noise.GetNoise<float>(-7100.125f, 1899.875f, 799.625f)));
+    }
+}
+
+VWB_TEST(cave_noise_compat_uses_procedural_cave_field_seed_and_profile_contract) {
+    const std::vector<std::uint32_t> seed_code_points{
+        'a','t','l','a','s','-','1','4','9','2'};
+    const CaveNoiseCompat first(seed_code_points);
+    const CaveNoiseCompat second(seed_code_points);
+    VWB_EXPECT_EQ(832792642, first.seed(CaveNoiseChannel::chambers));
+    VWB_EXPECT_EQ(1139199212, first.seed(CaveNoiseChannel::passages));
+    VWB_EXPECT_EQ(701837427, first.seed(CaveNoiseChannel::crossings));
+    VWB_EXPECT_EQ(1202240360, first.seed(CaveNoiseChannel::detail));
+    for (const CaveNoiseChannel channel : {CaveNoiseChannel::chambers,
+             CaveNoiseChannel::passages, CaveNoiseChannel::crossings,
+             CaveNoiseChannel::detail}) {
+        const float left = first.sample_3d(channel, -17.25F, 8.5F, 93.75F);
+        const float right = second.sample_3d(channel, -17.25F, 8.5F, 93.75F);
+        VWB_EXPECT(std::isfinite(left));
+        VWB_EXPECT_EQ(bits(left), bits(right));
     }
 }
 

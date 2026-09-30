@@ -156,8 +156,11 @@ func update_held_ground_fill_lights() -> void:
         var fill_height := float(light.get_meta("held_fill_height", 1.45))
         var anchor := basis_source.global_position + forward * fill_forward + right * fill_right
         var ground_y := anchor.y - fill_height
-        if main_node != null and main_node.has_method("surface_y_at_position"):
-            ground_y = float(main_node.call("surface_y_at_position", anchor))
+        # Carried fill lights follow the player's actual storey/cave floor.
+        # The exterior heightfield would put them above an underground roof,
+        # lighting floors through rock while leaving the ceiling black.
+        if main_node != null and main_node.has_method("ground_y_near_position"):
+            ground_y = float(main_node.call("ground_y_near_position", anchor))
         var target := Vector3(anchor.x, ground_y + fill_height, anchor.z)
         light.global_position = target
         light.global_rotation = Vector3.ZERO

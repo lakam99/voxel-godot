@@ -1,0 +1,360 @@
+#include "native_procedural_cave_field.hpp"
+
+#include "godot_pcg_compat.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
+namespace voxel::world_backend {
+namespace {
+constexpr double REGION_METRES = 192.0;
+constexpr std::size_t RECIPE_CACHE_LIMIT = 128U;
+constexpr float ROCK = 8.0F;
+constexpr double TUNNEL_RADIUS = 3.6;
+constexpr double PI = 3.14159265358979323846;
+constexpr double TAU = 6.28318530717958647692;
+
+CaveVector3 add(CaveVector3 a, CaveVector3 b) noexcept { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+CaveVector3 subtract(CaveVector3 a, CaveVector3 b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+CaveVector3 multiply(CaveVector3 a, double value) noexcept {
+    // Vector3's operator*(float) converts the Variant scalar to real_t before
+    // multiplying each float component; it does not multiply in double first.
+    const float real_value = static_cast<float>(value);
+    return {a.x * real_value, a.y * real_value, a.z * real_value};
+}
+CaveVector3 divide(CaveVector3 a, CaveVector3 b) noexcept { return {a.x / b.x, a.y / b.y, a.z / b.z}; }
+CaveVector3 lerp(CaveVector3 a, CaveVector3 b, double t) noexcept { return add(a, multiply(subtract(b, a), t)); }
+float dot_xz(CaveVector3 a, CaveVector3 b) noexcept { return a.x * b.x + a.z * b.z; }
+float length_squared_xz(CaveVector3 a) noexcept { return a.x * a.x + a.z * a.z; }
+float length(CaveVector3 a) noexcept { return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z); }
+float clamp01(const float value) noexcept { return std::clamp(value, 0.0F, 1.0F); }
+float randf_range(GodotPcg32 &rng, const float from, const float to) noexcept {
+    // Godot's randf_range rounds the interpolated result to real_t before a
+    // caller may promote it into a scalar expression or Vector3 constructor.
+    return from + rng.randf() * (to - from);
+}
+std::uint32_t fnv_append(std::uint32_t hash, const std::uint32_t value) noexcept {
+    return (hash ^ value) * 16777619U;
+}
+void append_ascii(std::uint32_t &hash, const std::string &value) noexcept {
+    for (const unsigned char character : value) hash = fnv_append(hash, character);
+}
+float max3(const float a, const float b, const float c) noexcept { return std::max(a, std::max(b, c)); }
+float min3(const float a, const float b, const float c) noexcept { return std::min(a, std::min(b, c)); }
+} // namespace
+
+bool CaveBounds::contains(const CaveVector3 point) const noexcept {
+    return point.x >= position.x && point.y >= position.y && point.z >= position.z
+        && point.x < position.x + size.x && point.y < position.y + size.y
+        && point.z < position.z + size.z;
+}
+
+void CaveBounds::merge(const CaveBounds &other) noexcept {
+    const CaveVector3 low{std::min(position.x, other.position.x),
+        std::min(position.y, other.position.y), std::min(position.z, other.position.z)};
+    const CaveVector3 high{std::max(position.x + size.x, other.position.x + other.size.x),
+        std::max(position.y + size.y, other.position.y + other.size.y),
+        std::max(position.z + size.z, other.position.z + other.size.z)};
+    position = low;
+    size = subtract(high, low);
+}
+
+NativeProceduralCaveField::NativeProceduralCaveField(const WorldSourceDefinition &definition)
+    : seed_code_points_(definition.raw_terrain_seed().code_points),
+      cell_size_meters_(definition.constants().cell_size_meters),
+      noise_(seed_code_points_) {}
+
+CaveRegionKey NativeProceduralCaveField::region_at(const CaveVector3 position) {
+    if (!std::isfinite(position.x) || !std::isfinite(position.z))
+        throw std::invalid_argument("native cave position must be finite");
+    const double region_x = std::floor((static_cast<double>(position.x) + 96.0) / 192.0);
+    const double region_z = std::floor((static_cast<double>(position.z) + 96.0) / 192.0);
+    if (region_x < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || region_x > static_cast<double>(std::numeric_limits<std::int32_t>::max())
+        || region_z < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || region_z > static_cast<double>(std::numeric_limits<std::int32_t>::max()))
+        throw std::out_of_range("native cave region is outside int32");
+    return {static_cast<std::int32_t>(region_x), static_cast<std::int32_t>(region_z)};
+}
+
+std::uint32_t NativeProceduralCaveField::region_seed(const CaveRegionKey region) const noexcept {
+    std::uint32_t hash = 2166136261U;
+    for (const std::uint32_t code_point : seed_code_points_) hash = fnv_append(hash, code_point);
+    append_ascii(hash, ":cave-region:");
+    append_ascii(hash, std::to_string(region.x));
+    append_ascii(hash, ",");
+    append_ascii(hash, std::to_string(region.z));
+    return hash;
+}
+
+std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
+    const CaveRegionKey region, const SurfaceSampler &surface,
+    const ProtectedBounds &protected_bounds) const {
+    if (!surface || !protected_bounds) throw std::invalid_argument("native cave recipe inputs are required");
+    {
+        const std::lock_guard<std::mutex> lock(cache_mutex_);
+        const auto found = recipe_cache_.find(region);
+        if (found != recipe_cache_.end()) return found->second;
+    }
+    const std::optional<CaveRecipe> built = build_recipe(region, surface, protected_bounds);
+    {
+        const std::lock_guard<std::mutex> lock(cache_mutex_);
+        const auto found = recipe_cache_.find(region);
+        if (found != recipe_cache_.end()) return found->second;
+        if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) recipe_cache_.clear();
+        recipe_cache_.emplace(region, built);
+    }
+    return built;
+}
+
+std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
+    const CaveRegionKey region, const SurfaceSampler &surface,
+    const ProtectedBounds &protected_bounds) const {
+    GodotPcg32 rng(region_seed(region));
+    if (static_cast<double>(rng.randf()) > 0.72) return std::nullopt;
+
+    const double region_x = static_cast<double>(region.x) * REGION_METRES;
+    const double region_z = static_cast<double>(region.z) * REGION_METRES;
+    CaveVector3 center{static_cast<float>(region_x + randf_range(rng, -14.0, 14.0)), 0.0F,
+        static_cast<float>(region_z + randf_range(rng, -14.0, 14.0))};
+    center.y = static_cast<float>(surface(center.x, center.z));
+    if (center.y < 19.0F) return std::nullopt;
+
+    const double length_value = randf_range(rng, 43.0, 52.0);
+    const double phase = randf_range(rng, 0.0, TAU);
+    CaveVector3 entry{};
+    CaveVector3 outward{};
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (std::int32_t index = 0; index < 8; ++index) {
+        const double angle = phase + static_cast<double>(index) * TAU / 8.0;
+        const CaveVector3 direction{static_cast<float>(std::cos(angle)), 0.0F, static_cast<float>(std::sin(angle))};
+        CaveVector3 candidate = add(center, multiply(direction, length_value));
+        candidate.y = static_cast<float>(surface(candidate.x, candidate.z));
+        if (candidate.y < 17.0F) continue;
+        const double drop = static_cast<double>(center.y) - candidate.y;
+        if (drop < -3.0 || drop > 18.0) continue;
+        const double score = -std::abs(drop - 8.0);
+        if (score > best_score) { best_score = score; entry = candidate; outward = direction; }
+    }
+    if (outward.x == 0.0F && outward.y == 0.0F && outward.z == 0.0F) return std::nullopt;
+
+    const CaveVector3 side{-outward.z, 0.0F, outward.x};
+    const double bend = randf_range(rng, -7.0, 7.0);
+    const double floor_end = std::min(static_cast<double>(entry.y) - 7.5,
+        static_cast<double>(center.y) - 11.0);
+    if (static_cast<double>(entry.y) - floor_end > length_value * 0.35) return std::nullopt;
+
+    CaveRecipe recipe;
+    recipe.region = region;
+    recipe.entry = entry;
+    recipe.outward = outward;
+    recipe.route.reserve(7U);
+    for (std::int32_t index = 0; index < 7; ++index) {
+        const double t = static_cast<double>(index) / 6.0;
+        CaveVector3 point = add(lerp(entry, center, t), multiply(side,
+            std::sin(t * PI) * bend + std::sin(t * TAU) * 2.0));
+        const double eased_t = std::pow(t, 0.15);
+        point.y = static_cast<float>(static_cast<double>(entry.y) - cell_size_meters_ * 2.0
+            + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 2.0)) * eased_t);
+        recipe.route.push_back(point);
+    }
+    for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
+        for (std::int32_t step = 0; step < 5; ++step) {
+            const CaveVector3 floor_point = lerp(recipe.route[index], recipe.route[index + 1U],
+                static_cast<double>(step) / 4.0);
+            if (static_cast<double>(floor_point.y) - 0.3
+                > surface(floor_point.x, floor_point.z))
+                return std::nullopt;
+        }
+    }
+
+    recipe = append_tapered_path(recipe, recipe.route,
+        {2.5, 2.5, 2.8, 3.2, TUNNEL_RADIUS, TUNNEL_RADIUS, TUNNEL_RADIUS});
+    const CaveVector3 junction = recipe.route[3];
+    const CaveVector3 branch_end = [&]() {
+        CaveVector3 value = add(recipe.route[5], multiply(side, randf_range(rng, 15.0, 21.0)));
+        value.y = static_cast<float>(floor_end - 1.0);
+        return value;
+    }();
+    recipe.loop = {junction, subtract(add(junction, multiply(side, 10.0F)), {0.0F, 1.0F, 0.0F}),
+        branch_end, recipe.route[6]};
+    recipe = append_path(recipe, recipe.loop, 3.2F);
+    const CaveVector3 deep_end = subtract(subtract(recipe.route[6], multiply(outward, 23.0F)),
+        multiply(side, 12.0F));
+    CaveVector3 deep_end_at_floor = deep_end;
+    deep_end_at_floor.y = static_cast<float>(floor_end - 10.0);
+    const CaveVector3 deep_mid = subtract(subtract(recipe.route[6], multiply(outward, 12.0F)),
+        {0.0F, 4.0F, 0.0F});
+    recipe.deep_route = {recipe.route[6], deep_mid, deep_end_at_floor};
+    recipe = append_path(recipe, recipe.deep_route, 2.5F);
+
+    CaveVector3 main_radii{static_cast<float>(randf_range(rng, 10.0, 14.0)),
+        static_cast<float>(randf_range(rng, 5.0, 7.0)),
+        static_cast<float>(randf_range(rng, 10.0, 13.0))};
+    main_radii.y = static_cast<float>(fit_chamber_vertical_radius(
+        recipe.route[6], main_radii.x, main_radii.z, main_radii.y, surface));
+    if (main_radii.y < TUNNEL_RADIUS) return std::nullopt;
+    CaveVector3 branch_radii{6.0F, 4.0F, 7.0F};
+    branch_radii.y = static_cast<float>(fit_chamber_vertical_radius(
+        branch_end, branch_radii.x, branch_radii.z, branch_radii.y, surface));
+    if (branch_radii.y < 2.5F) return std::nullopt;
+    CaveVector3 deep_radii{8.0F, 5.0F, 9.0F};
+    deep_radii.y = static_cast<float>(fit_chamber_vertical_radius(
+        deep_end_at_floor, deep_radii.x, deep_radii.z, deep_radii.y, surface));
+    if (deep_radii.y < 2.5F) return std::nullopt;
+    recipe.chambers = {
+        {add(recipe.route[6], {0.0F, main_radii.y, 0.0F}), main_radii},
+        {add(branch_end, {0.0F, branch_radii.y, 0.0F}), branch_radii},
+        {add(deep_end_at_floor, {0.0F, deep_radii.y, 0.0F}), deep_radii},
+    };
+    for (const CaveChamber &chamber : recipe.chambers) {
+        const CaveVector3 extent{chamber.radii.x + 1.0F, chamber.radii.y + 1.0F,
+            chamber.radii.z + 1.0F};
+        const CaveBounds bounds{subtract(chamber.center, extent), multiply(extent, 2.0F)};
+        recipe.bounds.merge(bounds);
+    }
+    if (!(region_at(recipe.bounds.position) == region)
+        || !(region_at(add(recipe.bounds.position, recipe.bounds.size)) == region))
+        return std::nullopt;
+    if (protected_bounds(recipe.bounds)) return std::nullopt;
+    return recipe;
+}
+
+CaveRecipe NativeProceduralCaveField::append_path(
+    CaveRecipe recipe, const std::vector<CaveVector3> &points, const double radius) const {
+    for (std::size_t index = 0; index + 1U < points.size(); ++index) {
+        const CaveVector3 a = points[index];
+        const CaveVector3 b = points[index + 1U];
+        const double grow = radius + 1.0;
+        const double grow_up = grow + radius;
+        const CaveVector3 low{static_cast<float>(std::min(a.x, b.x) - grow),
+            static_cast<float>(std::min(a.y, b.y) - grow),
+            static_cast<float>(std::min(a.z, b.z) - grow)};
+        const CaveVector3 high{static_cast<float>(std::max(a.x, b.x) + grow),
+            static_cast<float>(std::max(a.y, b.y) + grow_up),
+            static_cast<float>(std::max(a.z, b.z) + grow)};
+        const CaveBounds bounds{low, subtract(high, low)};
+        if (recipe.segments.empty()) recipe.bounds = bounds;
+        else recipe.bounds.merge(bounds);
+        recipe.segments.push_back({a, b, radius, radius, bounds});
+    }
+    return recipe;
+}
+
+CaveRecipe NativeProceduralCaveField::append_tapered_path(
+    CaveRecipe recipe, const std::vector<CaveVector3> &points,
+    const std::vector<double> &radii) const {
+    if (points.size() != radii.size())
+        throw std::invalid_argument("native tapered cave path requires one radius per point");
+    for (std::size_t index = 0; index + 1U < points.size(); ++index) {
+        const CaveVector3 a = points[index];
+        const CaveVector3 b = points[index + 1U];
+        const double start_radius = radii[index];
+        const double end_radius = radii[index + 1U];
+        const double bounds_radius = std::max(start_radius, end_radius);
+        const double grow = bounds_radius + 1.0;
+        const CaveVector3 low{static_cast<float>(std::min(a.x, b.x) - grow),
+            static_cast<float>(std::min(a.y, b.y) - grow),
+            static_cast<float>(std::min(a.z, b.z) - grow)};
+        const CaveVector3 high{static_cast<float>(std::max(a.x, b.x) + grow),
+            static_cast<float>(std::max(a.y, b.y) + grow + bounds_radius),
+            static_cast<float>(std::max(a.z, b.z) + grow)};
+        const CaveBounds bounds{low, subtract(high, low)};
+        if (recipe.segments.empty()) recipe.bounds = bounds;
+        else recipe.bounds.merge(bounds);
+        recipe.segments.push_back({a, b, start_radius, end_radius, bounds});
+    }
+    return recipe;
+}
+
+double NativeProceduralCaveField::fit_chamber_vertical_radius(
+    const CaveVector3 &floor_point, const double radius_x, const double radius_z,
+    const double requested_radius, const SurfaceSampler &surface) const {
+    const double reserve = cell_size_meters_ + 1.1 + 0.24;
+    double fitted = requested_radius;
+    for (std::int32_t x_step = -4; x_step <= 4; ++x_step) {
+        for (std::int32_t z_step = -4; z_step <= 4; ++z_step) {
+            const double nx = static_cast<double>(x_step) * 0.2;
+            const double nz = static_cast<double>(z_step) * 0.2;
+            const double radial_squared = nx * nx + nz * nz;
+            if (radial_squared >= 1.0) continue;
+            const double surface_y = surface(
+                static_cast<float>(static_cast<double>(floor_point.x) + nx * radius_x),
+                static_cast<float>(static_cast<double>(floor_point.z) + nz * radius_z));
+            const double cap_factor = 1.0 + std::sqrt(1.0 - radial_squared);
+            const double allowed_radius = (surface_y - floor_point.y - reserve) / cap_factor;
+            fitted = std::min(fitted, allowed_radius);
+        }
+    }
+    return fitted;
+}
+
+double NativeProceduralCaveField::recipe_density(
+    const CaveVector3 position, const CaveRecipe &recipe) const {
+    // Godot Vector3 storage/operations remain real_t(float), but GDScript's
+    // scalar expressions (distance, minf/maxf and blend) use double precision.
+    // Keep the same boundary arithmetic so N2's typed density stays exact.
+    double result = ROCK;
+    for (const CaveSegment &segment : recipe.segments) {
+        if (!segment.bounds.contains(position)) continue;
+        const CaveVector3 horizontal{segment.b.x - segment.a.x, 0.0F, segment.b.z - segment.a.z};
+        const double denominator = std::max(
+            static_cast<double>(length_squared_xz(horizontal)), 0.001);
+        const double t = std::clamp(
+            static_cast<double>(dot_xz(subtract(position, segment.a), horizontal)) / denominator,
+            0.0, 1.0);
+        const CaveVector3 floor_point = lerp(segment.a, segment.b, static_cast<float>(t));
+        const double radius = segment.radius + (segment.radius_end - segment.radius) * t;
+        const CaveVector3 delta = subtract(position, add(floor_point, multiply({0.0F, 1.0F, 0.0F}, radius)));
+        const double horizontal_squared = static_cast<double>(length_squared_xz(delta))
+            / (static_cast<double>(radius) * radius);
+        const double vertical = static_cast<double>(delta.y) / radius;
+        const double distance = (std::sqrt(horizontal_squared * horizontal_squared + vertical * vertical) - 1.0) * radius;
+        result = std::min(result, distance);
+    }
+    for (const CaveChamber &chamber : recipe.chambers) {
+        const CaveVector3 q = divide(subtract(position, chamber.center), chamber.radii);
+        double distance = (static_cast<double>(length(q)) - 1.0)
+            * min3(chamber.radii.x, chamber.radii.y, chamber.radii.z);
+        if (distance < 2.0) {
+            const CaveVector3 detail_position{position.x * 2.3F, position.y * 2.3F, position.z * 2.3F};
+            distance += static_cast<double>(noise_.sample_3d(CaveNoiseChannel::chambers,
+                detail_position.x, detail_position.y, detail_position.z)) * 1.1;
+        }
+        const double blend = std::max(1.8 - std::abs(result - distance), 0.0) / 1.8;
+        result = std::min(result, distance) - blend * blend * 1.8 * 0.25;
+    }
+    return static_cast<double>(result);
+}
+
+double NativeProceduralCaveField::density(
+    const CaveVector3 position, const double depth_meters,
+    const SurfaceSampler &surface, const ProtectedBounds &protected_bounds) const {
+    double result = ROCK;
+    if (depth_meters > 28.0) {
+        const float a = noise_.sample_3d(CaveNoiseChannel::chambers, position.x, position.y, position.z);
+        const CaveVector3 shifted{position.x + 873.0F, position.y - 211.0F, position.z + 397.0F};
+        const float b = noise_.sample_3d(CaveNoiseChannel::passages, shifted.x, shifted.y, shifted.z);
+        const float c = noise_.sample_3d(CaveNoiseChannel::crossings, position.x, position.y, position.z);
+        const double cheese = (0.43 - static_cast<double>(a)) * 22.0;
+        const double spaghetti = (std::max(std::abs(static_cast<double>(b)),
+            std::abs(static_cast<double>(c))) - 0.065) * 36.0;
+        result = std::max(std::min(cheese, spaghetti), 30.0 - depth_meters);
+    }
+    const std::optional<CaveRecipe> recipe = recipe_for_region(region_at(position), surface, protected_bounds);
+    if (!recipe || !recipe->bounds.contains(position)) return result;
+    double carved = recipe_density(position, *recipe);
+    if (carved < 1.0) {
+        const double detail = static_cast<double>(noise_.sample_3d(CaveNoiseChannel::detail,
+            position.x, position.y, position.z)) * 0.24;
+        // Keep additive roughness on the cave-facing wall while preventing a
+        // positive SDF near thin overburden from becoming a hairline skylight.
+        carved += carved < 0.0 ? detail : std::max(detail, -carved + 0.04);
+    }
+    return std::min(result, carved);
+}
+
+} // namespace voxel::world_backend

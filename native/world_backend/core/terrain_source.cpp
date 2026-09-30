@@ -1,6 +1,8 @@
 #include "terrain_source.hpp"
 
+#include "biome_region_field.hpp"
 #include "fast_noise_compat.hpp"
+#include "native_procedural_cave_field.hpp"
 
 #include <algorithm>
 #include <array>
@@ -137,10 +139,22 @@ TerrainBiomeId regional_biome(const std::string &seed, const std::int32_t cell_x
         climate_channel(seed, nearest_x, nearest_z, "moisture"));
 }
 
+WorldSourceDefinition legacy_cave_definition(const std::string &seed) {
+    WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed(seed);
+    descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed(seed);
+    descriptor.constants.cell_size_meters = CELL;
+    descriptor.constants.world_bottom_cell_y = WORLD_BOTTOM_CELL_Y;
+    descriptor.constants.water_level_meters = WATER_LEVEL;
+    descriptor.constants.minimum_surface_meters = MIN_HEIGHT;
+    descriptor.constants.maximum_surface_meters = MAX_HEIGHT;
+    return WorldSourceDefinition(std::move(descriptor));
+}
+
 class Generator {
 public:
     Generator(std::string seed, const std::uint32_t seed_hash)
-        : seed_(std::move(seed)), noise_(seed_hash) {}
+        : seed_(std::move(seed)), noise_(seed_hash), caves_(legacy_cave_definition(seed_)) {}
 
     double natural_surface(const std::int32_t x, const std::int32_t z) {
         const ColumnKey key{x, z};
@@ -198,8 +212,24 @@ public:
         double density = density_surface_y - position_y;
         const double depth = std::max(0.0, density_surface_y - position_y);
         const double depth_cells = depth / CELL;
-        if (density > 0.0) {
-            density = std::min(density, underground_air_density(cell, source_cell, position_y, density_surface_y, depth_cells));
+        if (density > -CELL * 16.0) {
+            double cave = CELL;
+            if (position_y > static_cast<double>(WORLD_BOTTOM_CELL_Y + 2) * CELL) {
+                const CaveVector3 position{static_cast<float>(position_x),
+                    static_cast<float>(position_y), static_cast<float>(position_z)};
+                const NativeProceduralCaveField::SurfaceSampler surface = [this](
+                    const float x, const float z) {
+                    const auto cell_x = static_cast<std::int32_t>(std::floor(
+                        static_cast<double>(x) / CELL));
+                    const auto cell_z = static_cast<std::int32_t>(std::floor(
+                        static_cast<double>(z) / CELL));
+                    return natural_surface(cell_x, cell_z);
+                };
+                const NativeProceduralCaveField::ProtectedBounds unprotected =
+                    [](const CaveBounds &) { return false; };
+                cave = caves_.density(position, depth, surface, unprotected);
+            }
+            density = std::min(density, cave);
         }
         density = terrain_apply_world_floor_density(position_y, density);
         const bool solid = density >= 0.0;
@@ -217,40 +247,9 @@ public:
     }
 
 private:
-    double underground_air_density(
-        const CellCoord &cell, const CellCoord &source_cell, const double py,
-        const double surface_y, const double depth_cells) const {
-        const double cx = static_cast<double>(cell.x);
-        const double cy = static_cast<double>(cell.y);
-        const double cz = static_cast<double>(cell.z);
-        const double broad_air = noise_.sample_3d_01(TerrainNoiseChannel::ridge, cx * 0.44 + 4100.0, cy * 0.58 - 2300.0, cz * 0.44 + 1700.0);
-        const double local_air = noise_.sample_3d_01(TerrainNoiseChannel::height, cx * 0.82 - 6200.0, cy * 0.76 + 910.0, cz * 0.82 + 3600.0);
-        const double mixed_air = broad_air * 0.66 + local_air * 0.34;
-        const double chamber_air = noise_.sample_3d_01(TerrainNoiseChannel::ridge, cx * 0.23 + 8100.0, cy * 0.30 - 5400.0, cz * 0.23 + 2600.0);
-        const double porous_a_raw = noise_.sample_3d_01(TerrainNoiseChannel::ridge, cx * 0.92 - 7100.0, cy * 0.46 + 1900.0, cz * 0.74 + 800.0);
-        const double porous_b_raw = noise_.sample_3d_01(TerrainNoiseChannel::height, cx * 0.62 + 2200.0, cy * 0.68 - 3600.0, cz - 4900.0);
-        const double porous_air = terrain_smoothstep(1.0 - std::abs(porous_a_raw - porous_b_raw), 0.44, 0.82);
-        const double cellular = hash01(seed_, "underground-volume:" + seed_ + ":" + coord_text(source_cell));
-        const double broad_strength = terrain_smoothstep(mixed_air, 0.48, 0.72);
-        const double chamber_strength = terrain_smoothstep(chamber_air, 0.48, 0.66);
-        const double porous_strength = porous_air * terrain_smoothstep(local_air, 0.52, 0.82);
-        const double chamber_depth = terrain_smoothstep(depth_cells, 8.0, 18.0) * (1.0 - terrain_smoothstep(depth_cells, 48.0, 64.0));
-        const double air_signal = std::clamp(std::max({broad_strength, chamber_strength * 0.96, porous_strength * 0.90})
-            + chamber_depth * 0.10 + cellular * 0.025, 0.0, 1.0);
-        constexpr double minimum_overburden = 3.0;
-        if (depth_cells <= minimum_overburden) return CELL;
-        const double depth_open = terrain_smoothstep(depth_cells, minimum_overburden, minimum_overburden + 5.0);
-        const double deep_compaction = 1.0 - terrain_smoothstep(depth_cells, 58.0, 74.0);
-        const double depth_fade = std::clamp(depth_open * deep_compaction, 0.0, 1.0);
-        const double strata = noise_.sample_3d_01(TerrainNoiseChannel::ridge, cx * 0.38 - 1400.0, cy * 0.62 + 2500.0, cz * 0.38 - 3700.0);
-        const double threshold = lerp(0.50, 0.60, strata) - chamber_depth * 0.04;
-        const double raw_density = (threshold - air_signal) * CELL * 4.25;
-        (void)surface_y;
-        return terrain_apply_underground_floor_density(py, lerp(CELL, raw_density, depth_fade));
-    }
-
     std::string seed_;
     FastNoiseCompat noise_;
+    NativeProceduralCaveField caves_;
     std::map<ColumnKey, double> surfaces_;
     std::map<ColumnKey, TerrainBiomeId> biomes_;
 };

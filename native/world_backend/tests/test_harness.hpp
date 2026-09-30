@@ -53,5 +53,6 @@ std::optional<int> emit_native_bushy_oak_shadow_observations_if_requested();
     static ::voxel::world_backend::tests::RegisterTest VWB_TEST_CONCAT(register_, name)(#name, &name); \
     static void name()
 #define VWB_EXPECT(expression) do { if (!(expression)) ::voxel::world_backend::tests::fail(#expression, __FILE__, __LINE__); } while (false)
+#define VWB_EXPECT_MSG(expression, detail) do { if (!(expression)) ::voxel::world_backend::tests::fail(#expression, __FILE__, __LINE__, (detail)); } while (false)
 #define VWB_EXPECT_EQ(expected, actual) ::voxel::world_backend::tests::expect_equal((expected), (actual), #expected " == " #actual, __FILE__, __LINE__)
 #define VWB_EXPECT_THROW(exception, expression) ::voxel::world_backend::tests::expect_throw<exception>([&]() { expression; }, #expression, __FILE__, __LINE__)
