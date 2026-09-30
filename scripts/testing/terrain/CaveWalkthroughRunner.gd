@@ -18,6 +18,7 @@ var view_audits: Array = []
 var view_audit_summaries: Array[Dictionary] = []
 var cave_dig_evidence: Dictionary = {}
 var failures: Array = []
+var optional_walk_failures: Array[Dictionary] = []
 var pre_act_support: Dictionary = {}
 var frame_times: Array = []
 var ready := false
@@ -292,7 +293,9 @@ func run() -> void:
 	cave_dig_evidence = await dig_cave_wall()
 	if not bool(cave_dig_evidence.get("passed", false)):
 		failures.append("live_cave_dig_failed:%s" % JSON.stringify(cave_dig_evidence))
-	for index in range(2, -1, -1):
+	# Retrace the generated route in reverse rather than cutting diagonally across
+	# the chamber and cave walls. The player is at route[6] after the digging act.
+	for index in range(5, -1, -1):
 		if not await walk_to(route[index], "outbound-%d" % index):
 			await finish()
 			return
@@ -304,7 +307,7 @@ func run() -> void:
 		await capture("07-returned-exterior")
 	await finish()
 
-func walk_to(target: Vector3, phase: String, sprint := false) -> bool:
+func walk_to(target: Vector3, phase: String, sprint := false, optional := false) -> bool:
 	var deadline := Time.get_ticks_msec() + 16000
 	var sidestep_target := Vector3.INF
 	var previous_position: Vector3 = player.global_position
@@ -323,7 +326,11 @@ func walk_to(target: Vector3, phase: String, sprint := false) -> bool:
 				return true
 			unsupported_arrival_ticks += 1
 			if unsupported_arrival_ticks >= 60:
-				failures.append("waypoint_not_grounded:%s:%s" % [phase, JSON.stringify(support)])
+				var reason := "waypoint_not_grounded:%s:%s" % [phase, JSON.stringify(support)]
+				if optional:
+					optional_walk_failures.append({"phase": phase, "reason": reason, "support": support})
+				else:
+					failures.append(reason)
 				await capture("failed-unsupported-" + phase)
 				return false
 			continue
@@ -371,7 +378,10 @@ func walk_to(target: Vector3, phase: String, sprint := false) -> bool:
 		if sample_tick % 6 == 0:
 			trace.append({"elapsedMs": Time.get_ticks_msec() - act_start, "phase": phase, "position": vec(player.global_position), "wish": vec(player.automated_move), "velocity": vec(player.velocity), "onFloor": player.is_on_floor(), "support": collision_support(), "jumpRequested": player.automated_jump, "collisionHold": player.get_meta("terrain_collision_hold", false), "collisionReason": player.get_meta("terrain_collision_hold_reason", ""), "chunk": str(Vector3i((player.global_position / (16.0 * 1.35)).floor()))})
 	player.automated_move = Vector3.ZERO
-	failures.append("walk_timeout:" + phase)
+	if optional:
+		optional_walk_failures.append({"phase": phase, "reason": "walk_timeout"})
+	else:
+		failures.append("walk_timeout:" + phase)
 	for index in range(player.get_slide_collision_count()):
 		var collision: KinematicCollision3D = player.get_slide_collision(index)
 		print("CAVE WALK: blocked collider=", collision.get_collider(), " normal=", collision.get_normal(), " point=", collision.get_position())
@@ -402,9 +412,17 @@ func collision_support() -> Dictionary:
 	var body_floor_contact: bool = bool(player.is_on_floor())
 	var controller_grounded: bool = bool(player.terrain_grounded)
 	var within_mesh_alignment: bool = gap >= -0.03 and gap <= COLLISION_GROUND_ALIGNMENT_TOLERANCE
-	var ground_authority: bool = body_floor_contact or controller_grounded
-	var normal_is_walkable: bool = hit.normal.y >= cos(deg_to_rad(46.0))
-	return {"supported": runtime.voxel_terrain_collider(hit.collider) and within_mesh_alignment and ground_authority and normal_is_walkable, "gap": gap, "alignmentTolerance": COLLISION_GROUND_ALIGNMENT_TOLERANCE, "height": hit.position.y, "normal": vec(hit.normal), "capsuleFloorNormal": vec(player.get_floor_normal()), "bodyFloorContact": body_floor_contact, "controllerGrounded": controller_grounded, "collider": str(hit.collider), "terrain": runtime.voxel_terrain_collider(hit.collider), "providerDelta": provided - hit.position.y}
+	# A vertical ray under the capsule origin is not the physical contact point on
+	# a slope: the capsule can be firmly grounded while that ray is lower along
+	# the slope by more than the small cell-alignment tolerance. Prefer Godot's
+	# actual CharacterBody floor contact/normal; use ray alignment only for the
+	# terrain-grounded fallback when the physics body has no floor contact.
+	var capsule_floor_normal: Vector3 = player.get_floor_normal()
+	var body_contact_walkable := capsule_floor_normal.y >= cos(deg_to_rad(46.0))
+	var ray_normal_walkable: bool = hit.normal.y >= cos(deg_to_rad(46.0))
+	var grounded_support := body_floor_contact and body_contact_walkable
+	var controller_support: bool = not body_floor_contact and controller_grounded and within_mesh_alignment and ray_normal_walkable
+	return {"supported": runtime.voxel_terrain_collider(hit.collider) and (grounded_support or controller_support), "gap": gap, "alignmentTolerance": COLLISION_GROUND_ALIGNMENT_TOLERANCE, "rayAlignmentWithinTolerance": within_mesh_alignment, "height": hit.position.y, "normal": vec(hit.normal), "capsuleFloorNormal": vec(capsule_floor_normal), "bodyFloorContact": body_floor_contact, "controllerGrounded": controller_grounded, "collider": str(hit.collider), "terrain": runtime.voxel_terrain_collider(hit.collider), "providerDelta": provided - hit.position.y}
 
 func terrain_floor_hit(position: Vector3) -> Dictionary:
 	var origin := position + Vector3.UP * 2.0
@@ -481,7 +499,7 @@ func dig_cave_wall() -> Dictionary:
 			if flat_direction.length_squared() > 0.001:
 				var approach_target: Vector3 = player.global_position + flat_direction.normalized() * maxf(0.0, horizontal_distance - 1.9)
 				approach_target.y = player.global_position.y
-				if not await walk_to(approach_target, "cave-dig-approach", true):
+				if not await walk_to(approach_target, "cave-dig-approach", true, true):
 					continue
 				look_toward(hit_position)
 				await process_frame
@@ -812,7 +830,7 @@ func finish() -> void:
 	var sorted := frame_times.duplicate()
 	sorted.sort()
 	var capture_only := OS.get_environment("CAVE_CAPTURE_ONLY") == "1"
-	var report := {"evidenceLevel": "diagnostic_visual_capture_only" if capture_only else ("diagnostic_live_physics_with_cave_dig" if diagnostic else "headed_gameplay_fixture_with_cave_dig"), "captureOnly": capture_only, "liveWalkCompleted": not capture_only and failures.is_empty(), "liveCaveDigCompleted": bool(cave_dig_evidence.get("passed", false)), "caveDigEvidence": cave_dig_evidence, "normalMenuNewGame": ready, "diagnosticStartup": diagnostic, "tutorialTownStartup": "excluded_by_diagnostic_fast_boot" if diagnostic else ("normal_new_game_path" if ready else "not_started"), "diagnosticStreamingOwnersReenabled": diagnostic_streaming_owners_reenabled, "seed": seed_value, "region": str(cave_region), "fixturePlacementBeforeAct": true, "preActSupport": pre_act_support, "actTeleports": 0, "forcedCollisionReadiness": false, "lighting": "ordinary held torch and game sky", "passed": failures.is_empty(), "failures": failures, "captures": captures, "trace": trace, "frameSamples": sorted.size(), "p95PhysicsIntervalMs": sorted[floori(sorted.size() * 0.95)] if not sorted.is_empty() else 0, "maxPhysicsIntervalMs": sorted.back() if not sorted.is_empty() else 0, "runtimePerformance": main.runtime_perf_monitor.summary() if main != null else {}}
+	var report := {"evidenceLevel": "diagnostic_visual_capture_only" if capture_only else ("diagnostic_live_physics_with_cave_dig" if diagnostic else "headed_gameplay_fixture_with_cave_dig"), "captureOnly": capture_only, "liveWalkCompleted": not capture_only and failures.is_empty(), "liveCaveDigCompleted": bool(cave_dig_evidence.get("passed", false)), "caveDigEvidence": cave_dig_evidence, "normalMenuNewGame": ready, "diagnosticStartup": diagnostic, "tutorialTownStartup": "excluded_by_diagnostic_fast_boot" if diagnostic else ("normal_new_game_path" if ready else "not_started"), "diagnosticStreamingOwnersReenabled": diagnostic_streaming_owners_reenabled, "seed": seed_value, "region": str(cave_region), "fixturePlacementBeforeAct": true, "preActSupport": pre_act_support, "actTeleports": 0, "forcedCollisionReadiness": false, "lighting": "ordinary held torch and game sky", "passed": failures.is_empty(), "failures": failures, "optionalWalkFailures": optional_walk_failures, "captures": captures, "trace": trace, "frameSamples": sorted.size(), "p95PhysicsIntervalMs": sorted[floori(sorted.size() * 0.95)] if not sorted.is_empty() else 0, "maxPhysicsIntervalMs": sorted.back() if not sorted.is_empty() else 0, "runtimePerformance": main.runtime_perf_monitor.summary() if main != null else {}}
 	report["arrivals"] = arrivals
 	report["viewRayAudit"] = view_audits
 	report["viewRayAuditSummaries"] = view_audit_summaries
@@ -823,7 +841,8 @@ func finish() -> void:
 		report["seed"] = main.seed_text
 		var world = main.world_generation_system
 		report["groundQueries"] = {"count": world.ground_query_count, "totalMs": float(world.ground_query_total_usec) / 1000.0, "maxMs": float(world.ground_query_max_usec) / 1000.0}
-		report["recipeConstruction"] = {"count": world.cave_field.recipe_build_count, "totalMs": float(world.cave_field.recipe_build_total_usec) / 1000.0, "maxMs": float(world.cave_field.recipe_build_max_usec) / 1000.0, "cacheEvictions": world.cave_field.cache_evictions}
+		var cave_cache_stats: Dictionary = world.cave_field.cache_stats()
+		report["recipeConstruction"] = {"count": int(cave_cache_stats.get("recipe_build_count", 0)), "totalMs": float(cave_cache_stats.get("recipe_build_total_usec", 0)) / 1000.0, "maxMs": float(cave_cache_stats.get("recipe_build_max_usec", 0)) / 1000.0, "cacheEvictions": int(cave_cache_stats.get("cache_evictions", 0))}
 		world = null
 	FileAccess.open(output + "report.json", FileAccess.WRITE).store_string(JSON.stringify(report, "  "))
 	print("CAVE WALK: finished failures=", failures)

@@ -4,6 +4,7 @@
 #include "world_source.hpp"
 
 #include <functional>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -29,6 +30,8 @@ struct CaveSegment {
     CaveVector3 b;
     double radius = 0.0;
     double radius_end = 0.0;
+    double vertical_radius = 0.0;
+    double vertical_radius_end = 0.0;
     CaveBounds bounds;
 };
 
@@ -65,6 +68,7 @@ struct CaveRecipe {
 // the returned recipe contains values, never Nodes or retained callbacks.
 class NativeProceduralCaveField final {
 public:
+    struct CacheStats { std::uint64_t recipe_build_count = 0; std::uint64_t recipe_build_total_usec = 0; std::uint64_t recipe_build_max_usec = 0; std::uint64_t cache_evictions = 0; };
     using SurfaceSampler = std::function<double(float, float)>;
     using ProtectedBounds = std::function<bool(const CaveBounds &)>;
 
@@ -79,6 +83,7 @@ public:
     double density(CaveVector3 position, double depth_meters,
         const SurfaceSampler &surface, const ProtectedBounds &protected_bounds) const;
     double recipe_density(CaveVector3 position, const CaveRecipe &recipe) const;
+    CacheStats cache_stats() const;
 
 private:
     std::optional<CaveRecipe> build_recipe(
@@ -89,6 +94,12 @@ private:
     CaveRecipe append_tapered_path(CaveRecipe recipe,
         const std::vector<CaveVector3> &points,
         const std::vector<double> &radii) const;
+    CaveRecipe append_tapered_arch_path(CaveRecipe recipe,
+        const std::vector<CaveVector3> &points,
+        const std::vector<double> &radii,
+        const std::vector<double> &vertical_radii) const;
+    bool interior_segments_keep_natural_roof(const CaveRecipe &recipe,
+        std::size_t first_interior_segment, const SurfaceSampler &surface) const;
     double fit_chamber_vertical_radius(const CaveVector3 &floor_point,
         double radius_x, double radius_z, double requested_radius,
         const SurfaceSampler &surface) const;
@@ -99,6 +110,7 @@ private:
     CaveNoiseCompat noise_;
     mutable std::mutex cache_mutex_;
     mutable std::map<CaveRegionKey, std::optional<CaveRecipe>> recipe_cache_;
+    mutable CacheStats cache_stats_;
 };
 
 } // namespace voxel::world_backend

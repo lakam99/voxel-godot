@@ -129,30 +129,56 @@ func configure_scene() -> void:
 		weather.call("force_weather", "clear", 0.0, 0.18, Vector3.ZERO)
 
 func find_open_surface_cave() -> Dictionary:
+	# Search the generated portal itself at terrain-cell resolution before the
+	# coarse world scan. A narrow, deliberately player-clear arch can fall between
+	# the old four-cell diagnostic probes even though its authoritative volume is
+	# open and connected to daylight.
+	for region_z in range(-1, 2):
+		for region_x in range(-1, 2):
+			var recipe: Dictionary = world_generation.call("cave_recipe_for_region", Vector2i(region_x, region_z))
+			if recipe.is_empty():
+				continue
+			var entry: Vector3 = recipe.entry
+			var entry_cell_x := floori(entry.x / CELL)
+			var entry_cell_z := floori(entry.z / CELL)
+			for z in range(entry_cell_z - 4, entry_cell_z + 5):
+				for x in range(entry_cell_x - 4, entry_cell_x + 5):
+					var candidate := find_open_surface_cell(x, z)
+					if candidate.is_empty():
+						continue
+					candidate["recipeRegion"] = recipe.region
+					candidate["recipeEntry"] = entry
+					return candidate
 	for radius in range(8, 161, 4):
 		for z in range(-radius, radius + 1, 4):
 			for x in range(-radius, radius + 1, 4):
 				if absi(x) != radius and absi(z) != radius:
 					continue
-				var surface_y := float(world_generation.call("surface_y_for_cell", Vector3i(x, 0, z)))
-				var surface_cell_y := floori(surface_y / CELL)
-				for depth in range(1, 10):
-					var target := Vector3i(x, surface_cell_y - depth, z)
-					var sample: Dictionary = world_generation.call("sample_cell", target)
-					if bool(sample.get("solid", true)) or String(sample.get("biome", "")) != "underground_air" or String(sample.get("fluid", "")) != "":
-						continue
-					if not vertical_column_is_open(target, surface_cell_y + 2):
-						continue
-					var chunk: Vector2i = main.call("cell_to_chunk", x, z)
-					return {
-						"cell": target,
-						"surfaceCell": Vector2i(x, z),
-						"surfaceCellY": surface_cell_y,
-						"depthCells": depth,
-						"chunk": chunk,
-						"sample": sample,
-						"targetPosition": cell_center(target)
-					}
+				var candidate := find_open_surface_cell(x, z)
+				if not candidate.is_empty():
+					return candidate
+	return {}
+
+func find_open_surface_cell(x: int, z: int) -> Dictionary:
+	var surface_y := float(world_generation.call("surface_y_for_cell", Vector3i(x, 0, z)))
+	var surface_cell_y := floori(surface_y / CELL)
+	for depth in range(1, 10):
+		var target := Vector3i(x, surface_cell_y - depth, z)
+		var sample: Dictionary = world_generation.call("sample_cell", target)
+		if bool(sample.get("solid", true)) or String(sample.get("biome", "")) != "underground_air" or String(sample.get("fluid", "")) != "":
+			continue
+		if not vertical_column_is_open(target, surface_cell_y + 2):
+			continue
+		var chunk: Vector2i = main.call("cell_to_chunk", x, z)
+		return {
+			"cell": target,
+			"surfaceCell": Vector2i(x, z),
+			"surfaceCellY": surface_cell_y,
+			"depthCells": depth,
+			"chunk": chunk,
+			"sample": sample,
+			"targetPosition": cell_center(target)
+		}
 	return {}
 
 func vertical_column_is_open(target: Vector3i, top_y: int) -> bool:

@@ -3,6 +3,7 @@
 #include "terrain_meshing_backend.h"
 #include "building_support_kernel.h"
 #include "native_world_backend_adapter.h"
+#include "native_cave_field_adapter.h"
 
 #include <godot_cpp/godot.hpp>
 
@@ -14,6 +15,7 @@ void initialize_terrain_meshing_module(ModuleInitializationLevel p_level) {
 	}
 	ClassDB::register_class<TerrainMeshingBackend>();
 	ClassDB::register_class<NativeWorldBackend>();
+	ClassDB::register_class<NativeCaveField>();
 	ClassDB::register_class<NativeEffectiveTerrainPage>();
 	ClassDB::register_class<NativeStructureExclusionChunk>();
 	register_building_support_kernel();

@@ -39,7 +39,9 @@ bool same_recipe(const CaveRecipe &a, const CaveRecipe &b) {
         if (!same_point(a.segments[index].a, b.segments[index].a)
             || !same_point(a.segments[index].b, b.segments[index].b)
             || a.segments[index].radius != b.segments[index].radius
-            || a.segments[index].radius_end != b.segments[index].radius_end) return false;
+            || a.segments[index].radius_end != b.segments[index].radius_end
+            || a.segments[index].vertical_radius != b.segments[index].vertical_radius
+            || a.segments[index].vertical_radius_end != b.segments[index].vertical_radius_end) return false;
     }
     for (std::size_t index = 0; index < a.chambers.size(); ++index) {
         if (!same_point(a.chambers[index].center, b.chambers[index].center)
@@ -71,13 +73,13 @@ VWB_TEST(native_procedural_cave_field_recipes_are_repeatable_order_independent_a
                 VWB_EXPECT(recipe->segments.size() >= 7U);
                 VWB_EXPECT(recipe->chambers.size() == 3U);
                 VWB_EXPECT(recipe->segments.front().radius == 2.5);
-                VWB_EXPECT(recipe->segments.front().radius_end == 2.5);
-                VWB_EXPECT(recipe->segments[1].radius == 2.5);
-                VWB_EXPECT(recipe->segments[1].radius_end == 2.8);
-                VWB_EXPECT(recipe->segments[2].radius_end == 3.2);
-                VWB_EXPECT(recipe->segments[3].radius_end == 3.6);
+                VWB_EXPECT(recipe->segments.front().radius_end == 2.3);
+                VWB_EXPECT(recipe->segments[1].radius == 2.3);
+                VWB_EXPECT(recipe->segments[1].radius_end == 2.1);
+                VWB_EXPECT(recipe->segments[1].vertical_radius == 1.2);
+                VWB_EXPECT(recipe->segments[3].radius_end == 2.1);
                 VWB_EXPECT(recipe->route.front().y < recipe->entry.y);
-                VWB_EXPECT(std::abs((recipe->route.front().y - recipe->entry.y) + 2.7F) < 0.001F);
+                VWB_EXPECT(std::abs((recipe->route.front().y - recipe->entry.y) + 0.3375F) < 0.001F);
                 VWB_EXPECT((NativeProceduralCaveField::region_at(recipe->bounds.position) == region));
                 VWB_EXPECT((NativeProceduralCaveField::region_at({
                     recipe->bounds.position.x + recipe->bounds.size.x,
@@ -136,10 +138,10 @@ VWB_TEST(native_procedural_cave_field_keeps_seeded_recipe_geometry_and_density_r
     VWB_EXPECT(recipe->route.size() == 7U);
     VWB_EXPECT(recipe->segments.size() >= recipe->route.size() - 1U);
     VWB_EXPECT(recipe->segments.front().radius == 2.5);
-    VWB_EXPECT(recipe->segments[0].radius_end == 2.5);
-    VWB_EXPECT(recipe->segments[1].radius_end == 2.8);
-    VWB_EXPECT(recipe->segments[2].radius_end == 3.2);
-    VWB_EXPECT(recipe->segments[3].radius_end == 3.6);
+    VWB_EXPECT(recipe->segments[0].radius_end == 2.3);
+    VWB_EXPECT(recipe->segments[1].radius_end == 2.1);
+    VWB_EXPECT(recipe->segments[1].vertical_radius == 1.2);
+    VWB_EXPECT(recipe->segments[3].radius_end == 2.1);
     VWB_EXPECT(recipe->route.front().y < recipe->entry.y);
     VWB_EXPECT(recipe->chambers.size() == 3U);
     // Frozen from the current visually verified atlas-1492 GDScript field,
@@ -148,9 +150,9 @@ VWB_TEST(native_procedural_cave_field_keeps_seeded_recipe_geometry_and_density_r
     VWB_EXPECT(std::abs(recipe->entry.x + 211.376F) < 0.01F);
     VWB_EXPECT(std::abs(recipe->entry.y - 18.0466626F) < 0.01F);
     VWB_EXPECT(std::abs(recipe->entry.z + 153.9749F) < 0.01F);
-    VWB_EXPECT(std::abs((recipe->route.front().y - recipe->entry.y) + 2.7F) < 0.001F);
+    VWB_EXPECT(std::abs((recipe->route.front().y - recipe->entry.y) + 0.3375F) < 0.001F);
     VWB_EXPECT(std::abs(recipe->route.back().y - (recipe->entry.y - 7.5F)) < 0.001F);
-    VWB_EXPECT(recipe->chambers[0].radii.y >= 3.6F);
+    VWB_EXPECT(recipe->chambers[0].radii.y >= 2.7F);
     VWB_EXPECT(recipe->chambers[1].radii.y >= 2.5F);
     VWB_EXPECT(recipe->chambers[2].radii.y >= 2.5F);
     const double roof_reserve = definition.constants().cell_size_meters + 1.1 + 0.24;

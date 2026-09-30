@@ -3,6 +3,7 @@ extends SceneTree
 const CONTEXT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const GENERATION := preload("res://scripts/WorldGenerationSystem.gd")
 const WORKER := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
+const CAVE_ORACLE := preload("res://scripts/world/ProceduralCaveField.gd")
 var results: Array = []
 
 func _initialize() -> void:
@@ -21,12 +22,19 @@ func make_world(seed_value: String):
 func run() -> void:
 	for seed_value in ["cave-master-20260903", "atlas-1492", "cave-contract-417", "cave-contract-928"]:
 		var world = make_world(seed_value)
+		var cave_oracle = CAVE_ORACLE.new()
+		cave_oracle.setup(seed_value)
 		var failures: Array = []
 		var recipe := {}
 		for rz in range(-2, 3):
 			for rx in range(-2, 3):
+				var region := Vector2i(rx, rz)
+				var native_recipe: Dictionary = world.cave_recipe_for_region(region)
+				var oracle_recipe: Dictionary = cave_oracle.recipe_for_region(region, world)
+				if not recipes_match(native_recipe, oracle_recipe):
+					failures.append("native_gdscript_recipe_mismatch:%s" % region)
 				if recipe.is_empty():
-					recipe = world.cave_recipe_for_region(Vector2i(rx, rz))
+					recipe = native_recipe
 		if recipe.is_empty():
 			results.append({"seed": seed_value, "passed": false, "failures": ["no_recipe"]})
 			continue
@@ -61,7 +69,8 @@ func run() -> void:
 		# Rebuild after cache eviction and visit samples in the opposite order.
 		for index in range(130):
 			world.cave_recipe_for_region(Vector2i(100 + index, 100))
-		if world.cave_field.cache_evictions < 1:
+		var cave_cache_stats: Dictionary = world.cave_field.cache_stats()
+		if int(cave_cache_stats.get("cache_evictions", 0)) < 1:
 			failures.append("cache_eviction_not_exercised")
 		samples.reverse()
 		for sample in samples:
@@ -96,7 +105,7 @@ func run() -> void:
 					solid_count += 1
 		if air_count == 0 or solid_count == 0:
 			failures.append("deep_noise_missing_air_or_rock")
-		results.append({"seed": seed_value, "passed": failures.is_empty(), "failures": failures, "workerSamples": samples.size(), "blockGenerationMs": generation_ms, "recipeBuilds": world.cave_field.recipe_build_count, "recipeBuildTotalMs": float(world.cave_field.recipe_build_total_usec) / 1000.0, "recipeBuildMaxMs": float(world.cave_field.recipe_build_max_usec) / 1000.0, "cacheEvictions": world.cave_field.cache_evictions, "deepAirSamples": air_count, "deepRockSamples": solid_count, "savedEditCell": str(cell)})
+		results.append({"seed": seed_value, "passed": failures.is_empty(), "failures": failures, "workerSamples": samples.size(), "blockGenerationMs": generation_ms, "recipeBuilds": int(cave_cache_stats.get("recipe_build_count", 0)), "recipeBuildTotalMs": float(cave_cache_stats.get("recipe_build_total_usec", 0)) / 1000.0, "recipeBuildMaxMs": float(cave_cache_stats.get("recipe_build_max_usec", 0)) / 1000.0, "cacheEvictions": int(cave_cache_stats.get("cache_evictions", 0)), "deepAirSamples": air_count, "deepRockSamples": solid_count, "savedEditCell": str(cell)})
 		print("CAVE AUTHORITY ", seed_value, " failures=", failures, " blockMs=", generation_ms)
 	var passed := results.all(func(r): return r.passed)
 	var report := {"evidenceLevel": "contract_service", "liveGameplayAcceptance": false,
@@ -114,3 +123,54 @@ func run() -> void:
 		push_error("Failed to write cave authority contract report: " + report_path)
 		passed = false
 	quit(0 if passed else 1)
+
+func recipes_match(native_recipe: Dictionary, oracle_recipe: Dictionary) -> bool:
+	if native_recipe.is_empty() or oracle_recipe.is_empty():
+		return native_recipe.is_empty() and oracle_recipe.is_empty()
+	for key in ["id", "region"]:
+		if native_recipe.get(key) != oracle_recipe.get(key):
+			return false
+	if not close_vector(native_recipe.entry, oracle_recipe.entry) or not close_vector(native_recipe.outward, oracle_recipe.outward):
+		return false
+	for key in ["route", "loop", "deepRoute"]:
+		var left: Array = native_recipe.get(key, [])
+		var right: Array = oracle_recipe.get(key, [])
+		if left.size() != right.size():
+			return false
+		for index in range(left.size()):
+			if not close_vector(left[index], right[index]):
+				return false
+	var left_segments: Array = native_recipe.get("segments", [])
+	var right_segments: Array = oracle_recipe.get("segments", [])
+	if left_segments.size() != right_segments.size():
+		return false
+	for index in range(left_segments.size()):
+		var left_segment: Dictionary = left_segments[index]
+		var right_segment: Dictionary = right_segments[index]
+		for key in ["a", "b"]:
+			if not close_vector(left_segment[key], right_segment[key]):
+				return false
+		for key in ["radius", "radius_end"]:
+			if absf(float(left_segment[key]) - float(right_segment[key])) > 0.0001:
+				return false
+		for key in ["vertical_radius", "vertical_radius_end"]:
+			var left_radius := float(left_segment.get(key, left_segment.radius if key == "vertical_radius" else left_segment.radius_end))
+			var right_radius := float(right_segment.get(key, right_segment.radius if key == "vertical_radius" else right_segment.radius_end))
+			if absf(left_radius - right_radius) > 0.0001:
+				return false
+		if not close_aabb(left_segment.bounds, right_segment.bounds):
+			return false
+	var left_chambers: Array = native_recipe.get("chambers", [])
+	var right_chambers: Array = oracle_recipe.get("chambers", [])
+	if left_chambers.size() != right_chambers.size():
+		return false
+	for index in range(left_chambers.size()):
+		if not close_vector(left_chambers[index].center, right_chambers[index].center) or not close_vector(left_chambers[index].radii, right_chambers[index].radii):
+			return false
+	return close_aabb(native_recipe.bounds, oracle_recipe.bounds)
+
+func close_vector(a: Vector3, b: Vector3) -> bool:
+	return a.distance_to(b) <= 0.0001
+
+func close_aabb(a: AABB, b: AABB) -> bool:
+	return close_vector(a.position, b.position) and close_vector(a.size, b.size)

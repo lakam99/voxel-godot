@@ -23,6 +23,8 @@ func run() -> void:
 	for seed_value in ["cave-master-20260903", "atlas-1492", "cave-contract-417", "cave-contract-928", "atlas-39389036"]:
 		var world = make_world(seed_value)
 		var other = make_world(seed_value)
+		var oracle = FIELD.new()
+		oracle.setup(seed_value)
 		var found := 0
 		var failures := []
 		for rz in range(-2, 3):
@@ -32,6 +34,9 @@ func run() -> void:
 				if recipe.is_empty():
 					continue
 				found += 1
+				var oracle_recipe: Dictionary = oracle.recipe_for_region(region, world)
+				if recipe != oracle_recipe:
+					failures.append("native_gdscript_recipe_mismatch:%s" % region)
 				if recipe != other.cave_recipe_for_region(region):
 					failures.append("recipe_not_repeatable:%s" % region)
 				for route_name in ["route", "loop", "deepRoute"]:

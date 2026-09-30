@@ -4,7 +4,6 @@ class_name WorldGenerationSystem
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 const BiomeRegionFieldScript := preload("res://scripts/world/BiomeRegionField.gd")
 const BuildingTerrainProfileScript := preload("res://scripts/world/BuildingTerrainProfile.gd")
-const ProceduralCaveFieldScript := preload("res://scripts/world/ProceduralCaveField.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
 const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
@@ -30,7 +29,9 @@ var surface_biome_cache := {}
 var minimum_overburden_cache := {}
 var terrain_volume_service
 var biome_region_field = BiomeRegionFieldScript.new()
-var cave_field = ProceduralCaveFieldScript.new()
+var cave_field
+var cave_surface_callable: Callable
+var cave_protected_bounds_callable: Callable
 var ground_query_count := 0
 var ground_query_total_usec := 0
 var ground_query_max_usec := 0
@@ -44,15 +45,26 @@ func setup(main_node) -> void:
 		# Worker contexts carry an immutable, already admitted source snapshot.
 		# They share it read-only; do not deep-copy every recipe root per voxel block.
 		generated_site_profiles = source_profiles
-	cave_field.setup(String(main.get("seed_text")) if main != null else "default")
+	_setup_native_cave_field()
 	if terrain_volume_service == null:
 		terrain_volume_service = TerrainVolumeServiceScript.new()
 	terrain_volume_service.setup(main, self)
 
+func _setup_native_cave_field() -> void:
+	if cave_field == null:
+		cave_field = ClassDB.instantiate("NativeCaveField")
+		assert(cave_field != null, "The native cave authority extension must be loaded before world generation")
+	var seed_text := String(main.get("seed_text")) if main != null else "default"
+	assert(bool(cave_field.setup(seed_text, cell_size())), "Native cave authority setup failed")
+	cave_surface_callable = Callable(self, "_native_cave_surface_y")
+	cave_protected_bounds_callable = Callable(self, "_native_cave_bounds_protected")
+
 func reset() -> void:
 	generated_site_profile_store = null
 	generated_site_profiles = []
-	cave_field.clear()
+	if cave_field != null:
+		cave_field.clear()
+		cave_field = null
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset"):
 		terrain_volume_service.reset()
@@ -65,8 +77,10 @@ func reset() -> void:
 func reset_for_seed() -> void:
 	generated_site_profile_store = null
 	generated_site_profiles = []
-	cave_field.setup(String(main.get("seed_text")) if main != null else "default")
-	cave_field.clear()
+	if cave_field != null:
+		cave_field.clear()
+		cave_field = null
+	_setup_native_cave_field()
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset_for_seed"):
 		terrain_volume_service.reset_for_seed()
@@ -878,10 +892,16 @@ func material_from_sample_components(position: Vector3, density: float, surface_
 func underground_air_density_at(position: Vector3, surface_y: float, _depth_cells: float) -> float:
 	if position.y <= float(world_bottom_cell_y() + 2) * cell_size():
 		return cell_size()
-	return cave_field.density(position, maxf(0.0, surface_y - position.y), self)
+	return cave_field.density(position, maxf(0.0, surface_y - position.y), cave_surface_callable, cave_protected_bounds_callable)
 
 func cave_recipe_for_region(region: Vector2i) -> Dictionary:
-	return cave_field.recipe_for_region(region, self)
+	return cave_field.recipe_for_region(region, cave_surface_callable, cave_protected_bounds_callable)
+
+func _native_cave_surface_y(x: float, z: float) -> float:
+	return terrain_reference_surface_y_at(Vector3(x, 0.0, z))
+
+func _native_cave_bounds_protected(bounds: AABB) -> bool:
+	return surface_town_intersects_bounds(bounds) or generated_site_intersects_bounds(bounds)
 
 func minimum_overburden_cells_for_position(position: Vector3) -> float:
 	var cell := world_to_cell3(position)
@@ -900,7 +920,7 @@ func generated_cave_near_surface_footprint(position: Vector3, radius: float) -> 
 	var high: Vector2i = cave_field.region_at(position + Vector3(radius, 0, radius))
 	for z in range(low.y, high.y + 1):
 		for x in range(low.x, high.x + 1):
-			var recipe: Dictionary = cave_field.recipe_for_region(Vector2i(x, z), self)
+			var recipe: Dictionary = cave_field.recipe_for_region(Vector2i(x, z), cave_surface_callable, cave_protected_bounds_callable)
 			if recipe.is_empty():
 				continue
 			var bounds: AABB = recipe.bounds
@@ -1491,7 +1511,7 @@ func underground_fluid_for_cell(cell: Vector3i, position: Vector3, _depth: float
 		return ""
 	# Entrance-connected carvers have a dry floor. Deep noise caves continue to
 	# use the ordinary aquifer/lava channels in the terrain volume.
-	if cave_field.dry_carver_at(position, self):
+	if cave_field.dry_carver_at(position, cave_surface_callable, cave_protected_bounds_callable):
 		return ""
 	var seed := String(main.get("seed_text"))
 	var bottom_y := world_bottom_cell_y()

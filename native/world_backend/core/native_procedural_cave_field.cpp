@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -13,7 +14,7 @@ namespace {
 constexpr double REGION_METRES = 192.0;
 constexpr std::size_t RECIPE_CACHE_LIMIT = 128U;
 constexpr float ROCK = 8.0F;
-constexpr double TUNNEL_RADIUS = 3.6;
+constexpr double TUNNEL_RADIUS = 2.7;
 constexpr double PI = 3.14159265358979323846;
 constexpr double TAU = 6.28318530717958647692;
 
@@ -99,15 +100,26 @@ std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
         const auto found = recipe_cache_.find(region);
         if (found != recipe_cache_.end()) return found->second;
     }
+    const auto started = std::chrono::steady_clock::now();
     const std::optional<CaveRecipe> built = build_recipe(region, surface, protected_bounds);
+    const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count());
     {
         const std::lock_guard<std::mutex> lock(cache_mutex_);
         const auto found = recipe_cache_.find(region);
         if (found != recipe_cache_.end()) return found->second;
-        if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) recipe_cache_.clear();
+        ++cache_stats_.recipe_build_count;
+        cache_stats_.recipe_build_total_usec += elapsed;
+        cache_stats_.recipe_build_max_usec = std::max(cache_stats_.recipe_build_max_usec, elapsed);
+        if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) { recipe_cache_.clear(); ++cache_stats_.cache_evictions; }
         recipe_cache_.emplace(region, built);
     }
     return built;
+}
+
+NativeProceduralCaveField::CacheStats NativeProceduralCaveField::cache_stats() const {
+    const std::lock_guard<std::mutex> lock(cache_mutex_);
+    return cache_stats_;
 }
 
 std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
@@ -156,9 +168,9 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         const double t = static_cast<double>(index) / 6.0;
         CaveVector3 point = add(lerp(entry, center, t), multiply(side,
             std::sin(t * PI) * bend + std::sin(t * TAU) * 2.0));
-        const double eased_t = std::pow(t, 0.15);
-        point.y = static_cast<float>(static_cast<double>(entry.y) - cell_size_meters_ * 2.0
-            + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 2.0)) * eased_t);
+        const double eased_t = std::pow(t, 0.4);
+        point.y = static_cast<float>(static_cast<double>(entry.y) - cell_size_meters_ * 0.25
+            + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 0.25)) * eased_t);
         recipe.route.push_back(point);
     }
     for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
@@ -171,8 +183,10 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         }
     }
 
-    recipe = append_tapered_path(recipe, recipe.route,
-        {2.5, 2.5, 2.8, 3.2, TUNNEL_RADIUS, TUNNEL_RADIUS, TUNNEL_RADIUS});
+    recipe = append_tapered_arch_path(recipe, recipe.route,
+        {2.5, 2.3, 2.1, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS},
+        {1.35, 1.2, 1.2, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS});
+    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
     const CaveVector3 junction = recipe.route[3];
     const CaveVector3 branch_end = [&]() {
         CaveVector3 value = add(recipe.route[5], multiply(side, randf_range(rng, 15.0, 21.0)));
@@ -181,7 +195,7 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
     }();
     recipe.loop = {junction, subtract(add(junction, multiply(side, 10.0F)), {0.0F, 1.0F, 0.0F}),
         branch_end, recipe.route[6]};
-    recipe = append_path(recipe, recipe.loop, 3.2F);
+    recipe = append_path(recipe, recipe.loop, static_cast<float>(TUNNEL_RADIUS));
     const CaveVector3 deep_end = subtract(subtract(recipe.route[6], multiply(outward, 23.0F)),
         multiply(side, 12.0F));
     CaveVector3 deep_end_at_floor = deep_end;
@@ -190,6 +204,7 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         {0.0F, 4.0F, 0.0F});
     recipe.deep_route = {recipe.route[6], deep_mid, deep_end_at_floor};
     recipe = append_path(recipe, recipe.deep_route, 2.5F);
+    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
 
     CaveVector3 main_radii{static_cast<float>(randf_range(rng, 10.0, 14.0)),
         static_cast<float>(randf_range(rng, 5.0, 7.0)),
@@ -239,7 +254,7 @@ CaveRecipe NativeProceduralCaveField::append_path(
         const CaveBounds bounds{low, subtract(high, low)};
         if (recipe.segments.empty()) recipe.bounds = bounds;
         else recipe.bounds.merge(bounds);
-        recipe.segments.push_back({a, b, radius, radius, bounds});
+        recipe.segments.push_back({a, b, radius, radius, radius, radius, bounds});
     }
     return recipe;
 }
@@ -265,9 +280,56 @@ CaveRecipe NativeProceduralCaveField::append_tapered_path(
         const CaveBounds bounds{low, subtract(high, low)};
         if (recipe.segments.empty()) recipe.bounds = bounds;
         else recipe.bounds.merge(bounds);
-        recipe.segments.push_back({a, b, start_radius, end_radius, bounds});
+        recipe.segments.push_back({a, b, start_radius, end_radius, start_radius, end_radius, bounds});
     }
     return recipe;
+}
+
+CaveRecipe NativeProceduralCaveField::append_tapered_arch_path(
+    CaveRecipe recipe, const std::vector<CaveVector3> &points,
+    const std::vector<double> &radii, const std::vector<double> &vertical_radii) const {
+    if (points.size() != radii.size() || points.size() != vertical_radii.size())
+        throw std::invalid_argument("native tapered cave arch requires one horizontal and vertical radius per point");
+    for (std::size_t index = 0; index + 1U < points.size(); ++index) {
+        const CaveVector3 a = points[index];
+        const CaveVector3 b = points[index + 1U];
+        const double start_radius = radii[index];
+        const double end_radius = radii[index + 1U];
+        const double start_vertical = vertical_radii[index];
+        const double end_vertical = vertical_radii[index + 1U];
+        const double bounds_radius = std::max(start_radius, end_radius);
+        const double grow = bounds_radius + 1.0;
+        const CaveVector3 low{static_cast<float>(std::min(a.x, b.x) - grow),
+            static_cast<float>(std::min(a.y, b.y) - grow),
+            static_cast<float>(std::min(a.z, b.z) - grow)};
+        const CaveVector3 high{static_cast<float>(std::max(a.x, b.x) + grow),
+            static_cast<float>(std::max(a.y, b.y) + grow + bounds_radius),
+            static_cast<float>(std::max(a.z, b.z) + grow)};
+        const CaveBounds bounds{low, subtract(high, low)};
+        if (recipe.segments.empty()) recipe.bounds = bounds;
+        else recipe.bounds.merge(bounds);
+        recipe.segments.push_back({a, b, start_radius, end_radius, start_vertical, end_vertical, bounds});
+    }
+    return recipe;
+}
+
+bool NativeProceduralCaveField::interior_segments_keep_natural_roof(
+    const CaveRecipe &recipe, const std::size_t first_interior_segment,
+    const SurfaceSampler &surface) const {
+    const double reserve = cell_size_meters_ * 1.15;
+    for (std::size_t index = first_interior_segment; index < recipe.segments.size(); ++index) {
+        const CaveSegment &segment = recipe.segments[index];
+        const double vertical_start = segment.vertical_radius > 0.0 ? segment.vertical_radius : segment.radius;
+        const double vertical_end = segment.vertical_radius_end > 0.0 ? segment.vertical_radius_end : segment.radius_end;
+        for (std::int32_t sample_index = 0; sample_index < 5; ++sample_index) {
+            const double t = static_cast<double>(sample_index) / 4.0;
+            const CaveVector3 floor_point = lerp(segment.a, segment.b, t);
+            const double radius = vertical_start + (vertical_end - vertical_start) * t;
+            if (static_cast<double>(floor_point.y) + radius * 2.0 + reserve > surface(floor_point.x, floor_point.z))
+                return false;
+        }
+    }
+    return true;
 }
 
 double NativeProceduralCaveField::fit_chamber_vertical_radius(
@@ -308,11 +370,14 @@ double NativeProceduralCaveField::recipe_density(
             0.0, 1.0);
         const CaveVector3 floor_point = lerp(segment.a, segment.b, static_cast<float>(t));
         const double radius = segment.radius + (segment.radius_end - segment.radius) * t;
-        const CaveVector3 delta = subtract(position, add(floor_point, multiply({0.0F, 1.0F, 0.0F}, radius)));
+        const double vertical_radius = segment.vertical_radius
+            + (segment.vertical_radius_end - segment.vertical_radius) * t;
+        const CaveVector3 delta = subtract(position, add(floor_point, multiply({0.0F, 1.0F, 0.0F}, vertical_radius)));
         const double horizontal_squared = static_cast<double>(length_squared_xz(delta))
             / (static_cast<double>(radius) * radius);
-        const double vertical = static_cast<double>(delta.y) / radius;
-        const double distance = (std::sqrt(horizontal_squared * horizontal_squared + vertical * vertical) - 1.0) * radius;
+        const double vertical = static_cast<double>(delta.y) / vertical_radius;
+        const double distance = (std::sqrt(horizontal_squared + vertical * vertical) - 1.0)
+            * std::min(radius, vertical_radius);
         result = std::min(result, distance);
     }
     for (const CaveChamber &chamber : recipe.chambers) {
