@@ -15,6 +15,7 @@ native/terrain_meshing/toolchains/
 native/terrain_meshing/.sconsign.dblite
 native/terrain_meshing/bin/
 native/terrain_meshing/build/
+native/terrain_meshing/artifacts/
 native/terrain_meshing/**/*.obj
 native/terrain_meshing/**/*.os
 native/terrain_meshing/**/__pycache__/

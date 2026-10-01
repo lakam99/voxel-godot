@@ -135,6 +135,7 @@ individual symptom:
   second world-generation authority without an explicit product decision.
 - Preserve deterministic world generation. Story or visual additions may derive stable IDs from the seed, but must not reorder terrain/town/prop RNG.
 - Visual assets, Blender generators, generated GLBs, and registries are first-class project assets. Do not replace them with a parallel pipeline.
+- Keep Godot `.uid` sidecars under version control. They preserve stable resource identities across file moves; do not blanket-ignore or delete them as generated noise. When Godot creates a sidecar for a retained source file, commit it with that source; when moving or removing a source, move or remove its sidecar in the same change. Keep temporary scripts and their sidecars under ignored artifacts with a `.gdignore` file.
 - Browser/Three.js work is historical context. New gameplay work should target this Godot project unless the user says otherwise.
 
 ## How To Approach Work
