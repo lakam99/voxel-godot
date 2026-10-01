@@ -39,7 +39,7 @@ await mkdir(path.dirname(outputDirectory), { recursive: true });
 await mkdir(outputDirectory, { recursive: false });
 
 const godot = await findGodot(options.godotExe);
-const record = String(options.record ?? 'true').toLowerCase() !== 'false' && String(options.record) !== '0';
+const record = String(options.record ?? (manual ? 'false' : 'true')).toLowerCase() !== 'false' && String(options.record) !== '0';
 const env = {
   ...process.env,
   CAVE_OUTPUT: `${outputDirectory.replaceAll('\\', '/')}/`,
@@ -100,8 +100,15 @@ const passed = processSummary.overallExitCode === 0
   && processSummary.authoritativeZeroProven === true
   && report.passed === true
   && (!liveWalkRequired || report.liveWalkCompleted === true);
+const manualReady = manual && report.manualReady === true;
+const manualSessionClean = manualReady
+  && processSummary.cleanupPassed === true
+  && processSummary.authoritativeZeroProven === true;
 process.stdout.write(`${JSON.stringify({
-  passed,
+	passed: manual ? null : passed,
+	status: manual ? (manualSessionClean ? 'manual_session_ended' : 'manual_setup_failed') : (passed ? 'passed' : 'failed'),
+	manualReady,
+	acceptanceEvaluated: manual ? false : undefined,
   evidenceLevel: report.evidenceLevel,
   liveWalkCompleted: report.liveWalkCompleted,
   captureOnly: report.captureOnly,
@@ -115,4 +122,4 @@ process.stdout.write(`${JSON.stringify({
   report: reportPath,
   watchdog: report.watchdog
 }, null, 2)}\n`);
-if (!passed) process.exitCode = 1;
+if (manual ? !manualSessionClean : !passed) process.exitCode = 1;

@@ -319,12 +319,22 @@ func run() -> void:
 		pre_act_support["collisionHold"] = player.get_meta("terrain_collision_hold", false)
 		pre_act_support["collisionHoldReason"] = player.get_meta("terrain_collision_hold_reason", "")
 		pre_act_support["lastMotionProof"] = player.last_terrain_collision_proof.duplicate(true)
+	var manual_mode := OS.get_environment("CAVE_MANUAL") == "1"
+	var support_normal: Array = pre_act_support.get("normal", [0.0, 0.0, 0.0])
+	var manual_near_support := bool(pre_act_support.get("terrain", false)) \
+		and bool(pre_act_support.get("controllerGrounded", false)) \
+		and float(pre_act_support.get("gap", INF)) >= -0.03 \
+		and float(pre_act_support.get("gap", INF)) <= 0.20 \
+		and float(support_normal[1]) >= cos(deg_to_rad(46.0))
+	if not bool(pre_act_support.get("supported", false)) and not (manual_mode and manual_near_support):
 		failures.append("exterior_fixture_not_grounded:%s" % JSON.stringify(pre_act_support))
 		await finish()
 		return
-	if OS.get_environment("CAVE_MANUAL") == "1":
+	if manual_mode:
 		# Interactive play mode shares the exact fixture setup and real collision
 		# publication used by the walkthrough, then returns control to the player.
+		# It accepts live controller grounding with a nearby walkable terrain hit;
+		# automated traversal retains its stricter center-ray alignment contract.
 		player.automated_input = false
 		player.automated_move = Vector3.ZERO
 		player.automated_sprint = false
@@ -334,6 +344,14 @@ func run() -> void:
 		print("CAVE MANUAL: ready outside entrance at ", player.global_position,
 			"; seed=", main.seed_text, " region=", cave_region,
 			"; torch equipped; use standard game movement and digging controls")
+		if not bool(pre_act_support.get("supported", false)):
+			print("CAVE MANUAL: strict walkthrough support check did not pass; manual stage accepted nearby controller-grounded terrain support: ", JSON.stringify(pre_act_support))
+		var manual_report := {"schema": "cave-manual-session/v1", "manualMode": true,
+			"manualReady": true, "acceptanceEvaluated": false, "passed": null,
+			"liveWalkCompleted": false, "seed": main.seed_text, "region": str(cave_region),
+			"stagedPosition": vec(player.global_position), "preActSupport": pre_act_support,
+			"captures": captures, "videoPath": ""}
+		FileAccess.open(output + "report.json", FileAccess.WRITE).store_string(JSON.stringify(manual_report, "  "))
 		while true:
 			await process_frame
 	await capture("02-exterior-entrance")
