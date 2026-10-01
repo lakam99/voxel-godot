@@ -42,3 +42,36 @@ This issue is recorded as a pre-existing gameplay limitation for the
 visible-world work. Per the user's direction, continue the visible-world plan
 without changing protected NPC pathfinding code; report any later NPC result
 against this baseline and do not claim this task repaired the failure.
+
+## Visual-readiness implementation findings
+
+The configured terrain viewer range is 96 world meters, while terrain cells
+are 1.35 meters. The terrain viewer's `view_distance` is already expressed in
+world units; it must not be multiplied by cell scale. `MainCore` waits for
+terrain view expansion and then foreground physical/navigation readiness, but
+neither establishes complete visual coverage across that view.
+
+The current chunk prop scanner consumes seeded RNG and constructs gameplay
+bodies in the same operation. Generated trees begin their separate visual
+queue only after the body exists, and `TreePublicationQueue` marks a tree
+published only after its visual is committed. Structures explicitly report
+physical-only readiness. No production publisher currently exposes a complete
+expected-versus-represented visual manifest for terrain, structures,
+trees/foliage, props, and wildlife. Consequently, the new readiness owner is
+not wired into startup or traversal yet; doing so before the publishers can
+describe their complete source state would either stall startup or falsely
+report empty coverage.
+
+The initial `VisibleWorldReadiness` contract was exercised with the owned
+headless Godot runner and now passes 49 synthetic checks:
+
+```text
+node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-fourth
+```
+
+Report: `artifacts/citadel-runtime-integration/visible-world-readiness-fourth/report.json`.
+It covers request/source/view revisions, complete source enumeration, circular
+view coverage, in-view candidates and tiers, installed owner receipts, stale
+owner invalidation, and candidate accounting. It does not prove live visual
+coverage or startup readiness. A separate headed normal-menu probe and the
+production publisher integrations remain outstanding.
