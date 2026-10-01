@@ -63,13 +63,13 @@ describe their complete source state would either stall startup or falsely
 report empty coverage.
 
 The initial `VisibleWorldReadiness` contract was exercised with the owned
-headless Godot runner and now passes 49 synthetic checks:
+headless Godot runner and now passes 52 synthetic checks:
 
 ```text
-node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-fourth
+node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-eighth
 ```
 
-Report: `artifacts/citadel-runtime-integration/visible-world-readiness-fourth/report.json`.
+Report: `artifacts/citadel-runtime-integration/visible-world-readiness-eighth/report.json`.
 It covers request/source/view revisions, complete source enumeration, circular
 view coverage, in-view candidates and tiers, installed owner receipts, stale
 owner invalidation, and candidate accounting. It does not prove live visual

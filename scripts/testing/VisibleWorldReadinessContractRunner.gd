@@ -18,6 +18,7 @@ func _initialize() -> void:
 func run() -> void:
 	test_empty_manifest_requires_complete_source_coverage()
 	test_incomplete_discovery_never_reports_empty_ready()
+	test_candidate_must_belong_to_declared_source_footprint()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
 	test_candidate_accounting_and_explicit_failure()
 	write_report()
@@ -52,6 +53,17 @@ func test_incomplete_discovery_never_reports_empty_ready() -> void:
 	_check("incomplete_discovery_is_pending", query.status == "pending")
 
 
+func test_candidate_must_belong_to_declared_source_footprint() -> void:
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(121, "seed-b2", "world-2b", BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var declared := book.expect_source("props:east", "props", "props:east", "rev:1", Rect2i(0, -2, 2, 4), revision)
+	_check("narrow_source_descriptor_succeeds", declared.status == "ready")
+	var outside := book.describe_candidate("props:east", "rock:outside-source", "horizon",
+		{"positionXZ": Vector2(3.0, 1.0)})
+	_check("candidate_cannot_escape_its_declared_source_footprint",
+		outside.status == "failed" and outside.reason == "visual_candidate_outside_source_or_view")
+
+
 func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	var book = VisualReadinessScript.new()
 	var revision := int(book.begin_view(13, "seed-c", "world-3", BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
@@ -63,7 +75,7 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 			_check("candidate_without_position_is_rejected",
 				book.describe_candidate("source:props", "tree:no-position", "horizon").reason == "visual_candidate_position_missing")
 			_check("candidate_outside_view_is_rejected",
-				book.describe_candidate("source:props", "tree:outside", "horizon", {"positionXZ": Vector2(30.0, 30.0)}).reason == "visual_candidate_outside_view")
+				book.describe_candidate("source:props", "tree:outside", "horizon", {"positionXZ": Vector2(30.0, 30.0)}).reason == "visual_candidate_outside_source_or_view")
 			_check("candidate_wrong_tier_is_rejected",
 				book.describe_candidate("source:props", "tree:wrong-tier", "near", {"positionXZ": Vector2(3.0, 1.0)}).reason == "visual_candidate_tier_mismatch")
 		_check("source_enumeration_receipt_succeeds",
@@ -84,6 +96,13 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	representation.mesh = BoxMesh.new()
 	owner.add_child(representation)
 	await process_frame
+	var empty_representation := Node3D.new()
+	empty_representation.name = "EmptyRepresentation"
+	owner.add_child(empty_representation)
+	var empty_receipt: Dictionary = book.accept_receipt("source:props", "tree:stable-id", "tree:stable-id:empty",
+		"horizon", "identity:props", "rev:1", revision, owner, empty_representation)
+	_check("visible_empty_node_is_not_a_visual_receipt",
+		empty_receipt.status == "pending" and empty_receipt.reason == "visual_representation_not_installed")
 	var stale: Dictionary = book.accept_receipt("source:props", "tree:stable-id", "tree:stable-id:horizon",
 		"horizon", "identity:props", "stale-revision", revision, owner, representation)
 	_check("stale_source_revision_is_rejected", stale.status == "pending")

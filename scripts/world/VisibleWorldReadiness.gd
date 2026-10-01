@@ -97,9 +97,11 @@ func describe_candidate(source_id: String, candidate_id: String, required_tier: 
 	if not metadata.has("positionXZ") or not (metadata.positionXZ is Vector2):
 		return {"status": "failed", "reason": "visual_candidate_position_missing"}
 	var candidate_position: Vector2 = metadata.positionXZ
-	if not _bounds.has_point(Vector2i(floori(candidate_position.x), floori(candidate_position.y))) \
+	var candidate_cell := Vector2i(floori(candidate_position.x), floori(candidate_position.y))
+	var source_bounds: Rect2i = source.bounds
+	if not _bounds.has_point(candidate_cell) or not source_bounds.has_point(candidate_cell) \
 			or candidate_position.distance_to(_view_center) > _view_radius:
-		return {"status": "failed", "reason": "visual_candidate_outside_view"}
+		return {"status": "failed", "reason": "visual_candidate_outside_source_or_view"}
 	var expected_tier := "near" if _near_bounds.has_point(Vector2i(floori(candidate_position.x), floori(candidate_position.y))) else "horizon"
 	if required_tier != expected_tier:
 		return {"status": "failed", "reason": "visual_candidate_tier_mismatch",
@@ -185,7 +187,8 @@ func accept_receipt(source_id: String, candidate_id: String, representation_id: 
 	if not is_instance_valid(owner) or not is_instance_valid(representation) \
 			or not owner.is_inside_tree() or not representation.is_inside_tree() \
 			or owner.is_queued_for_deletion() or representation.is_queued_for_deletion() \
-			or not representation.visible or not _is_descendant_or_self(owner, representation):
+			or not representation.visible or not _is_descendant_or_self(owner, representation) \
+			or not _has_visible_renderable(representation):
 		return {"status": "pending", "reason": "visual_representation_not_installed"}
 	if _tier_rank(tier) < _tier_rank(String(candidate.requiredTier)):
 		return {"status": "pending", "reason": "visual_representation_tier_insufficient"}
@@ -300,7 +303,8 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 		and representation.get_instance_id() == int(receipt.get("representationInstanceId", 0)) \
 		and owner.is_inside_tree() and representation.is_inside_tree() \
 		and not owner.is_queued_for_deletion() and not representation.is_queued_for_deletion() \
-		and representation.visible and _is_descendant_or_self(owner, representation)
+		and representation.visible and _is_descendant_or_self(owner, representation) \
+		and _has_visible_renderable(representation)
 
 
 func _record_failure(source_id: String, candidate_id: String, kind: String, reason: String,
@@ -347,6 +351,19 @@ static func _is_descendant_or_self(owner: Node, node: Node) -> bool:
 	while current != null:
 		if current == owner: return true
 		current = current.get_parent()
+	return false
+
+
+static func _has_visible_renderable(root_node: Node) -> bool:
+	if root_node is GeometryInstance3D:
+		var geometry := root_node as GeometryInstance3D
+		if geometry.visible and geometry.is_visible_in_tree():
+			if geometry is MeshInstance3D and (geometry as MeshInstance3D).mesh != null:
+				return true
+			if geometry is MultiMeshInstance3D and (geometry as MultiMeshInstance3D).multimesh != null:
+				return true
+	for child in root_node.get_children():
+		if child is Node and _has_visible_renderable(child): return true
 	return false
 
 
