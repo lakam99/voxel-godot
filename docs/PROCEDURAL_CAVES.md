@@ -8,12 +8,14 @@ Transvoxel remains the smooth renderer/collider. There are no cave meshes,
 entrance wrappers, teleport entrances, or cave-specific collision substitutes.
 
 The field combines independent noise chambers and intersecting noise passages
-below roughly 30 metres of overburden with regional tunnel carvers. Regional
-recipes provide a surface approach, a descending arched passage, a branch loop,
-and chambers/deeper passages. Rounded passage cross-sections have broad floors;
-chamber unions blend to avoid sharp junction saddles. Recipes can produce
-additional surface openings where their volume intersects terrain. A cave is
-not guaranteed in every region or connected to every other cave.
+below roughly 30 metres of overburden with regional tunnel carvers. Accepted
+regional recipes provide a surface approach, a chamber, four descending loop
+tiers, and two cross-tier links on alternating trunk edges. This creates deep,
+multi-route cave networks rather than a single descending passage. Rounded
+passage cross-sections have broad floors; chamber unions blend to avoid sharp
+junction saddles. Recipes can produce additional surface openings where their
+volume intersects terrain. A cave is not guaranteed in every region or
+connected to every other cave.
 
 The 192-metre recipe regions use their own seed-derived RNG. They do not consume
 terrain, town, or prop RNG. Recipes fit inside their source region; a bounded
@@ -31,7 +33,7 @@ lighting state and save deltas continue through the existing volume service.
 Generated recipes are not serialized as player edits. This intentionally changes
 generated underground geometry for existing seeds; save version remains 2.
 
-## Grounding, ecology and carried light
+## Grounding and ecology
 
 The underground support facade samples the volume lattice at actual XZ and
 interpolates its floor crossing. It no longer treats a solid lattice sample as
@@ -45,11 +47,10 @@ support samples over a 1.5-metre footprint. It rejects carved support instead of
 spawning from the pre-carving height alone. This is conservative sampling, not
 an exact test of every possible mature tree's entire mesh footprint.
 
-Carried light fill positions follow the ground near the player, including cave
-floors. Using exterior surface height placed those lights above cave roofs.
-The held torch has less ground-wash energy and a wider local range to make
-nearby arches readable. Ambient daylight and distant underground darkness are
-not raised. Placed and pickup light ranges retain their existing profiles.
+Lighting is polish layered over the authoritative cave volume. Cave material
+colors should remain natural and muted; they must not be tinted green to improve
+torch visibility. The held torch is the primary carried light source. This
+document does not claim that every local source casts real-time shadows.
 
 ## Verification entry points
 
@@ -63,7 +64,11 @@ $godot = 'C:/Users/arkam/Desktop/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stab
 ```
 
 The generation runner checks sampled body clearance and resulting floor grades
-along entrance, loop and deep routes on several seeds. The authority runner
+along entrance, loop, deep routes and tier links. Its full prevalence sample
+uses 10 stable seeds across 81 regions per seed (6.1 km square). A “substantial
+network” means at least four depth loops and 60 metres of vertical travel; the
+sampled-region gate requires at least 50% prevalence per seed. This is a
+deterministic contract sample, not proof about every possible seed. The authority runner
 compares encoded worker SDF values, exercises cache eviction/reversed queries,
 and checks direct-service edit serialization. These are contract/service
 evidence, not substitutes for gameplay.
@@ -88,6 +93,10 @@ For normal streaming/performance, use the existing
 `tools/run-normal-runtime-performance-pass.ps1` with no fast-boot flags. Distinguish
 main-loop timings, physics/render intervals, startup, and worker generation cost.
 
-The independent critic's reviews and run artifacts live under `artifacts/caves/`.
-Only the critic may approve this task's completion. Historical failed captures
-and the user-waived baseline results remain evidence, not passing acceptance.
+The independent visual critic's reviews and run artifacts live under
+`artifacts/caves/`. Screenshots and a walkthrough video are required to judge
+the scale, connectivity cues and natural muted palette. A failed automated
+player traversal is a playtest-logic issue unless a cave-generation or real
+navigation defect is demonstrated; the user may perform final traversal
+verification in-game. Historical failed captures remain evidence, not passing
+acceptance.

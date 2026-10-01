@@ -410,9 +410,10 @@ func configure_camera_and_light() -> void:
 	torch_light.name = "LightShadowUndergroundTorch"
 	torch_light.light_energy = 0.0
 	torch_light.omni_range = CELL * 12.0
+	torch_light.shadow_enabled = true
 	torch_light.light_cull_mask = 0xFFFFFFFF
-	torch_light.set_meta("light_role", "terrain_wash")
-	torch_light.add_to_group("local_light_rig_fill")
+	torch_light.set_meta("light_role", "source")
+	torch_light.add_to_group("local_light_rig_source")
 	main.add_child(torch_light)
 
 func capture_stage(stage: String, torch_enabled: bool, closeup := false) -> void:
@@ -426,8 +427,6 @@ func capture_stage(stage: String, torch_enabled: bool, closeup := false) -> void
 		torch_light.light_energy = 12.0 if torch_enabled else 0.0
 		var boundary_normal := vector3i_to_vector3(boundary_direction).normalized()
 		torch_light.global_position = sample_position - boundary_normal * CELL * 0.32
-	if main != null and main.has_method("update_terrain_local_light_uniforms"):
-		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(3)
 	await wait_physics_frames(1)
 	await wait_process_frames(3)
@@ -499,7 +498,7 @@ func global_ambient_low() -> bool:
 	var world := get_viewport().world_3d
 	if world == null or world.environment == null:
 		return true
-	return world.environment.ambient_light_energy <= 0.18
+	return world.environment.ambient_light_energy <= 0.01
 
 func environment_summary() -> Dictionary:
 	var world := get_viewport().world_3d
@@ -508,23 +507,12 @@ func environment_summary() -> Dictionary:
 	var factor := 0.0
 	if main != null and main.has_method("underground_environment_factor") and camera != null:
 		factor = float(main.call("underground_environment_factor", camera.global_position))
-	var shader_darkening := 0.0
-	var shader_min_light := 1.0
-	var shader_shadow_fill := 0.0
-	if main != null and main.get("terrain_material") is ShaderMaterial:
-		var terrain_mat := main.get("terrain_material") as ShaderMaterial
-		shader_darkening = float(terrain_mat.get_shader_parameter("underground_view_darkening"))
-		shader_min_light = float(terrain_mat.get_shader_parameter("underground_view_min_light"))
-		shader_shadow_fill = float(terrain_mat.get_shader_parameter("shadow_fill"))
 	return {
 		"ambientLightEnergy": rounded(world.environment.ambient_light_energy),
 		"ambientLightSource": int(world.environment.ambient_light_source),
 		"fogDensity": rounded(world.environment.fog_density),
 		"fogLightEnergy": rounded(world.environment.fog_light_energy),
-		"undergroundEnvironmentFactor": rounded(factor),
-		"shaderUndergroundDarkening": rounded(shader_darkening),
-		"shaderUndergroundMinLight": rounded(shader_min_light),
-		"shaderShadowFill": rounded(shader_shadow_fill)
+		"undergroundEnvironmentFactor": rounded(factor)
 	}
 
 func terrain_meshing_summary() -> Dictionary:

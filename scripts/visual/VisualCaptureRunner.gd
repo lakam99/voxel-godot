@@ -196,8 +196,6 @@ func capture_case(capture_case: Dictionary) -> void:
     position_camera(capture_case)
     apply_capture_time_and_weather(capture_case)
     configure_capture_lights(capture_case)
-    if main.has_method("update_terrain_local_light_uniforms"):
-        main.update_terrain_local_light_uniforms()
     set_hud_visible(bool(capture_case.get("hud", false)))
     prepare_hud_capture_state(capture_case)
     await wait_frames(3)

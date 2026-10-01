@@ -1,6 +1,5 @@
 extends "res://scripts/MainSetupScene.gd"
 
-const LOCAL_LIGHT_FILL_VISIBLE_LIMIT := 48
 const LOCAL_LIGHT_SOURCE_VISIBLE_LIMIT := 12
 const LOCAL_LIGHT_SOURCE_SHADOW_LIMIT := 4
 
@@ -134,32 +133,8 @@ func update_local_light_rig_lod(delta: float) -> void:
         return
     local_light_lod_elapsed = 0.0
     if player == null or get_tree() == null:
-        update_terrain_local_light_uniforms()
         return
     var observer := player.global_position
-    var fill_candidates := []
-    for light_value in get_tree().get_nodes_in_group("local_light_rig_fill"):
-        if not is_instance_valid(light_value):
-            continue
-        var light := light_value as Light3D
-        if light == null:
-            continue
-        if bool(light.get_meta("held_world_ground_fill", false)):
-            if light.has_method("set_lod_visible"):
-                light.set_lod_visible(true)
-            continue
-        var distance := observer.distance_to(light.global_position)
-        var max_distance := float(light.get_meta("rig_lod_distance", 56.0))
-        if distance <= max_distance:
-            fill_candidates.append({ "light": light, "distance": distance })
-        elif light.has_method("set_lod_visible"):
-            light.set_lod_visible(false)
-    fill_candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
-    for index in range(fill_candidates.size()):
-        var light := fill_candidates[index]["light"] as Light3D
-        if light != null and light.has_method("set_lod_visible"):
-            light.set_lod_visible(index < LOCAL_LIGHT_FILL_VISIBLE_LIMIT)
-
     # Omni shadows render the scene once per cube face. Keep the warm source
     # lights around the player, but limit shadow ownership to the nearest few
     # sources so streamed towns and the citadel cannot multiply the entire
@@ -194,59 +169,6 @@ func update_local_light_rig_lod(delta: float) -> void:
             light.set_lod_shadow_enabled(enable_shadow)
         else:
             light.shadow_enabled = enable_shadow and bool(light.get_meta("casts_shadow_when_enabled", false))
-    update_terrain_local_light_uniforms()
-
-func update_terrain_local_light_uniforms() -> void:
-    var shader_material := terrain_material as ShaderMaterial
-    if shader_material == null or get_tree() == null:
-        return
-    var observer := player.global_position if player != null else Vector3.ZERO
-    var candidates := []
-    for light_value in get_tree().get_nodes_in_group("local_light_rig_fill"):
-        if not is_instance_valid(light_value):
-            continue
-        var light := light_value as Light3D
-        if light == null or not light.visible:
-            continue
-        var role := String(light.get_meta("light_role", ""))
-        if role != "terrain_wash" and role != "bounce_fill":
-            continue
-        var omni := light as OmniLight3D
-        var base_range_value = light.get("base_range")
-        var base_range := 0.0
-        var base_range_type := typeof(base_range_value)
-        if base_range_type == TYPE_FLOAT or base_range_type == TYPE_INT:
-            base_range = float(base_range_value)
-        elif omni != null:
-            base_range = omni.omni_range
-        var range := maxf(omni.omni_range if omni != null else base_range, 0.0)
-        if range <= 0.01:
-            continue
-        var cull_range := maxf(base_range, range)
-        var distance := observer.distance_to(light.global_position)
-        if distance > cull_range + 18.0:
-            continue
-        candidates.append({ "light": light, "distance": distance, "range": range })
-    candidates.sort_custom(func(a, b): return float(a["distance"]) < float(b["distance"]))
-    var positions := PackedVector4Array()
-    var colors := PackedVector4Array()
-    var max_count := mini(12, candidates.size())
-    for index in range(max_count):
-        var light := candidates[index]["light"] as Light3D
-        if light == null:
-            continue
-        var position := light.global_position
-        var range := float(candidates[index]["range"])
-        var role := String(light.get_meta("light_role", ""))
-        var role_scale := 1.0 if role == "terrain_wash" else 0.72
-        positions.append(Vector4(position.x, position.y, position.z, range))
-        colors.append(Vector4(light.light_color.r, light.light_color.g, light.light_color.b, maxf(light.light_energy, 0.0) * role_scale))
-    while positions.size() < 12:
-        positions.append(Vector4.ZERO)
-        colors.append(Vector4.ZERO)
-    shader_material.set_shader_parameter("terrain_local_light_count", max_count)
-    shader_material.set_shader_parameter("terrain_local_light_positions", positions)
-    shader_material.set_shader_parameter("terrain_local_light_colors", colors)
 
 func apply_environment_style(day: float, warmth: float, weather_tint: float, underground_factor := 0.0) -> void:
     if visual_style == null:
@@ -257,12 +179,6 @@ func apply_environment_style(day: float, warmth: float, weather_tint: float, und
     # readability floor under dense self-shadow. It is zero at night and below
     # ground, so it does not turn trunks into emissive night props.
     RenderingServer.global_shader_parameter_set("environment_daylight", clampf(day * (1.0 - underground), 0.0, 1.0))
-    var shader_material := terrain_material as ShaderMaterial
-    if shader_material != null:
-        var terrain_shadow_fill := day * 0.24 * lerpf(1.0, 0.08, underground)
-        shader_material.set_shader_parameter("shadow_fill", terrain_shadow_fill)
-        shader_material.set_shader_parameter("underground_view_darkening", underground)
-        shader_material.set_shader_parameter("underground_view_min_light", 0.12)
     if sky_material:
         sky_material.set("sky_top_color", visual_style.sky_top_color(day, warmth, tint))
         sky_material.set("sky_horizon_color", visual_style.sky_horizon_color(day, warmth, tint))

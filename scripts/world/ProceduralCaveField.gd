@@ -128,7 +128,9 @@ func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) ->
 	var recipe := build_recipe_at_offset(region, generation, Vector3.ZERO, attempt_diagnostics)
 	attempts.append(attempt_diagnostics)
 	merge_attempt_admission(aggregate, attempt_diagnostics)
-	if not recipe.is_empty() or int(attempt_diagnostics.get("directionsEvaluated", 0)) != 8:
+	if not recipe.is_empty():
+		return finish_recipe_build(diagnostics, aggregate, attempts, started, recipe)
+	if int(attempt_diagnostics.get("directionsEvaluated", 0)) != 8:
 		return finish_recipe_build(diagnostics, aggregate, attempts, started, recipe)
 	var offset_rng := RandomNumberGenerator.new()
 	offset_rng.seed = stable_hash("%s:cave-center-fallback:%d,%d" % [seed_text, region.x, region.y])
@@ -190,9 +192,7 @@ func build_recipe_at_offset(region: Vector2i, generation, center_offset: Vector3
 	if region_at(center) != region:
 		return reject_recipe(diagnostics, "center_outside_region")
 	center.y = float(generation.terrain_reference_surface_y_at(center))
-	if center.y < 19.0:
-		return reject_recipe(diagnostics, "lowland_center")
-	diagnostics["highlandCenter"] = true
+	diagnostics["highlandCenter"] = center.y >= 19.0
 	var length := rng.randf_range(43.0, 52.0)
 	var phase := rng.randf_range(0.0, TAU)
 	var bend := rng.randf_range(-7.0, 7.0)
@@ -286,6 +286,8 @@ func build_recipe_at_offset(region: Vector2i, generation, center_offset: Vector3
 			diagnostics["reason"] = "accepted"
 			return candidate_recipe
 		last_candidate_rejection = str(candidate_diagnostics.get("reason", last_candidate_rejection))
+		if candidate_diagnostics.has("lastRejectionDetail"):
+			diagnostics["lastRejectionDetail"] = candidate_diagnostics["lastRejectionDetail"]
 		increment_count(diagnostics["candidateRejections"], last_candidate_rejection)
 	return reject_recipe(diagnostics, last_candidate_rejection)
 
@@ -362,9 +364,53 @@ func build_recipe_for_entrance(region: Vector2i, generation, candidate: Dictiona
 		var entrance := floor_point + depth_side * 10.0
 		depth_loops.append([floor_point, entrance, entrance + (along + across),
 			entrance + (-along + across), entrance])
+	var depth_tier_links: Array[Dictionary] = []
+	# Stable links join opposite portals on non-consecutive loop pairs. Their
+	# endpoints sit on the loop away from each loop's trunk junction.
+	for from_tier in [0, 2]:
+		if from_tier + 1 >= depth_loops.size():
+			continue
+		var start: Vector3 = (depth_loops[from_tier][2] + depth_loops[from_tier][3]) * 0.5
+		var finish: Vector3 = (depth_loops[from_tier + 1][2] + depth_loops[from_tier + 1][3]) * 0.5
+		var from_loop: Array = depth_loops[from_tier]
+		var to_loop: Array = depth_loops[from_tier + 1]
+		var from_center: Vector3 = route[6]
+		var to_center: Vector3 = route[6]
+		var start_outward := Vector3(start.x - from_center.x, 0.0, start.z - from_center.z).normalized()
+		var end_outward := Vector3(finish.x - to_center.x, 0.0, finish.z - to_center.z).normalized()
+		var start_collar := start + start_outward * 32.0
+		var end_collar := finish + end_outward * 32.0
+		start_collar.y = start.y
+		end_collar.y = finish.y
+		var ramp_delta := end_collar - start_collar
+		var horizontal_length := maxf(Vector2(ramp_delta.x, ramp_delta.z).length(), 0.001)
+		var lateral := Vector3(-ramp_delta.z / horizontal_length, 0.0, ramp_delta.x / horizontal_length)
+		var ramp_mid := (start_collar + end_collar) * 0.5
+		var away_from_core := ramp_mid - route[6]
+		if lateral.x * away_from_core.x + lateral.z * away_from_core.z < 0.0:
+			lateral = -lateral
+		var points: Array[Vector3] = [start, start_collar]
+		const RAMP_SUBDIVISIONS := 17
+		for step in range(1, RAMP_SUBDIVISIONS):
+			var t := float(step) / float(RAMP_SUBDIVISIONS)
+			var point := start_collar + ramp_delta * t
+			var lateral_curve_scale: float = 24.0 * sin(PI * t)
+			point += lateral * lateral_curve_scale
+			points.append(point)
+		points.append(end_collar)
+		points.append(finish)
+		depth_tier_links.append({"id": "tier-link:%s:%d,%d:%d-%d" % [seed_text, region.x, region.y, from_tier, from_tier + 1],
+			"fromTier": from_tier, "toTier": from_tier + 1, "points": points})
 	append_path(segments, deep_path, 2.5)
 	for depth_loop in depth_loops:
 		append_path(segments, depth_loop, TUNNEL_RADIUS)
+	for link in depth_tier_links:
+		var link_radii: Array[float] = []
+		var link_vertical_radii: Array[float] = []
+		for _point in link.points:
+			link_radii.append(TUNNEL_RADIUS)
+			link_vertical_radii.append(2.2)
+		append_tapered_arch_path(segments, link.points, link_radii, link_vertical_radii)
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
 		return reject_recipe(diagnostics, "network_roof")
 	var main_radii := requested_main_radii
@@ -409,8 +455,29 @@ func build_recipe_for_entrance(region: Vector2i, generation, candidate: Dictiona
 	var candidate_recipe := {"bounds": bounds, "segments": segments, "chambers": chambers}
 	if not route_effective_support_is_walkable(generation, route, candidate_recipe):
 		return reject_recipe(diagnostics, "entrance_effective_grade")
+	var deep_route_support_failure := {}
+	if not route_effective_support_is_walkable(generation, deep_path, candidate_recipe, deep_route_support_failure):
+		diagnostics["lastRejectionDetail"] = "deep_route:%s" % JSON.stringify(deep_route_support_failure)
+		return reject_recipe(diagnostics, "deep_route_effective_grade")
+	for link in depth_tier_links:
+		var points: Array[Vector3] = link.points
+		if points.size() < 2:
+			return reject_recipe(diagnostics, "tier_link_path_invalid")
+		for point_index in range(points.size()):
+			var point: Vector3 = points[point_index]
+			if point.y < lowest_cave_floor_y + generation.cell_size() * 4.0:
+				return reject_recipe(diagnostics, "tier_link_world_bottom_reserve")
+			if point_index > 0:
+				var previous: Vector3 = points[point_index - 1]
+				var run := Vector2(point.x - previous.x, point.z - previous.z).length()
+				if run <= 0.01 or absf(point.y - previous.y) / run > tan(deg_to_rad(46.0)):
+					return reject_recipe(diagnostics, "tier_link_grade")
+		var support_failure := {}
+		if not route_effective_support_is_walkable(generation, points, candidate_recipe, support_failure):
+			diagnostics["lastRejectionDetail"] = "%s:%s" % [str(link.id), JSON.stringify(support_failure)]
+			return reject_recipe(diagnostics, "tier_link_effective_support")
 	diagnostics["reason"] = "accepted"
-	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "depthLoops": depth_loops, "segments": segments, "chambers": chambers, "bounds": bounds}
+	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "depthLoops": depth_loops, "depthTierLinks": depth_tier_links, "segments": segments, "chambers": chambers, "bounds": bounds}
 
 func reject_recipe(diagnostics: Dictionary, reason: String) -> Dictionary:
 	diagnostics["reason"] = reason
@@ -447,7 +514,8 @@ func route_guide_is_walkable(route: Array[Vector3]) -> bool:
 			return false
 	return true
 
-func route_effective_support_is_walkable(generation, route: Array[Vector3], recipe: Dictionary) -> bool:
+func route_effective_support_is_walkable(generation, route: Array[Vector3], recipe: Dictionary,
+		failure_detail: Dictionary = {}) -> bool:
 	# Match CaveGenerationContractRunner.check_path against this candidate's own
 	# cave SDF, sampled on the same terrain lattice and interpolated ground column.
 	# This prevents a roof-preferred entrance from being accepted on a guide-only
@@ -459,13 +527,23 @@ func route_effective_support_is_walkable(generation, route: Array[Vector3], reci
 		for step in range(11):
 			var guide_floor := a.lerp(b, float(step) / 10.0)
 			var ground_y := candidate_ground_height_near(generation, guide_floor, recipe)
-			if is_nan(ground_y) or absf(ground_y - guide_floor.y) > 3.0:
+			if is_nan(ground_y):
+				failure_detail["reason"] = "no_effective_floor"
+				failure_detail["guide"] = guide_floor
+				return false
+			if absf(ground_y - guide_floor.y) > 3.0:
+				failure_detail["reason"] = "floor_offset"
+				failure_detail["guide"] = guide_floor
+				failure_detail["groundY"] = ground_y
 				return false
 			var support_floor := guide_floor
 			support_floor.y = ground_y
 			if previous != Vector3.INF:
 				var run := Vector2(support_floor.x - previous.x, support_floor.z - previous.z).length()
 				if run > 0.01 and absf(support_floor.y - previous.y) / run > tan(deg_to_rad(46.0)):
+					failure_detail["reason"] = "effective_floor_grade"
+					failure_detail["previous"] = previous
+					failure_detail["current"] = support_floor
 					return false
 			previous = support_floor
 	return true

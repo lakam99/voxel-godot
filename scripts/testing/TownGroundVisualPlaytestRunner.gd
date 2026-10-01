@@ -579,8 +579,6 @@ func capture_edge(mesh_summary: Dictionary) -> void:
 	var edge_position := edge_camera_target()
 	var aim := await aim_player_camera_at(edge_position)
 	camera.make_current()
-	if main.has_method("update_terrain_local_light_uniforms"):
-		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(4)
 	await wait_physics_frames(2)
 	var pose_proof := player_camera_pose_proof(edge_position, true, true)
@@ -612,8 +610,6 @@ func capture_house_foundation(mesh_summary: Dictionary) -> void:
 	var target_position := house_camera_target()
 	var aim := await aim_player_camera_at(target_position)
 	camera.make_current()
-	if main.has_method("update_terrain_local_light_uniforms"):
-		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(4)
 	await wait_physics_frames(2)
 	var pose_proof := player_camera_pose_proof(target_position, true, false)

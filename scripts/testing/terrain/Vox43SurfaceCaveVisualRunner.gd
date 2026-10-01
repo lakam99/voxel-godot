@@ -118,11 +118,6 @@ func configure_scene() -> void:
 	var hud = main.get("hud")
 	if hud is CanvasLayer:
 		(hud as CanvasLayer).visible = false
-	var terrain_material := main.get("terrain_material") as ShaderMaterial
-	if terrain_material != null:
-		terrain_material.set_shader_parameter("shadow_fill", 0.55)
-		terrain_material.set_shader_parameter("underground_view_darkening", 0.0)
-		terrain_material.set_shader_parameter("underground_view_min_light", 0.75)
 	main.set("time_of_day", fposmod((14.0 / 24.0) - 0.25, 1.0))
 	var weather = main.get("weather_system")
 	if weather != null and weather.has_method("force_weather"):

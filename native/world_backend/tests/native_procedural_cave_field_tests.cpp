@@ -31,6 +31,7 @@ bool same_recipe(const CaveRecipe &a, const CaveRecipe &b) {
         || a.route.size() != b.route.size() || a.loop.size() != b.loop.size()
         || a.deep_route.size() != b.deep_route.size() || a.segments.size() != b.segments.size()
         || a.depth_loops.size() != b.depth_loops.size()
+        || a.depth_tier_links.size() != b.depth_tier_links.size()
         || a.chambers.size() != b.chambers.size()) return false;
     for (std::size_t index = 0; index < a.route.size(); ++index)
         if (!same_point(a.route[index], b.route[index])) return false;
@@ -42,6 +43,14 @@ bool same_recipe(const CaveRecipe &a, const CaveRecipe &b) {
         if (a.depth_loops[index].size() != b.depth_loops[index].size()) return false;
         for (std::size_t point = 0; point < a.depth_loops[index].size(); ++point)
             if (!same_point(a.depth_loops[index][point], b.depth_loops[index][point])) return false;
+    }
+    for (std::size_t index = 0; index < a.depth_tier_links.size(); ++index) {
+        const auto &left = a.depth_tier_links[index];
+        const auto &right = b.depth_tier_links[index];
+        if (left.id != right.id || left.from_tier != right.from_tier
+            || left.to_tier != right.to_tier || left.points.size() != right.points.size()) return false;
+        for (std::size_t point = 0; point < left.points.size(); ++point)
+            if (!same_point(left.points[point], right.points[point])) return false;
     }
     for (std::size_t index = 0; index < a.segments.size(); ++index) {
         if (!same_point(a.segments[index].a, b.segments[index].a)
@@ -247,8 +256,12 @@ VWB_TEST(native_procedural_cave_field_builds_common_connected_multilevel_network
                 seed_levels = std::min(seed_levels == 0U ? recipe->depth_loops.size() : seed_levels,
                     recipe->depth_loops.size());
                 VWB_EXPECT(recipe->depth_loops.size() >= 4U);
+                VWB_EXPECT(recipe->depth_tier_links.size() >= 2U);
+                VWB_EXPECT(recipe->depth_tier_links[0].from_tier != recipe->depth_tier_links[1].from_tier);
                 VWB_EXPECT(recipe->chambers.size() == recipe->depth_loops.size() + 3U);
-                VWB_EXPECT(recipe->segments.size() <= 48U);
+                // Seven lower levels plus the sampled cross-tier ramps need
+                // at most 93 authored tunnel segments.
+                VWB_EXPECT(recipe->segments.size() <= 96U);
                 VWB_EXPECT((NativeProceduralCaveField::region_at(recipe->bounds.position) == recipe->region));
                 const CaveVector3 bounds_end{recipe->bounds.position.x + recipe->bounds.size.x,
                     recipe->bounds.position.y + recipe->bounds.size.y,

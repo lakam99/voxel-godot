@@ -42,6 +42,13 @@ struct CaveChamber {
     CaveVector3 radii;
 };
 
+struct CaveDepthTierLink {
+    std::string id;
+    std::uint32_t from_tier = 0U;
+    std::uint32_t to_tier = 0U;
+    std::vector<CaveVector3> points;
+};
+
 struct CaveRegionKey {
     std::int32_t x = 0;
     std::int32_t z = 0;
@@ -61,6 +68,7 @@ struct CaveRecipe {
     std::vector<CaveVector3> loop;
     std::vector<CaveVector3> deep_route;
     std::vector<std::vector<CaveVector3>> depth_loops;
+    std::vector<CaveDepthTierLink> depth_tier_links;
     std::vector<CaveSegment> segments;
     std::vector<CaveChamber> chambers;
     CaveBounds bounds;
@@ -72,6 +80,7 @@ struct CaveCenterAttemptDiagnostics {
     std::uint32_t viable_entrances = 0U;
     std::uint32_t full_recipe_attempts = 0U;
     std::string terminal_reason;
+    std::string last_rejection_detail;
     std::map<std::string, std::uint32_t> rejection_counts;
 };
 
@@ -130,7 +139,7 @@ private:
     bool interior_segments_keep_natural_roof(const CaveRecipe &recipe,
         std::size_t first_interior_segment, const SurfaceSampler &surface) const;
     bool route_has_walkable_effective_support(const CaveRecipe &recipe,
-        const SurfaceSampler &surface) const;
+        const SurfaceSampler &surface, std::string *failure_detail = nullptr) const;
     double candidate_volume_ground_height_near(const CaveRecipe &recipe,
         CaveVector3 position, const SurfaceSampler &surface) const;
     double candidate_volume_density_at_cell(const CaveRecipe &recipe,
@@ -142,6 +151,7 @@ private:
     std::uint32_t region_seed(CaveRegionKey region) const noexcept;
 
     std::vector<std::uint32_t> seed_code_points_;
+    std::string seed_utf8_;
     double cell_size_meters_ = 1.35;
     double lowest_cave_floor_meters_ = -81.0;
     CaveNoiseCompat noise_;

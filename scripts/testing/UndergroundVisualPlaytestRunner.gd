@@ -163,7 +163,6 @@ func configure_scene() -> void:
 		weather_system.force_weather("clear", 0.0, 0.18, Vector3.ZERO)
 	if main.has_method("update_sky"):
 		main.call("update_sky", 0.0)
-	configure_capture_terrain_material()
 	var hud = main.get("hud")
 	if hud is CanvasLayer:
 		(hud as CanvasLayer).visible = false
@@ -667,19 +666,6 @@ func make_capture_light(light_name: String, energy: float, light_range: float) -
 	light.add_to_group("local_light_rig_fill")
 	return light
 
-func configure_capture_terrain_material() -> void:
-	if main == null:
-		return
-	var terrain_mat = main.get("terrain_material")
-	var shader_material := terrain_mat as ShaderMaterial
-	if shader_material == null:
-		return
-	shader_material.set_shader_parameter("shadow_fill", 0.55)
-	shader_material.set_shader_parameter("underground_view_darkening", 0.0)
-	shader_material.set_shader_parameter("underground_view_min_light", 0.85)
-	shader_material.set_shader_parameter("terrain_local_light_strength", 0.45)
-	shader_material.set_shader_parameter("terrain_local_light_max", 0.85)
-
 func capture_stage(stage: String, direction: Vector3i) -> void:
 	position_camera(stage, direction)
 	if player != null:
@@ -687,9 +673,6 @@ func capture_stage(stage: String, direction: Vector3i) -> void:
 		player.velocity = Vector3.ZERO
 	if main != null and main.has_method("update_sky"):
 		main.call("update_sky", 0.0)
-	configure_capture_terrain_material()
-	if main != null and main.has_method("update_terrain_local_light_uniforms"):
-		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(2)
 	await wait_physics_frames(1)
 	await wait_process_frames(2)

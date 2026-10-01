@@ -94,8 +94,6 @@ func capture_provisional_stage() -> void:
 	if main != null and main.has_method("update_sky"):
 		main.call("update_sky", 0.0)
 	configure_capture_terrain_material()
-	if main != null and main.has_method("update_terrain_local_light_uniforms"):
-		main.call("update_terrain_local_light_uniforms")
 	await wait_process_frames(2)
 	await wait_physics_frames(1)
 	var image := get_viewport().get_texture().get_image()

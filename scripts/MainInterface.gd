@@ -221,7 +221,6 @@ func _process(delta: float) -> void: pass
 func profiled_ms(start_usec: int) -> float: return 0.0
 func update_sky(delta: float) -> void: pass
 func update_local_light_rig_lod(delta: float) -> void: pass
-func update_terrain_local_light_uniforms() -> void: pass
 func update_music_state(observer: Vector3, day: float) -> void: pass
 func apply_weather_lighting(weather: Dictionary, day: float) -> void: pass
 func update_survival(delta: float) -> void: pass

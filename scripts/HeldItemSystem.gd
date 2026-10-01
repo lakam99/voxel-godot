@@ -16,7 +16,6 @@ var visual_factory
 var sway_enabled := true
 var sway_time := 0.0
 var local_light_shadows_enabled := true
-var held_ground_fill_lights := []
 
 func setup(inventory_system, static_asset_registry = null) -> void:
     inventory = inventory_system
@@ -61,7 +60,6 @@ func refresh_active() -> void:
     if item_id == current_item:
         return
     current_item = item_id
-    held_ground_fill_lights.clear()
     clear_children(item_root)
     if current_item == "":
         visible = false
@@ -71,7 +69,6 @@ func refresh_active() -> void:
     if visual:
         item_root.add_child(visual)
         apply_local_light_shadows(item_root)
-        setup_held_ground_fill_lights()
     else:
         visible = false
 
@@ -80,7 +77,6 @@ func _process(delta: float) -> void:
     if use_time > 0.0:
         use_time = max(0.0, use_time - delta)
     apply_pose()
-    update_held_ground_fill_lights()
 
 func set_sway_enabled(enabled: bool) -> void:
     sway_enabled = enabled
@@ -97,75 +93,6 @@ func apply_local_light_shadows(node: Node) -> void:
         (node as Light3D).shadow_enabled = local_light_shadows_enabled
     for child in node.get_children():
         apply_local_light_shadows(child)
-
-func setup_held_ground_fill_lights() -> void:
-    held_ground_fill_lights.clear()
-    collect_held_ground_fill_lights(item_root, held_ground_fill_lights)
-    for light_value in held_ground_fill_lights:
-        if not is_instance_valid(light_value):
-            continue
-        var light := light_value as Light3D
-        if light == null:
-            continue
-        light.set_as_top_level(true)
-        light.set_meta("held_world_ground_fill", true)
-    update_held_ground_fill_lights()
-
-func collect_held_ground_fill_lights(node: Node, out: Array) -> void:
-    if node == null:
-        return
-    if node is Light3D and bool(node.get_meta("ground_fill_light", false)) and bool(node.get_meta("local_light_rig", false)):
-        out.append(node)
-    for child in node.get_children():
-        collect_held_ground_fill_lights(child, out)
-
-func update_held_ground_fill_lights() -> void:
-    if held_ground_fill_lights.is_empty() or not visible:
-        return
-    var camera_node := get_parent() as Camera3D
-    var player_node: Node3D = null
-    if camera_node != null:
-        player_node = camera_node.get_parent() as Node3D
-    var basis_source: Node3D = player_node
-    if basis_source == null:
-        basis_source = camera_node
-    if basis_source == null:
-        return
-    var forward := -basis_source.global_transform.basis.z
-    forward.y = 0.0
-    if forward.length_squared() < 0.001:
-        forward = Vector3.FORWARD
-    else:
-        forward = forward.normalized()
-    var right := basis_source.global_transform.basis.x
-    right.y = 0.0
-    if right.length_squared() < 0.001:
-        right = Vector3.RIGHT
-    else:
-        right = right.normalized()
-
-    var main_node = player_node.get("main") if player_node != null else null
-    for light_value in held_ground_fill_lights:
-        if not is_instance_valid(light_value):
-            continue
-        var light := light_value as Light3D
-        if light == null:
-            continue
-        var fill_forward := float(light.get_meta("held_fill_forward", 3.0))
-        var fill_right := float(light.get_meta("held_fill_right", 0.0))
-        var fill_height := float(light.get_meta("held_fill_height", 1.45))
-        var anchor := basis_source.global_position + forward * fill_forward + right * fill_right
-        var ground_y := anchor.y - fill_height
-        # Carried fill lights follow the player's actual storey/cave floor.
-        # The exterior heightfield would put them above an underground roof,
-        # lighting floors through rock while leaving the ceiling black.
-        if main_node != null and main_node.has_method("ground_y_near_position"):
-            ground_y = float(main_node.call("ground_y_near_position", anchor))
-        var target := Vector3(anchor.x, ground_y + fill_height, anchor.z)
-        light.global_position = target
-        light.global_rotation = Vector3.ZERO
-        if light.has_method("set_lod_visible"):
-            light.set_lod_visible(true)
 
 func play_use(action: String) -> void:
     use_action = action

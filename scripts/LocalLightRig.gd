@@ -53,11 +53,10 @@ static func add_rig(parent: Node3D, profile_id: String, options := {}) -> Dictio
         apply_torch_radius_scale(profile)
 
     var prefix := String(options.get("name_prefix", profile.get("name_prefix", profile_id)))
-    var result := {}
-    result[ROLE_SOURCE] = create_light(parent, prefix, profile_id, context, ROLE_SOURCE, profile)
-    result[ROLE_TERRAIN_WASH] = create_light(parent, prefix, profile_id, context, ROLE_TERRAIN_WASH, profile)
-    result[ROLE_BOUNCE_FILL] = create_light(parent, prefix, profile_id, context, ROLE_BOUNCE_FILL, profile)
-    return result
+    # A lamp has one physical emitter. Terrain-wash and bounce-fill OmniLights
+    # were unshadowed copies of the source and leaked light through cave walls.
+    # Let the real source light the scene and let its shadow map provide occlusion.
+    return {ROLE_SOURCE: create_light(parent, prefix, profile_id, context, ROLE_SOURCE, profile)}
 
 static func profile_for(profile_id: String, context: String, scale: float) -> Dictionary:
     var id := normalized_profile_id(profile_id)
@@ -163,16 +162,12 @@ static func apply_held_profile(profile: Dictionary, id: String) -> void:
         profile["bounce_range"] = 13.2
         profile["source_position"] = Vector3(0.0, 0.38, -0.12)
     elif id == "torch":
-        # Spread the carried light through a cave arch while reducing the
-        # previous overexposed ground wash. This is still a local light rig.
+        # A carried torch is one nearby physical emitter. Its shadowed source
+        # lights surfaces that have an unobstructed path to the flame.
         profile["source_energy"] = 1.90
-        profile["source_range"] = 24.0
+        profile["source_range"] = 11.2
         profile["source_min_scale"] = 0.35
         profile["source_max_scale"] = 1.20
-        profile["terrain_energy"] = 0.65
-        profile["terrain_range"] = 18.0
-        profile["bounce_energy"] = 0.65
-        profile["bounce_range"] = 24.0
     else:
         profile["source_energy"] = 3.05
         profile["source_range"] = 11.4

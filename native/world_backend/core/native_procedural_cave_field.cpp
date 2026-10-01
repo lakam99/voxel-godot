@@ -68,6 +68,7 @@ void CaveBounds::merge(const CaveBounds &other) noexcept {
 
 NativeProceduralCaveField::NativeProceduralCaveField(const WorldSourceDefinition &definition)
     : seed_code_points_(definition.raw_terrain_seed().code_points),
+      seed_utf8_(definition.raw_terrain_seed().utf8),
       cell_size_meters_(definition.constants().cell_size_meters),
       lowest_cave_floor_meters_(static_cast<double>(definition.constants().world_bottom_cell_y + 4)
           * definition.constants().cell_size_meters),
@@ -177,8 +178,9 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         diagnostics.terminal_reason = "accepted";
         return recipe;
     }
-    // Preserve primary-center output and cost exactly. Center search is only
-    // entered when that center evaluated all eight directions without success.
+    // Centers outside their owning region are not searched. Every in-region
+    // center evaluates its bounded entrance directions; actual depth capacity,
+    // roof, protection and support checks decide whether a recipe is viable.
     if (primary_diagnostics.directions_evaluated != 8U) {
         diagnostics.terminal_reason = primary_diagnostics.terminal_reason;
         return std::nullopt;
@@ -221,11 +223,6 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe_at_offset(
     }
     center.y = static_cast<float>(surface(center.x, center.z));
     attempt_diagnostics.center = center;
-    if (center.y < 19.0F) {
-        attempt_diagnostics.terminal_reason = "lowland_center";
-        return std::nullopt;
-    }
-
     const double length_value = randf_range(rng, 43.0, 52.0);
     const double phase = randf_range(rng, 0.0, TAU);
     const double bend = randf_range(rng, -7.0, 7.0);
@@ -506,10 +503,78 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe_at_offset(
         recipe.depth_loops.push_back({floor, entrance, add(entrance, add(along, across)),
             add(entrance, add(multiply(along, -1.0), across)), entrance});
     }
+    // Stable cross-tier links attach to opposite portals on separated adjacent
+    // loops, creating alternate routes around two distinct trunk edges.
+    for (const std::size_t from_tier : {0U, 2U}) {
+        if (from_tier + 1U >= recipe.depth_loops.size()) continue;
+        const std::vector<CaveVector3> &from_loop = recipe.depth_loops[from_tier];
+        const std::vector<CaveVector3> &to_loop = recipe.depth_loops[from_tier + 1U];
+        const CaveVector3 start = multiply(add(from_loop[2], from_loop[3]), 0.5);
+        const CaveVector3 end = multiply(add(to_loop[2], to_loop[3]), 0.5);
+        const auto horizontal_tangent = [](const CaveVector3 a, const CaveVector3 b) {
+            CaveVector3 tangent = subtract(a, b);
+            const float horizontal_length = std::sqrt(tangent.x * tangent.x + tangent.z * tangent.z);
+            if (horizontal_length <= 0.001F) return CaveVector3{};
+            return CaveVector3{tangent.x / horizontal_length, 0.0F, tangent.z / horizontal_length};
+        };
+        // Flat collars keep the ramp from lowering the effective floor at a
+        // loop junction. Move each collar outward from its loop before easing
+        // into the inter-tier descent.
+        const CaveVector3 from_center = recipe.route[6];
+        const CaveVector3 to_center = recipe.route[6];
+        const CaveVector3 start_outward = horizontal_tangent(start, from_center);
+        const CaveVector3 end_outward = horizontal_tangent(end, to_center);
+        CaveVector3 start_collar = add(start, multiply(start_outward, 32.0));
+        CaveVector3 end_collar = add(end, multiply(end_outward, 32.0));
+        start_collar.y = start.y;
+        end_collar.y = end.y;
+        const CaveVector3 ramp_delta = subtract(end_collar, start_collar);
+        const float horizontal_length = std::max(
+            std::sqrt(ramp_delta.x * ramp_delta.x + ramp_delta.z * ramp_delta.z), 0.001F);
+        CaveVector3 lateral{-ramp_delta.z / horizontal_length, 0.0F,
+            ramp_delta.x / horizontal_length};
+        const CaveVector3 ramp_mid = multiply(add(start_collar, end_collar), 0.5);
+        const CaveVector3 away_from_core = subtract(ramp_mid, recipe.route[6]);
+        if (static_cast<double>(lateral.x) * away_from_core.x
+            + static_cast<double>(lateral.z) * away_from_core.z < 0.0)
+            lateral = multiply(lateral, -1.0);
+        CaveDepthTierLink link;
+        link.id = "tier-link:" + seed_utf8_ + ":" + std::to_string(region.x) + ","
+            + std::to_string(region.z) + ":" + std::to_string(from_tier) + "-"
+            + std::to_string(from_tier + 1U);
+        link.from_tier = static_cast<std::uint32_t>(from_tier);
+        link.to_tier = static_cast<std::uint32_t>(from_tier + 1U);
+        constexpr std::int32_t RAMP_SUBDIVISIONS = 17;
+        link.points.reserve(static_cast<std::size_t>(RAMP_SUBDIVISIONS + 3));
+        link.points.push_back(start);
+        link.points.push_back(start_collar);
+        for (std::int32_t step = 1; step < RAMP_SUBDIVISIONS; ++step) {
+            const float t = static_cast<float>(step) / static_cast<float>(RAMP_SUBDIVISIONS);
+            CaveVector3 point = add(start_collar, multiply(ramp_delta, t));
+            // Keep the common real_t scalar explicit so the native and
+            // GDScript recipes perform the curve calculation at the same
+            // precision before applying it to the lateral vector.
+            const float lateral_curve_scale = static_cast<float>(
+                24.0 * std::sin(PI * static_cast<double>(t)));
+            point = add(point, multiply(lateral, lateral_curve_scale));
+            link.points.push_back(point);
+        }
+        link.points.push_back(end_collar);
+        link.points.push_back(end);
+        recipe.depth_tier_links.push_back(link);
+    }
     recipe = append_path(recipe, recipe.deep_route, 2.5F);
     for (std::size_t index = 0U; index < recipe.depth_loops.size(); ++index) {
         const std::vector<CaveVector3> depth_loop = recipe.depth_loops[index];
         recipe = append_path(recipe, depth_loop, static_cast<float>(TUNNEL_RADIUS));
+    }
+    // append_path takes and returns the whole recipe by value. Keep the range
+    // being iterated stable while each returned recipe replaces the original.
+    const std::vector<CaveDepthTierLink> depth_tier_links = recipe.depth_tier_links;
+    for (const CaveDepthTierLink &link : depth_tier_links) {
+        const std::vector<double> horizontal_radii(link.points.size(), TUNNEL_RADIUS);
+        const std::vector<double> vertical_radii(link.points.size(), 2.2);
+        recipe = append_tapered_arch_path(recipe, link.points, horizontal_radii, vertical_radii);
     }
     if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) { candidate_rejection = "entrance_roof"; return std::nullopt; }
 
@@ -558,6 +623,41 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe_at_offset(
     }
     if (protected_bounds(recipe.bounds)) { candidate_rejection = "protected_site"; return std::nullopt; }
     if (!route_has_walkable_effective_support(recipe, surface)) { candidate_rejection = "entrance_effective_grade"; return std::nullopt; }
+    CaveRecipe deep_route_probe = recipe;
+    deep_route_probe.route = recipe.deep_route;
+    std::string deep_route_support_failure;
+    if (!route_has_walkable_effective_support(deep_route_probe, surface, &deep_route_support_failure)) {
+        attempt_diagnostics.last_rejection_detail = "deep_route:" + deep_route_support_failure;
+        candidate_rejection = "deep_route_effective_grade";
+        return std::nullopt;
+    }
+    for (const CaveDepthTierLink &link : recipe.depth_tier_links) {
+        if (link.points.size() < 2U) { candidate_rejection = "tier_link_path_invalid"; return std::nullopt; }
+        for (std::size_t point = 0U; point < link.points.size(); ++point) {
+            if (static_cast<double>(link.points[point].y) < lowest_cave_floor_meters_ + 4.0 * cell_size_meters_) {
+                candidate_rejection = "tier_link_world_bottom_reserve"; return std::nullopt;
+            }
+            if (point > 0U) {
+                const CaveVector3 a = link.points[point - 1U];
+                const CaveVector3 b = link.points[point];
+                const double run = std::hypot(static_cast<double>(b.x - a.x), static_cast<double>(b.z - a.z));
+                if (run <= 0.01 || std::abs(static_cast<double>(b.y - a.y)) / run > std::tan(46.0 * PI / 180.0)) {
+                    attempt_diagnostics.last_rejection_detail = link.id + ":grade@"
+                        + std::to_string(point - 1U) + "->" + std::to_string(point)
+                        + ":run=" + std::to_string(run) + ":rise="
+                        + std::to_string(static_cast<double>(b.y - a.y));
+                    candidate_rejection = "tier_link_grade"; return std::nullopt;
+                }
+            }
+        }
+        CaveRecipe link_probe = recipe;
+        link_probe.route = link.points;
+        std::string support_failure;
+        if (!route_has_walkable_effective_support(link_probe, surface, &support_failure)) {
+            attempt_diagnostics.last_rejection_detail = link.id + ":" + support_failure;
+            candidate_rejection = "tier_link_effective_support"; return std::nullopt;
+        }
+    }
     return recipe;
         };
         const std::optional<CaveRecipe> built = try_candidate();
@@ -755,7 +855,39 @@ double NativeProceduralCaveField::density(
 }
 
 bool NativeProceduralCaveField::route_has_walkable_effective_support(
-    const CaveRecipe &recipe, const SurfaceSampler &surface) const {
+    const CaveRecipe &recipe, const SurfaceSampler &surface,
+    std::string *failure_detail) const {
+    const auto nearest_segment_text = [&](const CaveVector3 point) {
+        double best_distance = std::numeric_limits<double>::infinity();
+        std::size_t best_index = 0U;
+        double best_floor_y = 0.0;
+        for (std::size_t index = 0U; index < recipe.segments.size(); ++index) {
+            const CaveSegment &segment = recipe.segments[index];
+            const CaveVector3 horizontal{segment.b.x - segment.a.x, 0.0F,
+                segment.b.z - segment.a.z};
+            const double denominator = std::max(
+                static_cast<double>(length_squared_xz(horizontal)), 0.001);
+            const double t = std::clamp(static_cast<double>(dot_xz(
+                subtract(point, segment.a), horizontal)) / denominator, 0.0, 1.0);
+            const CaveVector3 floor = lerp(segment.a, segment.b, t);
+            const double radius = segment.radius + (segment.radius_end - segment.radius) * t;
+            const double vertical_radius = segment.vertical_radius
+                + (segment.vertical_radius_end - segment.vertical_radius) * t;
+            const double dx = static_cast<double>(point.x - floor.x);
+            const double dz = static_cast<double>(point.z - floor.z);
+            const double dy = static_cast<double>(point.y - floor.y - vertical_radius);
+            const double distance = (std::sqrt((dx * dx + dz * dz) / (radius * radius)
+                + (dy * dy) / (vertical_radius * vertical_radius)) - 1.0)
+                * std::min(radius, vertical_radius);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_index = index;
+                best_floor_y = floor.y;
+            }
+        }
+        return "segment=" + std::to_string(best_index) + ":axis_y="
+            + std::to_string(best_floor_y) + ":sdf=" + std::to_string(best_distance);
+    };
     CaveVector3 previous{std::numeric_limits<float>::infinity(),
         std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
     for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
@@ -764,13 +896,35 @@ bool NativeProceduralCaveField::route_has_walkable_effective_support(
         for (std::int32_t step = 0; step < 11; ++step) {
             CaveVector3 guide = lerp(a, b, static_cast<double>(step) / 10.0);
             const double ground_y = candidate_volume_ground_height_near(recipe, guide, surface);
-            if (!std::isfinite(ground_y) || std::abs(ground_y - guide.y) > 3.0) return false;
+            const auto point_text = [](const CaveVector3 point) {
+                return std::to_string(point.x) + "," + std::to_string(point.y) + ","
+                    + std::to_string(point.z);
+            };
+            if (!std::isfinite(ground_y)) {
+                if (failure_detail) *failure_detail = "no_effective_floor@segment="
+                    + std::to_string(index) + ":step=" + std::to_string(step) + ":point="
+                    + point_text(guide);
+                return false;
+            }
+            if (std::abs(ground_y - guide.y) > 3.0) {
+                if (failure_detail) *failure_detail = "floor_offset@segment="
+                    + std::to_string(index) + ":step=" + std::to_string(step) + ":guide=" + point_text(guide)
+                    + ":ground_y=" + std::to_string(ground_y);
+                return false;
+            }
             guide.y = static_cast<float>(ground_y);
             if (std::isfinite(previous.x)) {
                 const double run = std::hypot(static_cast<double>(guide.x - previous.x),
                     static_cast<double>(guide.z - previous.z));
                 if (run > 0.01 && std::abs(static_cast<double>(guide.y - previous.y)) / run
-                    > std::tan(46.0 * PI / 180.0)) return false;
+                    > std::tan(46.0 * PI / 180.0)) {
+                    if (failure_detail) *failure_detail = "effective_floor_grade@segment="
+                        + std::to_string(index) + ":step=" + std::to_string(step) + ":previous="
+                        + point_text(previous) + ":previous_winner="
+                        + nearest_segment_text(previous) + ":current=" + point_text(guide)
+                        + ":current_winner=" + nearest_segment_text(guide);
+                    return false;
+                }
             }
             previous = guide;
         }

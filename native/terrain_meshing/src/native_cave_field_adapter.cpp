@@ -103,6 +103,17 @@ Dictionary NativeCaveField::recipe_dictionary(const CaveRecipe &p_recipe) const 
 		for (const CaveVector3 &point : depth_loop_points) depth_loop.push_back(to_godot(point));
 		depth_loops.push_back(depth_loop);
 	}
+	Array depth_tier_links;
+	for (const CaveDepthTierLink &link_value : p_recipe.depth_tier_links) {
+		Dictionary link;
+		Array points;
+		for (const CaveVector3 &point : link_value.points) points.push_back(to_godot(point));
+		link["id"] = String(link_value.id.c_str());
+		link["fromTier"] = static_cast<int64_t>(link_value.from_tier);
+		link["toTier"] = static_cast<int64_t>(link_value.to_tier);
+		link["points"] = points;
+		depth_tier_links.push_back(link);
+	}
 	Array segments;
 	for (const CaveSegment &segment : p_recipe.segments) {
 		Dictionary item;
@@ -120,6 +131,7 @@ Dictionary NativeCaveField::recipe_dictionary(const CaveRecipe &p_recipe) const 
 	}
 	result["route"] = route; result["loop"] = loop; result["deepRoute"] = deep_route;
 	result["depthLoops"] = depth_loops;
+	result["depthTierLinks"] = depth_tier_links;
 	result["segments"] = segments; result["chambers"] = chambers; result["bounds"] = to_godot(p_recipe.bounds);
 	return result;
 }
@@ -147,6 +159,7 @@ Dictionary NativeCaveField::recipe_build_diagnostics(const Vector2i &p_region) c
 		item["viable_entrances"] = static_cast<std::int64_t>(attempt.viable_entrances);
 		item["full_recipe_attempts"] = static_cast<std::int64_t>(attempt.full_recipe_attempts);
 		item["terminal_reason"] = String(attempt.terminal_reason.c_str());
+		item["last_rejection_detail"] = String(attempt.last_rejection_detail.c_str());
 		Dictionary rejections;
 		for (const auto &[reason, count] : attempt.rejection_counts)
 			rejections[String(reason.c_str())] = static_cast<std::int64_t>(count);

@@ -101,11 +101,9 @@ func run_contract() -> void:
         "shadows": true
     })
     await process_frame
-    var rig_nodes_are_logical_and_idle := rig.size() == 3
+    var rig_nodes_are_logical_and_idle := rig.size() == 1
     var expected_rig := {
-        "source": {"energy": 2.31, "range": 13.0, "group": "local_light_rig_source", "casts": true},
-        "terrain_wash": {"energy": 1.25, "range": 10.8, "group": "local_light_rig_fill", "casts": false},
-        "bounce_fill": {"energy": 0.58, "range": 12.0, "group": "local_light_rig_fill", "casts": false}
+        "source": {"energy": 2.31, "range": 13.0, "group": "local_light_rig_source", "casts": true}
     }
     var rig_role_details := {}
     for role in expected_rig:

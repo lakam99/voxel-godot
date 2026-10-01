@@ -16,7 +16,10 @@ vec4 decode_8bit_vec4(float value) {
 }
 
 vec3 material_color(float index) {
-	if (index < 0.5) return vec3(0.36, 0.52, 0.30);
+	// Air has no surface pigment. Transvoxel may carry its channel ID into a
+	// blended boundary vertex, so use a neutral underground stone fallback;
+	// never let empty space tint a cave wall grass-green.
+	if (index < 0.5) return vec3(0.22, 0.23, 0.22);
 	if (index < 1.5) return vec3(0.34, 0.55, 0.28);
 	if (index < 2.5) return vec3(0.36, 0.25, 0.16);
 	if (index < 3.5) return vec3(0.39, 0.40, 0.38);

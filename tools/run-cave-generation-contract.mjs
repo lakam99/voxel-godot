@@ -15,15 +15,15 @@ contracts. This is a focused generator contract, not live gameplay acceptance.
 
   --godot-exe PATH      Godot console executable (or GODOT_EXE)
   --output-dir PATH     New output directory (must not already exist)
-  --timeout-seconds N   Owned Godot process deadline (default 180)
-  --seed VALUE          Run one seed instead of the fixed five-seed sample
+  --timeout-seconds N   Owned Godot process deadline (default 360)
+  --seed VALUE          Run one seed instead of the 10-seed prevalence sample
   --region X,Z          Run one region only
   --verify-primary      Prove primary-center behavior and fallback gating
 `);
   process.exit(0);
 }
 
-const timeoutSeconds = Number(options.timeoutSeconds ?? 180);
+const timeoutSeconds = Number(options.timeoutSeconds ?? 360);
 if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 600)
   throw new Error('--timeout-seconds must be an integer from 1 through 600');
 if (options.region !== undefined && !/^-?\d+,-?\d+$/.test(String(options.region)))

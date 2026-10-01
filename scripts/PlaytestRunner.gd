@@ -1989,13 +1989,13 @@ func test_held_item_system() -> void:
     add_result(
         "held_torch_emits_light",
         String(held_item.get("current_item")) == "torch"
-            and held_torch_lights >= 3
+            and held_torch_lights == 1
             and held_torch_fire_lights >= 1
             and held_torch_shadowed >= 1
-            and held_torch_ground_fills.size() >= 2
-            and held_torch_sources.size() >= 1
-            and held_torch_terrain_washes.size() >= 1
-            and held_torch_bounce_fills.size() >= 1
+            and held_torch_ground_fills.is_empty()
+            and held_torch_sources.size() == 1
+            and held_torch_terrain_washes.is_empty()
+            and held_torch_bounce_fills.is_empty()
             and held_base_energy >= 1.3
             and held_base_range >= 6.0
             and held_base_range <= 6.4
@@ -2025,51 +2025,18 @@ func test_held_item_system() -> void:
         ]
     )
     add_result(
-        "held_torch_ground_fill_pitch_independent",
-        torch_fill_pitch_independent,
-        "level %s h %.2f, up %s h %.2f drift %.2f, down %s h %.2f drift %.2f" % [
-            str(torch_fill_level_pos),
-            torch_fill_level_height,
-            str(torch_fill_up_pos),
-            torch_fill_up_height,
-            torch_fill_up_drift,
-            str(torch_fill_down_pos),
-            torch_fill_down_height,
-            torch_fill_down_drift
+        "held_torch_has_no_unshadowed_fill_lights",
+        held_torch_ground_fills.is_empty() and held_torch_terrain_washes.is_empty() and held_torch_bounce_fills.is_empty(),
+        "source lights %d, terrain washes %d, bounce fills %d" % [
+            held_torch_sources.size(), held_torch_terrain_washes.size(), held_torch_bounce_fills.size()
         ]
     )
-    if main.has_method("update_terrain_local_light_uniforms"):
-        main.call("update_terrain_local_light_uniforms")
     var torch_terrain_material := main.get("terrain_material") as ShaderMaterial
-    var torch_uniform_range_min := INF
-    var torch_uniform_range_max := 0.0
-    var torch_uniform_energy_min := INF
-    var torch_uniform_energy_max := 0.0
-    var torch_uniform_samples := 48
-    for i in range(torch_uniform_samples):
-        if main.has_method("update_terrain_local_light_uniforms"):
-            main.call("update_terrain_local_light_uniforms")
-        var torch_uniform_range := terrain_light_uniform_first_range(torch_terrain_material)
-        var torch_uniform_energy := terrain_light_uniform_max_energy(torch_terrain_material)
-        torch_uniform_range_min = minf(torch_uniform_range_min, torch_uniform_range)
-        torch_uniform_range_max = maxf(torch_uniform_range_max, torch_uniform_range)
-        torch_uniform_energy_min = minf(torch_uniform_energy_min, torch_uniform_energy)
-        torch_uniform_energy_max = maxf(torch_uniform_energy_max, torch_uniform_energy)
-        await wait_physics_frames(1)
-    var torch_uniform_range_delta := torch_uniform_range_max - torch_uniform_range_min
-    var torch_uniform_energy_delta := torch_uniform_energy_max - torch_uniform_energy_min
+    var torch_terrain_shader_code := torch_terrain_material.shader.code if torch_terrain_material and torch_terrain_material.shader else ""
     add_result(
-        "held_torch_terrain_material_flickers",
-        torch_uniform_range_delta > 0.02 or torch_uniform_energy_delta > 0.02,
-        "samples %d range %.2f..%.2f delta %.2f energy %.2f..%.2f delta %.2f" % [
-            torch_uniform_samples,
-            torch_uniform_range_min,
-            torch_uniform_range_max,
-            torch_uniform_range_delta,
-            torch_uniform_energy_min,
-            torch_uniform_energy_max,
-            torch_uniform_energy_delta
-        ]
+        "terrain_material_has_no_unoccluded_local_light_emission",
+        not torch_terrain_shader_code.contains("terrain_local_light") and not torch_terrain_shader_code.contains("EMISSION"),
+        "shader %s contains no custom unshadowed terrain-light emission" % String(torch_terrain_material.shader.resource_path if torch_terrain_material and torch_terrain_material.shader else "missing")
     )
 
     inventory_system.add_item("wardLantern", 1)
@@ -2128,13 +2095,13 @@ func test_held_item_system() -> void:
     add_result(
         "held_ward_lantern_emits_light",
         String(held_item.get("current_item")) == "wardLantern"
-            and held_ward_lights >= 3
+            and held_ward_lights == 1
             and held_ward_fire_lights >= 1
             and held_ward_shadowed >= 1
-            and held_ward_ground_fills.size() >= 2
-            and held_ward_sources.size() >= 1
-            and held_ward_terrain_washes.size() >= 1
-            and held_ward_bounce_fills.size() >= 1
+            and held_ward_ground_fills.is_empty()
+            and held_ward_sources.size() == 1
+            and held_ward_terrain_washes.is_empty()
+            and held_ward_bounce_fills.is_empty()
             and held_ward_base_energy >= 1.8
             and held_ward_base_range >= 8.0
             and held_ward_position.length() > 0.05
@@ -2158,48 +2125,18 @@ func test_held_item_system() -> void:
         ]
     )
     add_result(
-        "held_ward_lantern_ground_fill_pitch_independent",
-        ward_fill_pitch_independent,
-        "level %s h %.2f, up %s h %.2f drift %.2f, down %s h %.2f drift %.2f" % [
-            str(ward_fill_level_pos),
-            ward_fill_level_height,
-            str(ward_fill_up_pos),
-            ward_fill_up_height,
-            ward_fill_up_drift,
-            str(ward_fill_down_pos),
-            ward_fill_down_height,
-            ward_fill_down_drift
+        "held_ward_lantern_has_no_unshadowed_fill_lights",
+        held_ward_ground_fills.is_empty() and held_ward_terrain_washes.is_empty() and held_ward_bounce_fills.is_empty(),
+        "source lights %d, terrain washes %d, bounce fills %d" % [
+            held_ward_sources.size(), held_ward_terrain_washes.size(), held_ward_bounce_fills.size()
         ]
     )
-    if main.has_method("update_terrain_local_light_uniforms"):
-        main.call("update_terrain_local_light_uniforms")
     var terrain_light_material := main.get("terrain_material") as ShaderMaterial
-    var terrain_light_count := int(terrain_light_material.get_shader_parameter("terrain_local_light_count")) if terrain_light_material else 0
-    var terrain_light_positions_value = terrain_light_material.get_shader_parameter("terrain_local_light_positions") if terrain_light_material else null
-    var terrain_light_colors_value = terrain_light_material.get_shader_parameter("terrain_local_light_colors") if terrain_light_material else null
-    var first_terrain_light_range := 0.0
-    var strongest_terrain_light_energy := 0.0
-    if typeof(terrain_light_positions_value) == TYPE_PACKED_VECTOR4_ARRAY:
-        var terrain_position_vectors: PackedVector4Array = terrain_light_positions_value
-        if terrain_position_vectors.size() > 0:
-            first_terrain_light_range = terrain_position_vectors[0].w
-    elif typeof(terrain_light_positions_value) == TYPE_ARRAY:
-        var terrain_position_array: Array = terrain_light_positions_value
-        if terrain_position_array.size() > 0 and terrain_position_array[0] is Vector4:
-            first_terrain_light_range = (terrain_position_array[0] as Vector4).w
-    if typeof(terrain_light_colors_value) == TYPE_PACKED_VECTOR4_ARRAY:
-        var terrain_color_vectors: PackedVector4Array = terrain_light_colors_value
-        for value in terrain_color_vectors:
-            strongest_terrain_light_energy = maxf(strongest_terrain_light_energy, value.w)
-    elif typeof(terrain_light_colors_value) == TYPE_ARRAY:
-        var terrain_color_array: Array = terrain_light_colors_value
-        for value in terrain_color_array:
-            if value is Vector4:
-                strongest_terrain_light_energy = maxf(strongest_terrain_light_energy, (value as Vector4).w)
+    var terrain_light_shader_code := terrain_light_material.shader.code if terrain_light_material and terrain_light_material.shader else ""
     add_result(
-        "held_light_updates_terrain_material_lighting",
-        terrain_light_count >= 1 and first_terrain_light_range >= 8.0 and strongest_terrain_light_energy >= 1.0,
-        "count %d, first range %.2f, max energy %.2f" % [terrain_light_count, first_terrain_light_range, strongest_terrain_light_energy]
+        "held_light_uses_only_shadowed_source_lighting",
+        not terrain_light_shader_code.contains("terrain_local_light") and not terrain_light_shader_code.contains("EMISSION"),
+        "shader %s contains no local-light emission bypass" % String(terrain_light_material.shader.resource_path if terrain_light_material and terrain_light_material.shader else "missing")
     )
     main.set("time_of_day", held_light_original_time)
     main.call("update_sky", 0.0)
@@ -3226,17 +3163,17 @@ func test_utility_blocks() -> void:
             ])
             ground_fill_details.append("%s:%d@%.2f/%.1f shadow %d" % [String(item_id), ground_fill_lights.size(), min_ground_fill_height, min_ground_fill_range, shadowed_ground_fill])
             ground_overlay_details.append("%s:%d" % [String(item_id), ground_overlay_meshes.size()])
-            if light_count < 3 or source_lights.is_empty() or terrain_wash_lights.is_empty() or bounce_fill_lights.is_empty() or local_rig_lights.size() < 3:
+            if light_count != 1 or source_lights.size() != 1 or not terrain_wash_lights.is_empty() or not bounce_fill_lights.is_empty() or local_rig_lights.size() != 1:
                 light_failures.append(item_id)
-            if fire_count < 3:
+            if fire_count != 1:
                 fire_light_failures.append(item_id)
-            if ground_fill_lights.size() < 2 or min_ground_fill_height < CELL * 0.30 or min_ground_fill_range < expected_ground_fill_range or shadowed_ground_fill > 0:
+            if not ground_fill_lights.is_empty() or shadow_count != 1:
                 ground_fill_failures.append(item_id)
             if not ground_overlay_meshes.is_empty():
                 ground_overlay_failures.append(item_id)
             if flicker_min < 0.01 or flicker_min > 0.99:
                 light_strength_failures.append("%s:min %.2f" % [String(item_id), flicker_min])
-            if String(item_id) == "torch" and (base_range < CELL * 6.0 or base_range > CELL * 6.4):
+            if String(item_id) == "torch" and (base_range < CELL * 4.0 or base_range > CELL * 6.0):
                 light_strength_failures.append("%s:range %.2f" % [String(item_id), base_range])
             if String(item_id) == "wardLantern" and (base_energy < 2.0 or base_range < CELL * 12.0 or light_offset.length() < CELL * 0.35):
                 light_strength_failures.append("%s:%.2f/%.1f/%s" % [String(item_id), base_energy, base_range, str(light_offset)])
@@ -7968,8 +7905,6 @@ func test_environment_visual_style() -> void:
     var noon_sun := sun_light.light_energy
     var noon_ambient := env.ambient_light_energy
     var noon_fog := env.fog_density
-    var terrain_mat := main.get("terrain_material") as ShaderMaterial
-    var noon_terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 0.0
     main.set("time_of_day", 0.75)
     main.call("update_sky", 0.0)
     var night_sun := sun_light.light_energy
@@ -7977,7 +7912,9 @@ func test_environment_visual_style() -> void:
     var night_ambient := env.ambient_light_energy
     var night_fog := env.fog_density
     var night_fog_energy := env.fog_light_energy
-    var night_terrain_shadow_fill := float(terrain_mat.get_shader_parameter("shadow_fill")) if terrain_mat else 1.0
+    var terrain_mat := main.get("terrain_material") as ShaderMaterial
+    var terrain_shader_code := terrain_mat.shader.code if terrain_mat and terrain_mat.shader else ""
+    var no_unoccluded_terrain_light := not terrain_shader_code.contains("terrain_local_light") and not terrain_shader_code.contains("EMISSION")
     main.set("time_of_day", original_time)
     main.call("update_sky", 0.0)
     var range_ok := noon_sun >= 0.55 \
@@ -7986,8 +7923,6 @@ func test_environment_visual_style() -> void:
         and noon_ambient <= 0.01 \
         and noon_fog >= 0.002 \
         and noon_fog <= 0.020 \
-        and noon_terrain_shadow_fill >= 0.18 \
-        and noon_terrain_shadow_fill <= 0.28 \
         and night_sun <= 0.04 \
         and night_moon >= 0.02 \
         and night_moon <= 0.12 \
@@ -7996,11 +7931,11 @@ func test_environment_visual_style() -> void:
         and night_fog >= 0.004 \
         and night_fog <= 0.030 \
         and night_fog_energy <= 0.14 \
-        and night_terrain_shadow_fill <= 0.02
+        and no_unoccluded_terrain_light
     add_result(
         "environment_visual_style",
         structure_ok and range_ok,
-        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f terrain fill %.2f, night sun %.2f moon %.2f amb %.2f fog %.4f fog energy %.2f terrain fill %.2f" % [
+        "sky %s, filmic %s, sky ambient %s, fog %s, ssao %s, noon sun %.2f amb %.2f fog %.4f, night sun %.2f moon %.2f amb %.2f fog %.4f fog energy %.2f, no unoccluded terrain light %s" % [
             str(env.background_mode == Environment.BG_SKY and env.sky != null and sky_mat != null),
             str(env.tonemap_mode == Environment.TONE_MAPPER_FILMIC),
             str(env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY),
@@ -8009,13 +7944,12 @@ func test_environment_visual_style() -> void:
             noon_sun,
             noon_ambient,
             noon_fog,
-            noon_terrain_shadow_fill,
             night_sun,
             night_moon,
             night_ambient,
             night_fog,
             night_fog_energy,
-            night_terrain_shadow_fill
+            str(no_unoccluded_terrain_light)
         ]
     )
 
@@ -9402,36 +9336,6 @@ func light_flicker_min_scale(light: Light3D) -> float:
     if typeof(meta_value) == TYPE_FLOAT or typeof(meta_value) == TYPE_INT:
         return float(meta_value)
     return 0.0
-
-func terrain_light_uniform_first_range(shader_material: ShaderMaterial) -> float:
-    if shader_material == null:
-        return 0.0
-    var positions_value = shader_material.get_shader_parameter("terrain_local_light_positions")
-    if typeof(positions_value) == TYPE_PACKED_VECTOR4_ARRAY:
-        var position_vectors: PackedVector4Array = positions_value
-        if position_vectors.size() > 0:
-            return position_vectors[0].w
-    elif typeof(positions_value) == TYPE_ARRAY:
-        var position_array: Array = positions_value
-        if position_array.size() > 0 and position_array[0] is Vector4:
-            return (position_array[0] as Vector4).w
-    return 0.0
-
-func terrain_light_uniform_max_energy(shader_material: ShaderMaterial) -> float:
-    if shader_material == null:
-        return 0.0
-    var colors_value = shader_material.get_shader_parameter("terrain_local_light_colors")
-    var strongest := 0.0
-    if typeof(colors_value) == TYPE_PACKED_VECTOR4_ARRAY:
-        var color_vectors: PackedVector4Array = colors_value
-        for value in color_vectors:
-            strongest = maxf(strongest, value.w)
-    elif typeof(colors_value) == TYPE_ARRAY:
-        var color_array: Array = colors_value
-        for value in color_array:
-            if value is Vector4:
-                strongest = maxf(strongest, (value as Vector4).w)
-    return strongest
 
 func render_policy_stats(node: Node) -> Dictionary:
     var stats := {

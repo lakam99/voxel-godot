@@ -13,6 +13,8 @@ var output := "res://artifacts/caves/walkthrough/"
 var diagnostic := false
 var trace: Array = []
 var captures: Array = []
+var capture_publication: Array[Dictionary] = []
+var capture_expected_count := 0
 var arrivals: Array = []
 var view_audits: Array = []
 var view_audit_summaries: Array[Dictionary] = []
@@ -59,6 +61,12 @@ func run() -> void:
 	if diagnostic:
 		OS.set_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT", "1")
 		main = load("res://scenes/Main.tscn").instantiate()
+		# Match the established focused underground visual fixture: keep the
+		# diagnostic render neighborhood small and request fine cave-volume detail
+		# before Main starts admitting broad surface streaming work.
+		main.set("render_distance", 2)
+		main.set("force_underground_volume_debug", true)
+		main.set("force_underground_volume_fine_focus", true)
 		root.add_child(main)
 		await create_timer(2.0).timeout
 	else:
@@ -125,6 +133,14 @@ func run() -> void:
 	main.update_sky(0.0)
 	main.ensure_voxel_terrain_authority()
 	runtime = main.voxel_terrain_runtime
+	if OS.get_environment("CAVE_CAPTURE_ONLY") == "1" and runtime != null \
+			and runtime.has_method("full_vertical_cell_bounds") \
+			and runtime.has_method("apply_vertical_cell_bounds"):
+		# Fast boot bypasses the normal vertical-bound expansion gate. A deep
+		# camera preview must include the same configured vertical world range or
+		# it renders absent terrain as sky/void.
+		var vertical_bounds: Vector2i = runtime.full_vertical_cell_bounds()
+		runtime.apply_vertical_cell_bounds(vertical_bounds.x, vertical_bounds.y)
 	if diagnostic:
 		# Fast boot intentionally freezes Main's streaming scheduler. Resume its
 		# ordinary chunk admission now that the fixture is staged, but keep the
@@ -150,7 +166,10 @@ func run() -> void:
 			if not requested_fixture_chunks.has(missing_chunk):
 				requested_fixture_chunks[missing_chunk] = true
 				main.create_chunk(missing_chunk.x, missing_chunk.y, true)
-		if runtime.voxel_engine_pending_task_count() == 0 and runtime.published_mesh_blocks.size() > 12:
+		# Normal New Game continues publishing unrelated view-distance chunks.
+		# Gate the act phase on the exact entrance collision proof above, not on
+		# the entire world's streaming queue becoming idle.
+		if bool(fixture_collision_proof.get("passed", false)):
 			quiet += 1
 		else:
 			quiet = 0
@@ -167,6 +186,12 @@ func run() -> void:
 		}))
 		await finish()
 		return
+	# Startup publication may take longer than an in-game daylight window. Restore
+	# the walkthrough's controlled ordinary sky/weather immediately before the
+	# visual act phase so capture lighting is deterministic.
+	main.time_of_day = fposmod(14.0 / 24.0 - 0.25, 1.0)
+	main.weather_system.force_weather("clear", 0.0, 0.18, Vector3.ZERO)
+	main.update_sky(0.0)
 	act_start = Time.get_ticks_msec()
 	last_tick = Time.get_ticks_usec()
 	main.runtime_perf_monitor.reset()
@@ -178,35 +203,57 @@ func run() -> void:
 		# Visual recapture mode: these are real runtime renders at fixture camera
 		# positions, not evidence of traversal or collision readiness.
 		var views: Array[Dictionary] = [
+			{"label": "capture-exterior-entrance", "position": outside, "look": recipe.route[2]},
 			{"label": "capture-interior-main-chamber", "position": recipe.route[6], "look": recipe.route[5]},
 			{"label": "capture-interior-ceiling", "position": recipe.route[6], "look": recipe.route[6] + Vector3.UP * 4.0},
 			{"label": "capture-interior-branch", "position": recipe.loop[2], "look": recipe.loop[1]},
 			{"label": "05-branch-pan-left", "position": recipe.loop[2], "look": recipe.loop[1] + Vector3(-recipe.outward.z, 0.0, recipe.outward.x) * 4.0},
 			{"label": "05-branch-pan-right", "position": recipe.loop[2], "look": recipe.loop[1] - Vector3(-recipe.outward.z, 0.0, recipe.outward.x) * 4.0}
 		]
+		for tier in range(recipe.depthLoops.size()):
+			var tier_loop: Array = recipe.depthLoops[tier]
+			var trunk_index := mini(4 + 2 * tier, recipe.deepRoute.size() - 1)
+			views.append({"label": "diagnostic-depth-tier-%02d" % tier,
+				"position": tier_loop[2], "look": recipe.deepRoute[trunk_index]})
+		for link in recipe.depthTierLinks:
+			var link_points: Array = link.points
+			var from_tier := int(link.fromTier)
+			var to_tier := int(link.toTier)
+			# Capture the generated connector from both approaches. A single
+			# midpoint view tends to frame only a dark opening and hides the
+			# connector's direction and change in elevation.
+			for direction_index in range(2):
+				var sample_index := 3 if direction_index == 0 else link_points.size() - 4
+				var next_index := sample_index + 1 if direction_index == 0 else sample_index - 1
+				var view_from_tier := from_tier if direction_index == 0 else to_tier
+				var view_to_tier := to_tier if direction_index == 0 else from_tier
+				views.append({"label": "diagnostic-tier-link-%d-%d-from-%d" % [from_tier, to_tier, view_from_tier],
+					"position": link_points[sample_index], "look": link_points[next_index],
+					"fromTier": view_from_tier, "toTier": view_to_tier})
+		capture_expected_count = views.size()
 		for view in views:
 			var view_position: Vector3 = view.position
 			view_position.y += 0.15
 			player.global_position = view_position
 			player.velocity = Vector3.ZERO
 			look_toward(view.look)
-			var view_quiet := 0
-			for frame in range(2400):
-				await process_frame
-				if runtime.voxel_engine_pending_task_count() == 0:
-					view_quiet += 1
-				else:
-					view_quiet = 0
-				if view_quiet >= 45:
-					break
-			if view_quiet < 45:
-				failures.append("capture_terrain_not_quiet:" + String(view.label))
+			record_active = false
+			var publication: Dictionary = await wait_for_capture_terrain(view_position, String(view.label))
+			capture_publication.append(publication)
+			if not bool(publication.get("passed", false)):
+				failures.append("capture_terrain_not_published:%s:%s" % [String(view.label), publication.get("reason", "unknown")])
+				await finish()
+				return
+			record_active = OS.get_environment("CAVE_RECORD") == "1"
 			await capture(String(view.label))
-		player.global_position = outside
-		look_toward(recipe.route[2])
-		for _frame in range(60):
-			await process_frame
-		await capture("capture-exterior-entrance")
+			if String(view.label).begins_with("diagnostic-tier-link-"):
+				# Match visible connector openings against generated density and
+				# published SDF/collision, especially when a distant opening looks
+				# like sky. This is diagnostic evidence, not a traversal gate.
+				view_audit_summaries.append(await audit_view_rays(String(view.label)))
+			for _frame in range(18):
+				await process_frame
+			record_active = false
 		await finish()
 		return
 	player.set_physics_process(true)
@@ -214,12 +261,44 @@ func run() -> void:
 	# published terrain collider rather than the heightfield reference; entrance
 	# carving can move the actual floor away from that reference. Then require a
 	# real CharacterBody floor contact before issuing movement input.
-	var start_hit := terrain_floor_hit(outside)
-	if start_hit.is_empty():
-		failures.append("exterior_fixture_missing_terrain_hit")
+	# Mesh collision and the terrain-ground provider are distinct contracts. Pick
+	# the nearest point in a small, bounded area where they agree within the same
+	# strict support tolerance used by the act-phase assertions. This is fixture
+	# setup only; movement still begins outside the mouth and follows live input.
+	var start_hit := {}
+	var support_alignment_probe := {}
+	var selected_outside := false
+	var alignment_tolerance := COLLISION_GROUND_ALIGNMENT_TOLERANCE
+	for ring in range(0, 5):
+		if selected_outside:
+			break
+		for offset_x in range(-ring, ring + 1):
+			if selected_outside:
+				break
+			for offset_z in range(-ring, ring + 1):
+				if maxi(absi(offset_x), absi(offset_z)) != ring:
+					continue
+				var candidate_outside := outside + Vector3(float(offset_x) * 0.5, 0.0, float(offset_z) * 0.5)
+				var candidate_hit := terrain_floor_hit(candidate_outside)
+				if candidate_hit.is_empty():
+					continue
+				var provider_y := float(main.ground_y_near_position(candidate_outside))
+				var alignment_error := absf(provider_y - float(candidate_hit.position.y))
+				support_alignment_probe = {"candidate": vec(candidate_outside), "collisionY": candidate_hit.position.y,
+					"providerY": provider_y, "alignmentError": alignment_error, "tolerance": alignment_tolerance}
+				if alignment_error <= alignment_tolerance:
+					outside = candidate_outside
+					start_hit = candidate_hit
+					selected_outside = true
+					break
+	if not selected_outside:
+		failures.append("exterior_fixture_no_collision_aligned_surface:%s" % JSON.stringify(support_alignment_probe))
 		await finish()
 		return
-	outside.y = float(start_hit.position.y) + 0.35
+	# Place the capsule just above the measured collider surface. A larger drop
+	# offset can leave the custom terrain-grounded path hovering beyond the
+	# runner's strict support-alignment tolerance before the act phase.
+	outside.y = float(start_hit.position.y) + 0.05
 	player.global_position = outside
 	player.velocity = Vector3.ZERO
 	player.terrain_grounded = false
@@ -233,6 +312,7 @@ func run() -> void:
 		if bool(pre_act_support.get("supported", false)):
 			break
 	if not bool(pre_act_support.get("supported", false)):
+		pre_act_support["supportAlignmentProbe"] = support_alignment_probe
 		pre_act_support["playerPosition"] = vec(player.global_position)
 		pre_act_support["velocity"] = vec(player.velocity)
 		pre_act_support["terrainGrounded"] = player.terrain_grounded
@@ -285,6 +365,65 @@ func run() -> void:
 			return
 		look_toward(loop[index - 1] if index > 0 else route[2])
 		await capture("05-branch-%d" % index)
+	# The generated recipe contains a distinct deep trunk and a chamber loop at
+	# every tier. Walk these with live input and real terrain support; the older
+	# walkthrough only covered the shallow entrance loop and could not establish
+	# that the advertised multi-level maze was actually traversable.
+	var deep_route: Array = recipe.deepRoute
+	var depth_loops: Array = recipe.depthLoops
+	for index in range(1, deep_route.size()):
+		if not await walk_to(deep_route[index], "depth-descent-%d" % index):
+			await finish()
+			return
+		look_toward(deep_route[mini(index + 1, deep_route.size() - 1)])
+		await capture("depth-trunk-%02d" % index)
+		for tier in range(depth_loops.size()):
+			var tier_anchor_index := 4 + 2 * tier
+			if tier_anchor_index != index:
+				continue
+			var tier_loop: Array = depth_loops[tier]
+			for loop_index in range(1, tier_loop.size()):
+				if not await walk_to(tier_loop[loop_index], "depth-tier-%d-loop-%d" % [tier, loop_index]):
+					await finish()
+					return
+			if not await walk_to(tier_loop[0], "depth-tier-%d-return-to-trunk" % tier):
+				await finish()
+				return
+			look_toward(deep_route[mini(index + 1, deep_route.size() - 1)])
+			await capture("depth-tier-%02d" % tier)
+	# Traverse each authored cross-tier bypass in both directions while ascending
+	# its source tier. The loop perimeter connects the trunk anchor to the portal;
+	# reversing the real path verifies the same connection is physically usable.
+	for index in range(deep_route.size() - 2, -1, -1):
+		if not await walk_to(deep_route[index], "depth-ascent-%d" % index):
+			await finish()
+			return
+		for link in recipe.depthTierLinks:
+			var from_tier := int(link.fromTier)
+			if 4 + 2 * from_tier != index:
+				continue
+			var link_points: Array = link.points
+			var from_loop: Array = depth_loops[from_tier]
+			if not await walk_to(from_loop[1], "tier-link-%d-%d-source-entrance" % [from_tier, int(link.toTier)]) \
+					or not await walk_to(from_loop[2], "tier-link-%d-%d-source-corner" % [from_tier, int(link.toTier)]) \
+					or not await walk_to(link_points[0], "tier-link-%d-%d-source-portal" % [from_tier, int(link.toTier)]):
+				await finish()
+				return
+			for point_index in range(1, link_points.size()):
+				if not await walk_to(link_points[point_index], "tier-link-%d-%d-down-%d" % [from_tier, int(link.toTier), point_index]):
+					await finish()
+					return
+			look_toward(deep_route[4 + 2 * int(link.toTier)])
+			await capture("tier-link-%d-%d" % [from_tier, int(link.toTier)])
+			for point_index in range(link_points.size() - 2, -1, -1):
+				if not await walk_to(link_points[point_index], "tier-link-%d-%d-up-%d" % [from_tier, int(link.toTier), point_index]):
+					await finish()
+					return
+			if not await walk_to(from_loop[3], "tier-link-%d-%d-source-return-corner" % [from_tier, int(link.toTier)]) \
+					or not await walk_to(from_loop[4], "tier-link-%d-%d-source-return-entrance" % [from_tier, int(link.toTier)]) \
+					or not await walk_to(from_loop[0], "tier-link-%d-%d-source-return-trunk" % [from_tier, int(link.toTier)]):
+				await finish()
+				return
 	# Revisit the chamber by ordinary movement and exercise the game's production
 	# destroy_target -> queued excavation -> terrain-volume edit path in-place.
 	if not await walk_to(route[6], "cave-digging-position"):
@@ -625,6 +764,7 @@ func audit_view_rays(stage: String, enforce_alignment := false) -> Dictionary:
 	var collision_hits := 0
 	var aligned_hits := 0
 	var solid_origin_rays := 0
+	var collision_publication_deferred_rays := 0
 	var mismatches: Array[Dictionary] = []
 	var pixels: Array[Vector2] = [Vector2(480, 160), Vector2(640, 160), Vector2(800, 160), Vector2(480, 240), Vector2(640, 240), Vector2(800, 240), Vector2(480, 320), Vector2(640, 320), Vector2(800, 320)]
 	if stage == "inbound-3":
@@ -650,7 +790,7 @@ func audit_view_rays(stage: String, enforce_alignment := false) -> Dictionary:
 				break
 			var p := origin + direction * distance
 			var published_sdf := published_sdf_at_world_position(p, runtime.terrain.get_voxel_tool())
-			if previous_sdf > 0.0 and published_sdf <= 0.0:
+			if published_sdf_distance < 0.0 and previous_sdf > 0.0 and published_sdf <= 0.0:
 				var low := previous_distance
 				var high := distance
 				for _refine in range(7):
@@ -660,7 +800,6 @@ func audit_view_rays(stage: String, enforce_alignment := false) -> Dictionary:
 					else:
 						high = mid
 				published_sdf_distance = (low + high) * 0.5
-				break
 			var cell := Vector3i((p / 1.35).floor())
 			var density: float = world.density_from_components(p, world.terrain_deformed_surface_y_at(p), world.terrain_reference_surface_y_at(p))
 			if world.terrain_volume_service.edited_cells.has(cell):
@@ -675,13 +814,23 @@ func audit_view_rays(stage: String, enforce_alignment := false) -> Dictionary:
 		var collision_distance := -1.0
 		if not hit.is_empty() and runtime.voxel_terrain_collider(hit.get("collider")):
 			collision_distance = origin.distance_to(hit.position)
+		var collision_expected_by_viewer := true
+		if published_sdf_distance >= 0.0 and runtime.viewer != null and is_instance_valid(runtime.viewer):
+			var expected_surface := origin + direction * published_sdf_distance
+			var viewer_xz := Vector2(runtime.viewer.global_position.x, runtime.viewer.global_position.z)
+			var surface_xz := Vector2(expected_surface.x, expected_surface.z)
+			var required_view_distance: int = runtime.collision_publication_view_distance_requirement(viewer_xz.distance_to(surface_xz))
+			collision_expected_by_viewer = required_view_distance <= int(runtime.viewer.view_distance)
+		var collision_assessment_deferred := collision_distance < 0.0 and not collision_expected_by_viewer
+		if collision_assessment_deferred:
+			collision_publication_deferred_rays += 1
 		if density_distance >= 0.0: density_hits += 1
 		if collision_distance >= 0.0: collision_hits += 1
 		var aligned := starts_in_solid or (published_sdf_distance < 0.0 and collision_distance < 0.0)
 		if not starts_in_solid and published_sdf_distance >= 0.0 and collision_distance >= 0.0:
 			aligned = absf(published_sdf_distance - collision_distance) <= 1.5
 			if aligned: aligned_hits += 1
-		if enforce_alignment and not aligned:
+		if enforce_alignment and not aligned and not collision_assessment_deferred:
 			var detail := {"pixel": [pixel.x, pixel.y], "densityHitDistance": density_distance,
 				"publishedSdfHitDistance": published_sdf_distance,
 				"collisionHitDistance": collision_distance, "reason": "published_sdf_collision_disagreement"}
@@ -739,11 +888,14 @@ func audit_view_rays(stage: String, enforce_alignment := false) -> Dictionary:
 			"direction": vec(direction), "densityHitDistance": density_distance,
 			"publishedSdfAtRayOrigin": previous_sdf, "startsInSolid": starts_in_solid,
 			"publishedSdfHitDistance": published_sdf_distance,
-			"collisionHitDistance": collision_distance, "aligned": aligned})
+			"collisionHitDistance": collision_distance, "aligned": aligned,
+			"collisionExpectedByViewer": collision_expected_by_viewer,
+			"collisionAssessmentDeferredByStreamingRange": collision_assessment_deferred})
 		await process_frame
 	last_tick = Time.get_ticks_usec()
 	var result := {"stage": stage, "rayCount": pixels.size(), "densityHitCount": density_hits,
 		"terrainCollisionHitCount": collision_hits, "alignedSurfaceHitCount": aligned_hits,
+		"collisionPublicationDeferredRayCount": collision_publication_deferred_rays,
 		"startsInSolidRayCount": solid_origin_rays,
 		"mismatches": mismatches, "passed": mismatches.is_empty()}
 	if enforce_alignment and (density_hits < 2 or collision_hits < 2 or aligned_hits < 2):
@@ -772,33 +924,10 @@ func published_sdf_at_world_position(position: Vector3, voxel_tool) -> float:
 	return lerpf(z0, z1, blend.z)
 
 func capture(label: String) -> void:
-	var player_camera: Camera3D = player.camera if player != null else null
-	var diagnostic_camera: Camera3D
-	var diagnostic_fill := label.begins_with("03-") or label.begins_with("04-") or label.begins_with("05-") or label.begins_with("06-")
-	if diagnostic_fill and player_camera != null:
-		diagnostic_camera = Camera3D.new()
-		diagnostic_camera.name = "CaveVisualCaptureCamera"
-		diagnostic_camera.transform = player_camera.transform
-		diagnostic_camera.fov = player_camera.fov
-		player.add_child(diagnostic_camera)
-		var fill := SpotLight3D.new()
-		fill.name = "CaveVisualCaptureFill"
-		fill.light_energy = 1.8
-		fill.spot_range = 1.35 * 18.0
-		fill.spot_angle = 110.0
-		fill.shadow_enabled = false
-		diagnostic_camera.add_child(fill)
-		diagnostic_camera.current = true
-		await process_frame
 	await RenderingServer.frame_post_draw
 	var path := output + label + ".png"
 	root.get_texture().get_image().save_png(path)
-	captures.append({"label": label, "path": path, "elapsedMs": Time.get_ticks_msec() - act_start, "position": vec(player.global_position) if player != null else [], "diagnosticFill": diagnostic_fill})
-	if diagnostic_camera != null:
-		diagnostic_camera.queue_free()
-		if player_camera != null and is_instance_valid(player_camera):
-			player_camera.make_current()
-		await process_frame
+	captures.append({"label": label, "path": path, "elapsedMs": Time.get_ticks_msec() - act_start, "position": vec(player.global_position) if player != null else [], "diagnosticFill": false})
 	last_tick = Time.get_ticks_usec()
 	print("CAVE WALK: capture ", label)
 
@@ -815,6 +944,31 @@ func record_frame() -> void:
 	recorded_frames.append({"path": ProjectSettings.globalize_path(path), "elapsedMs": last_record_ms - act_start})
 	record_busy = false
 
+func wait_for_capture_terrain(position: Vector3, label: String) -> Dictionary:
+	var latest_proof: Dictionary = {}
+	for frame in range(900):
+		await process_frame
+		if frame % 30 != 0:
+			continue
+		if runtime.has_method("update_viewer_position"):
+			runtime.update_viewer_position()
+		# This is a camera-preview gate, not a movement acceptance test. Require
+		# the local VoxelTerrain mesh/collision area to exist, without waiting for
+		# unrelated surface-chunk receipts or testing a player traversal.
+		latest_proof = runtime.collision_mesh_ready_for_body_position(position, 0.42)
+		if bool(latest_proof.get("passed", false)):
+			return {"label": label, "passed": true, "frames": frame,
+				"proof": latest_proof}
+		if frame % 180 == 0:
+			print("CAVE CAPTURE PUBLICATION ", label, " frame=", frame,
+				" localTerrainProof=", latest_proof,
+				" verticalBounds=", runtime.vertical_cell_bounds(),
+				" terrain=", runtime.terrain.get_statistics() if runtime.terrain != null else {})
+	return {"label": label, "passed": false, "frames": 900,
+		"reason": latest_proof.get("reason", "capture_publication_timeout"),
+		"proof": latest_proof, "verticalBounds": runtime.vertical_cell_bounds(),
+		"terrain": runtime.terrain.get_statistics() if runtime.terrain != null else {}}
+
 func finish() -> void:
 	record_active = false
 	while record_busy:
@@ -830,7 +984,9 @@ func finish() -> void:
 	var sorted := frame_times.duplicate()
 	sorted.sort()
 	var capture_only := OS.get_environment("CAVE_CAPTURE_ONLY") == "1"
-	var report := {"evidenceLevel": "diagnostic_visual_capture_only" if capture_only else ("diagnostic_live_physics_with_cave_dig" if diagnostic else "headed_gameplay_fixture_with_cave_dig"), "captureOnly": capture_only, "liveWalkCompleted": not capture_only and failures.is_empty(), "liveCaveDigCompleted": bool(cave_dig_evidence.get("passed", false)), "caveDigEvidence": cave_dig_evidence, "normalMenuNewGame": ready, "diagnosticStartup": diagnostic, "tutorialTownStartup": "excluded_by_diagnostic_fast_boot" if diagnostic else ("normal_new_game_path" if ready else "not_started"), "diagnosticStreamingOwnersReenabled": diagnostic_streaming_owners_reenabled, "seed": seed_value, "region": str(cave_region), "fixturePlacementBeforeAct": true, "preActSupport": pre_act_support, "actTeleports": 0, "forcedCollisionReadiness": false, "lighting": "ordinary held torch and game sky", "passed": failures.is_empty(), "failures": failures, "optionalWalkFailures": optional_walk_failures, "captures": captures, "trace": trace, "frameSamples": sorted.size(), "p95PhysicsIntervalMs": sorted[floori(sorted.size() * 0.95)] if not sorted.is_empty() else 0, "maxPhysicsIntervalMs": sorted.back() if not sorted.is_empty() else 0, "runtimePerformance": main.runtime_perf_monitor.summary() if main != null else {}}
+	var report := {"evidenceLevel": "diagnostic_visual_capture_only" if capture_only else ("diagnostic_live_physics_with_cave_dig" if diagnostic else "headed_gameplay_fixture_with_cave_dig"), "captureOnly": capture_only, "captureMode": "diagnostic_local_volume_focus" if capture_only and diagnostic else "standard", "liveWalkCompleted": not capture_only and failures.is_empty(), "liveCaveDigCompleted": bool(cave_dig_evidence.get("passed", false)), "caveDigEvidence": cave_dig_evidence, "normalMenuNewGame": ready, "diagnosticStartup": diagnostic, "tutorialTownStartup": "excluded_by_diagnostic_fast_boot" if diagnostic else ("normal_new_game_path" if ready else "not_started"), "diagnosticStreamingOwnersReenabled": diagnostic_streaming_owners_reenabled, "seed": seed_value, "region": str(cave_region), "fixturePlacementBeforeAct": true, "preActSupport": pre_act_support, "actTeleports": 0, "forcedCollisionReadiness": false, "lighting": "ordinary held torch and game sky", "passed": failures.is_empty() and (not capture_only or (captures.size() == capture_expected_count and capture_publication.size() == capture_expected_count)), "failures": failures, "optionalWalkFailures": optional_walk_failures, "captures": captures, "trace": trace, "frameSamples": sorted.size(), "p95PhysicsIntervalMs": sorted[floori(sorted.size() * 0.95)] if not sorted.is_empty() else 0, "maxPhysicsIntervalMs": sorted.back() if not sorted.is_empty() else 0, "runtimePerformance": main.runtime_perf_monitor.summary() if main != null else {}}
+	if capture_only:
+		report["capturePublication"] = capture_publication
 	report["arrivals"] = arrivals
 	report["viewRayAudit"] = view_audits
 	report["viewRayAuditSummaries"] = view_audit_summaries
