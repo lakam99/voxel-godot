@@ -23,6 +23,7 @@ void NativeCaveField::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("clear"), &NativeCaveField::clear);
 	ClassDB::bind_method(D_METHOD("region_at", "position"), &NativeCaveField::region_at);
 	ClassDB::bind_method(D_METHOD("recipe_for_region", "region", "surface", "protected_bounds"), &NativeCaveField::recipe_for_region);
+	ClassDB::bind_method(D_METHOD("recipe_build_diagnostics", "region"), &NativeCaveField::recipe_build_diagnostics);
 	ClassDB::bind_method(D_METHOD("cache_stats"), &NativeCaveField::cache_stats);
 	ClassDB::bind_method(D_METHOD("density", "position", "depth", "surface", "protected_bounds"), &NativeCaveField::density);
 	ClassDB::bind_method(D_METHOD("dry_carver_at", "position", "surface", "protected_bounds"), &NativeCaveField::dry_carver_at);
@@ -128,6 +129,32 @@ Dictionary NativeCaveField::recipe_for_region(const Vector2i &p_region,
 	const auto recipe = field()->recipe_for_region({p_region.x, p_region.y},
 		surface_sampler(p_surface), protection_sampler(p_protected_bounds));
 	return recipe ? recipe_dictionary(*recipe) : Dictionary();
+}
+
+Dictionary NativeCaveField::recipe_build_diagnostics(const Vector2i &p_region) const {
+	Dictionary result;
+	const auto diagnostics = field()->build_diagnostics({p_region.x, p_region.y});
+	if (!diagnostics) return result;
+	result["centers_attempted"] = static_cast<std::int64_t>(diagnostics->centers_attempted);
+	result["directions_evaluated"] = static_cast<std::int64_t>(diagnostics->directions_evaluated);
+	result["build_time_usec"] = static_cast<std::int64_t>(diagnostics->build_time_usec);
+	result["terminal_reason"] = String(diagnostics->terminal_reason.c_str());
+	Array centers;
+	for (const CaveCenterAttemptDiagnostics &attempt : diagnostics->centers) {
+		Dictionary item;
+		item["center"] = to_godot(attempt.center);
+		item["directions_evaluated"] = static_cast<std::int64_t>(attempt.directions_evaluated);
+		item["viable_entrances"] = static_cast<std::int64_t>(attempt.viable_entrances);
+		item["full_recipe_attempts"] = static_cast<std::int64_t>(attempt.full_recipe_attempts);
+		item["terminal_reason"] = String(attempt.terminal_reason.c_str());
+		Dictionary rejections;
+		for (const auto &[reason, count] : attempt.rejection_counts)
+			rejections[String(reason.c_str())] = static_cast<std::int64_t>(count);
+		item["rejection_counts"] = rejections;
+		centers.push_back(item);
+	}
+	result["centers"] = centers;
+	return result;
 }
 
 double NativeCaveField::density(const Vector3 &p_position, const double p_depth,

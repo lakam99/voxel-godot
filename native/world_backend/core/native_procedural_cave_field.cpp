@@ -3,6 +3,7 @@
 #include "godot_pcg_compat.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <limits>
@@ -95,12 +96,31 @@ std::uint32_t NativeProceduralCaveField::region_seed(const CaveRegionKey region)
     return hash;
 }
 
+std::uint32_t fallback_center_seed(const std::vector<std::uint32_t> &seed_code_points,
+    const CaveRegionKey region) {
+    std::uint32_t hash = 2166136261U;
+    for (const std::uint32_t code_point : seed_code_points) hash = fnv_append(hash, code_point);
+    append_ascii(hash, ":cave-center-fallback:");
+    append_ascii(hash, std::to_string(region.x));
+    append_ascii(hash, ",");
+    append_ascii(hash, std::to_string(region.z));
+    return hash;
+}
+
 std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
     const CaveRegionKey region, const SurfaceSampler &surface,
     const ProtectedBounds &protected_bounds) const {
     const std::shared_ptr<const CaveRecipe> recipe = recipe_snapshot_for_region(
         region, surface, protected_bounds);
     return recipe ? std::optional<CaveRecipe>(*recipe) : std::nullopt;
+}
+
+std::optional<CaveRecipeBuildDiagnostics> NativeProceduralCaveField::build_diagnostics(
+    const CaveRegionKey region) const {
+    const std::lock_guard<std::mutex> lock(cache_mutex_);
+    const auto found = recipe_diagnostics_.find(region);
+    if (found == recipe_diagnostics_.end()) return std::nullopt;
+    return found->second;
 }
 
 std::shared_ptr<const CaveRecipe> NativeProceduralCaveField::recipe_snapshot_for_region(
@@ -113,11 +133,13 @@ std::shared_ptr<const CaveRecipe> NativeProceduralCaveField::recipe_snapshot_for
         if (found != recipe_cache_.end()) return found->second;
     }
     const auto started = std::chrono::steady_clock::now();
-    const std::optional<CaveRecipe> built = build_recipe(region, surface, protected_bounds);
+    CaveRecipeBuildDiagnostics diagnostics;
+    const std::optional<CaveRecipe> built = build_recipe(region, surface, protected_bounds, diagnostics);
     const std::shared_ptr<const CaveRecipe> snapshot = built
         ? std::make_shared<const CaveRecipe>(*built) : std::shared_ptr<const CaveRecipe>{};
     const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
+    diagnostics.build_time_usec = elapsed;
     {
         const std::lock_guard<std::mutex> lock(cache_mutex_);
         const auto found = recipe_cache_.find(region);
@@ -125,8 +147,13 @@ std::shared_ptr<const CaveRecipe> NativeProceduralCaveField::recipe_snapshot_for
         ++cache_stats_.recipe_build_count;
         cache_stats_.recipe_build_total_usec += elapsed;
         cache_stats_.recipe_build_max_usec = std::max(cache_stats_.recipe_build_max_usec, elapsed);
-        if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) { recipe_cache_.clear(); ++cache_stats_.cache_evictions; }
+        if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) {
+            recipe_cache_.clear();
+            recipe_diagnostics_.clear();
+            ++cache_stats_.cache_evictions;
+        }
         recipe_cache_.emplace(region, snapshot);
+        recipe_diagnostics_[region] = std::move(diagnostics);
     }
     return snapshot;
 }
@@ -138,74 +165,266 @@ NativeProceduralCaveField::CacheStats NativeProceduralCaveField::cache_stats() c
 
 std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
     const CaveRegionKey region, const SurfaceSampler &surface,
-    const ProtectedBounds &protected_bounds) const {
+    const ProtectedBounds &protected_bounds,
+    CaveRecipeBuildDiagnostics &diagnostics) const {
+    CaveCenterAttemptDiagnostics primary_diagnostics;
+    std::optional<CaveRecipe> recipe = build_recipe_at_offset(region, {0.0F, 0.0F, 0.0F},
+        surface, protected_bounds, primary_diagnostics);
+    diagnostics.centers_attempted = 1U;
+    diagnostics.directions_evaluated = primary_diagnostics.directions_evaluated;
+    diagnostics.centers.push_back(primary_diagnostics);
+    if (recipe) {
+        diagnostics.terminal_reason = "accepted";
+        return recipe;
+    }
+    // Preserve primary-center output and cost exactly. Center search is only
+    // entered when that center evaluated all eight directions without success.
+    if (primary_diagnostics.directions_evaluated != 8U) {
+        diagnostics.terminal_reason = primary_diagnostics.terminal_reason;
+        return std::nullopt;
+    }
+    GodotPcg32 offset_rng(fallback_center_seed(seed_code_points_, region));
+    const double first_angle = randf_range(offset_rng, 0.0F, static_cast<float>(TAU));
+    for (std::int32_t index = 0; index < 4; ++index) {
+        const double angle = first_angle + static_cast<double>(index) * TAU / 4.0;
+        const CaveVector3 offset{static_cast<float>(std::cos(angle) * 28.0), 0.0F,
+            static_cast<float>(std::sin(angle) * 28.0)};
+        CaveCenterAttemptDiagnostics attempt;
+        recipe = build_recipe_at_offset(region, offset, surface, protected_bounds, attempt);
+        ++diagnostics.centers_attempted;
+        diagnostics.directions_evaluated += attempt.directions_evaluated;
+        diagnostics.centers.push_back(attempt);
+        if (recipe) {
+            diagnostics.terminal_reason = "accepted";
+            return recipe;
+        }
+    }
+    diagnostics.terminal_reason = diagnostics.centers.back().terminal_reason;
+    return std::nullopt;
+}
+
+std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe_at_offset(
+    const CaveRegionKey region, const CaveVector3 center_offset,
+    const SurfaceSampler &surface, const ProtectedBounds &protected_bounds,
+    CaveCenterAttemptDiagnostics &attempt_diagnostics) const {
     GodotPcg32 rng(region_seed(region));
 
     const double region_x = static_cast<double>(region.x) * REGION_METRES;
     const double region_z = static_cast<double>(region.z) * REGION_METRES;
     CaveVector3 center{static_cast<float>(region_x + randf_range(rng, -14.0, 14.0)), 0.0F,
         static_cast<float>(region_z + randf_range(rng, -14.0, 14.0))};
+    if (center_offset.x != 0.0F || center_offset.z != 0.0F) center = add(center, center_offset);
+    attempt_diagnostics.center = center;
+    if (!(region_at(center) == region)) {
+        attempt_diagnostics.terminal_reason = "center_outside_region";
+        return std::nullopt;
+    }
     center.y = static_cast<float>(surface(center.x, center.z));
-    if (center.y < 19.0F) return std::nullopt;
+    attempt_diagnostics.center = center;
+    if (center.y < 19.0F) {
+        attempt_diagnostics.terminal_reason = "lowland_center";
+        return std::nullopt;
+    }
 
     const double length_value = randf_range(rng, 43.0, 52.0);
     const double phase = randf_range(rng, 0.0, TAU);
-    CaveVector3 entry{};
-    CaveVector3 outward{};
-    double best_score = -std::numeric_limits<double>::infinity();
+    const double bend = randf_range(rng, -7.0, 7.0);
+    struct EntranceCandidate {
+        CaveVector3 entry;
+        CaveVector3 outward;
+        CaveVector3 side;
+        double floor_end = 0.0;
+        double roof_margin = 0.0;
+        std::int64_t roof_margin_millimeters = 0;
+        double drop_preference = 0.0;
+        std::int64_t drop_preference_millimeters = 0;
+        std::int32_t candidate_index = 0;
+        std::size_t lower_level_count = 0U;
+        std::vector<CaveVector3> route;
+    };
+    std::vector<EntranceCandidate> candidates;
+    const std::array<double, 7> vertical_radii{{1.35, 1.45, 1.45, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS}};
+    const double roof_reserve = cell_size_meters_ * 1.15;
+    bool saw_drop_candidate = false;
+    bool saw_descent_candidate = false;
+    bool saw_depth_candidate = false;
+    bool saw_surface_crossing = false;
+    bool saw_roof_failure = false;
+    bool saw_grade_failure = false;
+    attempt_diagnostics.directions_evaluated = 8U;
     for (std::int32_t index = 0; index < 8; ++index) {
         const double angle = phase + static_cast<double>(index) * TAU / 8.0;
         const CaveVector3 direction{static_cast<float>(std::cos(angle)), 0.0F, static_cast<float>(std::sin(angle))};
-        CaveVector3 candidate = add(center, multiply(direction, length_value));
-        candidate.y = static_cast<float>(surface(candidate.x, candidate.z));
-        if (candidate.y < 17.0F) continue;
-        const double drop = static_cast<double>(center.y) - candidate.y;
-        if (drop < -3.0 || drop > 18.0) continue;
-        const double score = -std::abs(drop - 8.0);
-        if (score > best_score) { best_score = score; entry = candidate; outward = direction; }
+        CaveVector3 entry = add(center, multiply(direction, length_value));
+        entry.y = static_cast<float>(surface(entry.x, entry.z));
+        if (entry.y < 17.0F) {
+            ++attempt_diagnostics.rejection_counts["entry_too_low"];
+            continue;
+        }
+        const double drop = static_cast<double>(center.y) - entry.y;
+        if (drop < -3.0 || drop > 18.0) {
+            ++attempt_diagnostics.rejection_counts["entry_drop"];
+            continue;
+        }
+        saw_drop_candidate = true;
+        const double floor_end = std::min(static_cast<double>(entry.y) - 7.5,
+            static_cast<double>(center.y) - 11.0);
+        if (static_cast<double>(entry.y) - floor_end > length_value * 0.35) {
+            ++attempt_diagnostics.rejection_counts["descent_limit"];
+            continue;
+        }
+        saw_descent_candidate = true;
+        const double remaining_depth = floor_end - 10.0 - lowest_cave_floor_meters_;
+        const std::size_t lower_level_count = std::min(MAX_DEEP_LEVELS,
+            static_cast<std::size_t>(std::max(0.0, std::floor(remaining_depth / DEEP_LEVEL_DROP_METERS))));
+        if (lower_level_count < 4U) {
+            ++attempt_diagnostics.rejection_counts["depth_capacity"];
+            continue;
+        }
+        saw_depth_candidate = true;
+        const CaveVector3 side{-direction.z, 0.0F, direction.x};
+        EntranceCandidate candidate;
+        candidate.entry = entry;
+        candidate.outward = direction;
+        candidate.side = side;
+        candidate.floor_end = floor_end;
+        candidate.drop_preference = -std::abs(drop - 8.0);
+        candidate.drop_preference_millimeters = static_cast<std::int64_t>(
+            std::floor(candidate.drop_preference * 1000.0));
+        candidate.candidate_index = index;
+        candidate.lower_level_count = lower_level_count;
+        candidate.route.reserve(7U);
+        for (std::int32_t route_index = 0; route_index < 7; ++route_index) {
+            const double t = static_cast<double>(route_index) / 6.0;
+            CaveVector3 point = add(lerp(entry, center, t), multiply(side,
+                std::sin(t * PI) * bend + std::sin(t * TAU) * 2.0));
+            const double eased_t = std::pow(t, 0.4);
+            point.y = static_cast<float>(static_cast<double>(entry.y) - cell_size_meters_ * 0.25
+                + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 0.25)) * eased_t);
+            candidate.route.push_back(point);
+        }
+        candidate.route[1].y += 0.25F;
+        bool route_below_surface = true;
+        for (std::size_t route_index = 0; route_index + 1U < candidate.route.size(); ++route_index) {
+            for (std::int32_t step = 0; step < 5; ++step) {
+                const CaveVector3 point = lerp(candidate.route[route_index], candidate.route[route_index + 1U],
+                    static_cast<double>(step) / 4.0);
+                if (static_cast<double>(point.y) - 0.3 > surface(point.x, point.z)) {
+                    route_below_surface = false;
+                    break;
+                }
+            }
+            if (!route_below_surface) break;
+        }
+        if (!route_below_surface) {
+            saw_surface_crossing = true;
+            ++attempt_diagnostics.rejection_counts["route_crosses_surface"];
+            continue;
+        }
+        const double maximum_grade = std::tan(46.0 * PI / 180.0);
+        bool guide_walkable = true;
+        for (std::size_t route_index = 0; route_index + 1U < candidate.route.size(); ++route_index) {
+            const CaveVector3 a = candidate.route[route_index];
+            const CaveVector3 b = candidate.route[route_index + 1U];
+            const double horizontal_run = std::hypot(static_cast<double>(b.x - a.x),
+                static_cast<double>(b.z - a.z));
+            if (horizontal_run > 0.01 && std::abs(static_cast<double>(b.y - a.y)) / horizontal_run > maximum_grade) {
+                guide_walkable = false;
+                break;
+            }
+        }
+        if (!guide_walkable) {
+            saw_grade_failure = true;
+            ++attempt_diagnostics.rejection_counts["entrance_guide_grade"];
+            continue;
+        }
+        double minimum_roof_margin = std::numeric_limits<double>::infinity();
+        for (std::size_t segment_index = 1U; segment_index + 1U < candidate.route.size(); ++segment_index) {
+            for (std::int32_t sample_index = 0; sample_index < 5; ++sample_index) {
+                const double t = static_cast<double>(sample_index) / 4.0;
+                const CaveVector3 floor_point = lerp(candidate.route[segment_index],
+                    candidate.route[segment_index + 1U], t);
+                const double vertical_radius = vertical_radii[segment_index]
+                    + (vertical_radii[segment_index + 1U] - vertical_radii[segment_index]) * t;
+                const double margin = surface(floor_point.x, floor_point.z)
+                    - (static_cast<double>(floor_point.y) + vertical_radius * 2.0 + roof_reserve);
+                minimum_roof_margin = std::min(minimum_roof_margin, margin);
+            }
+        }
+        if (minimum_roof_margin < 0.0) {
+            saw_roof_failure = true;
+            ++attempt_diagnostics.rejection_counts["entrance_roof"];
+            continue;
+        }
+        candidate.roof_margin = minimum_roof_margin;
+        candidate.roof_margin_millimeters = static_cast<std::int64_t>(std::floor(minimum_roof_margin * 1000.0));
+        candidates.push_back(std::move(candidate));
+        ++attempt_diagnostics.viable_entrances;
     }
-    if (outward.x == 0.0F && outward.y == 0.0F && outward.z == 0.0F) return std::nullopt;
-
-    const CaveVector3 side{-outward.z, 0.0F, outward.x};
-    const double bend = randf_range(rng, -7.0, 7.0);
-    const double floor_end = std::min(static_cast<double>(entry.y) - 7.5,
-        static_cast<double>(center.y) - 11.0);
-    if (static_cast<double>(entry.y) - floor_end > length_value * 0.35) return std::nullopt;
+    if (candidates.empty()) {
+        if (saw_depth_candidate) {
+            if (saw_roof_failure) attempt_diagnostics.terminal_reason = "entrance_roof";
+            else if (saw_surface_crossing) attempt_diagnostics.terminal_reason = "route_crosses_surface";
+            else if (saw_grade_failure) attempt_diagnostics.terminal_reason = "entrance_grade";
+            else attempt_diagnostics.terminal_reason = "no_valid_entrance";
+            return std::nullopt;
+        }
+        if (saw_descent_candidate && !saw_depth_candidate) {
+            attempt_diagnostics.terminal_reason = "insufficient_world_depth";
+            return std::nullopt;
+        }
+        if (saw_drop_candidate && !saw_descent_candidate) {
+            attempt_diagnostics.terminal_reason = "entrance_descent_limit";
+            return std::nullopt;
+        }
+        attempt_diagnostics.terminal_reason = "no_valid_entrance";
+        return std::nullopt;
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const EntranceCandidate &a, const EntranceCandidate &b) {
+        if (a.roof_margin_millimeters != b.roof_margin_millimeters)
+            return a.roof_margin_millimeters > b.roof_margin_millimeters;
+        if (a.drop_preference_millimeters != b.drop_preference_millimeters)
+            return a.drop_preference_millimeters > b.drop_preference_millimeters;
+        return a.candidate_index < b.candidate_index;
+    });
+    const double branch_distance = randf_range(rng, 15.0, 21.0);
+    const CaveVector3 requested_main_radii{randf_range(rng, 10.0, 14.0),
+        randf_range(rng, 5.0, 7.0), randf_range(rng, 10.0, 13.0)};
+    attempt_diagnostics.full_recipe_attempts = static_cast<std::uint32_t>(candidates.size());
+    std::string last_candidate_rejection = "no_valid_entrance";
+    for (const EntranceCandidate &candidate : candidates) {
+        const CaveVector3 entry = candidate.entry;
+        const CaveVector3 outward = candidate.outward;
+        const CaveVector3 side = candidate.side;
+        const double floor_end = candidate.floor_end;
+        const std::size_t lower_level_count = candidate.lower_level_count;
+        std::string candidate_rejection = "unknown";
+        const auto try_candidate = [&]() -> std::optional<CaveRecipe> {
 
     CaveRecipe recipe;
     recipe.region = region;
     recipe.entry = entry;
     recipe.outward = outward;
-    recipe.route.reserve(7U);
-    for (std::int32_t index = 0; index < 7; ++index) {
-        const double t = static_cast<double>(index) / 6.0;
-        CaveVector3 point = add(lerp(entry, center, t), multiply(side,
-            std::sin(t * PI) * bend + std::sin(t * TAU) * 2.0));
-        const double eased_t = std::pow(t, 0.4);
-        point.y = static_cast<float>(static_cast<double>(entry.y) - cell_size_meters_ * 0.25
-            + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 0.25)) * eased_t);
-        recipe.route.push_back(point);
-    }
-    // Raise the first interior control point into the natural hillside so the
-    // entrance collar does not stack its descent on a steep surface grade.
-    recipe.route[1].y += 0.25F;
+    recipe.route = candidate.route;
     for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
         for (std::int32_t step = 0; step < 5; ++step) {
             const CaveVector3 floor_point = lerp(recipe.route[index], recipe.route[index + 1U],
                 static_cast<double>(step) / 4.0);
             if (static_cast<double>(floor_point.y) - 0.3
-                > surface(floor_point.x, floor_point.z))
+                > surface(floor_point.x, floor_point.z)) {
+                candidate_rejection = "route_crosses_surface";
                 return std::nullopt;
+            }
         }
     }
 
     recipe = append_tapered_arch_path(recipe, recipe.route,
         {2.5, 2.3, 2.1, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS},
         {1.35, 1.45, 1.45, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS});
-    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
+    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) { candidate_rejection = "network_roof"; return std::nullopt; }
     const CaveVector3 junction = recipe.route[3];
     const CaveVector3 branch_end = [&]() {
-        CaveVector3 value = add(recipe.route[5], multiply(side, randf_range(rng, 15.0, 21.0)));
+        CaveVector3 value = add(recipe.route[5], multiply(side, branch_distance));
         value.y = static_cast<float>(floor_end - 1.0);
         return value;
     }();
@@ -219,9 +438,6 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
     const CaveVector3 deep_mid = subtract(subtract(recipe.route[6], multiply(outward, 12.0F)),
         {0.0F, 7.0F, 0.0F});
     recipe.deep_route = {recipe.route[6], deep_mid, deep_end_at_floor};
-    const double remaining_depth = static_cast<double>(deep_end_at_floor.y) - lowest_cave_floor_meters_;
-    const std::size_t lower_level_count = std::min(MAX_DEEP_LEVELS,
-        static_cast<std::size_t>(std::max(0.0, std::floor(remaining_depth / DEEP_LEVEL_DROP_METERS))));
     const double first_angle = std::atan2(
         static_cast<double>(deep_end_at_floor.z - recipe.route[6].z),
         static_cast<double>(deep_end_at_floor.x - recipe.route[6].x));
@@ -295,22 +511,20 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         const std::vector<CaveVector3> depth_loop = recipe.depth_loops[index];
         recipe = append_path(recipe, depth_loop, static_cast<float>(TUNNEL_RADIUS));
     }
-    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
+    if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) { candidate_rejection = "entrance_roof"; return std::nullopt; }
 
-    CaveVector3 main_radii{static_cast<float>(randf_range(rng, 10.0, 14.0)),
-        static_cast<float>(randf_range(rng, 5.0, 7.0)),
-        static_cast<float>(randf_range(rng, 10.0, 13.0))};
+    CaveVector3 main_radii = requested_main_radii;
     main_radii.y = static_cast<float>(fit_chamber_vertical_radius(
         recipe.route[6], main_radii.x, main_radii.z, main_radii.y, surface));
-    if (main_radii.y < TUNNEL_RADIUS) return std::nullopt;
+    if (main_radii.y < TUNNEL_RADIUS) { candidate_rejection = "main_chamber_clearance"; return std::nullopt; }
     CaveVector3 branch_radii{6.0F, 4.0F, 7.0F};
     branch_radii.y = static_cast<float>(fit_chamber_vertical_radius(
         branch_end, branch_radii.x, branch_radii.z, branch_radii.y, surface));
-    if (branch_radii.y < 2.5F) return std::nullopt;
+    if (branch_radii.y < 2.5F) { candidate_rejection = "branch_chamber_clearance"; return std::nullopt; }
     CaveVector3 deep_radii{8.0F, 5.0F, 9.0F};
     deep_radii.y = static_cast<float>(fit_chamber_vertical_radius(
         deep_end_at_floor, deep_radii.x, deep_radii.z, deep_radii.y, surface));
-    if (deep_radii.y < 2.5F) return std::nullopt;
+    if (deep_radii.y < 2.5F) { candidate_rejection = "deep_chamber_clearance"; return std::nullopt; }
     recipe.chambers = {
         {add(recipe.route[6], {0.0F, main_radii.y, 0.0F}), main_radii},
         {add(branch_end, {0.0F, branch_radii.y, 0.0F}), branch_radii},
@@ -324,9 +538,11 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
             8.0F + (index % 3U == 0U ? 1.0F : 0.0F)};
         radii.y = static_cast<float>(fit_chamber_vertical_radius(
             floor, radii.x, radii.z, radii.y, surface));
-        if (radii.y < TUNNEL_RADIUS) return std::nullopt;
-        if (static_cast<double>(tier_floor.y) < lowest_cave_floor_meters_)
+        if (radii.y < TUNNEL_RADIUS) { candidate_rejection = "tier_chamber_clearance_or_world_bottom"; return std::nullopt; }
+        if (static_cast<double>(tier_floor.y) < lowest_cave_floor_meters_) {
+            candidate_rejection = "tier_chamber_clearance_or_world_bottom";
             return std::nullopt;
+        }
         recipe.chambers.push_back({add(floor, {0.0F, radii.y, 0.0F}), radii});
     }
     for (const CaveChamber &chamber : recipe.chambers) {
@@ -336,10 +552,24 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         recipe.bounds.merge(bounds);
     }
     if (!(region_at(recipe.bounds.position) == region)
-        || !(region_at(add(recipe.bounds.position, recipe.bounds.size)) == region))
+        || !(region_at(add(recipe.bounds.position, recipe.bounds.size)) == region)) {
+        candidate_rejection = "region_bounds";
         return std::nullopt;
-    if (protected_bounds(recipe.bounds)) return std::nullopt;
+    }
+    if (protected_bounds(recipe.bounds)) { candidate_rejection = "protected_site"; return std::nullopt; }
+    if (!route_has_walkable_effective_support(recipe, surface)) { candidate_rejection = "entrance_effective_grade"; return std::nullopt; }
     return recipe;
+        };
+        const std::optional<CaveRecipe> built = try_candidate();
+        if (built) {
+            attempt_diagnostics.terminal_reason = "accepted";
+            return built;
+        }
+        ++attempt_diagnostics.rejection_counts[candidate_rejection];
+        last_candidate_rejection = candidate_rejection;
+    }
+    attempt_diagnostics.terminal_reason = candidates.empty() ? "no_valid_entrance" : last_candidate_rejection;
+    return std::nullopt;
 }
 
 CaveRecipe NativeProceduralCaveField::append_path(
@@ -522,6 +752,95 @@ double NativeProceduralCaveField::density(
             : std::max(detail, -carved + 0.04);
     }
     return carved;
+}
+
+bool NativeProceduralCaveField::route_has_walkable_effective_support(
+    const CaveRecipe &recipe, const SurfaceSampler &surface) const {
+    CaveVector3 previous{std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
+    for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
+        const CaveVector3 a = recipe.route[index];
+        const CaveVector3 b = recipe.route[index + 1U];
+        for (std::int32_t step = 0; step < 11; ++step) {
+            CaveVector3 guide = lerp(a, b, static_cast<double>(step) / 10.0);
+            const double ground_y = candidate_volume_ground_height_near(recipe, guide, surface);
+            if (!std::isfinite(ground_y) || std::abs(ground_y - guide.y) > 3.0) return false;
+            guide.y = static_cast<float>(ground_y);
+            if (std::isfinite(previous.x)) {
+                const double run = std::hypot(static_cast<double>(guide.x - previous.x),
+                    static_cast<double>(guide.z - previous.z));
+                if (run > 0.01 && std::abs(static_cast<double>(guide.y - previous.y)) / run
+                    > std::tan(46.0 * PI / 180.0)) return false;
+            }
+            previous = guide;
+        }
+    }
+    return true;
+}
+
+double NativeProceduralCaveField::candidate_volume_ground_height_near(
+    const CaveRecipe &recipe, const CaveVector3 position,
+    const SurfaceSampler &surface) const {
+    const float cell_size = static_cast<float>(cell_size_meters_);
+    const CaveVector3 lattice{position.x / cell_size, position.y / cell_size, position.z / cell_size};
+    const auto x = static_cast<std::int32_t>(std::floor(lattice.x));
+    const auto z = static_cast<std::int32_t>(std::floor(lattice.z));
+    const float fraction_x = lattice.x - static_cast<float>(x);
+    const float fraction_z = lattice.z - static_cast<float>(z);
+    const float start_height = lattice.y + 0.95F;
+    const auto start_y = static_cast<std::int32_t>(std::floor(start_height));
+    const auto column_density = [&](const std::int32_t y) {
+        const double a = candidate_volume_density_at_cell(recipe, x, y, z, surface);
+        const double b = candidate_volume_density_at_cell(recipe, x + 1, y, z, surface);
+        const double c = candidate_volume_density_at_cell(recipe, x, y, z + 1, surface);
+        const double d = candidate_volume_density_at_cell(recipe, x + 1, y, z + 1, surface);
+        const float front = static_cast<float>(a + (b - a) * fraction_x);
+        const float back = static_cast<float>(c + (d - c) * fraction_x);
+        return static_cast<double>(front + (back - front) * fraction_z);
+    };
+    const double lower = column_density(start_y);
+    const double upper = column_density(start_y + 1);
+    double previous_density = static_cast<double>(static_cast<float>(lower
+        + (upper - lower) * (start_height - static_cast<float>(start_y))));
+    if (previous_density >= 0.0) return std::numeric_limits<double>::quiet_NaN();
+    double previous_height = start_height;
+    const auto lowest_y = static_cast<std::int32_t>(std::floor(lattice.y - 14.0F));
+    for (std::int32_t y = start_y; y >= lowest_y; --y) {
+        const double density = column_density(y);
+        if (density >= 0.0 && previous_density < 0.0) {
+            const double fraction = (density - previous_density) == 0.0 ? 0.0
+                : density / std::max(density - previous_density, 0.0001);
+            const float height = static_cast<float>(static_cast<float>(y)
+                + (previous_height - static_cast<float>(y)) * static_cast<float>(fraction));
+            return static_cast<double>(height * cell_size);
+        }
+        previous_density = density;
+        previous_height = static_cast<double>(y);
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+double NativeProceduralCaveField::candidate_volume_density_at_cell(
+    const CaveRecipe &recipe, const std::int32_t x, const std::int32_t y,
+    const std::int32_t z, const SurfaceSampler &surface) const {
+    const float cell_size = static_cast<float>(cell_size_meters_);
+    const CaveVector3 position{static_cast<float>(x) * cell_size,
+        static_cast<float>(y) * cell_size, static_cast<float>(z) * cell_size};
+    const double surface_y = surface(position.x, position.z);
+    double cave_density = ROCK;
+    if (recipe.bounds.contains(position)) {
+        cave_density = recipe_density(position, recipe);
+        if (cave_density < 1.0) {
+            const double detail = static_cast<double>(noise_.sample_3d(CaveNoiseChannel::detail,
+                position.x, position.y, position.z)) * 0.24;
+            cave_density += cave_density < 0.0 ? std::min(detail, -cave_density - 0.02)
+                : std::max(detail, -cave_density + 0.04);
+        }
+    }
+    double density = std::min(surface_y - static_cast<double>(position.y), cave_density);
+    if (static_cast<double>(position.y) <= lowest_cave_floor_meters_ - 4.0 * cell_size)
+        density = std::max(density, cell_size * 4.0);
+    return density;
 }
 
 } // namespace voxel::world_backend

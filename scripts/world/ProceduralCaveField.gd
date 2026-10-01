@@ -12,6 +12,7 @@ const MAX_DEEP_LEVELS := 7
 
 var seed_text := ""
 var recipes := {}
+var recipe_diagnostics := {}
 var recipe_build_count := 0
 var recipe_build_total_usec := 0
 var recipe_build_max_usec := 0
@@ -24,6 +25,7 @@ func setup(seed_value: String) -> void:
 		return
 	seed_text = seed_value
 	recipes.clear()
+	recipe_diagnostics.clear()
 	configure_noise(shape_noise, "chambers", 0.032)
 	configure_noise(detail_noise, "rock", 0.19)
 
@@ -36,6 +38,7 @@ func configure_noise(noise: FastNoiseLite, salt: String, frequency: float) -> vo
 
 func clear() -> void:
 	recipes.clear()
+	recipe_diagnostics.clear()
 
 func region_at(position: Vector3) -> Vector2i:
 	return Vector2i(floori((position.x + REGION_METRES * 0.5) / REGION_METRES), floori((position.z + REGION_METRES * 0.5) / REGION_METRES))
@@ -99,78 +102,202 @@ func recipe_for_region(region: Vector2i, generation) -> Dictionary:
 	if recipes.has(region):
 		return recipes[region]
 	var started := Time.get_ticks_usec()
-	var recipe := build_recipe(region, generation)
+	var diagnostics := {}
+	var recipe := build_recipe(region, generation, diagnostics)
 	var elapsed := Time.get_ticks_usec() - started
 	recipe_build_count += 1
 	recipe_build_total_usec += elapsed
 	recipe_build_max_usec = maxi(recipe_build_max_usec, elapsed)
 	if recipes.size() >= RECIPE_CACHE_LIMIT:
 		recipes.clear()
+		recipe_diagnostics.clear()
 		cache_evictions += 1
 	recipes[region] = recipe
+	recipe_diagnostics[region] = diagnostics.duplicate(true)
 	return recipe
 
+func build_diagnostics_for_region(region: Vector2i) -> Dictionary:
+	return (recipe_diagnostics.get(region, {}) as Dictionary).duplicate(true)
+
 func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) -> Dictionary:
+	var started := Time.get_ticks_usec()
+	var attempts: Array[Dictionary] = []
+	var aggregate := {"highlandCenter": false, "validEntrance": false,
+		"depthCapacity": false, "proposalConditioned": false}
+	var attempt_diagnostics := {}
+	var recipe := build_recipe_at_offset(region, generation, Vector3.ZERO, attempt_diagnostics)
+	attempts.append(attempt_diagnostics)
+	merge_attempt_admission(aggregate, attempt_diagnostics)
+	if not recipe.is_empty() or int(attempt_diagnostics.get("directionsEvaluated", 0)) != 8:
+		return finish_recipe_build(diagnostics, aggregate, attempts, started, recipe)
+	var offset_rng := RandomNumberGenerator.new()
+	offset_rng.seed = stable_hash("%s:cave-center-fallback:%d,%d" % [seed_text, region.x, region.y])
+	var first_angle := offset_rng.randf_range(0.0, TAU)
+	for index in range(4):
+		var angle := first_angle + float(index) * TAU / 4.0
+		var offset := Vector3(cos(angle) * 28.0, 0.0, sin(angle) * 28.0)
+		attempt_diagnostics = {}
+		recipe = build_recipe_at_offset(region, generation, offset, attempt_diagnostics)
+		attempts.append(attempt_diagnostics)
+		merge_attempt_admission(aggregate, attempt_diagnostics)
+		if not recipe.is_empty():
+			break
+	return finish_recipe_build(diagnostics, aggregate, attempts, started, recipe)
+
+func finish_recipe_build(diagnostics: Dictionary, aggregate: Dictionary,
+		attempts: Array[Dictionary], started: int, recipe: Dictionary) -> Dictionary:
+	var terminal_reasons := {}
+	var directions_evaluated := 0
+	var full_recipe_attempts := 0
+	for attempt in attempts:
+		var reason := str(attempt.get("reason", "missing_reason"))
+		terminal_reasons[reason] = int(terminal_reasons.get(reason, 0)) + 1
+		directions_evaluated += int(attempt.get("directionsEvaluated", 0))
+		full_recipe_attempts += int(attempt.get("fullRecipeAttempts", 0))
+	diagnostics.merge(aggregate, true)
+	diagnostics["centerAttempts"] = attempts.duplicate(true)
+	diagnostics["centersAttempted"] = attempts.size()
+	diagnostics["directionsEvaluated"] = directions_evaluated
+	diagnostics["fullRecipeAttempts"] = full_recipe_attempts
+	diagnostics["terminalReasons"] = terminal_reasons
+	diagnostics["buildTimeUsec"] = Time.get_ticks_usec() - started
+	diagnostics["reason"] = "accepted" if not recipe.is_empty() else str(attempts.back().get("reason", "no_valid_entrance"))
+	return recipe
+
+func merge_attempt_admission(aggregate: Dictionary, attempt: Dictionary) -> void:
+	for key in ["highlandCenter", "validEntrance", "depthCapacity", "proposalConditioned"]:
+		aggregate[key] = bool(aggregate[key]) or bool(attempt.get(key, false))
+
+func increment_count(counts: Dictionary, key: String) -> void:
+	counts[key] = int(counts.get(key, 0)) + 1
+
+func build_recipe_at_offset(region: Vector2i, generation, center_offset: Vector3,
+		diagnostics: Dictionary) -> Dictionary:
 	# Local RNG does not consume/reorder the terrain, town or prop RNG streams.
-	diagnostics.merge({"seedSelected": false, "highlandCenter": false,
-		"validEntrance": false, "depthCapacity": false, "eligible": false}, false)
+	diagnostics.merge({"highlandCenter": false, "validEntrance": false,
+		"depthCapacity": false, "proposalConditioned": false}, false)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = stable_hash("%s:cave-region:%d,%d" % [seed_text, region.x, region.y])
-	diagnostics["seedSelected"] = true
 	var center := Vector3(region.x * REGION_METRES + rng.randf_range(-14.0, 14.0), 0.0, region.y * REGION_METRES + rng.randf_range(-14.0, 14.0))
+	if center_offset != Vector3.ZERO:
+		center += center_offset
+	diagnostics["center"] = center
+	diagnostics["directionRejections"] = {}
+	diagnostics["candidateRejections"] = {}
+	diagnostics["directionsEvaluated"] = 0
+	diagnostics["candidateDirections"] = 0
+	diagnostics["fullRecipeAttempts"] = 0
+	if region_at(center) != region:
+		return reject_recipe(diagnostics, "center_outside_region")
 	center.y = float(generation.terrain_reference_surface_y_at(center))
 	if center.y < 19.0:
 		return reject_recipe(diagnostics, "lowland_center")
 	diagnostics["highlandCenter"] = true
 	var length := rng.randf_range(43.0, 52.0)
 	var phase := rng.randf_range(0.0, TAU)
-	var entry := Vector3.ZERO
-	var outward := Vector3.ZERO
-	var best_score := -INF
+	var bend := rng.randf_range(-7.0, 7.0)
+	var entrance_candidates: Array[Dictionary] = []
+	var saw_drop_candidate := false
+	var saw_descent_candidate := false
+	var saw_capacity_candidate := false
+	var saw_surface_crossing := false
+	var saw_roof_failure := false
+	var saw_grade_failure := false
+	var lowest_cave_floor_y: float = float(generation.world_bottom_cell_y() + 4) * generation.cell_size()
+	diagnostics["directionsEvaluated"] = 8
 	for index in range(8):
 		var angle := phase + float(index) * TAU / 8.0
 		var direction := Vector3(cos(angle), 0.0, sin(angle))
 		var candidate := center + direction * length
 		candidate.y = float(generation.terrain_reference_surface_y_at(candidate))
 		if candidate.y < 17.0:
+			increment_count(diagnostics["directionRejections"], "entry_too_low")
 			continue
 		var drop := center.y - candidate.y
 		if drop < -3.0 or drop > 18.0:
+			increment_count(diagnostics["directionRejections"], "entry_drop")
 			continue
-		var score := -absf(drop - 8.0)
-		if score > best_score:
-			best_score = score
-			entry = candidate
-			outward = direction
-	if outward == Vector3.ZERO:
-		return reject_recipe(diagnostics, "no_valid_entrance")
-	diagnostics["validEntrance"] = true
-	var side := Vector3(-outward.z, 0.0, outward.x)
-	var bend := rng.randf_range(-7.0, 7.0)
-	var floor_end := minf(entry.y - 7.5, center.y - 11.0)
-	if entry.y - floor_end > length * 0.35:
-		return reject_recipe(diagnostics, "entrance_descent_limit")
-	var route: Array[Vector3] = []
-	for index in range(7):
-		var t := float(index) / 6.0
-		var point := entry.lerp(center, t) + side * (sin(t * PI) * bend + sin(t * TAU) * 2.0)
-		# The mouth must overlap a real below-surface volume cell. Starting the
-		# tunnel floor at the surface leaves only skylight above an intact sill.
-		# Lower the entrance ramp enough to acquire a roof beneath the hillside,
-		# without the old near-step profile that dropped most of the elevation
-		# in the first few metres.
-		point.y = lerpf(entry.y - generation.cell_size() * 0.25, floor_end, pow(t, 0.4))
-		route.append(point)
-	# Raise the first interior control point into the natural hillside so the
-	# entrance collar does not stack its descent on a steep surface grade.
-	route[1].y += 0.25
-	# A carver can only remove rock: never accept a tunnel crossing above a
-	# valley and then invent a separate floor to make the route look supported.
-	for index in range(route.size() - 1):
-		for step in range(5):
-			var floor_point := route[index].lerp(route[index + 1], float(step) / 4.0)
-			if floor_point.y - 0.3 > float(generation.terrain_reference_surface_y_at(floor_point)):
+		diagnostics["validEntrance"] = true
+		saw_drop_candidate = true
+		var candidate_floor_end := minf(candidate.y - 7.5, center.y - 11.0)
+		if candidate.y - candidate_floor_end > length * 0.35:
+			increment_count(diagnostics["directionRejections"], "descent_limit")
+			continue
+		saw_descent_candidate = true
+		var candidate_remaining_depth := (candidate_floor_end - 10.0) - lowest_cave_floor_y
+		var candidate_level_count := clampi(floori(candidate_remaining_depth / DEEP_LEVEL_DROP_METERS), 0, MAX_DEEP_LEVELS)
+		if candidate_level_count < 4:
+			increment_count(diagnostics["directionRejections"], "depth_capacity")
+			continue
+		saw_capacity_candidate = true
+		diagnostics["depthCapacity"] = true
+		diagnostics["proposalConditioned"] = true
+		var candidate_side := Vector3(-direction.z, 0.0, direction.x)
+		var candidate_route := build_entrance_route(candidate, center, candidate_side, bend,
+			candidate_floor_end, generation)
+		if not route_stays_below_surface(generation, candidate_route):
+			saw_surface_crossing = true
+			increment_count(diagnostics["directionRejections"], "route_crosses_surface")
+			continue
+		var roof_margin := entrance_roof_margin(generation, candidate_route)
+		if roof_margin < 0.0:
+			saw_roof_failure = true
+			increment_count(diagnostics["directionRejections"], "entrance_roof")
+			continue
+		if not route_guide_is_walkable(candidate_route):
+			saw_grade_failure = true
+			increment_count(diagnostics["directionRejections"], "entrance_guide_grade")
+			continue
+		var drop_preference := -absf(drop - 8.0)
+		entrance_candidates.append({"entry": candidate, "outward": direction, "side": candidate_side,
+			"floorEnd": candidate_floor_end, "route": candidate_route,
+			"lowerLevelCount": candidate_level_count, "roofMargin": roof_margin,
+			"roofMarginMillimeters": floori(roof_margin * 1000.0),
+			"dropPreferenceMillimeters": floori(drop_preference * 1000.0), "candidateIndex": index})
+	diagnostics["candidateDirections"] = entrance_candidates.size()
+	if entrance_candidates.is_empty():
+		if saw_capacity_candidate:
+			if saw_roof_failure:
+				return reject_recipe(diagnostics, "entrance_roof")
+			if saw_surface_crossing:
 				return reject_recipe(diagnostics, "route_crosses_surface")
+			if saw_grade_failure:
+				return reject_recipe(diagnostics, "entrance_grade")
+		if saw_descent_candidate and not saw_capacity_candidate:
+			return reject_recipe(diagnostics, "insufficient_world_depth")
+		if saw_drop_candidate and not saw_descent_candidate:
+			return reject_recipe(diagnostics, "entrance_descent_limit")
+		return reject_recipe(diagnostics, "no_valid_entrance")
+	entrance_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if int(a.roofMarginMillimeters) != int(b.roofMarginMillimeters):
+			return int(a.roofMarginMillimeters) > int(b.roofMarginMillimeters)
+		if int(a.dropPreferenceMillimeters) != int(b.dropPreferenceMillimeters):
+			return int(a.dropPreferenceMillimeters) > int(b.dropPreferenceMillimeters)
+		return int(a.candidateIndex) < int(b.candidateIndex))
+	var branch_distance := rng.randf_range(15.0, 21.0)
+	var requested_main_radii := Vector3(rng.randf_range(10.0, 14.0), rng.randf_range(5.0, 7.0), rng.randf_range(10.0, 13.0))
+	var last_candidate_rejection := "no_valid_entrance"
+	diagnostics["fullRecipeAttempts"] = entrance_candidates.size()
+	for candidate_data in entrance_candidates:
+		var candidate_diagnostics := {}
+		var candidate_recipe := build_recipe_for_entrance(region, generation, candidate_data,
+			branch_distance, requested_main_radii, candidate_diagnostics)
+		if not candidate_recipe.is_empty():
+			diagnostics["reason"] = "accepted"
+			return candidate_recipe
+		last_candidate_rejection = str(candidate_diagnostics.get("reason", last_candidate_rejection))
+		increment_count(diagnostics["candidateRejections"], last_candidate_rejection)
+	return reject_recipe(diagnostics, last_candidate_rejection)
+
+func build_recipe_for_entrance(region: Vector2i, generation, candidate: Dictionary,
+		branch_distance: float, requested_main_radii: Vector3, diagnostics: Dictionary) -> Dictionary:
+	var entry: Vector3 = candidate.entry
+	var outward: Vector3 = candidate.outward
+	var side: Vector3 = candidate.side
+	var floor_end: float = candidate.floorEnd
+	var route: Array[Vector3] = candidate.route
+	var lower_level_count: int = candidate.lowerLevelCount
+	var lowest_cave_floor_y: float = float(generation.world_bottom_cell_y() + 4) * generation.cell_size()
 	var segments: Array[Dictionary] = []
 	# Constrain the mouth to a player-clear arch, then widen only after the
 	# route is below the natural hillside. A full-radius mouth excavates through
@@ -181,7 +308,7 @@ func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) ->
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
 		return reject_recipe(diagnostics, "entrance_roof")
 	var junction: Vector3 = route[3]
-	var branch_end: Vector3 = route[5] + side * rng.randf_range(15.0, 21.0)
+	var branch_end: Vector3 = route[5] + side * branch_distance
 	branch_end.y = floor_end - 1.0
 	var loop: Array[Vector3] = [junction, junction + side * 10.0 - Vector3.UP, branch_end, route[6]]
 	append_path(segments, loop, TUNNEL_RADIUS)
@@ -189,13 +316,6 @@ func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) ->
 	deep_end.y = floor_end - 10.0
 	var deep_mid: Vector3 = route[6] - outward * 12.0 - Vector3.UP * 7.0
 	var deep_path: Array[Vector3] = [route[6], deep_mid, deep_end]
-	var lowest_cave_floor_y: float = float(generation.world_bottom_cell_y() + 4) * generation.cell_size()
-	var remaining_depth: float = deep_end.y - lowest_cave_floor_y
-	var lower_level_count := clampi(floori(remaining_depth / DEEP_LEVEL_DROP_METERS), 0, MAX_DEEP_LEVELS)
-	diagnostics["depthCapacity"] = lower_level_count >= 4
-	diagnostics["eligible"] = bool(diagnostics["seedSelected"]) \
-		and bool(diagnostics["highlandCenter"]) and bool(diagnostics["validEntrance"]) \
-		and bool(diagnostics["depthCapacity"])
 	var first_angle := atan2(deep_end.z - route[6].z, deep_end.x - route[6].x)
 	var lower_floors: Array[Vector3] = []
 	for index in range(1, lower_level_count + 1):
@@ -247,7 +367,7 @@ func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) ->
 		append_path(segments, depth_loop, TUNNEL_RADIUS)
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
 		return reject_recipe(diagnostics, "network_roof")
-	var main_radii := Vector3(rng.randf_range(10.0, 14.0), rng.randf_range(5.0, 7.0), rng.randf_range(10.0, 13.0))
+	var main_radii := requested_main_radii
 	main_radii.y = fit_chamber_vertical_radius(generation, route[6], main_radii.x, main_radii.z, main_radii.y)
 	if main_radii.y < TUNNEL_RADIUS:
 		return reject_recipe(diagnostics, "main_chamber_clearance")
@@ -286,12 +406,134 @@ func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) ->
 	# Reject a whole recipe; never plug a published entrance with a town mask.
 	if generation.surface_town_intersects_bounds(bounds) or generation.generated_site_intersects_bounds(bounds):
 		return reject_recipe(diagnostics, "protected_site")
+	var candidate_recipe := {"bounds": bounds, "segments": segments, "chambers": chambers}
+	if not route_effective_support_is_walkable(generation, route, candidate_recipe):
+		return reject_recipe(diagnostics, "entrance_effective_grade")
 	diagnostics["reason"] = "accepted"
 	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "depthLoops": depth_loops, "segments": segments, "chambers": chambers, "bounds": bounds}
 
 func reject_recipe(diagnostics: Dictionary, reason: String) -> Dictionary:
 	diagnostics["reason"] = reason
 	return {}
+
+func build_entrance_route(entry: Vector3, center: Vector3, side: Vector3,
+		bend: float, floor_end: float, generation) -> Array[Vector3]:
+	var route: Array[Vector3] = []
+	for index in range(7):
+		var t := float(index) / 6.0
+		var point := entry.lerp(center, t) + side * (sin(t * PI) * bend + sin(t * TAU) * 2.0)
+		# The mouth starts below the surface and descends gradually under natural rock.
+		point.y = lerpf(entry.y - generation.cell_size() * 0.25, floor_end, pow(t, 0.4))
+		route.append(point)
+	# Raise the first interior control point into the natural hillside so the
+	# entrance collar does not stack its descent on a steep surface grade.
+	route[1].y += 0.25
+	return route
+
+func route_stays_below_surface(generation, route: Array[Vector3]) -> bool:
+	for index in range(route.size() - 1):
+		for step in range(5):
+			var floor_point := route[index].lerp(route[index + 1], float(step) / 4.0)
+			if floor_point.y - 0.3 > float(generation.terrain_reference_surface_y_at(floor_point)):
+				return false
+	return true
+
+func route_guide_is_walkable(route: Array[Vector3]) -> bool:
+	for index in range(route.size() - 1):
+		var a: Vector3 = route[index]
+		var b: Vector3 = route[index + 1]
+		var horizontal_run := Vector2(b.x - a.x, b.z - a.z).length()
+		if horizontal_run > 0.01 and absf(b.y - a.y) / horizontal_run > tan(deg_to_rad(46.0)):
+			return false
+	return true
+
+func route_effective_support_is_walkable(generation, route: Array[Vector3], recipe: Dictionary) -> bool:
+	# Match CaveGenerationContractRunner.check_path against this candidate's own
+	# cave SDF, sampled on the same terrain lattice and interpolated ground column.
+	# This prevents a roof-preferred entrance from being accepted on a guide-only
+	# grade that the effective volume turns into an unwalkable ramp.
+	var previous := Vector3.INF
+	for index in range(route.size() - 1):
+		var a: Vector3 = route[index]
+		var b: Vector3 = route[index + 1]
+		for step in range(11):
+			var guide_floor := a.lerp(b, float(step) / 10.0)
+			var ground_y := candidate_ground_height_near(generation, guide_floor, recipe)
+			if is_nan(ground_y) or absf(ground_y - guide_floor.y) > 3.0:
+				return false
+			var support_floor := guide_floor
+			support_floor.y = ground_y
+			if previous != Vector3.INF:
+				var run := Vector2(support_floor.x - previous.x, support_floor.z - previous.z).length()
+				if run > 0.01 and absf(support_floor.y - previous.y) / run > tan(deg_to_rad(46.0)):
+					return false
+			previous = support_floor
+	return true
+
+func candidate_ground_height_near(generation, position: Vector3, recipe: Dictionary) -> float:
+	var cell_size := float(generation.cell_size())
+	var lattice := position / cell_size
+	var x := floori(lattice.x)
+	var z := floori(lattice.z)
+	var fraction := Vector2(lattice.x - x, lattice.z - z)
+	var start_height := lattice.y + 0.95
+	var start_y := floori(start_height)
+	var lower_density := candidate_volume_column_density(generation, recipe, x, start_y, z, fraction)
+	var upper_density := candidate_volume_column_density(generation, recipe, x, start_y + 1, z, fraction)
+	var previous_density := lerpf(lower_density, upper_density, start_height - start_y)
+	if previous_density >= 0.0:
+		return NAN
+	var previous_height := start_height
+	for y in range(start_y, floori(lattice.y - 14.0) - 1, -1):
+		var density := candidate_volume_column_density(generation, recipe, x, y, z, fraction)
+		if density >= 0.0 and previous_density < 0.0:
+			return lerpf(float(y), previous_height, density / maxf(density - previous_density, 0.0001)) * cell_size
+		previous_density = density
+		previous_height = float(y)
+	return NAN
+
+func candidate_volume_column_density(generation, recipe: Dictionary, x: int, y: int, z: int, fraction: Vector2) -> float:
+	var a := candidate_volume_density_at_cell(generation, recipe, Vector3i(x, y, z))
+	var b := candidate_volume_density_at_cell(generation, recipe, Vector3i(x + 1, y, z))
+	var c := candidate_volume_density_at_cell(generation, recipe, Vector3i(x, y, z + 1))
+	var d := candidate_volume_density_at_cell(generation, recipe, Vector3i(x + 1, y, z + 1))
+	return lerpf(lerpf(a, b, fraction.x), lerpf(c, d, fraction.x), fraction.y)
+
+func candidate_volume_density_at_cell(generation, recipe: Dictionary, cell: Vector3i) -> float:
+	var cell_size := float(generation.cell_size())
+	var position := Vector3(cell) * cell_size
+	# Recipe admission is source-generation state: player/save edits publish over
+	# this field but must not affect which immutable cave recipe is generated.
+	var surface_y := float(generation.terrain_reference_surface_y_at(position))
+	var density := minf(surface_y - position.y, candidate_cave_density(position, recipe))
+	if position.y <= float(generation.world_bottom_cell_y()) * cell_size:
+		density = maxf(density, cell_size * 4.0)
+	return density
+
+func candidate_cave_density(position: Vector3, recipe: Dictionary) -> float:
+	if not (recipe.bounds as AABB).has_point(position):
+		return ROCK
+	var carved := recipe_density(position, recipe)
+	if carved < 1.0:
+		var detail := detail_noise.get_noise_3dv(position) * 0.24
+		carved += minf(detail, -carved - 0.02) if carved < 0.0 else maxf(detail, -carved + 0.04)
+	return carved
+
+func entrance_roof_margin(generation, route: Array[Vector3]) -> float:
+	var vertical_radii: Array[float] = [1.35, 1.45, 1.45, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS]
+	var reserve := float(generation.cell_size()) * 1.15
+	var minimum_margin := INF
+	for segment_index in range(1, route.size() - 1):
+		var a: Vector3 = route[segment_index]
+		var b: Vector3 = route[segment_index + 1]
+		for sample_index in range(5):
+			var t := float(sample_index) / 4.0
+			var floor_point := a.lerp(b, t)
+			var vertical_radius := lerpf(vertical_radii[segment_index], vertical_radii[segment_index + 1], t)
+			var margin := float(generation.terrain_reference_surface_y_at(floor_point)) \
+				- (floor_point.y + vertical_radius * 2.0 + reserve)
+			minimum_margin = minf(minimum_margin, margin)
+	return minimum_margin
 
 func append_path(segments: Array[Dictionary], points: Array, radius: float) -> void:
 	for index in range(points.size() - 1):

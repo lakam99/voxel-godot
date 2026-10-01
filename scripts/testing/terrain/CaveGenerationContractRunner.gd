@@ -12,11 +12,12 @@ var examples: Array = []
 func _initialize() -> void:
 	call_deferred("run")
 
-func make_world(seed_value: String):
+func make_world(seed_value: String, terrain_edits: Dictionary = {}):
 	var context = CONTEXT.new()
 	context.seed_text = seed_value
 	context.seed_hash = context.hash_string(seed_value)
 	context.setup_noise()
+	context.initial_terrain_edits = terrain_edits.duplicate(true)
 	var generation = GENERATION.new()
 	generation.setup(context)
 	context.set_generator(generation)
@@ -40,12 +41,11 @@ func run() -> void:
 		var oracle = FIELD.new()
 		oracle.setup(seed_value)
 		var found := 0
-		var seed_selected_regions := 0
 		var highland_centers := 0
 		var valid_entrances := 0
 		var depth_capacity_regions := 0
-		var exact_eligible_regions := 0
-		var eligible_recipes := 0
+		var proposal_conditioned_regions := 0
+		var proposal_conditioned_recipes := 0
 		var substantial_recipes := 0
 		var rejection_counts := {}
 		var minimum_vertical_travel := INF
@@ -53,6 +53,16 @@ func run() -> void:
 		var minimum_depth_levels := 999
 		var sampled_region_count := 0
 		var failures := []
+		var build_metrics := {"nativeCentersAttempted": 0, "nativeDirectionsEvaluated": 0,
+			"nativeBuildTimeUsec": 0, "nativeBuildMaxUsec": 0,
+			"oracleCentersAttempted": 0, "oracleDirectionsEvaluated": 0,
+			"oracleBuildTimeUsec": 0, "oracleBuildMaxUsec": 0,
+			"nativeTerminalReasons": {}, "oracleTerminalReasons": {},
+			"regions": []}
+		var verify_primary_preservation := OS.get_environment("CAVE_CONTRACT_VERIFY_PRIMARY") == "1"
+		var overlay_determinism_verified := false
+		var primary_success_regions := 0
+		var fallback_rescued_regions := 0
 		for rz in coordinate_values:
 			for rx in coordinate_values:
 				var region := Vector2i(rx, rz)
@@ -60,29 +70,112 @@ func run() -> void:
 					continue
 				sampled_region_count += 1
 				var recipe: Dictionary = world.cave_recipe_for_region(region)
+				var native_diagnostics: Dictionary = world.cave_field.recipe_build_diagnostics(region)
 				var admission: Dictionary = {}
 				var oracle_recipe: Dictionary = oracle.build_recipe(region, world, admission)
+				var oracle_diagnostics := admission.duplicate(true)
+				var native_reason := str(native_diagnostics.get("terminal_reason", "missing_diagnostics"))
+				var oracle_reason := str(oracle_diagnostics.get("reason", "missing_diagnostics"))
+				add_count(build_metrics["nativeTerminalReasons"], native_reason)
+				add_count(build_metrics["oracleTerminalReasons"], oracle_reason)
+				build_metrics["nativeCentersAttempted"] += int(native_diagnostics.get("centers_attempted", 0))
+				build_metrics["nativeDirectionsEvaluated"] += int(native_diagnostics.get("directions_evaluated", 0))
+				build_metrics["nativeBuildTimeUsec"] += int(native_diagnostics.get("build_time_usec", 0))
+				build_metrics["nativeBuildMaxUsec"] = maxi(int(build_metrics["nativeBuildMaxUsec"]), int(native_diagnostics.get("build_time_usec", 0)))
+				build_metrics["oracleCentersAttempted"] += int(oracle_diagnostics.get("centersAttempted", 0))
+				build_metrics["oracleDirectionsEvaluated"] += int(oracle_diagnostics.get("directionsEvaluated", 0))
+				build_metrics["oracleBuildTimeUsec"] += int(oracle_diagnostics.get("buildTimeUsec", 0))
+				build_metrics["oracleBuildMaxUsec"] = maxi(int(build_metrics["oracleBuildMaxUsec"]), int(oracle_diagnostics.get("buildTimeUsec", 0)))
+				var center_summaries: Array = []
+				for native_center in native_diagnostics.get("centers", []):
+					var native_center_position: Vector3 = native_center.get("center", Vector3.ZERO)
+					center_summaries.append({"center": vec(native_center_position),
+						"directionsEvaluated": int(native_center.get("directions_evaluated", 0)),
+						"viableEntrances": int(native_center.get("viable_entrances", 0)),
+						"fullRecipeAttempts": int(native_center.get("full_recipe_attempts", 0)),
+						"terminalReason": str(native_center.get("terminal_reason", "")),
+						"rejections": native_center.get("rejection_counts", {})})
+				var oracle_center_summaries: Array = []
+				for oracle_center in oracle_diagnostics.get("centerAttempts", []):
+					var oracle_center_position: Vector3 = oracle_center.get("center", Vector3.ZERO)
+					oracle_center_summaries.append({"center": vec(oracle_center_position),
+						"directionsEvaluated": int(oracle_center.get("directionsEvaluated", 0)),
+						"candidateDirections": int(oracle_center.get("candidateDirections", 0)),
+						"fullRecipeAttempts": int(oracle_center.get("fullRecipeAttempts", 0)),
+						"terminalReason": str(oracle_center.get("reason", "")),
+						"directionRejections": oracle_center.get("directionRejections", {}),
+						"candidateRejections": oracle_center.get("candidateRejections", {})})
+				var reported_native_centers: Array = native_diagnostics.get("centers", [])
+				if native_diagnostics.is_empty() or int(native_diagnostics.get("centers_attempted", -1)) != reported_native_centers.size():
+					failures.append("native_diagnostics_shape_invalid:%s" % region)
+				if int(oracle_diagnostics.get("centersAttempted", -1)) != oracle_center_summaries.size():
+					failures.append("oracle_diagnostics_shape_invalid:%s" % region)
+				build_metrics["regions"].append({"region": [rx, rz],
+					"native": {"centersAttempted": int(native_diagnostics.get("centers_attempted", 0)),
+						"directionsEvaluated": int(native_diagnostics.get("directions_evaluated", 0)),
+						"buildTimeUsec": int(native_diagnostics.get("build_time_usec", 0)),
+						"terminalReason": native_reason, "centers": center_summaries},
+					"oracle": {"centersAttempted": int(oracle_diagnostics.get("centersAttempted", 0)),
+						"directionsEvaluated": int(oracle_diagnostics.get("directionsEvaluated", 0)),
+						"buildTimeUsec": int(oracle_diagnostics.get("buildTimeUsec", 0)),
+						"terminalReason": oracle_reason, "centers": oracle_center_summaries}})
 				var rejection_reason := str(admission.get("reason", "missing_reason"))
 				rejection_counts[rejection_reason] = int(rejection_counts.get(rejection_reason, 0)) + 1
-				seed_selected_regions += int(bool(admission.get("seedSelected", false)))
 				highland_centers += int(bool(admission.get("highlandCenter", false)))
 				valid_entrances += int(bool(admission.get("validEntrance", false)))
 				depth_capacity_regions += int(bool(admission.get("depthCapacity", false)))
-				if bool(admission.get("eligible", false)):
-					exact_eligible_regions += 1
-				if recipe.is_empty():
-					continue
-				found += 1
-				if bool(admission.get("eligible", false)):
-					eligible_recipes += 1
-				if recipe.depthLoops.size() >= 4:
-					substantial_recipes += 1
+				if bool(admission.get("proposalConditioned", false)):
+					proposal_conditioned_regions += 1
 				var recipe_diff := first_difference(recipe, oracle_recipe, "recipe")
 				if not recipe_diff.is_empty():
 					failures.append("native_gdscript_recipe_mismatch:%s" % region)
 					print("CAVE FIRST RECIPE DIFF ", recipe_diff)
-				if recipe != other.cave_recipe_for_region(region):
+				if verify_primary_preservation:
+					var primary_oracle := FIELD.new()
+					primary_oracle.setup(seed_value)
+					var primary_diagnostics := {}
+					var primary_recipe: Dictionary = primary_oracle.build_recipe_at_offset(region, world, Vector3.ZERO, primary_diagnostics)
+					if not primary_recipe.is_empty():
+						primary_success_regions += 1
+					elif not recipe.is_empty():
+						fallback_rescued_regions += 1
+					if not primary_recipe.is_empty() and not first_difference(recipe, primary_recipe, "primary_recipe").is_empty():
+						failures.append("primary_recipe_changed:%s" % region)
+					if not primary_recipe.is_empty() and int(native_diagnostics.get("centers_attempted", 0)) != 1:
+						failures.append("fallback_ran_after_primary_success:%s" % region)
+					if not primary_recipe.is_empty() and int(oracle_diagnostics.get("centersAttempted", 0)) != 1:
+						failures.append("oracle_fallback_ran_after_primary_success:%s" % region)
+					if primary_recipe.is_empty() and not recipe.is_empty() and int(native_diagnostics.get("centers_attempted", 0)) <= 1:
+						failures.append("native_fallback_skipped_after_primary_failure:%s" % region)
+					if primary_recipe.is_empty() and not oracle_recipe.is_empty() \
+							and int(oracle_diagnostics.get("centersAttempted", 0)) <= 1:
+						failures.append("oracle_fallback_skipped_after_primary_failure:%s" % region)
+					if int(native_diagnostics.get("centers_attempted", 0)) == 1 \
+							and not first_difference(recipe, primary_recipe, "native_primary_recipe").is_empty():
+						failures.append("native_primary_recipe_changed:%s" % region)
+					if not overlay_determinism_verified:
+						var overlay_cell := Vector3i(region.x * 142, 0, region.y * 142)
+						var edited_world = make_world(seed_value, {overlay_cell: {"density": -1.35, "material": "air"}})
+						var edited_native_recipe: Dictionary = edited_world.cave_recipe_for_region(region)
+						var edited_oracle := FIELD.new()
+						edited_oracle.setup(seed_value)
+						var edited_admission := {}
+						var edited_recipe: Dictionary = edited_oracle.build_recipe(region, edited_world, edited_admission)
+						if not first_difference(recipe, edited_native_recipe, "overlay_native_recipe").is_empty():
+							failures.append("persistent_overlay_changed_native_recipe:%s" % region)
+						if not first_difference(oracle_recipe, edited_recipe, "overlay_oracle_recipe").is_empty():
+							failures.append("persistent_overlay_changed_oracle_recipe:%s" % region)
+						overlay_determinism_verified = true
+				var repeated_recipe: Dictionary = other.cave_recipe_for_region(region)
+				if recipe != repeated_recipe:
 					failures.append("recipe_not_repeatable:%s" % region)
+				if recipe.is_empty():
+					continue
+				found += 1
+				if bool(admission.get("proposalConditioned", false)):
+					proposal_conditioned_recipes += 1
+				if recipe.depthLoops.size() >= 4:
+					substantial_recipes += 1
 				for route_name in ["route", "loop", "deepRoute"]:
 					check_path(world, recipe[route_name], "%s:%s" % [region, route_name], failures, recipe, oracle)
 				for depth_index in range(recipe.depthLoops.size()):
@@ -95,27 +188,40 @@ func run() -> void:
 				maximum_vertical_travel = maxf(maximum_vertical_travel, vertical_travel)
 				minimum_depth_levels = mini(minimum_depth_levels, recipe.depthLoops.size())
 				examples.append({"seed": seed_value, "region": [rx, rz], "biome": world.surface_biome_for_cell3(Vector3i((recipe.entry / 1.35).floor())), "entry": vec(recipe.entry), "outward": vec(recipe.outward), "chamberFloor": vec(route.back()), "deepestFloor": vec(recipe.deepRoute.back()), "verticalTravelMeters": recipe.entry.y - recipe.deepRoute.back().y, "depthLevelCount": recipe.depthLoops.size(), "chamberCount": recipe.chambers.size(), "route": route.map(func(p): return vec(p))})
-		var acceptance_rate := float(substantial_recipes) / float(maxi(exact_eligible_regions, 1))
+		var proposal_conditioned_rate := float(substantial_recipes) / float(maxi(proposal_conditioned_regions, 1))
+		var all_sampled_prevalence := float(substantial_recipes) / float(maxi(sampled_region_count, 1))
+		build_metrics["nativeBuildMeanUsec"] = float(build_metrics["nativeBuildTimeUsec"]) / float(maxi(sampled_region_count, 1))
+		build_metrics["oracleBuildMeanUsec"] = float(build_metrics["oracleBuildTimeUsec"]) / float(maxi(sampled_region_count, 1))
+		build_metrics["nativeCacheStats"] = world.cave_field.cache_stats()
 		results.append({"seed": seed_value, "regionsSampled": sampled_region_count, "recipes": found,
-			"seedSelectedRegions": seed_selected_regions,
 			"highlandCenters": highland_centers,
 			"validEntrances": valid_entrances,
 			"depthCapacityRegions": depth_capacity_regions,
-			"exactEligibleRegions": exact_eligible_regions,
-			"eligibleRecipes": eligible_recipes,
+			"proposalConditionedRegions": proposal_conditioned_regions,
+			"proposalConditionedRecipes": proposal_conditioned_recipes,
 			"substantialRecipes": substantial_recipes,
-			"eligibleAcceptanceRate": acceptance_rate,
+			"proposalConditionedAcceptanceRate": proposal_conditioned_rate,
+			"allSampledPrevalence": all_sampled_prevalence,
 			"rejectionCounts": rejection_counts,
+			"buildMetrics": build_metrics,
+			"overlayDeterminismVerified": overlay_determinism_verified,
+			"primarySuccessRegions": primary_success_regions,
+			"fallbackRescuedRegions": fallback_rescued_regions,
+			"allSampledSubstantialAcceptanceRate": all_sampled_prevalence,
 			"minimumVerticalTravelMeters": minimum_vertical_travel,
 			"maximumVerticalTravelMeters": maximum_vertical_travel,
 			"minimumDepthLevels": minimum_depth_levels,
-			"passed": exact_eligible_regions > 0 and acceptance_rate >= 0.5
-				and minimum_depth_levels >= 4 and failures.is_empty(), "failures": failures})
+			"passed": proposal_conditioned_regions > 0 and proposal_conditioned_rate >= 0.5
+				and minimum_depth_levels >= 4 and failures.is_empty()
+				and (not verify_primary_preservation or overlay_determinism_verified), "failures": failures})
 		print("CAVE CONTRACT ", seed_value, " recipes=", found, " regions=", sampled_region_count,
-			" selected=", seed_selected_regions, " highland=", highland_centers,
+			" highland=", highland_centers,
 			" entrances=", valid_entrances, " depth_capacity=", depth_capacity_regions,
-			" eligible=", exact_eligible_regions, " substantial=", substantial_recipes,
-			" eligible_acceptance=", acceptance_rate, " rejection_counts=", rejection_counts,
+			" proposal_conditioned=", proposal_conditioned_regions,
+			" substantial=", substantial_recipes,
+			" proposal_conditioned_acceptance=", proposal_conditioned_rate,
+			" all_sampled_prevalence=", all_sampled_prevalence,
+			" rejection_counts=", rejection_counts,
 			" minimum_levels=", minimum_depth_levels,
 			" failures=", failures.size())
 	var passed := results.all(func(r): return r.passed)
@@ -128,6 +234,9 @@ func run() -> void:
 
 func vec(value: Vector3) -> Array:
 	return [value.x, value.y, value.z]
+
+func add_count(counts: Dictionary, key: String) -> void:
+	counts[key] = int(counts.get(key, 0)) + 1
 
 func first_difference(left: Variant, right: Variant, path: String) -> Dictionary:
 	if typeof(left) != typeof(right):

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace voxel::world_backend {
@@ -65,6 +66,23 @@ struct CaveRecipe {
     CaveBounds bounds;
 };
 
+struct CaveCenterAttemptDiagnostics {
+    CaveVector3 center;
+    std::uint32_t directions_evaluated = 0U;
+    std::uint32_t viable_entrances = 0U;
+    std::uint32_t full_recipe_attempts = 0U;
+    std::string terminal_reason;
+    std::map<std::string, std::uint32_t> rejection_counts;
+};
+
+struct CaveRecipeBuildDiagnostics {
+    std::uint32_t centers_attempted = 0U;
+    std::uint32_t directions_evaluated = 0U;
+    std::uint64_t build_time_usec = 0U;
+    std::string terminal_reason;
+    std::vector<CaveCenterAttemptDiagnostics> centers;
+};
+
 // Native port of scripts/world/ProceduralCaveField.gd. Inputs are callbacks
 // over the owning native source only during deterministic recipe construction;
 // the returned recipe contains values, never Nodes or retained callbacks.
@@ -82,6 +100,7 @@ public:
     std::optional<CaveRecipe> recipe_for_region(
         CaveRegionKey region, const SurfaceSampler &surface,
         const ProtectedBounds &protected_bounds) const;
+    std::optional<CaveRecipeBuildDiagnostics> build_diagnostics(CaveRegionKey region) const;
     double density(CaveVector3 position, double depth_meters,
         const SurfaceSampler &surface, const ProtectedBounds &protected_bounds) const;
     double recipe_density(CaveVector3 position, const CaveRecipe &recipe) const;
@@ -90,7 +109,12 @@ public:
 private:
     std::optional<CaveRecipe> build_recipe(
         CaveRegionKey region, const SurfaceSampler &surface,
-        const ProtectedBounds &protected_bounds) const;
+        const ProtectedBounds &protected_bounds,
+        CaveRecipeBuildDiagnostics &diagnostics) const;
+    std::optional<CaveRecipe> build_recipe_at_offset(
+        CaveRegionKey region, CaveVector3 center_offset,
+        const SurfaceSampler &surface, const ProtectedBounds &protected_bounds,
+        CaveCenterAttemptDiagnostics &diagnostics) const;
     std::shared_ptr<const CaveRecipe> recipe_snapshot_for_region(
         CaveRegionKey region, const SurfaceSampler &surface,
         const ProtectedBounds &protected_bounds) const;
@@ -105,6 +129,13 @@ private:
         const std::vector<double> &vertical_radii) const;
     bool interior_segments_keep_natural_roof(const CaveRecipe &recipe,
         std::size_t first_interior_segment, const SurfaceSampler &surface) const;
+    bool route_has_walkable_effective_support(const CaveRecipe &recipe,
+        const SurfaceSampler &surface) const;
+    double candidate_volume_ground_height_near(const CaveRecipe &recipe,
+        CaveVector3 position, const SurfaceSampler &surface) const;
+    double candidate_volume_density_at_cell(const CaveRecipe &recipe,
+        std::int32_t x, std::int32_t y, std::int32_t z,
+        const SurfaceSampler &surface) const;
     double fit_chamber_vertical_radius(const CaveVector3 &floor_point,
         double radius_x, double radius_z, double requested_radius,
         const SurfaceSampler &surface) const;
@@ -116,6 +147,7 @@ private:
     CaveNoiseCompat noise_;
     mutable std::mutex cache_mutex_;
     mutable std::map<CaveRegionKey, std::shared_ptr<const CaveRecipe>> recipe_cache_;
+    mutable std::map<CaveRegionKey, CaveRecipeBuildDiagnostics> recipe_diagnostics_;
     mutable CacheStats cache_stats_;
 };
 
