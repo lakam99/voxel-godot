@@ -23,6 +23,7 @@ screenshots, and records a gameplay video by default.
   --region-x N --region-z N  Cave recipe region to walk
   --capture-only         Capture interior viewpoints; not a traversal test
   --diagnostic           Use diagnostic boot instead of normal menu/New Game
+  --manual               Stage at the cave entrance and leave control to the player
   --record false         Skip video frames and MP4 encoding
 `);
   process.exit(0);
@@ -31,8 +32,9 @@ screenshots, and records a gameplay video by default.
 const runId = randomUUID().replaceAll('-', '').slice(0, 10);
 const safeTime = timestamp().replace(/[:.]/g, '-');
 const outputDirectory = path.resolve(options.outputDir ?? path.join(projectRoot, 'artifacts', 'caves', `walkthrough-${safeTime}-${runId}`));
-const timeoutSeconds = Number(options.timeoutSeconds ?? 900);
-if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 86400) throw new Error('--timeout-seconds must be an integer from 1 to 86400');
+const manual = !!options.manual;
+const timeoutSeconds = Number(options.timeoutSeconds ?? (manual ? 0 : 900));
+if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds > 86400 || (!manual && timeoutSeconds < 1)) throw new Error('--timeout-seconds must be an integer from 1 to 86400, or 0 for manual mode');
 await mkdir(path.dirname(outputDirectory), { recursive: true });
 await mkdir(outputDirectory, { recursive: false });
 
@@ -44,6 +46,7 @@ const env = {
   CAVE_RECORD: record ? '1' : '0',
   CAVE_CAPTURE_ONLY: options.captureOnly ? '1' : '0',
   CAVE_DIAGNOSTIC: options.diagnostic ? '1' : '0',
+  CAVE_MANUAL: manual ? '1' : '0',
   VOXEL_PLAYTEST: options.seed !== undefined ? '1' : (process.env.VOXEL_PLAYTEST ?? '')
 };
 if (options.seed !== undefined) env.CAVE_SEED = String(options.seed);

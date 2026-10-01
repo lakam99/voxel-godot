@@ -322,6 +322,20 @@ func run() -> void:
 		failures.append("exterior_fixture_not_grounded:%s" % JSON.stringify(pre_act_support))
 		await finish()
 		return
+	if OS.get_environment("CAVE_MANUAL") == "1":
+		# Interactive play mode shares the exact fixture setup and real collision
+		# publication used by the walkthrough, then returns control to the player.
+		player.automated_input = false
+		player.automated_move = Vector3.ZERO
+		player.automated_sprint = false
+		player.automated_jump = false
+		if main.inventory_system.add_item("ironPickaxe", 1) > 0:
+			print("CAVE MANUAL: iron pickaxe staged in inventory")
+		print("CAVE MANUAL: ready outside entrance at ", player.global_position,
+			"; seed=", main.seed_text, " region=", cave_region,
+			"; torch equipped; use standard game movement and digging controls")
+		while true:
+			await process_frame
 	await capture("02-exterior-entrance")
 	var exterior_audit: Dictionary = await audit_view_rays("exterior-entrance", true)
 	view_audit_summaries.append(exterior_audit)
