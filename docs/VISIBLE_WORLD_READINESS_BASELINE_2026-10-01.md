@@ -63,15 +63,22 @@ describe their complete source state would either stall startup or falsely
 report empty coverage.
 
 The initial `VisibleWorldReadiness` contract was exercised with the owned
-headless Godot runner and now passes 52 synthetic checks:
+headless Godot runner and now passes 55 synthetic checks:
 
 ```text
-node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-eighth
+node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-ninth
 ```
 
-Report: `artifacts/citadel-runtime-integration/visible-world-readiness-eighth/report.json`.
+Report: `artifacts/citadel-runtime-integration/visible-world-readiness-ninth/report.json`.
 It covers request/source/view revisions, complete source enumeration, circular
 view coverage, in-view candidates and tiers, installed owner receipts, stale
-owner invalidation, and candidate accounting. It does not prove live visual
-coverage or startup readiness. A separate headed normal-menu probe and the
-production publisher integrations remain outstanding.
+owner invalidation, publisher-owned receipt revalidation, and candidate
+accounting. It does not prove live visual coverage or startup readiness.
+
+Terrain publication uses native `VoxelTerrain` mesh blocks at 1.35 world meters
+per terrain cell. Its existing regional readiness method verifies published
+gameplay collision chunks, which is not the same as exact visible mesh coverage.
+A production terrain adapter must query the actual meshed surface bands and
+their current terrain owner/revision; it must not translate collision receipts
+into visual receipts. A separate headed normal-menu probe and the production
+publisher integrations remain outstanding.

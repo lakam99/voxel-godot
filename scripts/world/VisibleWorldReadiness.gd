@@ -111,7 +111,8 @@ func describe_candidate(source_id: String, candidate_id: String, required_tier: 
 	if _candidate_count >= MAX_CANDIDATES:
 		return {"status": "pending", "reason": "visual_candidate_capacity", "retryable": true}
 	source.candidates[candidate_id] = {"requiredTier": required_tier,
-		"metadata": metadata.duplicate(true), "receipt": {}, "failed": false, "failureReason": ""}
+		"candidateId": candidate_id, "metadata": metadata.duplicate(true),
+		"receipt": {}, "failed": false, "failureReason": ""}
 	_candidate_count += 1
 	return {"status": "ready", "candidateId": candidate_id}
 
@@ -198,10 +199,40 @@ func accept_receipt(source_id: String, candidate_id: String, representation_id: 
 		"ownerInstanceId": owner.get_instance_id(), "owner": weakref(owner),
 		"representationInstanceId": representation.get_instance_id(),
 		"representation": weakref(representation)}
+	candidate.receipt.erase("publisher")
 	candidate.failed = false
 	candidate.failureReason = ""
 	return {"status": "ready", "candidateId": candidate_id, "tier": tier,
 		"viewRevision": view_revision}
+
+
+## Native render owners such as VoxelTerrain do not expose a MeshInstance3D
+## child. They may receipt through their own source-of-truth validator, which
+## is called both here and on every readiness query to reject stale installs.
+func accept_publisher_receipt(source_id: String, candidate_id: String, representation_id: String,
+		tier: String, source_identity: String, source_revision: String, view_revision: int,
+		publisher: Object, validator_method: StringName) -> Dictionary:
+	if not _sources.has(source_id) or not _sources[source_id].candidates.has(candidate_id):
+		return {"status": "failed", "reason": "visual_receipt_candidate_missing"}
+	var source: Dictionary = _sources[source_id]
+	var candidate: Dictionary = source.candidates[candidate_id]
+	if view_revision != _view_revision or int(source.viewRevision) != view_revision \
+			or String(source.identity) != source_identity or String(source.revision) != source_revision:
+		return {"status": "pending", "reason": "visual_receipt_revision_stale"}
+	if not is_instance_valid(publisher) or not publisher.has_method(validator_method) \
+			or not _valid_publisher_tier(candidate, tier) \
+			or not _publisher_installation_valid(publisher, validator_method, source, candidate,
+				representation_id, tier, view_revision):
+		return {"status": "pending", "reason": "visual_publisher_receipt_not_current"}
+	candidate.receipt = {"representationId": representation_id, "tier": tier,
+		"sourceIdentity": source_identity, "sourceRevision": source_revision,
+		"worldRevision": _world_revision, "viewRevision": view_revision,
+		"publisherInstanceId": publisher.get_instance_id(), "publisher": weakref(publisher),
+		"validatorMethod": validator_method}
+	candidate.failed = false
+	candidate.failureReason = ""
+	return {"status": "ready", "candidateId": candidate_id, "tier": tier,
+		"viewRevision": view_revision, "receiptAuthority": "publisher_validator"}
 
 
 func fail_candidate(source_id: String, candidate_id: String, reason: String,
@@ -294,6 +325,13 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 			or String(receipt.get("sourceRevision", "")) != String(source.revision) \
 			or _tier_rank(String(receipt.get("tier", ""))) < _tier_rank(String(candidate.requiredTier)):
 		return false
+	if receipt.has("publisher"):
+		var publisher_ref: WeakRef = receipt.get("publisher") as WeakRef
+		var publisher: Object = publisher_ref.get_ref() if publisher_ref != null else null
+		return is_instance_valid(publisher) \
+			and publisher.get_instance_id() == int(receipt.get("publisherInstanceId", 0)) \
+			and _publisher_installation_valid(publisher, StringName(receipt.validatorMethod), source,
+				candidate, String(receipt.representationId), String(receipt.tier), view_revision)
 	var owner_ref: WeakRef = receipt.get("owner") as WeakRef
 	var representation_ref: WeakRef = receipt.get("representation") as WeakRef
 	var owner: Node = owner_ref.get_ref() as Node if owner_ref != null else null
@@ -305,6 +343,22 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 		and not owner.is_queued_for_deletion() and not representation.is_queued_for_deletion() \
 		and representation.visible and _is_descendant_or_self(owner, representation) \
 		and _has_visible_renderable(representation)
+
+
+func _valid_publisher_tier(candidate: Dictionary, tier: String) -> bool:
+	return REPRESENTATION_TIERS.has(tier) and _tier_rank(tier) >= _tier_rank(String(candidate.requiredTier))
+
+
+func _publisher_installation_valid(publisher: Object, validator_method: StringName,
+		source: Dictionary, candidate: Dictionary, representation_id: String, tier: String,
+		view_revision: int) -> bool:
+	if not is_instance_valid(publisher) or not publisher.has_method(validator_method) \
+			or not _valid_publisher_tier(candidate, tier):
+		return false
+	var proof: Variant = publisher.call(validator_method, String(source.identity), String(source.revision),
+		_world_revision, view_revision, String(candidate.candidateId),
+		representation_id, tier)
+	return proof is bool and proof
 
 
 func _record_failure(source_id: String, candidate_id: String, kind: String, reason: String,

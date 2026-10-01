@@ -7,6 +7,18 @@ const NEAR_BOUNDS := Rect2i(-2, -2, 4, 4)
 const VIEW_CENTER := Vector2(0.0, 0.0)
 const VIEW_RADIUS := 6.0
 
+class ReceiptPublisher extends RefCounted:
+	var installed := true
+	var validation_count := 0
+
+	func visual_receipt_is_current(source_identity: String, source_revision: String,
+		world_revision: String, view_revision: int, candidate_id: String,
+		representation_id: String, tier: String) -> bool:
+		validation_count += 1
+		return installed and source_identity == "identity:props" and source_revision == "rev:1" \
+			and world_revision == "world-3" and view_revision > 0 and candidate_id == "tree:stable-id" \
+			and representation_id == "tree-native-mesh:stable-id" and tier == "horizon"
+
 var _checks: Array[Dictionary] = []
 var _passed := true
 
@@ -87,6 +99,19 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	_check("queued_candidate_remains_pending_and_accounted",
 		pending.status == "pending" and int(pending.candidateCount) == 1 and int(pending.pendingCount) == 1 \
 		and int(pending.byKind.props.candidate) == 1 and int(pending.byKind.props.represented) == 0)
+	var native_publisher := ReceiptPublisher.new()
+	var native_receipt := book.accept_publisher_receipt("source:props", "tree:stable-id",
+		"tree-native-mesh:stable-id", "horizon", "identity:props", "rev:1", revision,
+		native_publisher, &"visual_receipt_is_current")
+	_check("native_publisher_receipt_uses_owner_validator", native_receipt.status == "ready")
+	_check("native_publisher_receipt_is_revalidated_for_readiness",
+		book.region_readiness(13, "seed-c", "world-3", revision, BOUNDS).status == "ready" \
+		and native_publisher.validation_count >= 2)
+	native_publisher.installed = false
+	var stale_native: Dictionary = book.region_readiness(13, "seed-c", "world-3", revision, BOUNDS)
+	_check("native_publisher_receipt_invalidates_when_installation_changes",
+		stale_native.status == "pending" and int(stale_native.pendingCount) == 1)
+	native_publisher.installed = true
 
 	var owner := Node3D.new()
 	owner.name = "ReceiptOwner"
