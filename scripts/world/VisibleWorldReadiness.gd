@@ -63,7 +63,7 @@ func begin_view(request_id: int, seed: String, world_revision: String,
 ## report an empty manifest only after finish_source() confirms enumeration.
 func expect_source(source_id: String, kind: String, source_identity: String,
 		source_revision: String, source_bounds: Rect2i, view_revision: int) -> Dictionary:
-	if not _view_active or _source_set_sealed:
+	if not _view_active:
 		return {"status": "failed", "reason": "visual_source_set_closed"}
 	if view_revision != _view_revision:
 		return {"status": "pending", "reason": "visual_view_revision_changed"}
@@ -75,14 +75,25 @@ func expect_source(source_id: String, kind: String, source_identity: String,
 		var old: Dictionary = _sources[source_id]
 		var same: bool = String(old.kind) == kind and String(old.identity) == source_identity \
 			and String(old.revision) == source_revision and old.bounds == source_bounds
-		return {"status": "ready" if same else "failed",
-			"reason": "" if same else "visual_source_identity_conflict", "sourceId": source_id}
+		if same:
+			return {"status": "ready", "sourceId": source_id, "viewRevision": _view_revision}
+		if String(old.kind) != kind or String(old.identity) != source_identity or old.bounds != source_bounds:
+			return {"status": "failed", "reason": "visual_source_identity_conflict", "sourceId": source_id}
+		_candidate_count = maxi(0, _candidate_count - old.candidates.size())
+		_sources.erase(source_id)
+		_source_set_sealed = false
+	if _source_set_sealed:
+		return {"status": "failed", "reason": "visual_source_set_closed"}
 	if _sources.size() >= MAX_SOURCES:
 		return {"status": "pending", "reason": "visual_source_capacity", "retryable": true}
 	_sources[source_id] = {"kind": kind, "identity": source_identity, "revision": source_revision,
 		"bounds": source_bounds, "viewRevision": _view_revision, "complete": false,
 		"failed": false, "failureReason": "", "candidates": {}}
 	return {"status": "ready", "sourceId": source_id, "viewRevision": _view_revision}
+
+
+func has_candidate(source_id: String, candidate_id: String) -> bool:
+	return _sources.has(source_id) and _sources[source_id].candidates.has(candidate_id)
 
 
 func describe_candidate(source_id: String, candidate_id: String, required_tier: String,

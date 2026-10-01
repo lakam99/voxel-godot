@@ -3,6 +3,7 @@ extends "res://scripts/MainRuntimeTools.gd"
 const TreePublicationQueueScript := preload("res://scripts/environment/TreePublicationQueue.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
+const ChunkPropVisualManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
 signal rock_published(body: StaticBody3D, collider: CollisionShape3D)
@@ -3071,7 +3072,34 @@ func process_chunk_prop_spawn_state(
             return false
         if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
             return false
+    var completed_chunk := valid_node3d_from_variant(state.get("chunk"))
+    if completed_chunk != null:
+        completed_chunk.set_meta("chunk_prop_candidate_scan_complete", true)
+        completed_chunk.set_meta("chunk_prop_candidate_source_revision", "%s:%d:%d" % [
+            seed_text, int(get("seed_hash")), completed_chunk.get_instance_id()
+        ])
     return true
+
+
+## Read-only view of the real chunk prop publisher. Empty manifests are
+## available only after the existing seeded spawn state has completed.
+func visible_chunk_prop_manifest(chunk_key: Vector2i) -> Dictionary:
+    var chunk := chunks.get(chunk_key) as Node3D
+    if chunk == null or not is_instance_valid(chunk):
+        return {"status": "pending", "reason": "chunk_prop_source_missing", "chunk": chunk_key}
+    var complete := bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
+    var source_revision := String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
+    return ChunkPropVisualManifestScript.capture(
+        chunk, chunk_key, seed_text, source_revision, complete, CELL
+    )
+
+
+func publish_chunk_prop_visual_readiness(readiness: Object, view_revision: int,
+        near_bounds: Rect2i, chunk_key: Vector2i) -> Dictionary:
+    var manifest := visible_chunk_prop_manifest(chunk_key)
+    if manifest.get("status") == "failed" or not bool(manifest.get("scanComplete", false)):
+        return manifest
+    return ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision, near_bounds)
 
 func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> bool:
     if time_budget_ms <= 0.0:

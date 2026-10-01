@@ -8,6 +8,9 @@ cli(async () => {
   const files = [
     'scripts/testing/VisibleWorldReadinessContractRunner.gd',
     'scripts/world/VisibleWorldReadiness.gd',
+    'scripts/world/ChunkPropVisualManifest.gd',
+    'scripts/MainPlaytestTools.gd',
+    'scripts/MainRuntimeTools.gd',
     'tools/run-visible-world-readiness-contract.mjs',
     'tools/lib/building-runner.mjs',
     'tools/run-godot-scene-watchdog.mjs'

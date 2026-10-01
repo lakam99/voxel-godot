@@ -1,6 +1,7 @@
 extends SceneTree
 
 const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
+const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_WORLD_READINESS_REPORT"
 const BOUNDS := Rect2i(-6, -6, 12, 12)
 const NEAR_BOUNDS := Rect2i(-2, -2, 4, 4)
@@ -31,6 +32,7 @@ func run() -> void:
 	test_empty_manifest_requires_complete_source_coverage()
 	test_incomplete_discovery_never_reports_empty_ready()
 	test_candidate_must_belong_to_declared_source_footprint()
+	await test_production_chunk_prop_manifest()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
 	test_candidate_accounting_and_explicit_failure()
 	write_report()
@@ -74,6 +76,81 @@ func test_candidate_must_belong_to_declared_source_footprint() -> void:
 		{"positionXZ": Vector2(3.0, 1.0)})
 	_check("candidate_cannot_escape_its_declared_source_footprint",
 		outside.status == "failed" and outside.reason == "visual_candidate_outside_source_or_view")
+
+
+func test_production_chunk_prop_manifest() -> void:
+	var chunk := Node3D.new()
+	chunk.name = "ChunkManifestFixture"
+	chunk.position = Vector3(-28.0 * 1.35, 0.0, 56.0 * 1.35)
+	root.add_child(chunk)
+	await process_frame
+	var incomplete: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", false, 1.35)
+	_check("incomplete_production_prop_scan_stays_pending",
+		incomplete.status == "pending" and incomplete.reason == "chunk_prop_candidate_scan_incomplete")
+	var empty_complete: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	_check("completed_empty_chunk_scan_is_explicitly_ready",
+		empty_complete.status == "ready" and empty_complete.scanComplete \
+		and int(empty_complete.candidateCount) == 0, empty_complete)
+	var rock := _make_manifest_body(chunk, "rock:stable", "rock")
+	var tree := _make_manifest_body(chunk, "tree:stable", "tree")
+	tree.set_meta("tree_visual_state", "queued")
+	var wildlife := _make_manifest_body(chunk, "wildlife:stable", "wildlife")
+	wildlife.set_meta("wildlife_variant", "deer")
+	var queued: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	_check("candidate_set_is_bound_into_chunk_source_revision",
+		queued.sourceRevision != empty_complete.sourceRevision)
+	_check("chunk_manifest_uses_existing_prop_ids_and_classification",
+		queued.candidateCount == 3 and int(queued.byKind.props.candidateCount) == 1 \
+		and int(queued.byKind.trees_foliage.candidateCount) == 1 \
+		and int(queued.byKind.wildlife.candidateCount) == 1)
+	_check("queued_tree_remains_pending_after_spawn_scan",
+		queued.status == "pending" and queued.byKind.trees_foliage.pendingIds == ["tree:stable"])
+	var readiness = VisualReadinessScript.new()
+	var view_bounds := Rect2i(-70, 14, 84, 84)
+	var near_bounds := Rect2i(-28, 56, 28, 28)
+	var view_revision := int(readiness.begin_view(92, "seed-props", "world-props-1",
+		view_bounds, near_bounds, Vector2(-28.0, 56.0), 42.0).viewRevision)
+	var submitted_pending_tree: Dictionary = ChunkPropManifestScript.submit(queued, readiness,
+		view_revision, near_bounds)
+	_check("completed_chunk_manifest_registers_real_candidates",
+		submitted_pending_tree.status == "pending" and submitted_pending_tree.manifestSubmitted \
+		and readiness.has_candidate(
+			"%s:trees_foliage" % queued.sourceIdentity, "tree:stable"))
+	_check("queued_tree_candidate_remains_unreceipted",
+		readiness.region_readiness(92, "seed-props", "world-props-1", view_revision,
+			view_bounds).status == "pending")
+	var committed_tree_visual := MeshInstance3D.new()
+	committed_tree_visual.name = "GeneratedTreeVisual"
+	committed_tree_visual.mesh = BoxMesh.new()
+	tree.add_child(committed_tree_visual)
+	tree.set_meta("tree_visual_state", "published")
+	var published: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	_check("published_tree_visual_is_counted_from_committed_mesh",
+		published.status == "ready" and int(published.byKind.trees_foliage.representedCount) == 1)
+	var published_receipts: Dictionary = ChunkPropManifestScript.submit(published, readiness,
+		view_revision, near_bounds)
+	_check("tree_queue_commit_is_admitted_as_a_live_owner_receipt",
+		published_receipts.status == "ready" and int(published_receipts.pendingCount) == 0 \
+		and int(published_receipts.byKind.trees_foliage.representedCount) == 1)
+	_check("prop_visual_manifest_does_not_advance_generation_rng",
+		String(published.scanAuthority) == "completed_production_chunk_prop_spawn_state")
+	chunk.queue_free()
+	await process_frame
+
+
+func _make_manifest_body(parent: Node3D, prop_id: String, kind: String) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "Manifest_" + kind
+	body.set_meta("prop_id", prop_id)
+	parent.add_child(body)
+	var visual := MeshInstance3D.new()
+	visual.mesh = BoxMesh.new()
+	body.add_child(visual)
+	return body
 
 
 func test_receipts_are_request_revision_tier_and_installation_bound() -> void:

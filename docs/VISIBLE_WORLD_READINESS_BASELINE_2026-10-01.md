@@ -62,14 +62,15 @@ not wired into startup or traversal yet; doing so before the publishers can
 describe their complete source state would either stall startup or falsely
 report empty coverage.
 
-The initial `VisibleWorldReadiness` contract was exercised with the owned
-headless Godot runner and now passes 55 synthetic checks:
+The `VisibleWorldReadiness` and production chunk-prop adapter contract was
+exercised with the owned headless Godot runner and now passes 65 synthetic
+checks:
 
 ```text
-node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-ninth
+node tools/run-visible-world-readiness-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-chunk-adapter-final
 ```
 
-Report: `artifacts/citadel-runtime-integration/visible-world-readiness-ninth/report.json`.
+Report: `artifacts/citadel-runtime-integration/visible-world-readiness-chunk-adapter-final/report.json`.
 It covers request/source/view revisions, complete source enumeration, circular
 view coverage, in-view candidates and tiers, installed owner receipts, stale
 owner invalidation, publisher-owned receipt revalidation, and candidate
@@ -82,3 +83,14 @@ A production terrain adapter must query the actual meshed surface bands and
 their current terrain owner/revision; it must not translate collision receipts
 into visual receipts. A separate headed normal-menu probe and the production
 publisher integrations remain outstanding.
+
+The existing chunk-prop state machine now stamps a completion marker only after
+its seeded surface, detail, and underground phases finish. The read-only
+`visible_chunk_prop_manifest()` snapshot consumes the completed chunk's stable
+`prop_id` nodes and real renderable descendants; it does not generate or reorder
+RNG decisions. The companion submitter registers per-kind chunk sources and
+receipts into `VisibleWorldReadiness`, leaving queued trees pending until the
+tree publication queue commits a renderable tree root. Project compile smoke
+passed after this wiring (`node tools/run-project-compile-smoke.mjs`): both main
+menu and gameplay scenes loaded. This does not yet connect terrain, structure,
+or full-view ecology publishers, nor does it gate startup/traversal.
