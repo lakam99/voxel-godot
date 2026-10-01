@@ -6,6 +6,7 @@
 #include <functional>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -58,6 +59,7 @@ struct CaveRecipe {
     std::vector<CaveVector3> route;
     std::vector<CaveVector3> loop;
     std::vector<CaveVector3> deep_route;
+    std::vector<std::vector<CaveVector3>> depth_loops;
     std::vector<CaveSegment> segments;
     std::vector<CaveChamber> chambers;
     CaveBounds bounds;
@@ -89,6 +91,9 @@ private:
     std::optional<CaveRecipe> build_recipe(
         CaveRegionKey region, const SurfaceSampler &surface,
         const ProtectedBounds &protected_bounds) const;
+    std::shared_ptr<const CaveRecipe> recipe_snapshot_for_region(
+        CaveRegionKey region, const SurfaceSampler &surface,
+        const ProtectedBounds &protected_bounds) const;
     CaveRecipe append_path(CaveRecipe recipe,
         const std::vector<CaveVector3> &points, double radius) const;
     CaveRecipe append_tapered_path(CaveRecipe recipe,
@@ -107,9 +112,10 @@ private:
 
     std::vector<std::uint32_t> seed_code_points_;
     double cell_size_meters_ = 1.35;
+    double lowest_cave_floor_meters_ = -81.0;
     CaveNoiseCompat noise_;
     mutable std::mutex cache_mutex_;
-    mutable std::map<CaveRegionKey, std::optional<CaveRecipe>> recipe_cache_;
+    mutable std::map<CaveRegionKey, std::shared_ptr<const CaveRecipe>> recipe_cache_;
     mutable CacheStats cache_stats_;
 };
 

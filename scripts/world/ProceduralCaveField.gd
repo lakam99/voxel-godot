@@ -7,6 +7,8 @@ const REGION_METRES := 192.0
 const RECIPE_CACHE_LIMIT := 128
 const ROCK := 8.0
 const TUNNEL_RADIUS := 2.7
+const DEEP_LEVEL_DROP_METERS := 18.0
+const MAX_DEEP_LEVELS := 7
 
 var seed_text := ""
 var recipes := {}
@@ -15,8 +17,6 @@ var recipe_build_total_usec := 0
 var recipe_build_max_usec := 0
 var cache_evictions := 0
 var shape_noise := FastNoiseLite.new()
-var tunnel_noise := FastNoiseLite.new()
-var crossing_noise := FastNoiseLite.new()
 var detail_noise := FastNoiseLite.new()
 
 func setup(seed_value: String) -> void:
@@ -25,8 +25,6 @@ func setup(seed_value: String) -> void:
 	seed_text = seed_value
 	recipes.clear()
 	configure_noise(shape_noise, "chambers", 0.032)
-	configure_noise(tunnel_noise, "passages", 0.022)
-	configure_noise(crossing_noise, "passage-crossings", 0.024)
 	configure_noise(detail_noise, "rock", 0.19)
 
 func configure_noise(noise: FastNoiseLite, salt: String, frequency: float) -> void:
@@ -43,29 +41,25 @@ func region_at(position: Vector3) -> Vector2i:
 	return Vector2i(floori((position.x + REGION_METRES * 0.5) / REGION_METRES), floori((position.z + REGION_METRES * 0.5) / REGION_METRES))
 
 func density(position: Vector3, depth_metres: float, generation) -> float:
-	var result := ROCK
-	# Deep noise supplies irregular cheese chambers and intersecting spaghetti
-	# passages. The near-surface connection is made by continuous tunnel carvers.
-	if depth_metres > 28.0:
-		var a := shape_noise.get_noise_3dv(position)
-		var b := tunnel_noise.get_noise_3dv(position + Vector3(873.0, -211.0, 397.0))
-		var c := crossing_noise.get_noise_3dv(position)
-		var cheese := (0.43 - a) * 22.0
-		var spaghetti := (maxf(absf(b), absf(c)) - 0.065) * 36.0
-		result = maxf(minf(cheese, spaghetti), 30.0 - depth_metres)
+	# Recipes are the sole generated cave authority. Unauthored underground
+	# remains solid until a recipe or durable terrain edit removes it.
 	var recipe := recipe_for_region(region_at(position), generation)
 	if recipe.is_empty():
-		return result
+		return ROCK
 	var bounds: AABB = recipe.bounds
 	if not bounds.has_point(position):
-		return result
+		return ROCK
 	var carved := recipe_density(position, recipe)
 	if carved < 1.0:
 		var detail := detail_noise.get_noise_3dv(position) * 0.24
 		# Roughen the cave-facing wall, but do not let positive cave SDF values
 		# become negative and punch a hairline skylight through thin overburden.
-		carved += detail if carved < 0.0 else maxf(detail, -carved + 0.04)
-	return minf(result, carved)
+		# Roughness must not re-solidify recipe-owned air. On solid-side walls,
+		# bias outward to preserve the thin-roof skylight guard.
+		carved += minf(detail, -carved - 0.02) if carved < 0.0 else maxf(detail, -carved + 0.04)
+	# An accepted recipe owns its bounded cave volume. Independent noise caves
+	# must not undercut recipe floors and create accidental shafts.
+	return carved
 
 func recipe_density(position: Vector3, recipe: Dictionary) -> float:
 	var result := ROCK
@@ -164,6 +158,9 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 		# in the first few metres.
 		point.y = lerpf(entry.y - generation.cell_size() * 0.25, floor_end, pow(t, 0.4))
 		route.append(point)
+	# Raise the first interior control point into the natural hillside so the
+	# entrance collar does not stack its descent on a steep surface grade.
+	route[1].y += 0.25
 	# A carver can only remove rock: never accept a tunnel crossing above a
 	# valley and then invent a separate floor to make the route look supported.
 	for index in range(route.size() - 1):
@@ -187,8 +184,60 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 	append_path(segments, loop, TUNNEL_RADIUS)
 	var deep_end: Vector3 = route[6] - outward * 23.0 - side * 12.0
 	deep_end.y = floor_end - 10.0
-	var deep_path: Array[Vector3] = [route[6], route[6] - outward * 12.0 - Vector3.UP * 4.0, deep_end]
+	var deep_mid: Vector3 = route[6] - outward * 12.0 - Vector3.UP * 7.0
+	var deep_path: Array[Vector3] = [route[6], deep_mid, deep_end]
+	var lowest_cave_floor_y: float = float(generation.world_bottom_cell_y() + 4) * generation.cell_size()
+	var remaining_depth: float = deep_end.y - lowest_cave_floor_y
+	var lower_level_count := clampi(floori(remaining_depth / DEEP_LEVEL_DROP_METERS), 0, MAX_DEEP_LEVELS)
+	var first_angle := atan2(deep_end.z - route[6].z, deep_end.x - route[6].x)
+	var lower_floors: Array[Vector3] = []
+	for index in range(1, lower_level_count + 1):
+		# Build a helical descent with 18m between floors; lateral chords and
+		# alternating radii limit overlap while keeping the passage walkable.
+		var angle := first_angle + float(index) * 1.7
+		var orbit_radius := 32.0 + (4.0 if index % 2 == 0 else 0.0)
+		var floor_point := route[6] + Vector3(cos(angle) * orbit_radius, 0.0, sin(angle) * orbit_radius)
+		floor_point.y = deep_end.y - float(index) * DEEP_LEVEL_DROP_METERS
+		var previous: Vector3 = deep_end if lower_floors.is_empty() else lower_floors.back()
+		var incoming: Vector3 = deep_end - deep_mid if lower_floors.is_empty() else previous - (deep_end if lower_floors.size() == 1 else lower_floors[lower_floors.size() - 2])
+		var incoming_length := maxf(Vector2(incoming.x, incoming.z).length(), 0.001)
+		var departure := Vector3(-incoming.z / incoming_length, 0.0, incoming.x / incoming_length)
+		var toward_next := floor_point - previous
+		if departure.x * toward_next.x + departure.z * toward_next.z < 0.0:
+			departure = -departure
+		var collar := previous + departure * 20.0
+		deep_path.append(collar)
+		deep_path.append(floor_point)
+		lower_floors.append(floor_point)
+	var depth_loops: Array = []
+	for index in range(lower_floors.size()):
+		var floor_point: Vector3 = lower_floors[index]
+		var previous: Vector3 = deep_end if index == 0 else lower_floors[index - 1]
+		var incoming := floor_point - previous
+		var incoming_length := maxf(Vector2(incoming.x, incoming.z).length(), 0.001)
+		var departure := Vector3(-incoming.z / incoming_length, 0.0, incoming.x / incoming_length)
+		var next: Vector3 = lower_floors[index + 1] if index + 1 < lower_floors.size() else floor_point
+		if index + 1 < lower_floors.size() and departure.x * (next.x - floor_point.x) + departure.z * (next.z - floor_point.z) < 0.0:
+			departure = -departure
+		var outgoing_direction := departure
+		var incoming_direction := Vector3(incoming.x / incoming_length, 0.0, incoming.z / incoming_length)
+		var direction := outgoing_direction + incoming_direction
+		var direction_length := Vector2(direction.x, direction.z).length()
+		if direction_length > 0.001:
+			direction /= direction_length
+		else:
+			direction = outgoing_direction
+		var depth_side := Vector3(-direction.z, 0.0, direction.x)
+		if depth_side.x * incoming.x + depth_side.z * incoming.z > 0.0:
+			depth_side = -depth_side
+		var along := direction * 14.0
+		var across := depth_side * 28.0
+		var entrance := floor_point + depth_side * 10.0
+		depth_loops.append([floor_point, entrance, entrance + (along + across),
+			entrance + (-along + across), entrance])
 	append_path(segments, deep_path, 2.5)
+	for depth_loop in depth_loops:
+		append_path(segments, depth_loop, TUNNEL_RADIUS)
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
 		return {}
 	var main_radii := Vector3(rng.randf_range(10.0, 14.0), rng.randf_range(5.0, 7.0), rng.randf_range(10.0, 13.0))
@@ -208,6 +257,15 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 		{"center": branch_end + Vector3.UP * branch_radii.y, "radii": branch_radii},
 		{"center": deep_end + Vector3.UP * deep_radii.y, "radii": deep_radii}
 	]
+	for index in range(lower_level_count):
+		var tier_floor: Vector3 = lower_floors[index]
+		var floor_point: Vector3 = (depth_loops[index][2] + depth_loops[index][3]) * 0.5
+		var radii := Vector3(7.0 + (1.0 if index % 2 == 0 else 0.0), 4.5,
+			8.0 + (1.0 if index % 3 == 0 else 0.0))
+		radii.y = fit_chamber_vertical_radius(generation, floor_point, radii.x, radii.z, radii.y)
+		if radii.y < TUNNEL_RADIUS or tier_floor.y < lowest_cave_floor_y:
+			return {}
+		chambers.append({"center": floor_point + Vector3.UP * radii.y, "radii": radii})
 	var bounds: AABB = segments[0].bounds
 	for segment in segments:
 		bounds = bounds.merge(segment.bounds)
@@ -221,12 +279,12 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 	# Reject a whole recipe; never plug a published entrance with a town mask.
 	if generation.surface_town_intersects_bounds(bounds) or generation.generated_site_intersects_bounds(bounds):
 		return {}
-	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "segments": segments, "chambers": chambers, "bounds": bounds}
+	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "depthLoops": depth_loops, "segments": segments, "chambers": chambers, "bounds": bounds}
 
-func append_path(segments: Array[Dictionary], points: Array[Vector3], radius: float) -> void:
+func append_path(segments: Array[Dictionary], points: Array, radius: float) -> void:
 	for index in range(points.size() - 1):
-		var a := points[index]
-		var b := points[index + 1]
+		var a: Vector3 = points[index]
+		var b: Vector3 = points[index + 1]
 		var bounds := AABB(a, Vector3.ZERO).expand(b).grow(radius + 1.0)
 		bounds.size.y += radius
 		segments.append({"a": a, "b": b, "radius": radius, "radius_end": radius, "bounds": bounds})
@@ -240,7 +298,8 @@ func append_tapered_path(segments: Array[Dictionary], points: Array[Vector3], ra
 		var bounds_radius := maxf(radius_start, radius_end)
 		var bounds := AABB(a, Vector3.ZERO).expand(b).grow(bounds_radius + 1.0)
 		bounds.size.y += bounds_radius
-		segments.append({"a": a, "b": b, "radius": radius_start, "radius_end": radius_end, "bounds": bounds})
+		segments.append({"a": a, "b": b, "radius": radius_start, "radius_end": radius_end,
+			"bounds": bounds})
 
 func append_tapered_arch_path(segments: Array[Dictionary], points: Array[Vector3], radii: Array, vertical_radii: Array) -> void:
 	for index in range(points.size() - 1):
@@ -253,8 +312,11 @@ func append_tapered_arch_path(segments: Array[Dictionary], points: Array[Vector3
 		var bounds_radius := maxf(maxf(radius_start, radius_end), maxf(vertical_start, vertical_end))
 		var bounds := AABB(a, Vector3.ZERO).expand(b).grow(bounds_radius + 1.0)
 		bounds.size.y += bounds_radius
-		segments.append({"a": a, "b": b, "radius": radius_start, "radius_end": radius_end,
-			"vertical_radius": vertical_start, "vertical_radius_end": vertical_end, "bounds": bounds})
+		var segment := {"a": a, "b": b, "radius": radius_start, "radius_end": radius_end, "bounds": bounds}
+		if vertical_start != radius_start or vertical_end != radius_end:
+			segment["vertical_radius"] = vertical_start
+			segment["vertical_radius_end"] = vertical_end
+		segments.append(segment)
 
 func interior_segments_keep_natural_roof(generation, segments: Array[Dictionary], first_interior_segment: int) -> bool:
 	var reserve := float(generation.cell_size()) * 1.15

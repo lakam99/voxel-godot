@@ -96,6 +96,12 @@ Dictionary NativeCaveField::recipe_dictionary(const CaveRecipe &p_recipe) const 
 	Array route; for (const CaveVector3 &point : p_recipe.route) route.push_back(to_godot(point));
 	Array loop; for (const CaveVector3 &point : p_recipe.loop) loop.push_back(to_godot(point));
 	Array deep_route; for (const CaveVector3 &point : p_recipe.deep_route) deep_route.push_back(to_godot(point));
+	Array depth_loops;
+	for (const auto &depth_loop_points : p_recipe.depth_loops) {
+		Array depth_loop;
+		for (const CaveVector3 &point : depth_loop_points) depth_loop.push_back(to_godot(point));
+		depth_loops.push_back(depth_loop);
+	}
 	Array segments;
 	for (const CaveSegment &segment : p_recipe.segments) {
 		Dictionary item;
@@ -112,6 +118,7 @@ Dictionary NativeCaveField::recipe_dictionary(const CaveRecipe &p_recipe) const 
 		Dictionary item; item["center"] = to_godot(chamber.center); item["radii"] = to_godot(chamber.radii); chambers.push_back(item);
 	}
 	result["route"] = route; result["loop"] = loop; result["deepRoute"] = deep_route;
+	result["depthLoops"] = depth_loops;
 	result["segments"] = segments; result["chambers"] = chambers; result["bounds"] = to_godot(p_recipe.bounds);
 	return result;
 }

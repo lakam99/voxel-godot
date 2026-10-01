@@ -15,6 +15,8 @@ constexpr double REGION_METRES = 192.0;
 constexpr std::size_t RECIPE_CACHE_LIMIT = 128U;
 constexpr float ROCK = 8.0F;
 constexpr double TUNNEL_RADIUS = 2.7;
+constexpr double DEEP_LEVEL_DROP_METERS = 18.0;
+constexpr std::size_t MAX_DEEP_LEVELS = 7U;
 constexpr double PI = 3.14159265358979323846;
 constexpr double TAU = 6.28318530717958647692;
 
@@ -66,6 +68,8 @@ void CaveBounds::merge(const CaveBounds &other) noexcept {
 NativeProceduralCaveField::NativeProceduralCaveField(const WorldSourceDefinition &definition)
     : seed_code_points_(definition.raw_terrain_seed().code_points),
       cell_size_meters_(definition.constants().cell_size_meters),
+      lowest_cave_floor_meters_(static_cast<double>(definition.constants().world_bottom_cell_y + 4)
+          * definition.constants().cell_size_meters),
       noise_(seed_code_points_) {}
 
 CaveRegionKey NativeProceduralCaveField::region_at(const CaveVector3 position) {
@@ -94,6 +98,14 @@ std::uint32_t NativeProceduralCaveField::region_seed(const CaveRegionKey region)
 std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
     const CaveRegionKey region, const SurfaceSampler &surface,
     const ProtectedBounds &protected_bounds) const {
+    const std::shared_ptr<const CaveRecipe> recipe = recipe_snapshot_for_region(
+        region, surface, protected_bounds);
+    return recipe ? std::optional<CaveRecipe>(*recipe) : std::nullopt;
+}
+
+std::shared_ptr<const CaveRecipe> NativeProceduralCaveField::recipe_snapshot_for_region(
+    const CaveRegionKey region, const SurfaceSampler &surface,
+    const ProtectedBounds &protected_bounds) const {
     if (!surface || !protected_bounds) throw std::invalid_argument("native cave recipe inputs are required");
     {
         const std::lock_guard<std::mutex> lock(cache_mutex_);
@@ -102,6 +114,8 @@ std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
     }
     const auto started = std::chrono::steady_clock::now();
     const std::optional<CaveRecipe> built = build_recipe(region, surface, protected_bounds);
+    const std::shared_ptr<const CaveRecipe> snapshot = built
+        ? std::make_shared<const CaveRecipe>(*built) : std::shared_ptr<const CaveRecipe>{};
     const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
     {
@@ -112,9 +126,9 @@ std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
         cache_stats_.recipe_build_total_usec += elapsed;
         cache_stats_.recipe_build_max_usec = std::max(cache_stats_.recipe_build_max_usec, elapsed);
         if (recipe_cache_.size() >= RECIPE_CACHE_LIMIT) { recipe_cache_.clear(); ++cache_stats_.cache_evictions; }
-        recipe_cache_.emplace(region, built);
+        recipe_cache_.emplace(region, snapshot);
     }
-    return built;
+    return snapshot;
 }
 
 NativeProceduralCaveField::CacheStats NativeProceduralCaveField::cache_stats() const {
@@ -173,6 +187,9 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
             + (floor_end - (static_cast<double>(entry.y) - cell_size_meters_ * 0.25)) * eased_t);
         recipe.route.push_back(point);
     }
+    // Raise the first interior control point into the natural hillside so the
+    // entrance collar does not stack its descent on a steep surface grade.
+    recipe.route[1].y += 0.25F;
     for (std::size_t index = 0; index + 1U < recipe.route.size(); ++index) {
         for (std::int32_t step = 0; step < 5; ++step) {
             const CaveVector3 floor_point = lerp(recipe.route[index], recipe.route[index + 1U],
@@ -201,9 +218,84 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
     CaveVector3 deep_end_at_floor = deep_end;
     deep_end_at_floor.y = static_cast<float>(floor_end - 10.0);
     const CaveVector3 deep_mid = subtract(subtract(recipe.route[6], multiply(outward, 12.0F)),
-        {0.0F, 4.0F, 0.0F});
+        {0.0F, 7.0F, 0.0F});
     recipe.deep_route = {recipe.route[6], deep_mid, deep_end_at_floor};
+    const double remaining_depth = static_cast<double>(deep_end_at_floor.y) - lowest_cave_floor_meters_;
+    const std::size_t lower_level_count = std::min(MAX_DEEP_LEVELS,
+        static_cast<std::size_t>(std::max(0.0, std::floor(remaining_depth / DEEP_LEVEL_DROP_METERS))));
+    const double first_angle = std::atan2(
+        static_cast<double>(deep_end_at_floor.z - recipe.route[6].z),
+        static_cast<double>(deep_end_at_floor.x - recipe.route[6].x));
+    std::vector<CaveVector3> lower_floors;
+    for (std::size_t index = 1U; index <= lower_level_count; ++index) {
+        // Keep successive floors around a compact helical footprint. Each
+        // level drops 18m; lateral chords and alternating radii limit overlap
+        // while keeping the descent traversable.
+        const double angle = first_angle + static_cast<double>(index) * 1.7;
+        const double orbit_radius = 32.0 + (index % 2U == 0U ? 4.0 : 0.0);
+        CaveVector3 floor = recipe.route[6];
+        floor.x += static_cast<float>(std::cos(angle) * orbit_radius);
+        floor.z += static_cast<float>(std::sin(angle) * orbit_radius);
+        floor.y = static_cast<float>(static_cast<double>(deep_end_at_floor.y)
+            - static_cast<double>(index) * DEEP_LEVEL_DROP_METERS);
+        const CaveVector3 previous = lower_floors.empty() ? deep_end_at_floor : lower_floors.back();
+        const CaveVector3 incoming = lower_floors.empty()
+            ? subtract(deep_end_at_floor, deep_mid)
+            : subtract(previous, lower_floors.size() < 2U
+                ? deep_end_at_floor : lower_floors[lower_floors.size() - 2U]);
+        const double incoming_length = std::max(std::hypot(static_cast<double>(incoming.x),
+            static_cast<double>(incoming.z)), 0.001);
+        CaveVector3 departure{static_cast<float>(-incoming.z / incoming_length), 0.0F,
+            static_cast<float>(incoming.x / incoming_length)};
+        const CaveVector3 toward_next = subtract(floor, previous);
+        if (static_cast<double>(departure.x) * toward_next.x
+            + static_cast<double>(departure.z) * toward_next.z < 0.0)
+            departure = multiply(departure, -1.0);
+        CaveVector3 collar = previous;
+        collar.x += departure.x * 20.0F;
+        collar.z += departure.z * 20.0F;
+        recipe.deep_route.push_back(collar);
+        recipe.deep_route.push_back(floor);
+        lower_floors.push_back(floor);
+    }
+    for (std::size_t index = 0U; index < lower_floors.size(); ++index) {
+        const CaveVector3 &floor = lower_floors[index];
+        const CaveVector3 &previous = index == 0U ? deep_end_at_floor : lower_floors[index - 1U];
+        const CaveVector3 &next = index + 1U < lower_floors.size()
+            ? lower_floors[index + 1U] : floor;
+        const CaveVector3 incoming = subtract(floor, previous);
+        const double incoming_length = std::max(std::hypot(static_cast<double>(incoming.x),
+            static_cast<double>(incoming.z)), 0.001);
+        CaveVector3 departure{static_cast<float>(-incoming.z / incoming_length), 0.0F,
+            static_cast<float>(incoming.x / incoming_length)};
+        if (index + 1U < lower_floors.size()) {
+            const CaveVector3 toward_next = subtract(next, floor);
+            if (static_cast<double>(departure.x) * toward_next.x
+                + static_cast<double>(departure.z) * toward_next.z < 0.0)
+                departure = multiply(departure, -1.0);
+        }
+        const CaveVector3 outgoing_direction = departure;
+        const CaveVector3 incoming_direction{static_cast<float>(incoming.x / incoming_length), 0.0F,
+            static_cast<float>(incoming.z / incoming_length)};
+        CaveVector3 direction = add(outgoing_direction, incoming_direction);
+        const double direction_length = std::hypot(static_cast<double>(direction.x),
+            static_cast<double>(direction.z));
+        if (direction_length > 0.001) direction = multiply(direction, 1.0 / direction_length);
+        else direction = outgoing_direction;
+        CaveVector3 side{-direction.z, 0.0F, direction.x};
+        if (static_cast<double>(side.x) * incoming.x + static_cast<double>(side.z) * incoming.z > 0.0)
+            side = multiply(side, -1.0);
+        const CaveVector3 along = multiply(direction, 14.0);
+        const CaveVector3 across = multiply(side, 28.0);
+        const CaveVector3 entrance = add(floor, multiply(side, 10.0));
+        recipe.depth_loops.push_back({floor, entrance, add(entrance, add(along, across)),
+            add(entrance, add(multiply(along, -1.0), across)), entrance});
+    }
     recipe = append_path(recipe, recipe.deep_route, 2.5F);
+    for (std::size_t index = 0U; index < recipe.depth_loops.size(); ++index) {
+        const std::vector<CaveVector3> depth_loop = recipe.depth_loops[index];
+        recipe = append_path(recipe, depth_loop, static_cast<float>(TUNNEL_RADIUS));
+    }
     if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
 
     CaveVector3 main_radii{static_cast<float>(randf_range(rng, 10.0, 14.0)),
@@ -225,6 +317,19 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
         {add(branch_end, {0.0F, branch_radii.y, 0.0F}), branch_radii},
         {add(deep_end_at_floor, {0.0F, deep_radii.y, 0.0F}), deep_radii},
     };
+    for (std::size_t index = 0U; index < lower_level_count; ++index) {
+        const CaveVector3 &tier_floor = lower_floors[index];
+        const CaveVector3 floor = multiply(add(recipe.depth_loops[index][2],
+            recipe.depth_loops[index][3]), 0.5);
+        CaveVector3 radii{7.0F + (index % 2U == 0U ? 1.0F : 0.0F), 4.5F,
+            8.0F + (index % 3U == 0U ? 1.0F : 0.0F)};
+        radii.y = static_cast<float>(fit_chamber_vertical_radius(
+            floor, radii.x, radii.z, radii.y, surface));
+        if (radii.y < TUNNEL_RADIUS) return std::nullopt;
+        if (static_cast<double>(tier_floor.y) < lowest_cave_floor_meters_)
+            return std::nullopt;
+        recipe.chambers.push_back({add(floor, {0.0F, radii.y, 0.0F}), radii});
+    }
     for (const CaveChamber &chamber : recipe.chambers) {
         const CaveVector3 extent{chamber.radii.x + 1.0F, chamber.radii.y + 1.0F,
             chamber.radii.z + 1.0F};
@@ -396,30 +501,28 @@ double NativeProceduralCaveField::recipe_density(
 }
 
 double NativeProceduralCaveField::density(
-    const CaveVector3 position, const double depth_meters,
+    const CaveVector3 position, const double,
     const SurfaceSampler &surface, const ProtectedBounds &protected_bounds) const {
-    double result = ROCK;
-    if (depth_meters > 28.0) {
-        const float a = noise_.sample_3d(CaveNoiseChannel::chambers, position.x, position.y, position.z);
-        const CaveVector3 shifted{position.x + 873.0F, position.y - 211.0F, position.z + 397.0F};
-        const float b = noise_.sample_3d(CaveNoiseChannel::passages, shifted.x, shifted.y, shifted.z);
-        const float c = noise_.sample_3d(CaveNoiseChannel::crossings, position.x, position.y, position.z);
-        const double cheese = (0.43 - static_cast<double>(a)) * 22.0;
-        const double spaghetti = (std::max(std::abs(static_cast<double>(b)),
-            std::abs(static_cast<double>(c))) - 0.065) * 36.0;
-        result = std::max(std::min(cheese, spaghetti), 30.0 - depth_meters);
-    }
-    const std::optional<CaveRecipe> recipe = recipe_for_region(region_at(position), surface, protected_bounds);
-    if (!recipe || !recipe->bounds.contains(position)) return result;
+    const std::shared_ptr<const CaveRecipe> recipe = recipe_snapshot_for_region(
+        region_at(position), surface, protected_bounds);
+    // Explicit cave recipes are the sole underground-air authority. The former
+    // free-running noise caves made unrelated voids outside recipes and could
+    // undercut a recipe floor from below. Unauthored regions therefore remain
+    // solid; generated edits can still open them through the terrain volume.
+    if (!recipe || !recipe->bounds.contains(position)) return ROCK;
     double carved = recipe_density(position, *recipe);
     if (carved < 1.0) {
         const double detail = static_cast<double>(noise_.sample_3d(CaveNoiseChannel::detail,
             position.x, position.y, position.z)) * 0.24;
         // Keep additive roughness on the cave-facing wall while preventing a
         // positive SDF near thin overburden from becoming a hairline skylight.
-        carved += carved < 0.0 ? detail : std::max(detail, -carved + 0.04);
+        // Noise may roughen a wall, but it must never turn recipe-owned air
+        // into solid terrain. Positive-side detail remains biased outward to
+        // avoid thin-roof skylights.
+        carved += carved < 0.0 ? std::min(detail, -carved - 0.02)
+            : std::max(detail, -carved + 0.04);
     }
-    return std::min(result, carved);
+    return carved;
 }
 
 } // namespace voxel::world_backend
