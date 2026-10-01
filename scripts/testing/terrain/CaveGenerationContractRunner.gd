@@ -40,7 +40,14 @@ func run() -> void:
 		var oracle = FIELD.new()
 		oracle.setup(seed_value)
 		var found := 0
-		var lowland_region_centers := 0
+		var seed_selected_regions := 0
+		var highland_centers := 0
+		var valid_entrances := 0
+		var depth_capacity_regions := 0
+		var exact_eligible_regions := 0
+		var eligible_recipes := 0
+		var substantial_recipes := 0
+		var rejection_counts := {}
 		var minimum_vertical_travel := INF
 		var maximum_vertical_travel := 0.0
 		var minimum_depth_levels := 999
@@ -52,15 +59,24 @@ func run() -> void:
 				if not region_filter.is_empty() and region != selected_region:
 					continue
 				sampled_region_count += 1
-				var region_center := Vector3(rx * 192.0, 0.0, rz * 192.0)
-				var center_surface := float(world.terrain_reference_surface_y_at(region_center))
-				if center_surface < 19.0:
-					lowland_region_centers += 1
 				var recipe: Dictionary = world.cave_recipe_for_region(region)
+				var admission: Dictionary = {}
+				var oracle_recipe: Dictionary = oracle.build_recipe(region, world, admission)
+				var rejection_reason := str(admission.get("reason", "missing_reason"))
+				rejection_counts[rejection_reason] = int(rejection_counts.get(rejection_reason, 0)) + 1
+				seed_selected_regions += int(bool(admission.get("seedSelected", false)))
+				highland_centers += int(bool(admission.get("highlandCenter", false)))
+				valid_entrances += int(bool(admission.get("validEntrance", false)))
+				depth_capacity_regions += int(bool(admission.get("depthCapacity", false)))
+				if bool(admission.get("eligible", false)):
+					exact_eligible_regions += 1
 				if recipe.is_empty():
 					continue
 				found += 1
-				var oracle_recipe: Dictionary = oracle.recipe_for_region(region, world)
+				if bool(admission.get("eligible", false)):
+					eligible_recipes += 1
+				if recipe.depthLoops.size() >= 4:
+					substantial_recipes += 1
 				var recipe_diff := first_difference(recipe, oracle_recipe, "recipe")
 				if not recipe_diff.is_empty():
 					failures.append("native_gdscript_recipe_mismatch:%s" % region)
@@ -79,17 +95,27 @@ func run() -> void:
 				maximum_vertical_travel = maxf(maximum_vertical_travel, vertical_travel)
 				minimum_depth_levels = mini(minimum_depth_levels, recipe.depthLoops.size())
 				examples.append({"seed": seed_value, "region": [rx, rz], "biome": world.surface_biome_for_cell3(Vector3i((recipe.entry / 1.35).floor())), "entry": vec(recipe.entry), "outward": vec(recipe.outward), "chamberFloor": vec(route.back()), "deepestFloor": vec(recipe.deepRoute.back()), "verticalTravelMeters": recipe.entry.y - recipe.deepRoute.back().y, "depthLevelCount": recipe.depthLoops.size(), "chamberCount": recipe.chambers.size(), "route": route.map(func(p): return vec(p))})
-		var acceptance_rate := float(found) / float(maxi(sampled_region_count, 1))
+		var acceptance_rate := float(substantial_recipes) / float(maxi(exact_eligible_regions, 1))
 		results.append({"seed": seed_value, "regionsSampled": sampled_region_count, "recipes": found,
-			"acceptanceRate": acceptance_rate,
-			"lowlandRegionCenters": lowland_region_centers,
+			"seedSelectedRegions": seed_selected_regions,
+			"highlandCenters": highland_centers,
+			"validEntrances": valid_entrances,
+			"depthCapacityRegions": depth_capacity_regions,
+			"exactEligibleRegions": exact_eligible_regions,
+			"eligibleRecipes": eligible_recipes,
+			"substantialRecipes": substantial_recipes,
+			"eligibleAcceptanceRate": acceptance_rate,
+			"rejectionCounts": rejection_counts,
 			"minimumVerticalTravelMeters": minimum_vertical_travel,
 			"maximumVerticalTravelMeters": maximum_vertical_travel,
 			"minimumDepthLevels": minimum_depth_levels,
-			"passed": acceptance_rate >= 0.3
+			"passed": exact_eligible_regions > 0 and acceptance_rate >= 0.5
 				and minimum_depth_levels >= 4 and failures.is_empty(), "failures": failures})
 		print("CAVE CONTRACT ", seed_value, " recipes=", found, " regions=", sampled_region_count,
-			" acceptance=", acceptance_rate, " lowland_region_centers=", lowland_region_centers,
+			" selected=", seed_selected_regions, " highland=", highland_centers,
+			" entrances=", valid_entrances, " depth_capacity=", depth_capacity_regions,
+			" eligible=", exact_eligible_regions, " substantial=", substantial_recipes,
+			" eligible_acceptance=", acceptance_rate, " rejection_counts=", rejection_counts,
 			" minimum_levels=", minimum_depth_levels,
 			" failures=", failures.size())
 	var passed := results.all(func(r): return r.passed)
@@ -194,9 +220,32 @@ func check_path(world, route: Array, label: String, failures: Array, recipe: Dic
 						var native_cave_density: float = world.cave_field.density(p,
 							maxf(0.0, surface - p.y), world.cave_surface_callable,
 							world.cave_protected_bounds_callable)
+						var nearest_segment_distance := INF
+						var nearest_segment := {}
+						for segment_index in range(recipe.segments.size()):
+							var segment: Dictionary = recipe.segments[segment_index]
+							var segment_a: Vector3 = segment.a
+							var segment_b: Vector3 = segment.b
+							var horizontal := Vector2(segment_b.x - segment_a.x, segment_b.z - segment_a.z)
+							var t := clampf(Vector2(p.x - segment_a.x, p.z - segment_a.z).dot(horizontal)
+								/ maxf(horizontal.length_squared(), 0.001), 0.0, 1.0)
+							var segment_floor := segment_a.lerp(segment_b, t)
+							var segment_radius := lerpf(float(segment.get("radius", 2.7)),
+								float(segment.get("radius_end", segment.get("radius", 2.7))), t)
+							var segment_vertical := lerpf(float(segment.get("vertical_radius", segment_radius)),
+								float(segment.get("vertical_radius_end", segment.get("vertical_radius", segment_radius))), t)
+							var delta := p - (segment_floor + Vector3.UP * segment_vertical)
+							var normalized_distance := sqrt(Vector2(delta.x, delta.z).length_squared() / (segment_radius * segment_radius)
+								+ pow(delta.y / segment_vertical, 2.0))
+							if normalized_distance < nearest_segment_distance:
+								nearest_segment_distance = normalized_distance
+								nearest_segment = {"index": segment_index, "t": t, "floor": segment_floor,
+									"radius": segment_radius, "verticalRadius": segment_vertical,
+									"normalizedDistance": normalized_distance}
 						print("CAVE BLOCKED BODY ", label, " point=", p, " density=", body_density,
 							" recipeDensity=", recipe_body_density, " nativeCaveDensity=", native_cave_density,
-							" guide_floor=", floor_point, " ground=", world.volume_ground_height_near(floor_point))
+							" guide_floor=", floor_point, " ground=", world.volume_ground_height_near(floor_point),
+							" surface=", surface, " nearestSegment=", nearest_segment)
 						support_debug_emitted = true
 			var below := floor_point - Vector3.UP * 1.2
 			var below_surface: float = world.terrain_reference_surface_y_at(below)

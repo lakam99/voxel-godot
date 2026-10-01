@@ -110,16 +110,18 @@ func recipe_for_region(region: Vector2i, generation) -> Dictionary:
 	recipes[region] = recipe
 	return recipe
 
-func build_recipe(region: Vector2i, generation) -> Dictionary:
+func build_recipe(region: Vector2i, generation, diagnostics: Dictionary = {}) -> Dictionary:
 	# Local RNG does not consume/reorder the terrain, town or prop RNG streams.
+	diagnostics.merge({"seedSelected": false, "highlandCenter": false,
+		"validEntrance": false, "depthCapacity": false, "eligible": false}, false)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = stable_hash("%s:cave-region:%d,%d" % [seed_text, region.x, region.y])
-	if rng.randf() > 0.72:
-		return {}
+	diagnostics["seedSelected"] = true
 	var center := Vector3(region.x * REGION_METRES + rng.randf_range(-14.0, 14.0), 0.0, region.y * REGION_METRES + rng.randf_range(-14.0, 14.0))
 	center.y = float(generation.terrain_reference_surface_y_at(center))
 	if center.y < 19.0:
-		return {}
+		return reject_recipe(diagnostics, "lowland_center")
+	diagnostics["highlandCenter"] = true
 	var length := rng.randf_range(43.0, 52.0)
 	var phase := rng.randf_range(0.0, TAU)
 	var entry := Vector3.ZERO
@@ -141,12 +143,13 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 			entry = candidate
 			outward = direction
 	if outward == Vector3.ZERO:
-		return {}
+		return reject_recipe(diagnostics, "no_valid_entrance")
+	diagnostics["validEntrance"] = true
 	var side := Vector3(-outward.z, 0.0, outward.x)
 	var bend := rng.randf_range(-7.0, 7.0)
 	var floor_end := minf(entry.y - 7.5, center.y - 11.0)
 	if entry.y - floor_end > length * 0.35:
-		return {}
+		return reject_recipe(diagnostics, "entrance_descent_limit")
 	var route: Array[Vector3] = []
 	for index in range(7):
 		var t := float(index) / 6.0
@@ -167,16 +170,16 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 		for step in range(5):
 			var floor_point := route[index].lerp(route[index + 1], float(step) / 4.0)
 			if floor_point.y - 0.3 > float(generation.terrain_reference_surface_y_at(floor_point)):
-				return {}
+				return reject_recipe(diagnostics, "route_crosses_surface")
 	var segments: Array[Dictionary] = []
 	# Constrain the mouth to a player-clear arch, then widen only after the
 	# route is below the natural hillside. A full-radius mouth excavates through
 	# the roof and creates the very empty-sky void this field must avoid.
 	append_tapered_arch_path(segments, route,
 		[2.5, 2.3, 2.1, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS],
-		[1.35, 1.2, 1.2, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS])
+		[1.35, 1.45, 1.45, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS])
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
-		return {}
+		return reject_recipe(diagnostics, "entrance_roof")
 	var junction: Vector3 = route[3]
 	var branch_end: Vector3 = route[5] + side * rng.randf_range(15.0, 21.0)
 	branch_end.y = floor_end - 1.0
@@ -189,6 +192,10 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 	var lowest_cave_floor_y: float = float(generation.world_bottom_cell_y() + 4) * generation.cell_size()
 	var remaining_depth: float = deep_end.y - lowest_cave_floor_y
 	var lower_level_count := clampi(floori(remaining_depth / DEEP_LEVEL_DROP_METERS), 0, MAX_DEEP_LEVELS)
+	diagnostics["depthCapacity"] = lower_level_count >= 4
+	diagnostics["eligible"] = bool(diagnostics["seedSelected"]) \
+		and bool(diagnostics["highlandCenter"]) and bool(diagnostics["validEntrance"]) \
+		and bool(diagnostics["depthCapacity"])
 	var first_angle := atan2(deep_end.z - route[6].z, deep_end.x - route[6].x)
 	var lower_floors: Array[Vector3] = []
 	for index in range(1, lower_level_count + 1):
@@ -239,19 +246,19 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 	for depth_loop in depth_loops:
 		append_path(segments, depth_loop, TUNNEL_RADIUS)
 	if not interior_segments_keep_natural_roof(generation, segments, 1):
-		return {}
+		return reject_recipe(diagnostics, "network_roof")
 	var main_radii := Vector3(rng.randf_range(10.0, 14.0), rng.randf_range(5.0, 7.0), rng.randf_range(10.0, 13.0))
 	main_radii.y = fit_chamber_vertical_radius(generation, route[6], main_radii.x, main_radii.z, main_radii.y)
 	if main_radii.y < TUNNEL_RADIUS:
-		return {}
+		return reject_recipe(diagnostics, "main_chamber_clearance")
 	var branch_radii := Vector3(6.0, 4.0, 7.0)
 	branch_radii.y = fit_chamber_vertical_radius(generation, branch_end, branch_radii.x, branch_radii.z, branch_radii.y)
 	if branch_radii.y < 2.5:
-		return {}
+		return reject_recipe(diagnostics, "branch_chamber_clearance")
 	var deep_radii := Vector3(8.0, 5.0, 9.0)
 	deep_radii.y = fit_chamber_vertical_radius(generation, deep_end, deep_radii.x, deep_radii.z, deep_radii.y)
 	if deep_radii.y < 2.5:
-		return {}
+		return reject_recipe(diagnostics, "deep_chamber_clearance")
 	var chambers: Array[Dictionary] = [
 		{"center": route[6] + Vector3.UP * main_radii.y, "radii": main_radii},
 		{"center": branch_end + Vector3.UP * branch_radii.y, "radii": branch_radii},
@@ -264,7 +271,7 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 			8.0 + (1.0 if index % 3 == 0 else 0.0))
 		radii.y = fit_chamber_vertical_radius(generation, floor_point, radii.x, radii.z, radii.y)
 		if radii.y < TUNNEL_RADIUS or tier_floor.y < lowest_cave_floor_y:
-			return {}
+			return reject_recipe(diagnostics, "tier_chamber_clearance_or_world_bottom")
 		chambers.append({"center": floor_point + Vector3.UP * radii.y, "radii": radii})
 	var bounds: AABB = segments[0].bounds
 	for segment in segments:
@@ -274,12 +281,17 @@ func build_recipe(region: Vector2i, generation) -> Dictionary:
 	# Recipes stay wholly within their source region, so adjacent chunk queries
 	# use identical recipes without scanning neighbouring regions per voxel.
 	if region_at(bounds.position) != region or region_at(bounds.end) != region:
-		return {}
+		return reject_recipe(diagnostics, "region_bounds")
 	# Protect generated settlement footprints through their existing authority.
 	# Reject a whole recipe; never plug a published entrance with a town mask.
 	if generation.surface_town_intersects_bounds(bounds) or generation.generated_site_intersects_bounds(bounds):
-		return {}
+		return reject_recipe(diagnostics, "protected_site")
+	diagnostics["reason"] = "accepted"
 	return {"id": "cave:%d,%d" % [region.x, region.y], "region": region, "entry": entry, "outward": outward, "route": route, "loop": loop, "deepRoute": deep_path, "depthLoops": depth_loops, "segments": segments, "chambers": chambers, "bounds": bounds}
+
+func reject_recipe(diagnostics: Dictionary, reason: String) -> Dictionary:
+	diagnostics["reason"] = reason
+	return {}
 
 func append_path(segments: Array[Dictionary], points: Array, radius: float) -> void:
 	for index in range(points.size() - 1):

@@ -140,7 +140,6 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
     const CaveRegionKey region, const SurfaceSampler &surface,
     const ProtectedBounds &protected_bounds) const {
     GodotPcg32 rng(region_seed(region));
-    if (static_cast<double>(rng.randf()) > 0.72) return std::nullopt;
 
     const double region_x = static_cast<double>(region.x) * REGION_METRES;
     const double region_z = static_cast<double>(region.z) * REGION_METRES;
@@ -202,7 +201,7 @@ std::optional<CaveRecipe> NativeProceduralCaveField::build_recipe(
 
     recipe = append_tapered_arch_path(recipe, recipe.route,
         {2.5, 2.3, 2.1, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS},
-        {1.35, 1.2, 1.2, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS});
+        {1.35, 1.45, 1.45, 2.1, 2.5, TUNNEL_RADIUS, TUNNEL_RADIUS});
     if (!interior_segments_keep_natural_roof(recipe, 1U, surface)) return std::nullopt;
     const CaveVector3 junction = recipe.route[3];
     const CaveVector3 branch_end = [&]() {
