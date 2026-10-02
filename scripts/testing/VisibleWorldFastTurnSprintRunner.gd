@@ -114,7 +114,7 @@ func run() -> void:
             "testSeedOverride": OS.get_environment("VOXEL_TEST_SEED"), "fixedFps": false,
             "diagnosticReplaySeed": diagnostic_replay_seed,
             "dataPrefetchProbe": data_prefetch_probe_mode,
-            "movementAcceptanceExcluded": data_prefetch_probe_mode == "mesh",
+            "movementAcceptanceExcluded": data_prefetch_probe_mode in ["mesh", "visual"],
             "skipTutorial": bool(main.launch_options.get("skipTutorial", false)) if main != null and is_instance_valid(main) else false,
             "forceDaytime": bool(main.launch_options.get("forceDaytime", false)) if main != null and is_instance_valid(main) else false,
             "forceClearWeather": bool(main.launch_options.get("forceClearWeather", false)) if main != null and is_instance_valid(main) else false,
@@ -185,23 +185,27 @@ func _launch_seeded_main_diagnostic() -> bool:
 
 
 func _prepare_data_prefetch_probe() -> void:
-    # Both probe modes pause for the same bounded interval after first control.
-    # Only the data mode requests a secondary viewer, so the control measures
-    # the same player position and elapsed background-publication opportunity.
+    # Every probe mode pauses for the same bounded interval after first control.
+    # Control makes no secondary request, preserving the elapsed background
+    # publication opportunity for the pinned comparison.
     var runtime = main.get("voxel_terrain_runtime") if is_instance_valid(main) else null
     var player_body = main.get("player") as CharacterBody3D if is_instance_valid(main) else null
     var started_usec := Time.get_ticks_usec()
-    if data_prefetch_probe_mode in ["data", "mesh"] and is_instance_valid(runtime) and is_instance_valid(player_body):
-        var probe_distance := MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh" else DATA_PREFETCH_DISTANCE
+    if data_prefetch_probe_mode in ["data", "mesh", "visual"] \
+            and is_instance_valid(runtime) and is_instance_valid(player_body):
+        var probe_distance := MESH_PREP_DISTANCE if _mesh_prefetch_probe() else DATA_PREFETCH_DISTANCE
         var probe_position := _data_prefetch_target(player_body.global_position)
         data_prefetch_requested_target = probe_position
         data_prefetch_viewer = VoxelViewer.new()
-        data_prefetch_viewer.name = "DiagnosticHiddenMeshPrep" if data_prefetch_probe_mode == "mesh" \
-            else "DiagnosticDataOnlyPrefetch"
-        data_prefetch_viewer.requires_visuals = false
-        # Voxel Tools v1.6x accepts collision demand for mesh preparation, then
-        # hides the block when no visual viewer owns it. This diagnostic also
-        # creates native far colliders, so its movement result is not acceptance.
+        data_prefetch_viewer.name = "DiagnosticVisualMeshPrep" if data_prefetch_probe_mode == "visual" \
+            else ("DiagnosticCollisionMeshPrep" if data_prefetch_probe_mode == "mesh" \
+                else "DiagnosticDataOnlyPrefetch")
+        # The visual mode requests native rendering meshes and may draw them
+        # outside the configured 96m view. It is diagnostic, not acceptance.
+        data_prefetch_viewer.requires_visuals = data_prefetch_probe_mode == "visual"
+        # Collision-only demand processes native blocks without requiring a
+        # render mesh and can create far colliders. Neither mesh probe is
+        # movement acceptance.
         data_prefetch_viewer.requires_collisions = data_prefetch_probe_mode == "mesh"
         data_prefetch_viewer.view_distance = probe_distance
         runtime.call("_stage_secondary_viewer", DATA_PREFETCH_ID, "prefetch",
@@ -224,18 +228,22 @@ func _data_prefetch_coarse_cell(position: Vector3) -> Vector2i:
 
 func _data_prefetch_target(position: Vector3) -> Vector3:
     return position + Vector3(MESH_PREP_LEAD_DISTANCE, 0.0, 0.0) \
-        if data_prefetch_probe_mode == "mesh" else position
+        if _mesh_prefetch_probe() else position
+
+
+func _mesh_prefetch_probe() -> bool:
+    return data_prefetch_probe_mode in ["mesh", "visual"]
 
 
 func _advance_data_prefetch_position(position: Vector3) -> void:
-    if data_prefetch_probe_mode not in ["data", "mesh"] or not data_prefetch_attached \
+    if data_prefetch_probe_mode not in ["data", "mesh", "visual"] or not data_prefetch_attached \
             or not is_instance_valid(data_prefetch_viewer) or not position.is_finite():
         return
     var next_cell := _data_prefetch_coarse_cell(position)
     if next_cell == data_prefetch_last_cell: return
     var runtime = main.get("voxel_terrain_runtime") if is_instance_valid(main) else null
     if not is_instance_valid(runtime): return
-    if data_prefetch_probe_mode == "mesh":
+    if _mesh_prefetch_probe():
         # Diagnostic-only cap: make at most two extra small native requests even
         # if the production background lane is busy, then observe actual lag.
         if data_prefetch_move_attempts >= MESH_PREP_MAX_MOVE_REQUESTS:
@@ -247,7 +255,7 @@ func _advance_data_prefetch_position(position: Vector3) -> void:
     var gate = runtime.get("site_gate")
     if not is_instance_valid(gate): return
     data_prefetch_move_attempts += 1
-    var probe_distance := MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh" else DATA_PREFETCH_DISTANCE
+    var probe_distance := MESH_PREP_DISTANCE if _mesh_prefetch_probe() else DATA_PREFETCH_DISTANCE
     data_prefetch_requested_target = _data_prefetch_target(position)
     if bool(gate.call("request_viewer", data_prefetch_viewer,
             data_prefetch_requested_target, probe_distance)):
@@ -341,21 +349,26 @@ func _data_prefetch_snapshot(label: String, sample_shell: bool) -> Dictionary:
 func _data_prefetch_report() -> Dictionary:
     if data_prefetch_probe_mode.is_empty(): return {}
     return {"mode": data_prefetch_probe_mode,
-        "scope": "fixture-only collision-demand probe; native area/entry counters do not prove rendering mesh preparation; native far colliders may be added; movement result excluded from acceptance"
-            if data_prefetch_probe_mode == "mesh" else
-            "fixture-only data loading probe; data residency never counts as visual readiness",
-        "distanceWorldUnits": MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh"
+        "scope": "fixture-only visual-demand probe; native rendering meshes may draw outside configured 96m view; native area/entry counters alone do not prove installed render geometry; movement result excluded from acceptance"
+            if data_prefetch_probe_mode == "visual" else
+            ("fixture-only collision-demand probe; native area/entry counters do not prove rendering mesh preparation; native far colliders may be added; movement result excluded from acceptance"
+                if data_prefetch_probe_mode == "mesh" else
+                "fixture-only data loading probe; data residency never counts as visual readiness"),
+        "viewerRequiresVisuals": data_prefetch_viewer.requires_visuals if is_instance_valid(data_prefetch_viewer) else null,
+        "viewerRequiresCollisions": data_prefetch_viewer.requires_collisions if is_instance_valid(data_prefetch_viewer) else null,
+        "movementAcceptanceExcluded": _mesh_prefetch_probe(),
+        "distanceWorldUnits": MESH_PREP_DISTANCE if _mesh_prefetch_probe()
             else DATA_PREFETCH_DISTANCE,
-        "leadDistanceWorldUnits": MESH_PREP_LEAD_DISTANCE if data_prefetch_probe_mode == "mesh" else 0.0,
+        "leadDistanceWorldUnits": MESH_PREP_LEAD_DISTANCE if _mesh_prefetch_probe() else 0.0,
         "nominalAheadAnnulusWorldUnits": [MESH_PREP_LEAD_DISTANCE - MESH_PREP_DISTANCE,
-            MESH_PREP_LEAD_DISTANCE + MESH_PREP_DISTANCE] if data_prefetch_probe_mode == "mesh" else [],
+            MESH_PREP_LEAD_DISTANCE + MESH_PREP_DISTANCE] if _mesh_prefetch_probe() else [],
         "warmupSeconds": DATA_PREFETCH_WARMUP_SECONDS,
         "viewerAttached": data_prefetch_attached,
         "viewerAttachMs": data_prefetch_attach_ms,
         "moveAttempts": data_prefetch_move_attempts,
         "moveAdmissions": data_prefetch_move_admitted,
         "moveDeferred": data_prefetch_move_deferred,
-        "maxMoveRequests": MESH_PREP_MAX_MOVE_REQUESTS if data_prefetch_probe_mode == "mesh" else -1,
+        "maxMoveRequests": MESH_PREP_MAX_MOVE_REQUESTS if _mesh_prefetch_probe() else -1,
         "samples": data_prefetch_samples.duplicate(true)}
 
 
@@ -377,7 +390,7 @@ func _run_visual_act(failures: Array[String]) -> void:
     main.call("set_game_mouse_mode", Input.MOUSE_MODE_CAPTURED)
     if not data_prefetch_probe_mode.is_empty():
         await _prepare_data_prefetch_probe()
-        if data_prefetch_probe_mode in ["data", "mesh"] and not data_prefetch_attached:
+        if data_prefetch_probe_mode in ["data", "mesh", "visual"] and not data_prefetch_attached:
             failures.append("diagnostic prefetch viewer was not admitted during warmup")
         if data_prefetch_probe_mode == "mesh" and data_prefetch_attached:
             var runtime = main.get("voxel_terrain_runtime")
@@ -387,6 +400,15 @@ func _run_visual_act(failures: Array[String]) -> void:
                     or not is_instance_valid(native_terrain) or not native_terrain.generate_collisions \
                     or not is_instance_valid(primary_viewer) or primary_viewer.view_distance != 96:
                 failures.append("hidden mesh prep probe changed the configured visual or collision policy")
+        if data_prefetch_probe_mode == "visual" and data_prefetch_attached:
+            var visual_runtime = main.get("voxel_terrain_runtime")
+            var visual_terrain = visual_runtime.get("terrain") if is_instance_valid(visual_runtime) else null
+            var visual_primary_viewer = visual_runtime.get("viewer") if is_instance_valid(visual_runtime) else null
+            if not data_prefetch_viewer.requires_visuals or data_prefetch_viewer.requires_collisions \
+                    or not is_instance_valid(visual_terrain) or not visual_terrain.generate_collisions \
+                    or not is_instance_valid(visual_primary_viewer) or visual_primary_viewer.view_distance != 96 \
+                    or not visual_primary_viewer.requires_visuals or not visual_primary_viewer.requires_collisions:
+                failures.append("visual mesh prep probe changed the configured primary view or collision policy")
     await _checkpoint("first_outdoor_control")
     var first_position := player_body.global_position
     var initial_yaw := player_body.global_rotation.y
