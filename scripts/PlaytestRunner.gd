@@ -174,7 +174,7 @@ func run() -> void:
     add_child(main)
     mark_progress("main_instantiated")
     if not await wait_for_runtime_loading_complete():
-        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        add_result("startup_loading_complete", false, JSON.stringify(startup_failure_diagnostics(main)))
         finish_playtest()
         return
     await wait_physics_frames(20)
@@ -1451,6 +1451,24 @@ func wait_for_runtime_loading_complete(max_seconds := 240.0) -> bool:
         return false
     mark_progress("runtime_loading_complete")
     return true
+
+func startup_failure_diagnostics(main_node: Node) -> Dictionary:
+    if main_node == null or not is_instance_valid(main_node):
+        return {"reason": "main_owner_missing"}
+    var timeline_value: Variant = main_node.get("startup_loading_timeline")
+    var timeline: Array = timeline_value if timeline_value is Array else []
+    var domains_value: Variant = main_node.get("startup_readiness_domains")
+    var domains: Dictionary = domains_value if domains_value is Dictionary else {}
+    var selected_domains := {}
+    for domain in ["terrain_view_expansion", "visible_terrain_meshes", "initial_region",
+            "initial_structure_visual", "gameplay"]:
+        if domains.has(domain):
+            selected_domains[domain] = domains[domain]
+    var timeline_start := maxi(0, timeline.size() - 16)
+    return {"startup_loading_failure_result": main_node.get("startup_loading_failure_result"),
+        "startupTimelineTail": timeline.slice(timeline_start),
+        "startupMaxStep": main_node.get("startup_loading_max_step"),
+        "startupReadinessDomains": selected_domains}
 
 func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
     if main == null:

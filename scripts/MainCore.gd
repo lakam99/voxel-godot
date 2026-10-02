@@ -16,6 +16,9 @@ const NativeCollisionAdmissionRouterScript := preload("res://scripts/terrain/Nat
 const NativePrivateMainLoadStageScript := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 const NativeDecodedSaveRetirementScript := preload("res://scripts/terrain/NativeDecodedSaveRetirement.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
+const VisibleWorldReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
+const VoxelTerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
+const GeneratedStructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
@@ -47,6 +50,14 @@ var startup_work_progress = StartupWorkProgressTrackerScript.new()
 var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
+var visible_world_readiness: Object
+var visible_world_view_revision := 0
+var visible_world_view_center_cells := Vector2.ZERO
+var visible_world_near_bounds := Rect2i()
+var visible_world_prop_chunk_keys: Array[Vector2i] = []
+var visible_world_prop_chunk_cursor := 0
+var visible_world_prop_manifest_sources: Dictionary = {}
+var visible_world_prop_last_attempt: Dictionary = {}
 var regional_navigation = RegionalNavigationPublicationScript.new()
 var streaming_requests: Dictionary = {}
 var streaming_request_bounds: Dictionary = {}
@@ -318,6 +329,7 @@ var hud_skipped_refresh_count := 0
 var last_hud_refresh_message := ""
 var detail_meshes := {}
 var block_meshes := {}
+var generated_block_cells_by_column: Dictionary = {}
 
 func native_collision_admit_motion(body: PhysicsBody3D, motion: Vector3) -> bool:
     if _native_collision_admission_owner_id == 0:
@@ -720,8 +732,12 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
             "invalid_final_terrain_expansion_state"
         )
         if startup_result_is_ready(state):
-            await startup_loading_yield("Nearby terrain drawn", "terrain_view_expansion", "ready", state.get("metrics", {}))
-            return state
+            var visual_state: Dictionary = await wait_for_initial_terrain_mesh_coverage(runtime)
+            if not startup_result_is_ready(visual_state): return visual_state
+            var metrics: Dictionary = state.get("metrics", {}).duplicate(true)
+            metrics["visibleTerrain"] = visual_state.get("metrics", {})
+            await startup_loading_yield("Nearby terrain drawn", "terrain_view_expansion", "ready", metrics)
+            return StartupReadinessResultScript.ready({}, metrics)
         if String(state.get("status", "")) == StartupReadinessResultScript.STATUS_FAILED \
             and String(state.get("reason", "")) != "terrain_generation_pending":
             return state
@@ -736,6 +752,145 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
         [],
         state.get("metrics", {}).merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true)
     )
+
+func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
+    if not is_instance_valid(runtime) or player == null or not is_instance_valid(player) \
+            or not runtime.has_method("visible_mesh_world_revision"):
+        return StartupReadinessResultScript.failed("missing_visible_terrain_manifest_authority")
+    var viewer: Object = runtime.get("viewer")
+    if not is_instance_valid(viewer):
+        return StartupReadinessResultScript.failed("missing_visible_terrain_viewer")
+    var view_distance := float(viewer.get("view_distance"))
+    if not is_finite(view_distance) or view_distance <= 0.0:
+        return StartupReadinessResultScript.failed("invalid_visible_terrain_view_distance")
+    var center := player.global_position / CELL
+    var radius_cells := view_distance / CELL
+    var radius_int := ceili(radius_cells)
+    var view_bounds := Rect2i(Vector2i(floori(center.x) - radius_int, floori(center.z) - radius_int),
+        Vector2i.ONE * (radius_int * 2 + 1))
+    var near_intent := foreground_streaming_intent_for_position(player.global_position)
+    var near_bounds: Rect2i = near_intent.get("bounds", view_bounds)
+    var request_id := int(streaming_requests.get("player", 0))
+    if request_id <= 0:
+        return StartupReadinessResultScript.failed("initial_visible_terrain_request_missing")
+    var world_revision := String(runtime.call("visible_mesh_world_revision"))
+    var readiness = VisibleWorldReadinessScript.new()
+    var view_result: Dictionary = readiness.begin_view(request_id, seed_text, world_revision,
+        view_bounds, near_bounds, Vector2(center.x, center.z), radius_cells)
+    if view_result.get("status") != "ready":
+        return StartupReadinessResultScript.failed("initial_visible_terrain_view_rejected", {}, [], view_result)
+    visible_world_readiness = readiness
+    visible_world_view_revision = int(view_result.viewRevision)
+    visible_world_view_center_cells = Vector2(center.x, center.z)
+    visible_world_near_bounds = near_bounds
+    visible_world_prop_chunk_keys = visible_prop_chunk_keys_for_bounds(view_bounds, center)
+    visible_world_prop_chunk_cursor = 0
+    visible_world_prop_manifest_sources.clear()
+    var manifest = VoxelTerrainVisualManifestScript.new()
+    var begin_result: Dictionary = manifest.begin(runtime, readiness, request_id, seed_text,
+        world_revision, int(view_result.viewRevision), view_bounds, near_bounds, center, radius_cells)
+    if begin_result.get("status") == "failed":
+        return StartupReadinessResultScript.failed("initial_visible_terrain_manifest_rejected", {}, [], begin_result)
+    var started_usec := Time.get_ticks_usec()
+    var state: Dictionary = {"status": "pending", "reason": "initial_visible_terrain_meshes_pending"}
+    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS:
+        if shutdown_requested:
+            return StartupReadinessResultScript.failed("startup_cancelled")
+        advance_visible_world_prop_manifest()
+        state = manifest.advance(12)
+        if state.get("reason") == "native_terrain_mesh_block_pending":
+            state["pendingBlockDiagnostics"] = manifest.pending_block_diagnostics(runtime)
+        if state.get("status") == "ready":
+            return StartupReadinessResultScript.ready({}, state)
+        if state.get("status") == "failed":
+            return StartupReadinessResultScript.failed("initial_visible_terrain_manifest_failed", {}, [], state)
+        process_pending_chunk_loads(world_to_chunk(player.position.x, player.position.z))
+        if pending_chunk_loads.is_empty():
+            call("process_streaming_structure_work")
+            process_pending_chunk_prop_spawns(visible_world_prop_chunk_keys)
+        await startup_loading_yield("Finishing visible terrain", "visible_terrain_meshes", "pending", state)
+    return StartupReadinessResultScript.failed("initial_visible_terrain_mesh_coverage_timeout", {}, [],
+        state.merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true))
+
+func visible_prop_chunk_keys_for_bounds(bounds: Rect2i, center: Vector3) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    if bounds.size.x <= 0 or bounds.size.y <= 0:
+        return result
+    var min_x := floori(float(bounds.position.x) / float(CHUNK_SIZE))
+    var max_x := floori(float(bounds.end.x - 1) / float(CHUNK_SIZE))
+    var min_z := floori(float(bounds.position.y) / float(CHUNK_SIZE))
+    var max_z := floori(float(bounds.end.y - 1) / float(CHUNK_SIZE))
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            result.append(Vector2i(x, z))
+    # Scheduling-only order: preserve each chunk's owned seeded RNG sequence,
+    # but feed visible and predicted-corridor chunks to the existing bounded
+    # prop/tree publishers before equally distant background chunks.
+    var groups: Dictionary = {}
+    var keys_by_id: Dictionary = {}
+    for key: Vector2i in result:
+        var id := "%d,%d" % [key.x, key.y]
+        var low := Vector3(float(key.x * CHUNK_SIZE) * CELL, 0.0,
+            float(key.y * CHUNK_SIZE) * CELL)
+        groups[id] = {"bounds": AABB(low, Vector3(float(CHUNK_SIZE) * CELL, 1.0,
+            float(CHUNK_SIZE) * CELL)), "doorPartIds": []}
+        keys_by_id[id] = key
+    var view := player_streaming_view_intent(player.global_position) if player != null \
+        and is_instance_valid(player) else {}
+    var ranked: Array[Dictionary] = GeneratedContentViewPriorityScript.ranked_groups(groups, view)
+    result.clear()
+    for row: Dictionary in ranked:
+        var id := String(row.get("id", ""))
+        if keys_by_id.has(id): result.append(keys_by_id[id])
+    return result
+
+func advance_visible_world_prop_manifest() -> Dictionary:
+    if visible_world_prop_chunk_keys.is_empty() or visible_world_readiness == null \
+            or not is_instance_valid(visible_world_readiness) or visible_world_view_revision <= 0:
+        return {"status": "pending", "reason": "visible_prop_manifest_not_started"}
+    var key := visible_world_prop_chunk_keys[visible_world_prop_chunk_cursor]
+    visible_world_prop_chunk_cursor = (visible_world_prop_chunk_cursor + 1) % visible_world_prop_chunk_keys.size()
+    if not has_method("publish_chunk_prop_visual_readiness"):
+        visible_world_prop_last_attempt = {"status": "failed", "reason": "chunk_prop_visual_publisher_missing", "chunk": key}
+        return visible_world_prop_last_attempt
+    visible_world_prop_last_attempt = call("publish_chunk_prop_visual_readiness", visible_world_readiness,
+        visible_world_view_revision, visible_world_near_bounds, key)
+    visible_world_prop_last_attempt["chunk"] = key
+    visible_world_prop_last_attempt["cursor"] = visible_world_prop_chunk_cursor
+    visible_world_prop_last_attempt["chunkCount"] = visible_world_prop_chunk_keys.size()
+    visible_world_prop_last_attempt["spawnQueueDepth"] = pending_chunk_prop_spawns.size()
+    if bool(visible_world_prop_last_attempt.get("manifestSubmitted", false)):
+        visible_world_prop_manifest_sources[key] = true
+    return visible_world_prop_last_attempt
+
+## Coordinator-facing visual contract. The ledger verifies current installed
+## receipts and complete per-kind source coverage for this exact gameplay area.
+func visual_region_readiness(bounds: Rect2i, request_id: int) -> Dictionary:
+    if visible_world_readiness == null or not is_instance_valid(visible_world_readiness) \
+            or visible_world_view_revision <= 0:
+        return {"status": "pending", "reason": "visual_view_not_started", "bounds": bounds}
+    var runtime = get("voxel_terrain_runtime")
+    if not is_instance_valid(runtime) or not runtime.has_method("visible_mesh_world_revision"):
+        return {"status": "pending", "reason": "visual_world_revision_unavailable", "bounds": bounds}
+    var visual_request := int(streaming_requests.get("player", 0))
+    if request_id > 0 and visual_request != request_id:
+        return {"status": "pending", "reason": "visual_request_revision_changed",
+            "requestId": request_id, "currentRequestId": visual_request, "bounds": bounds}
+    var unscanned_chunks := maxi(0, visible_world_prop_chunk_keys.size()
+        - visible_world_prop_manifest_sources.size())
+    var queue_depth := mini(VisibleWorldReadinessScript.MAX_SOURCES,
+        pending_chunk_prop_spawns.size() + unscanned_chunks)
+    var coverage_lag_cells := 0.0
+    if player != null and is_instance_valid(player):
+        var current_center := Vector2(player.global_position.x / CELL, player.global_position.z / CELL)
+        coverage_lag_cells = minf(1000000.0, current_center.distance_to(visible_world_view_center_cells))
+    visible_world_readiness.call("record_queue_diagnostics", queue_depth, coverage_lag_cells)
+    var result: Dictionary = visible_world_readiness.call("region_readiness", visual_request, seed_text,
+        String(runtime.call("visible_mesh_world_revision")), visible_world_view_revision, bounds)
+    result["visualQueueDepth"] = queue_depth
+    result["visualCoverageLagCells"] = coverage_lag_cells
+    result["visualViewCenterCells"] = visible_world_view_center_cells
+    return result
 
 func begin_startup_loading_timeline() -> void:
     startup_loading_started_usec = Time.get_ticks_usec()
@@ -957,7 +1112,8 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     world_streaming.configure("")
     if not regional_navigation.configure(self):
         return StartupReadinessResultScript.failed(regional_navigation.last_rejection)
-    world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system, "navigation":regional_navigation})
+    world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system,
+        "navigation":regional_navigation, "visual":self})
     streaming_requests.clear()
     streaming_request_bounds.clear()
     streaming_request_priorities.clear()
@@ -1416,6 +1572,13 @@ func reset_streaming_region_demand() -> void:
     streaming_applied_source_revision = -1
     streaming_requested_source_revision = -1
     streaming_applied_view_revision = -1
+    visible_world_readiness = null
+    visible_world_view_revision = 0
+    visible_world_view_center_cells = Vector2.ZERO
+    visible_world_near_bounds = Rect2i()
+    visible_world_prop_chunk_keys.clear()
+    visible_world_prop_chunk_cursor = 0
+    visible_world_prop_manifest_sources.clear()
     var runtime = get("voxel_terrain_runtime")
     if runtime != null: runtime.clear_retained_gameplay_chunks()
 
@@ -1440,26 +1603,58 @@ func wait_for_initial_region_readiness() -> Dictionary:
         process_pending_chunk_loads(world_to_chunk(player.position.x,player.position.z))
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
-            process_pending_chunk_prop_spawns()
-        state = world_streaming.region_readiness(streaming_request_foreground_bounds.player,int(streaming_requests.get("player",-1)))
+            process_pending_chunk_prop_spawns(visible_world_prop_chunk_keys)
+        advance_visible_world_prop_manifest()
+        state = world_streaming.initial_physical_readiness(
+            streaming_request_foreground_bounds.player, int(streaming_requests.get("player", -1)))
         if state.status == "ready" and streaming_source_handoff_complete():
-            await startup_loading_yield("Nearby world ready", "initial_region", "ready", state)
-            return StartupReadinessResultScript.ready({}, state)
+            var structure_visual: Dictionary = submit_initial_structure_visual_readiness()
+            state["structureVisual"] = structure_visual
+            if structure_visual.get("status") == "failed":
+                return StartupReadinessResultScript.failed(
+                    "initial_structure_visual_manifest_failed", {}, [], structure_visual)
+            if structure_visual.get("status") != "ready":
+                await startup_loading_yield("Finishing nearby structure visuals", "initial_structure_visual", "pending", structure_visual)
+                continue
+            var full_gameplay_state: Dictionary = world_streaming.region_readiness(
+                streaming_request_foreground_bounds.player, int(streaming_requests.get("player", -1)))
+            full_gameplay_state["structureVisual"] = structure_visual
+            if full_gameplay_state.get("status") == "ready":
+                await startup_loading_yield("Nearby world ready", "initial_region", "ready", full_gameplay_state)
+                return StartupReadinessResultScript.ready({}, full_gameplay_state)
+            state = full_gameplay_state
         if state.status == "failed":
             return StartupReadinessResultScript.failed("initial_region_dependency_failed", {}, state.get("missing",[]), state)
         var progress := {"bounds":state.get("bounds"), "closedBounds":state.get("closedBounds"),
             "status":state.status, "missing":state.get("missing",[]), "domains":{},
             "coordinatorMaxAdvanceUsec":world_streaming.max_advance_usec,
             "navigationQueue":regional_navigation._stats(),
+            "propVisualScan":visible_world_prop_last_attempt.duplicate(true),
             "terrainRetainedReason":get("voxel_terrain_runtime").retained_activation_reason}
         for domain in state.get("domains",{}):
             var owner: Dictionary = state.domains[domain]
             progress.domains[domain] = {"status":owner.get("status"),"reason":owner.get("reason"),
                 "missingChunks":owner.get("missingChunks",[]).size(),
                 "missingItems":owner.get("missing",[]).size(),
-                "unresolvedCrossings":owner.get("unresolvedCrossingIds",[]).size()}
+                "unresolvedCrossings":owner.get("unresolvedCrossingIds",[]).size(),
+                "coverageGaps":owner.get("coverageGaps",[]),
+                "candidateCount":owner.get("candidateCount",0),
+                "representedCount":owner.get("representedCount",0),
+                "pendingCount":owner.get("pendingCount",0),
+                "byKind":owner.get("byKind",{})}
         await startup_loading_yield("Preparing nearby world", "initial_region", "pending", progress)
     return StartupReadinessResultScript.failed("initial_region_readiness_timeout", {}, state.get("missing",[]), state)
+
+func submit_initial_structure_visual_readiness() -> Dictionary:
+    if visible_world_readiness == null or not is_instance_valid(visible_world_readiness) \
+            or visible_world_view_revision <= 0:
+        return {"status": "failed", "reason": "initial_visible_world_readiness_missing"}
+    var structure_bounds: Rect2i = streaming_request_foreground_bounds.get("player", Rect2i())
+    if structure_bounds.size.x <= 0 or structure_bounds.size.y <= 0:
+        return {"status": "failed", "reason": "initial_structure_visual_bounds_missing"}
+    return GeneratedStructureVisualManifestScript.submit(self, structure_system,
+        visible_world_readiness, int(streaming_requests.get("player", 0)),
+        visible_world_view_revision, structure_bounds, structure_bounds)
 
 func wait_for_initial_region_physical_readiness() -> Dictionary:
     if not streaming_active or not streaming_request_bounds.has("player") or not streaming_request_foreground_bounds.has("player"):

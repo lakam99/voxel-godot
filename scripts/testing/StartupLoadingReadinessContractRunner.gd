@@ -204,6 +204,11 @@ class SyntheticRegionProvider extends RefCounted:
 	var next_id := 1
 	var retained := {}
 	var releases: Array[int] = []
+	var visual_status := "ready"
+	func visual_region_readiness(bounds: Rect2i, request_id: int) -> Dictionary:
+		return {"status":visual_status,"reason":"synthetic_visual_receipt",
+			"requestId":request_id,"bounds":bounds,"candidateCount":0,"representedCount":0,
+			"pendingCount":0,"sourceRevision":"synthetic-visual:%d" % source_revision}
 	static func tile_keys(bounds: Rect2i) -> Array[String]:
 		var keys: Array[String] = []
 		for z in range(floori(float(bounds.position.y)/16),floori(float(bounds.end.y-1)/16)+1):
@@ -634,7 +639,8 @@ func test_regional_provider_closure_contract() -> void:
 	var terrain := SyntheticRegionProvider.new()
 	var structures := SyntheticRegionProvider.new()
 	var navigation := SyntheticRegionProvider.new()
-	var providers := {"terrain":terrain,"structures":structures,"navigation":navigation}
+	var visual := SyntheticRegionProvider.new()
+	var providers := {"terrain":terrain,"structures":structures,"navigation":navigation,"visual":visual}
 	var regions := Regions.new()
 	regions.configure("regional-provider-contract",providers)
 	var bounds := Rect2i(Vector2i.ZERO,Vector2i(8,8))
@@ -765,7 +771,8 @@ func test_regional_sparse_islands_and_capacity() -> void:
 	var gap := Rect2i(1400,0,1,1)
 	structures.dependency_domains = {"terrain":[physical],"render":[physical],"navigation":[crossing]}
 	terrain.pending_bounds = gap
-	regions.configure("synthetic-sparse-islands",{"terrain":terrain,"structures":structures,"navigation":navigation})
+	var visual := SyntheticRegionProvider.new()
+	regions.configure("synthetic-sparse-islands",{"terrain":terrain,"structures":structures,"navigation":navigation,"visual":visual})
 	var id: int = regions.request_region(bounds,0,"synthetic islands")
 	if id>0: regions._refresh_request(regions._requests[id])
 	var state: Dictionary = regions.region_readiness(bounds)
@@ -781,7 +788,8 @@ func test_regional_sparse_islands_and_capacity() -> void:
 	add_result("regional_source_consumer_preserves_original_identity",source_request.get("ownerId")==id
 		and source_request.get("bounds")==bounds
 		and source_request.get("admissionKeys",[])==Regions.chunks_for_bounds(bounds.grow(Regions.RENDER_CELL_SIZE)),source_request)
-	regions.configure("synthetic-capacity",{"terrain":terrain,"structures":structures,"navigation":navigation})
+	visual = SyntheticRegionProvider.new()
+	regions.configure("synthetic-capacity",{"terrain":terrain,"structures":structures,"navigation":navigation,"visual":visual})
 	var first: int = regions.request_region(bounds,0,"synthetic compiled candidate")
 	var second: int = regions.request_region(Rect2i(2800,2800,1,1),0,"synthetic still uncompiled")
 	var before := regions.retained_gameplay_chunks()
@@ -813,7 +821,8 @@ func test_regional_subregion_readiness() -> void:
 	var navigation := SyntheticRegionProvider.new()
 	navigation.pending_bounds = Rect2i(16,16,16,16)
 	var regions := Regions.new()
-	regions.configure("synthetic-local-query",{"terrain":terrain,"structures":structures,"navigation":navigation})
+	var visual := SyntheticRegionProvider.new()
+	regions.configure("synthetic-local-query",{"terrain":terrain,"structures":structures,"navigation":navigation,"visual":visual})
 	var full := Rect2i(0,0,32,32)
 	var player_request := regions.request_region(full,0,"player")
 	for frame in range(3):
@@ -821,6 +830,12 @@ func test_regional_subregion_readiness() -> void:
 		regions.advance()
 	add_result("regional_local_query_does_not_wait_for_unrelated_tiles",regions.region_readiness(full).status=="pending"
 		and regions.region_readiness(Rect2i(0,0,8,8)).status=="ready",{})
+	visual.visual_status = "pending"
+	var visual_pending := regions.region_readiness(Rect2i(0,0,8,8))
+	add_result("regional_gameplay_readiness_requires_current_visual_receipt",
+		visual_pending.status=="pending" and visual_pending.domains.get("visual",{}).get("status")=="pending"
+		and visual_pending.requiredDomains.has("visual"),visual_pending)
+	visual.visual_status = "ready"
 	# A failed wide closure cannot turn an already admitted, clean local window
 	# into a false failure. The local query still executes its exact source and
 	# receipt checks; the original wide query remains failed.
@@ -1348,6 +1363,42 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 	var runtime_load_publication_call := main_source.find("await prepare_runtime_world_publication_staged()", runtime_load_tutorial_guard)
 	var runtime_load_publication_guard := main_source.find("if not startup_result_is_ready(publication_result):", runtime_load_publication_call)
 	var runtime_load_completion_call := main_source.find("await complete_runtime_world_loading_staged(", runtime_load_publication_guard)
+	var terrain_view_start := main_source.find("func wait_for_final_voxel_view_distance()")
+	var terrain_view_end := main_source.find("\nfunc ", terrain_view_start + 1)
+	var terrain_view_source := main_source.substr(terrain_view_start, terrain_view_end - terrain_view_start)
+	var terrain_mesh_gate := terrain_view_source.find("await wait_for_initial_terrain_mesh_coverage(runtime)")
+	var terrain_mesh_helper_start := main_source.find("func wait_for_initial_terrain_mesh_coverage(")
+	var terrain_mesh_helper_end := main_source.find("\nfunc ", terrain_mesh_helper_start + 1)
+	var terrain_mesh_helper := main_source.substr(terrain_mesh_helper_start,
+		terrain_mesh_helper_end - terrain_mesh_helper_start)
+	var initial_region_start := main_source.find("func wait_for_initial_region_readiness()")
+	var initial_region_end := main_source.find("\nfunc ", initial_region_start + 1)
+	var initial_region_source := main_source.substr(initial_region_start,
+		initial_region_end - initial_region_start)
+	var visual_readiness_start := main_source.find("func visual_region_readiness(")
+	var visual_readiness_end := main_source.find("\nfunc ", visual_readiness_start + 1)
+	var visual_readiness_source := main_source.substr(visual_readiness_start,
+		visual_readiness_end - visual_readiness_start)
+	var terrain_mesh_gate_is_after_expansion := terrain_view_source.find("startup_result_is_ready(state)") >= 0 \
+		and terrain_mesh_gate > terrain_view_source.find("startup_result_is_ready(state)") \
+		and terrain_mesh_gate < terrain_view_source.find("return StartupReadinessResultScript.ready({}, metrics)")
+	var terrain_mesh_gate_uses_native_receipts := terrain_mesh_helper.contains("visible_mesh_world_revision") \
+		and terrain_mesh_helper.contains("manifest.advance(12)") \
+		and terrain_mesh_helper.contains("initial_visible_terrain_mesh_coverage_timeout") \
+		and terrain_mesh_helper.contains("StartupReadinessResultScript.ready({}, state)")
+	var visible_prop_discovery_is_incremental := terrain_mesh_helper.contains("advance_visible_world_prop_manifest()") \
+		and main_source.contains("visible_world_prop_chunk_cursor = (visible_world_prop_chunk_cursor + 1) % visible_world_prop_chunk_keys.size()") \
+		and main_source.find("publish_chunk_prop_visual_readiness", main_source.find("func advance_visible_world_prop_manifest()")) >= 0
+	var visual_readiness_reports_queue_and_coverage_lag := visual_readiness_source.contains("record_queue_diagnostics") \
+		and visual_readiness_source.contains("visualQueueDepth") \
+		and visual_readiness_source.contains("visualCoverageLagCells")
+	var nearby_structure_visual_is_required := initial_region_source.find("world_streaming.initial_physical_readiness(") >= 0 \
+		and initial_region_source.find("submit_initial_structure_visual_readiness()") > initial_region_source.find("world_streaming.initial_physical_readiness(") \
+		and initial_region_source.find("world_streaming.region_readiness(") > initial_region_source.find("submit_initial_structure_visual_readiness()") \
+		and initial_region_source.find("structure_visual.get(\"status\") != \"ready\"") > initial_region_source.find("submit_initial_structure_visual_readiness()") \
+		and initial_region_source.find("continue") > initial_region_source.find("structure_visual.get(\"status\") != \"ready\"") \
+		and initial_region_source.find("full_gameplay_state.get(\"status\") == \"ready\"") > initial_region_source.find("submit_initial_structure_visual_readiness()") \
+		and initial_region_source.find("StartupReadinessResultScript.ready({}, full_gameplay_state)") > initial_region_source.find("full_gameplay_state.get(\"status\") == \"ready\"")
 	var both_runtime_entries_use_shared_gates := runtime_load_start >= 0 \
 		and runtime_load_tutorial_guard > runtime_load_start \
 		and runtime_load_publication_call > runtime_load_tutorial_guard \
@@ -1370,6 +1421,10 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		and tutorial_source.find("claim_town_population") >= 0 \
 		and tutorial_source.find("submit_initial_actor_orders") >= 0
 	var passed := direct_boot_is_staged and completion_index >= 0 \
+		and terrain_mesh_gate_is_after_expansion and terrain_mesh_gate_uses_native_receipts \
+		and visible_prop_discovery_is_incremental \
+		and visual_readiness_reports_queue_and_coverage_lag \
+		and nearby_structure_visual_is_required \
 		and tutorial_ready_index >= 0 and tutorial_ready_index < completion_index \
 		and terrain_ready_index > tutorial_ready_index and navigation_ready_index > terrain_ready_index \
 		and gameplay_ready_index > navigation_ready_index and gameplay_ready_index < completion_index \
@@ -1387,6 +1442,11 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		"evidenceLevel":"static_audit",
 		"directBootUsesStagedLoading":direct_boot_is_staged,
 		"runtimeNewGameAndLoadUseSharedGates":both_runtime_entries_use_shared_gates,
+		"nativeVisibleTerrainMeshGateAfterFinalViewExpansion":terrain_mesh_gate_is_after_expansion,
+		"nativeVisibleTerrainMeshGateUsesLiveReceiptsAndBoundedTimeout":terrain_mesh_gate_uses_native_receipts,
+		"visiblePropDiscoveryUsesIncrementalNearFirstCursor":visible_prop_discovery_is_incremental,
+		"visualReadinessReportsQueueDepthAndCoverageLag":visual_readiness_reports_queue_and_coverage_lag,
+		"nearbyStructureVisualReceiptIsRequiredAfterPhysicalRegionReadiness":nearby_structure_visual_is_required,
 		"completionIndex": completion_index,
 		"tutorialReadyIndex": tutorial_ready_index,
 		"terrainReadyIndex":terrain_ready_index,

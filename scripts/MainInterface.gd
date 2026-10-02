@@ -184,7 +184,7 @@ func restore_single_slot(slot_value) -> Dictionary: return {}
 func reload_chunks(defer_rebuild := false) -> void: pass
 func queue_chunk_load(chunk_key: Vector2i) -> void: pass
 func process_pending_chunk_loads(center: Vector2i) -> int: return 0
-func process_pending_chunk_prop_spawns() -> int: return 0
+func process_pending_chunk_prop_spawns(_priority_keys: Array[Vector2i] = []) -> int: return 0
 func vector3_to_array(value: Vector3) -> Array: return []
 func array_to_vector3(value, fallback: Vector3) -> Vector3: return Vector3.ZERO
 func optional_vector3(value): return null

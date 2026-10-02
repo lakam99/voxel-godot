@@ -17,7 +17,7 @@ const MAX_EXPIRY_TRANSACTIONS_PER_FRAME := 1
 const SOURCE_SNAPSHOT_SLICE_USEC := 750
 const SOURCE_SNAPSHOT_UNIT_CAP := 96
 const FOREGROUND_PRIORITY := 0
-const REQUIRED_DOMAINS := ["terrain", "structures", "navigation"]
+const REQUIRED_DOMAINS := ["terrain", "structures", "navigation", "visual"]
 const RETAINED_DOMAINS := ["terrain", "render", "navigation", "discovery"]
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
@@ -1057,6 +1057,9 @@ func _region_readiness(bounds: Rect2i, request_id: int, required_domains: Array,
 			if int(background.get("id",0))>0: navigation_request_ids.append(int(background.id))
 		if domain=="navigation" and not DemandSet.contains(admitted_navigation,needed.keys):
 			state.reason = "regional_provider_demand_pending"
+		elif domain=="visual" and is_instance_valid(provider) \
+				and provider.has_method("visual_region_readiness"):
+			state = provider.visual_region_readiness(bounds, request_id)
 		elif domain=="navigation" and is_instance_valid(provider) and provider.has_method("tiles_publication_readiness"):
 			state = provider.tiles_publication_readiness(_string_keys(needed.keys),bounds,0,navigation_request_ids) \
 				if _navigation_readiness_accepts_collective_handles(provider) else provider.tiles_publication_readiness(_string_keys(needed.keys),bounds,int(admitted.get("id",0)))

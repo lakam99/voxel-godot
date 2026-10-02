@@ -1,6 +1,8 @@
 extends Node3D
 class_name VoxelTerrainRuntime
 
+signal visible_mesh_block_revision_changed(block_position: Vector3i, revision: int)
+
 const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const SITE_GATE_SCRIPT := preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
@@ -72,6 +74,8 @@ var viewer: VoxelViewer
 var generator
 var authority_ready := false
 var published_mesh_blocks := {}
+var mesh_block_revisions := {}
+var mesh_publication_serial := 0
 var configured_seed := ""
 var last_volume_revision := -1
 var applied_edit_signatures := {}
@@ -748,6 +752,8 @@ func reset_for_current_seed_staged() -> Dictionary:
 			"resetMapUsec": reset_map_usec
 		})
 	published_mesh_blocks.clear()
+	mesh_block_revisions.clear()
+	mesh_publication_serial += 1
 	pending_edit_sections.clear()
 	gameplay_chunk_edit_revisions.clear()
 	collision_owner_generation += 1
@@ -1711,12 +1717,101 @@ func required_classes_available() -> bool:
 	return true
 
 func on_mesh_block_entered(block_position: Vector3i) -> void:
+	mesh_publication_serial += 1
+	mesh_block_revisions[block_position] = mesh_publication_serial
 	published_mesh_blocks[block_position] = true
+	visible_mesh_block_revision_changed.emit(block_position, int(mesh_block_revisions[block_position]))
 	queue_loaded_block_edit_sections(block_position)
 
 func on_mesh_block_exited(block_position: Vector3i) -> void:
 	published_mesh_blocks.erase(block_position)
+	mesh_publication_serial += 1
+	visible_mesh_block_revision_changed.emit(block_position, mesh_publication_serial)
+	mesh_block_revisions.erase(block_position)
 	invalidate_gameplay_publications_for_mesh_block(block_position)
+
+
+func visible_mesh_source_identity() -> String:
+	if terrain == null or not is_instance_valid(terrain): return ""
+	return "voxel-terrain:%d:%d" % [get_instance_id(), terrain.get_instance_id()]
+
+
+func visible_mesh_world_revision() -> String:
+	return "%s:%d:%d" % [configured_seed, last_volume_revision, collision_owner_generation]
+
+
+func visible_mesh_source_revision(block_position: Vector3i) -> String:
+	return "%s:%d:%d,%d,%d" % [visible_mesh_world_revision(),
+		int(mesh_block_revisions.get(block_position, 0)), block_position.x, block_position.y, block_position.z]
+
+
+func visible_mesh_vertical_bounds() -> Vector2i:
+	return vertical_cell_bounds()
+
+
+func visible_mesh_area_complete(block_position: Vector3i) -> bool:
+	if not authority_ready or terrain == null or not is_instance_valid(terrain) \
+			or last_volume_revision < 0:
+		return false
+	var area := native_mesh_block_bounds(block_position)
+	var vertical := vertical_cell_bounds()
+	var first_y := maxi(floori(area.position.y), vertical.x)
+	var last_y := mini(floori(area.position.y + area.size.y), vertical.y + 1)
+	if last_y <= first_y: return false
+	area.position.y = float(first_y)
+	area.size.y = float(last_y - first_y)
+	var xz_bounds := Rect2i(Vector2i(block_position.x, block_position.z) * NATIVE_MESH_BLOCK_SIZE_CELLS,
+		Vector2i.ONE * NATIVE_MESH_BLOCK_SIZE_CELLS)
+	if pending_edit_sections_intersect_bounds(xz_bounds): return false
+	return terrain.is_area_meshed(area)
+
+
+func visible_mesh_area_diagnostics(block_position: Vector3i) -> Dictionary:
+	var area := native_mesh_block_bounds(block_position)
+	var vertical := vertical_cell_bounds()
+	var first_y := maxi(floori(area.position.y), vertical.x)
+	var last_y := mini(floori(area.position.y + area.size.y), vertical.y + 1)
+	area.position.y = float(first_y)
+	area.size = Vector3(area.size.x, float(maxi(0, last_y - first_y)), area.size.z)
+	var xz_bounds := Rect2i(Vector2i(block_position.x, block_position.z) * NATIVE_MESH_BLOCK_SIZE_CELLS,
+		Vector2i.ONE * NATIVE_MESH_BLOCK_SIZE_CELLS)
+	var pending_sections: Array = []
+	for section_value in pending_edit_sections:
+		if not section_value is Vector3i:
+			pending_sections.append(str(section_value))
+			continue
+		var section: Vector3i = section_value
+		var section_bounds := Rect2i(Vector2i(section.x * SECTION_SIZE, section.z * SECTION_SIZE),
+			Vector2i.ONE * SECTION_SIZE)
+		if section_bounds.intersects(xz_bounds): pending_sections.append(section)
+		if pending_sections.size() >= 16: break
+	return {"block": block_position, "area": area, "areaMeshed": terrain.is_area_meshed(area),
+		"hasGeometryReceipt": published_mesh_blocks.has(block_position),
+		"pendingEditSections": pending_sections,
+		"viewerPosition": viewer.global_position if is_instance_valid(viewer) else Vector3.ZERO,
+		"viewerDistance": int(viewer.view_distance) if is_instance_valid(viewer) else 0,
+		"verticalBounds": vertical_cell_bounds()}
+
+
+func visible_mesh_block_has_geometry(block_position: Vector3i) -> bool:
+	return published_mesh_blocks.has(block_position)
+
+
+func visible_mesh_receipt_is_current(source_identity: String, source_revision: String,
+		world_revision: String, view_revision: int, candidate_id: String,
+		metadata: Dictionary, representation_id: String, tier: String) -> bool:
+	if source_identity != visible_mesh_source_identity() or world_revision != visible_mesh_world_revision() \
+		or not is_instance_valid(terrain) or not terrain.is_inside_tree():
+		return false
+	var block_value: Variant = metadata.get("nativeBlock")
+	if not block_value is Vector3i: return false
+	var block_position: Vector3i = block_value
+	if source_revision != visible_mesh_source_revision(block_position) \
+			or candidate_id != "terrain:%d,%d,%d" % [block_position.x, block_position.y, block_position.z] \
+			or representation_id != candidate_id + ":native_mesh" \
+			or tier not in ["near", "horizon"]:
+		return false
+	return published_mesh_blocks.has(block_position) and visible_mesh_area_complete(block_position)
 
 static func native_mesh_block_bounds(block_position: Vector3i) -> AABB:
 	return AABB(Vector3(block_position * NATIVE_MESH_BLOCK_SIZE_CELLS),

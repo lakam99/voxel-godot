@@ -516,6 +516,7 @@ func clear_all_blocks() -> void:
         removed_count += 1
         if removed_count % 200 == 0:
             playtest_progress("clear_all_blocks_%d" % removed_count)
+    generated_block_cells_by_column.clear()
     if removed_any:
         invalidate_navigation_marker_cache()
     playtest_progress("clear_all_blocks_done_%d" % removed_count)

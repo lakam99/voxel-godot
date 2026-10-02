@@ -1626,13 +1626,21 @@ func queue_chunk_prop_spawn(chunk_key: Vector2i, chunk: Node3D) -> void:
         return
     pending_chunk_prop_spawns[chunk_key] = begin_chunk_prop_spawn_state(chunk, chunk_key.x, chunk_key.y)
 
-func process_pending_chunk_prop_spawns() -> int:
+func process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i] = []) -> int:
     if pending_chunk_prop_spawns.is_empty():
         return 0
     var monitor = runtime_perf_monitor
     var queue_start: int = monitor.begin_section("chunk_prop_spawn_queue") if monitor != null else Time.get_ticks_usec()
     var processed := 0
-    for key in pending_chunk_prop_spawns.keys():
+    var pending_keys: Array[Vector2i] = []
+    var priority_set: Dictionary = {}
+    for key_value in priority_keys:
+        if pending_chunk_prop_spawns.has(key_value) and not priority_set.has(key_value):
+            pending_keys.append(key_value)
+            priority_set[key_value] = true
+    for key_value in pending_chunk_prop_spawns.keys():
+        if key_value is Vector2i and not priority_set.has(key_value): pending_keys.append(key_value)
+    for key in pending_keys:
         var state_value = pending_chunk_prop_spawns[key]
         if not (state_value is Dictionary):
             pending_chunk_prop_spawns.erase(key)

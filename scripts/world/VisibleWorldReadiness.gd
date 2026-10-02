@@ -96,6 +96,11 @@ func has_candidate(source_id: String, candidate_id: String) -> bool:
 	return _sources.has(source_id) and _sources[source_id].candidates.has(candidate_id)
 
 
+func candidate_in_view(position_xz: Vector2) -> bool:
+	return _view_active and position_xz.is_finite() \
+		and position_xz.distance_to(_view_center) <= _view_radius
+
+
 func describe_candidate(source_id: String, candidate_id: String, required_tier: String,
 		metadata: Dictionary = {}) -> Dictionary:
 	if not _sources.has(source_id):
@@ -266,7 +271,7 @@ func record_queue_diagnostics(queue_depth: int, coverage_lag: float) -> void:
 func region_readiness(request_id: int, seed: String, world_revision: String,
 		view_revision: int, bounds: Rect2i) -> Dictionary:
 	var result := {"status": "pending", "reason": "visual_manifest_incomplete", "requestId": _request_id,
-		"bounds": _bounds, "worldRevision": _world_revision, "viewRevision": _view_revision,
+		"bounds": bounds, "viewBounds": _bounds, "worldRevision": _world_revision, "viewRevision": _view_revision,
 		"candidateCount": 0, "representedCount": 0, "pendingCount": 0, "failedCount": 0,
 		"byKind": {}, "tiers": {"near": {"candidate": 0, "represented": 0},
 			"horizon": {"candidate": 0, "represented": 0}},
@@ -279,15 +284,19 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		result.reason = "visual_view_not_started"
 		return result
 	if request_id != _request_id or seed != _seed or world_revision != _world_revision \
-			or view_revision != _view_revision or bounds != _bounds:
+			or view_revision != _view_revision or not _bounds.encloses(bounds) or not _valid_bounds(bounds):
 		result.reason = "visual_request_or_revision_changed"
 		return result
-	if not _source_set_sealed:
-		result.reason = "visual_source_set_incomplete"
+	var coverage_gaps := _source_coverage_gaps(bounds)
+	if not coverage_gaps.is_empty():
+		result.reason = "visual_source_coverage_incomplete"
+		result["coverageGaps"] = coverage_gaps
 		return result
 	var has_failure := false
 	for source_id_value in _sources:
 		var source: Dictionary = _sources[source_id_value]
+		var source_bounds: Rect2i = source.bounds
+		if not source_bounds.intersects(bounds): continue
 		var kind := String(source.kind)
 		var kind_counts: Dictionary = result.byKind[kind]
 		if not bool(source.complete):
@@ -296,6 +305,9 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		if bool(source.failed): has_failure = true
 		for candidate_id_value in source.candidates:
 			var candidate: Dictionary = source.candidates[candidate_id_value]
+			var candidate_position: Vector2 = candidate.get("metadata", {}).get("positionXZ", Vector2(INF, INF))
+			if not bounds.has_point(Vector2i(floori(candidate_position.x), floori(candidate_position.y))):
+				continue
 			kind_counts.candidate = int(kind_counts.candidate) + 1
 			result.candidateCount = int(result.candidateCount) + 1
 			var required_tier := String(candidate.requiredTier)
@@ -328,6 +340,49 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 	return result
 
 
+func _source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:
+	# Exact row-wise union coverage avoids mistaking a pair of separated source
+	# rectangles for a complete visual region. The bounded ledger caps demand.
+	var gaps: Array[Dictionary] = []
+	if bounds.get_area() > MAX_CANDIDATES:
+		return [{"kind":"all", "reason":"visual_query_capacity", "area":bounds.get_area()}]
+	for kind: String in CONTENT_KINDS:
+		var sources: Array[Dictionary] = []
+		for source_value in _sources.values():
+			var source: Dictionary = source_value
+			if String(source.kind) == kind and source.bounds.intersects(bounds) \
+					and bool(source.complete) and not bool(source.failed):
+				sources.append(source)
+		var first_gap := Vector2i(-1, -1)
+		for z in range(bounds.position.y, bounds.end.y):
+			var vertical_delta := (float(z) + 0.5) - _view_center.y
+			if absf(vertical_delta) > _view_radius: continue
+			var horizontal_reach := sqrt(maxf(0.0,
+				_view_radius * _view_radius - vertical_delta * vertical_delta))
+			var row_start := maxi(bounds.position.x, ceili(_view_center.x - horizontal_reach - 0.5))
+			var row_end := mini(bounds.end.x, floori(_view_center.x + horizontal_reach - 0.5) + 1)
+			if row_end <= row_start: continue
+			var intervals: Array[Vector2i] = []
+			for source: Dictionary in sources:
+				var source_bounds: Rect2i = source.bounds
+				if z >= source_bounds.position.y and z < source_bounds.end.y:
+					intervals.append(Vector2i(maxi(row_start, source_bounds.position.x),
+						mini(row_end, source_bounds.end.x)))
+			intervals.sort_custom(func(a: Vector2i, b: Vector2i): return a.x < b.x)
+			var covered_x := row_start
+			for interval: Vector2i in intervals:
+				if interval.x > covered_x: break
+				covered_x = maxi(covered_x, interval.y)
+				if covered_x >= row_end: break
+			if covered_x < row_end:
+				first_gap = Vector2i(covered_x, z)
+				break
+		if first_gap != Vector2i(-1, -1):
+			gaps.append({"kind":kind, "firstUncoveredCell":first_gap,
+				"completeSourcesIntersecting":sources.size()})
+	return gaps
+
+
 func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_revision: int) -> bool:
 	var receipt: Dictionary = candidate.get("receipt", {})
 	if receipt.is_empty() or int(receipt.get("viewRevision", -1)) != view_revision \
@@ -347,6 +402,10 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 	var representation_ref: WeakRef = receipt.get("representation") as WeakRef
 	var owner: Node = owner_ref.get_ref() as Node if owner_ref != null else null
 	var representation: Node3D = representation_ref.get_ref() as Node3D if representation_ref != null else null
+	if String(source.kind) == "trees_foliage" and is_instance_valid(owner) \
+			and not _tree_lod_satisfies_tier(String(owner.get_meta("tree_render_lod_tier", "")),
+				String(candidate.requiredTier)):
+		return false
 	return is_instance_valid(owner) and is_instance_valid(representation) \
 		and owner.get_instance_id() == int(receipt.get("ownerInstanceId", 0)) \
 		and representation.get_instance_id() == int(receipt.get("representationInstanceId", 0)) \
@@ -360,6 +419,11 @@ func _valid_publisher_tier(candidate: Dictionary, tier: String) -> bool:
 	return REPRESENTATION_TIERS.has(tier) and _tier_rank(tier) >= _tier_rank(String(candidate.requiredTier))
 
 
+static func _tree_lod_satisfies_tier(lod_tier: String, required_tier: String) -> bool:
+	if required_tier == "near": return lod_tier == "near"
+	return lod_tier in ["near", "mid", "far", "impostor"]
+
+
 func _publisher_installation_valid(publisher: Object, validator_method: StringName,
 		source: Dictionary, candidate: Dictionary, representation_id: String, tier: String,
 		view_revision: int) -> bool:
@@ -368,6 +432,7 @@ func _publisher_installation_valid(publisher: Object, validator_method: StringNa
 		return false
 	var proof: Variant = publisher.call(validator_method, String(source.identity), String(source.revision),
 		_world_revision, view_revision, String(candidate.candidateId),
+		candidate.get("metadata", {}).duplicate(true),
 		representation_id, tier)
 	return proof is bool and proof
 

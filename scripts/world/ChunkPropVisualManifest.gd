@@ -12,12 +12,13 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 		source_revision: String, scan_complete: bool, cell_scale: float) -> Dictionary:
 	if not is_instance_valid(chunk) or not chunk.is_inside_tree() or chunk.is_queued_for_deletion():
 		return {"status": "pending", "reason": "chunk_prop_source_not_live"}
-	if seed.strip_edges().is_empty() or source_revision.strip_edges().is_empty() \
-			or not is_finite(cell_scale) or cell_scale <= 0.0:
+	if seed.strip_edges().is_empty() or not is_finite(cell_scale) or cell_scale <= 0.0:
 		return {"status": "failed", "reason": "invalid_chunk_prop_source_identity"}
 	if not scan_complete:
 		return {"status": "pending", "reason": "chunk_prop_candidate_scan_incomplete",
 			"chunk": chunk_key, "sourceIdentity": _source_identity(chunk, chunk_key)}
+	if source_revision.strip_edges().is_empty():
+		return {"status": "failed", "reason": "invalid_chunk_prop_source_identity"}
 	var candidates: Array[Dictionary] = []
 	var seen_ids: Dictionary = {}
 	var overflow: Array = [false]
@@ -26,10 +27,22 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 		return {"status": "pending", "reason": "chunk_prop_manifest_capacity", "retryable": true,
 			"chunk": chunk_key, "candidateCount": candidates.size()}
 	var stable_ids: Array[String] = []
+	var candidates_by_id: Dictionary = {}
 	for candidate: Dictionary in candidates:
-		stable_ids.append(String(candidate.candidateId))
+		var candidate_id := String(candidate.candidateId)
+		stable_ids.append(candidate_id)
+		candidates_by_id[candidate_id] = candidate
 	stable_ids.sort()
-	var candidate_source_revision := source_revision + ":" + "|".join(stable_ids)
+	var candidate_hasher := HashingContext.new()
+	candidate_hasher.start(HashingContext.HASH_SHA256)
+	for candidate_id: String in stable_ids:
+		var candidate: Dictionary = candidates_by_id[candidate_id]
+		for field: String in [candidate_id, String(candidate.kind), String(candidate.treeVisualState),
+				String(candidate.treeRenderLodTier), String(candidate.treeRecipeSignature),
+				String.num(float(candidate.positionXZ.x), 6), String.num(float(candidate.positionXZ.y), 6),
+				"1" if bool(candidate.renderable) else "0"]:
+			_update_candidate_hasher(candidate_hasher, field)
+	var candidate_source_revision := source_revision + ":sha256:" + candidate_hasher.finish().hex_encode()
 	var by_kind := {}
 	for kind: String in CONTENT_KINDS:
 		by_kind[kind] = {"candidateCount": 0, "representedCount": 0, "pendingCount": 0,
@@ -58,7 +71,8 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 		return {"status": "pending", "reason": manifest.get("reason", "chunk_prop_candidate_scan_incomplete")}
 	if not is_instance_valid(readiness) or not readiness.has_method("expect_source") \
 			or not readiness.has_method("describe_candidate") or not readiness.has_method("finish_source") \
-			or not readiness.has_method("has_candidate") or not readiness.has_method("accept_receipt"):
+			or not readiness.has_method("has_candidate") or not readiness.has_method("accept_receipt") \
+			or not readiness.has_method("candidate_in_view"):
 		return {"status": "failed", "reason": "visible_readiness_owner_contract_missing"}
 	var chunk_key: Vector2i = manifest.get("chunk", Vector2i.ZERO)
 	var chunk_bounds := Rect2i(chunk_key * GAME_CHUNK_SIZE, Vector2i.ONE * GAME_CHUNK_SIZE)
@@ -68,7 +82,11 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 		return {"status": "failed", "reason": "chunk_prop_manifest_identity_missing"}
 	var source_ids := {}
 	var pending_candidate_count := 0
+	var submitted_candidate_count := 0
+	var submitted_by_kind := {}
 	for kind: String in CONTENT_KINDS:
+		submitted_by_kind[kind] = {"candidateCount": 0, "representedCount": 0,
+			"pendingCount": 0, "candidateIds": [], "pendingIds": []}
 		var source_id := "%s:%s" % [source_identity, kind]
 		source_ids[kind] = source_id
 		var source_result: Dictionary = readiness.call("expect_source", source_id, kind,
@@ -84,21 +102,39 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 			return {"status": "failed", "reason": "chunk_prop_manifest_kind_invalid", "candidateId": candidate_id}
 		var source_id := String(source_ids[kind])
 		var position_xz: Vector2 = candidate.get("positionXZ", Vector2.ZERO)
+		if not bool(readiness.call("candidate_in_view", position_xz)):
+			continue
+		var counts: Dictionary = submitted_by_kind[kind]
+		counts.candidateCount = int(counts.candidateCount) + 1
+		submitted_candidate_count += 1
+		counts.candidateIds.append(candidate_id)
 		var required_tier := "near" if near_bounds.has_point(Vector2i(floori(position_xz.x), floori(position_xz.y))) else "horizon"
 		if not bool(readiness.call("has_candidate", source_id, candidate_id)):
 			var described: Dictionary = readiness.call("describe_candidate", source_id, candidate_id,
 				required_tier, {"positionXZ": position_xz})
 			if described.get("status") != "ready": return described
 		if bool(candidate.get("renderable", false)):
+			if not _candidate_lod_satisfies_tier(candidate, required_tier):
+				pending_candidate_count += 1
+				counts.pendingCount = int(counts.pendingCount) + 1
+				counts.pendingIds.append(candidate_id)
+				continue
 			var owner := candidate.get("owner") as Node
 			var representation := candidate.get("representation") as Node3D
 			var receipt: Dictionary = readiness.call("accept_receipt", source_id, candidate_id,
 				"%s:installed" % candidate_id, required_tier,
 				source_identity, source_revision, view_revision, owner, representation)
 			if receipt.get("status") == "failed": return receipt
-			if receipt.get("status") != "ready": pending_candidate_count += 1
+			if receipt.get("status") != "ready":
+				pending_candidate_count += 1
+				counts.pendingCount = int(counts.pendingCount) + 1
+				counts.pendingIds.append(candidate_id)
+			else:
+				counts.representedCount = int(counts.representedCount) + 1
 		else:
 			pending_candidate_count += 1
+			counts.pendingCount = int(counts.pendingCount) + 1
+			counts.pendingIds.append(candidate_id)
 	for kind: String in CONTENT_KINDS:
 		var finish: Dictionary = readiness.call("finish_source", String(source_ids[kind]),
 			source_identity, source_revision, view_revision)
@@ -106,9 +142,9 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 	return {"status": "pending" if pending_candidate_count > 0 else "ready",
 		"reason": "chunk_prop_visual_publication_pending" if pending_candidate_count > 0 else "",
 		"manifestSubmitted": true, "chunk": chunk_key, "sourceRevision": source_revision,
-		"candidateCount": int(manifest.get("candidateCount", 0)),
+		"candidateCount": submitted_candidate_count,
 		"pendingCount": pending_candidate_count,
-		"byKind": manifest.get("byKind", {}).duplicate(true),
+		"byKind": submitted_by_kind,
 		"sourceIds": source_ids}
 
 
@@ -139,6 +175,8 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 			"positionXZ": Vector2(body.global_position.x / cell_scale, body.global_position.z / cell_scale),
 			"owner": current, "representation": current if renderable else null,
 			"renderable": renderable, "treeVisualState": String(current.get_meta("tree_visual_state", "")),
+			"treeRenderLodTier": String(current.get_meta("tree_render_lod_tier", "")),
+			"treeRecipeSignature": String(current.get_meta("tree_recipe_signature", "")),
 			"chunk": chunk_key})
 	for child in current.get_children():
 		if child is Node:
@@ -168,6 +206,22 @@ static func _all_represented(by_kind: Dictionary) -> bool:
 	for kind: String in CONTENT_KINDS:
 		if int(by_kind[kind].pendingCount) > 0: return false
 	return true
+
+
+static func _candidate_lod_satisfies_tier(candidate: Dictionary, required_tier: String) -> bool:
+	if String(candidate.get("kind", "")) != "trees_foliage": return true
+	var lod_tier := String(candidate.get("treeRenderLodTier", ""))
+	if required_tier == "near": return lod_tier == "near"
+	return lod_tier in ["near", "mid", "far", "impostor"]
+
+
+static func _update_candidate_hasher(hasher: HashingContext, value: String) -> void:
+	var bytes := value.to_utf8_buffer()
+	var length := PackedByteArray()
+	length.resize(4)
+	length.encode_u32(0, bytes.size())
+	hasher.update(length)
+	if not bytes.is_empty(): hasher.update(bytes)
 
 
 static func _source_identity(chunk: Node3D, chunk_key: Vector2i) -> String:

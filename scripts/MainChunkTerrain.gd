@@ -926,6 +926,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     block_root.add_child(body)
     blocks[cell] = body
+    if bool(body.get_meta("generated", false)) and not bool(body.get_meta("player_placed", false)):
+        register_generated_structure_visual_block(cell)
     register_navigation_marker_block(cell, body, block_type)
     register_light_safety_source(cell, block_type, body)
     record_block_creation_instrumentation(instrumentation_metrics, instrumentation_prefix, "NodeBuild", node_build_started_usec)
@@ -954,6 +956,44 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     if block_type == "door" and npc_system and npc_system.has_method("notify_navigation_door_registered"):
         npc_system.notify_navigation_door_registered(body)
     return body
+
+func register_generated_structure_visual_block(cell: Vector3i) -> void:
+    var column := Vector2i(cell.x, cell.z)
+    var indexed: Array = generated_block_cells_by_column.get(column, [])
+    if not indexed.has(cell):
+        indexed.append(cell)
+        generated_block_cells_by_column[column] = indexed
+
+## Bounded spatial lookup of live generated block owners used by the visual
+## manifest. Stale cells are pruned when edits remove or replace their blocks.
+func generated_structure_visual_blocks(bounds: Rect2i) -> Array[Dictionary]:
+    var result: Array[Dictionary] = []
+    if bounds.size.x <= 0 or bounds.size.y <= 0:
+        return result
+    for z in range(bounds.position.y, bounds.end.y):
+        for x in range(bounds.position.x, bounds.end.x):
+            var column := Vector2i(x, z)
+            if not generated_block_cells_by_column.has(column):
+                continue
+            var indexed: Array = generated_block_cells_by_column[column]
+            var current_cells: Array[Vector3i] = []
+            for cell_value in indexed:
+                if not cell_value is Vector3i:
+                    continue
+                var cell: Vector3i = cell_value
+                var body := blocks.get(cell) as Node3D
+                if not is_instance_valid(body) or not body.is_inside_tree() \
+                        or body.is_queued_for_deletion() \
+                        or not bool(body.get_meta("generated", false)) \
+                        or bool(body.get_meta("player_placed", false)):
+                    continue
+                current_cells.append(cell)
+                result.append({"cell": cell, "owner": body})
+            if current_cells.is_empty():
+                generated_block_cells_by_column.erase(column)
+            else:
+                generated_block_cells_by_column[column] = current_cells
+    return result
 
 func record_block_creation_instrumentation(metrics: Dictionary, prefix: String, phase: String, started_usec: int) -> void:
     if metrics.is_empty() or prefix == "" or phase == "":

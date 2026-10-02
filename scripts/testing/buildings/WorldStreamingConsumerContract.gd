@@ -86,6 +86,11 @@ class SyntheticNavigation extends RefCounted:
 			if not owned or pending.has(key): return {"status":"pending","reason":"synthetic_tile_pending"}
 		return {"status":"ready","reason":"synthetic_navigation_receipt","sourceRevision":1}
 
+class SyntheticVisual extends RefCounted:
+	func visual_region_readiness(bounds: Rect2i, request_id: int) -> Dictionary:
+		return {"status":"ready","reason":"synthetic_visual_receipt",
+			"bounds":bounds,"requestId":request_id,"sourceRevision":"synthetic-visual-v1"}
+
 var checks: Dictionary = {}
 var metrics: Dictionary = {}
 
@@ -99,9 +104,12 @@ func _context() -> Dictionary:
 	var structures := SyntheticStructures.new()
 	var terrain := SyntheticTerrain.new()
 	var navigation := SyntheticNavigation.new()
+	var visual := SyntheticVisual.new()
 	var coordinator = Coordinator.new()
-	coordinator.configure("synthetic-stable-consumer",{"structures":structures,"terrain":terrain,"navigation":navigation})
-	return {"coordinator":coordinator,"structures":structures,"terrain":terrain,"navigation":navigation}
+	coordinator.configure("synthetic-stable-consumer",{"structures":structures,"terrain":terrain,
+		"navigation":navigation,"visual":visual})
+	return {"coordinator":coordinator,"structures":structures,"terrain":terrain,
+		"navigation":navigation,"visual":visual}
 
 func _refresh(context: Dictionary, id: int) -> bool:
 	if not context.coordinator._requests.has(id): return false
@@ -350,7 +358,8 @@ func _consumer_capacity_and_release() -> void:
 	_check("released_consumer_releases_one_handle_at_deadline",not context.coordinator._requests.has(first)
 		and not context.navigation.requests.has(handle) and context.navigation.release_calls.get(handle,0)==1)
 	var old_max: int = ids.back()
-	context.coordinator.configure("synthetic-successor",{"structures":context.structures,"terrain":context.terrain,"navigation":context.navigation})
+	context.coordinator.configure("synthetic-successor",{"structures":context.structures,
+		"terrain":context.terrain,"navigation":context.navigation,"visual":context.visual})
 	_check("configuration_balances_all_old_handles",context.navigation.requests.is_empty() and context.coordinator._requests.is_empty())
 	var successor: int = _request(context,A,"successor_setup")
 	_check("logical_ids_are_monotonic_across_configuration",successor>old_max)

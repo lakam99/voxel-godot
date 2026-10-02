@@ -2,6 +2,8 @@ extends SceneTree
 
 const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
+const StructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_WORLD_READINESS_REPORT"
 const BOUNDS := Rect2i(-6, -6, 12, 12)
 const NEAR_BOUNDS := Rect2i(-2, -2, 4, 4)
@@ -14,11 +16,74 @@ class ReceiptPublisher extends RefCounted:
 
 	func visual_receipt_is_current(source_identity: String, source_revision: String,
 		world_revision: String, view_revision: int, candidate_id: String,
-		representation_id: String, tier: String) -> bool:
+		metadata: Dictionary, representation_id: String, tier: String) -> bool:
 		validation_count += 1
 		return installed and source_identity == "identity:props" and source_revision == "rev:1" \
 			and world_revision == "world-3" and view_revision > 0 and candidate_id == "tree:stable-id" \
+			and metadata.get("positionXZ") == Vector2(3.0, 1.0) \
 			and representation_id == "tree-native-mesh:stable-id" and tier == "horizon"
+
+class TerrainPublisherFixture extends RefCounted:
+	signal visible_mesh_block_revision_changed(block_position: Vector3i, revision: int)
+	var complete := false
+	var has_geometry := false
+	var block_revision := 1
+	var owner_identity := "terrain-fixture-owner"
+	var world_revision := "terrain-fixture-world"
+	var vertical_bounds := Vector2i(0, 15)
+
+	func visible_mesh_source_identity() -> String:
+		return owner_identity
+
+	func visible_mesh_world_revision() -> String:
+		return world_revision
+
+	func visible_mesh_source_revision(block: Vector3i) -> String:
+		return "%s:%d:%d,%d,%d" % [world_revision, block_revision, block.x, block.y, block.z]
+
+	func visible_mesh_vertical_bounds() -> Vector2i:
+		return vertical_bounds
+
+	func visible_mesh_area_complete(_block: Vector3i) -> bool:
+		return complete
+
+	func visible_mesh_block_has_geometry(_block: Vector3i) -> bool:
+		return has_geometry
+
+	func visible_mesh_receipt_is_current(source_identity: String, source_revision: String,
+		current_world_revision: String, _view_revision: int, candidate_id: String,
+		metadata: Dictionary, representation_id: String, tier: String) -> bool:
+		var block: Vector3i = metadata.get("nativeBlock", Vector3i(-1, -1, -1))
+		return complete and has_geometry and source_identity == owner_identity \
+			and source_revision == visible_mesh_source_revision(block) \
+			and current_world_revision == world_revision \
+			and candidate_id == "terrain:%d,%d,%d" % [block.x, block.y, block.z] \
+			and representation_id == candidate_id + ":native_mesh" and tier in ["near", "horizon"]
+
+class StructureWorldFixture extends Node:
+	var blocks: Dictionary = {}
+
+	func generated_structure_visual_blocks(bounds: Rect2i) -> Array[Dictionary]:
+		var result: Array[Dictionary] = []
+		for cell_value in blocks:
+			var cell: Vector3i = cell_value
+			if bounds.has_point(Vector2i(cell.x, cell.z)):
+				result.append({"cell": cell, "owner": blocks[cell]})
+		return result
+
+class StructureReadinessFixture extends RefCounted:
+	var physical_status := "ready"
+	var description_status := "described"
+	var revision := "structure-region-revision-1"
+
+	func region_publication_readiness(_bounds: Rect2i) -> Dictionary:
+		return {"status": physical_status, "reason": "physical_fixture_" + physical_status}
+
+	func region_dependency_requirements(_bounds: Rect2i) -> Dictionary:
+		return {"status": description_status, "reason": "source_fixture_" + description_status}
+
+	func region_dependency_revision(_bounds: Rect2i) -> String:
+		return revision
 
 var _checks: Array[Dictionary] = []
 var _passed := true
@@ -30,8 +95,12 @@ func _initialize() -> void:
 
 func run() -> void:
 	test_empty_manifest_requires_complete_source_coverage()
+	test_exact_subregion_coverage_is_independent()
+	test_circular_view_coverage_ignores_outside_corner_cells()
 	test_incomplete_discovery_never_reports_empty_ready()
 	test_candidate_must_belong_to_declared_source_footprint()
+	await test_native_terrain_visual_manifest()
+	await test_generated_structure_visual_manifest()
 	await test_production_chunk_prop_manifest()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
 	test_candidate_accounting_and_explicit_failure()
@@ -54,6 +123,48 @@ func test_empty_manifest_requires_complete_source_coverage() -> void:
 	var ready: Dictionary = book.region_readiness(11, "seed-a", "world-1", revision, BOUNDS)
 	_check("complete_deterministic_empty_manifest_is_ready",
 		ready.status == "ready" and int(ready.candidateCount) == 0 and int(ready.pendingCount) == 0)
+
+
+func test_exact_subregion_coverage_is_independent() -> void:
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(111, "seed-subregion", "world-subregion",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	_declare_sources(book, revision, BOUNDS)
+	var local := Rect2i(-5, -5, 4, 4)
+	var local_state: Dictionary = book.region_readiness(111, "seed-subregion",
+		"world-subregion", revision, local)
+	var uncovered := Rect2i(1, 1, 4, 4)
+	var missing_kind := VisualReadinessScript.new()
+	var missing_revision := int(missing_kind.begin_view(112, "seed-subregion", "world-subregion",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	_declare_sources(missing_kind, missing_revision, local)
+	var missing_state: Dictionary = missing_kind.region_readiness(112, "seed-subregion",
+		"world-subregion", missing_revision, uncovered)
+	_check("complete_source_rectangles_prove_only_the_covered_subregion",
+		local_state.status == "ready" and local_state.bounds == local
+		and missing_state.status == "pending" and missing_state.reason == "visual_source_coverage_incomplete")
+
+
+func test_circular_view_coverage_ignores_outside_corner_cells() -> void:
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(113, "seed-circle", "world-circle",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	for kind: String in VisualReadinessScript.CONTENT_KINDS:
+		for z in range(BOUNDS.position.y, BOUNDS.end.y):
+			var vertical_delta := (float(z) + 0.5) - VIEW_CENTER.y
+			if absf(vertical_delta) > VIEW_RADIUS: continue
+			var reach := sqrt(maxf(0.0, VIEW_RADIUS * VIEW_RADIUS - vertical_delta * vertical_delta))
+			var row_start := maxi(BOUNDS.position.x, ceili(VIEW_CENTER.x - reach - 0.5))
+			var row_end := mini(BOUNDS.end.x, floori(VIEW_CENTER.x + reach - 0.5) + 1)
+			if row_end <= row_start: continue
+			var source_bounds := Rect2i(row_start, z, row_end - row_start, 1)
+			var source_id := "%s:row:%d" % [kind, z]
+			book.expect_source(source_id, kind, source_id, "rev:1", source_bounds, revision)
+			book.finish_source(source_id, source_id, "rev:1", revision)
+	var circle_state: Dictionary = book.region_readiness(113, "seed-circle",
+		"world-circle", revision, BOUNDS)
+	_check("circular_view_requires_all_in_circle_sources_but_not_square_corner_sources",
+		circle_state.status == "ready" and int(circle_state.candidateCount) == 0)
 
 
 func test_incomplete_discovery_never_reports_empty_ready() -> void:
@@ -88,6 +199,11 @@ func test_production_chunk_prop_manifest() -> void:
 		"seed-props", "source-rev-1", false, 1.35)
 	_check("incomplete_production_prop_scan_stays_pending",
 		incomplete.status == "pending" and incomplete.reason == "chunk_prop_candidate_scan_incomplete")
+	var unrevisioned_incomplete: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "", false, 1.35)
+	_check("incomplete_prop_scan_without_final_revision_stays_retryable",
+		unrevisioned_incomplete.status == "pending"
+		and unrevisioned_incomplete.reason == "chunk_prop_candidate_scan_incomplete")
 	var empty_complete: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
 		"seed-props", "source-rev-1", true, 1.35)
 	_check("completed_empty_chunk_scan_is_explicitly_ready",
@@ -95,8 +211,12 @@ func test_production_chunk_prop_manifest() -> void:
 		and int(empty_complete.candidateCount) == 0, empty_complete)
 	var rock := _make_manifest_body(chunk, "rock:stable", "rock")
 	var tree := _make_manifest_body(chunk, "tree:stable", "tree")
-	tree.set_meta("tree_visual_state", "queued")
 	var wildlife := _make_manifest_body(chunk, "wildlife:stable", "wildlife")
+	var chunk_center_offset := Vector3(14.0 * 1.35, 0.0, 14.0 * 1.35)
+	rock.position = chunk_center_offset
+	tree.position = chunk_center_offset
+	wildlife.position = chunk_center_offset
+	tree.set_meta("tree_visual_state", "queued")
 	wildlife.set_meta("wildlife_variant", "deer")
 	var queued: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
 		"seed-props", "source-rev-1", true, 1.35)
@@ -127,6 +247,7 @@ func test_production_chunk_prop_manifest() -> void:
 	committed_tree_visual.mesh = BoxMesh.new()
 	tree.add_child(committed_tree_visual)
 	tree.set_meta("tree_visual_state", "published")
+	tree.set_meta("tree_render_lod_tier", "near")
 	var published: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
 		"seed-props", "source-rev-1", true, 1.35)
 	_check("published_tree_visual_is_counted_from_committed_mesh",
@@ -136,10 +257,159 @@ func test_production_chunk_prop_manifest() -> void:
 	_check("tree_queue_commit_is_admitted_as_a_live_owner_receipt",
 		published_receipts.status == "ready" and int(published_receipts.pendingCount) == 0 \
 		and int(published_receipts.byKind.trees_foliage.representedCount) == 1)
+	var lod_view_bounds := Rect2i(-28, 56, 28, 28)
+	var lod_center := Vector2(-14.0, 70.0)
+	var lod_radius := 13.5
+	var dynamic_lod_readiness = VisualReadinessScript.new()
+	var dynamic_lod_view_revision := int(dynamic_lod_readiness.begin_view(93, "seed-props", "world-props-1",
+		lod_view_bounds, lod_view_bounds, lod_center, lod_radius).viewRevision)
+	var accepted_near_manifest: Dictionary = ChunkPropManifestScript.submit(published,
+		dynamic_lod_readiness, dynamic_lod_view_revision, lod_view_bounds)
+	for kind: String in ["terrain", "structures"]:
+		var empty_source_id := "lod-empty:%s" % kind
+		dynamic_lod_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", lod_view_bounds, dynamic_lod_view_revision)
+		dynamic_lod_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", dynamic_lod_view_revision)
+	dynamic_lod_readiness.seal_source_set(dynamic_lod_view_revision)
+	var accepted_near_state: Dictionary = dynamic_lod_readiness.region_readiness(93,
+		"seed-props", "world-props-1", dynamic_lod_view_revision, lod_view_bounds)
+	tree.set_meta("tree_render_lod_tier", "far")
+	var demoted_tree_state: Dictionary = dynamic_lod_readiness.region_readiness(93,
+		"seed-props", "world-props-1", dynamic_lod_view_revision, lod_view_bounds)
+	_check("accepted_near_tree_receipt_invalidates_immediately_on_lod_demotion",
+		accepted_near_manifest.status == "ready" and accepted_near_state.status == "ready" \
+		and demoted_tree_state.status == "pending" \
+		and int(demoted_tree_state.byKind.trees_foliage.pending) == 1,
+		{"before": accepted_near_state, "after": demoted_tree_state})
+	var far_tree_manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	_check("tree_lod_change_advances_visual_source_revision",
+		far_tree_manifest.sourceRevision != published.sourceRevision)
+	var near_lod_readiness = VisualReadinessScript.new()
+	var near_lod_view_revision := int(near_lod_readiness.begin_view(94, "seed-props", "world-props-1",
+		lod_view_bounds, lod_view_bounds, lod_center, lod_radius).viewRevision)
+	var far_in_near: Dictionary = ChunkPropManifestScript.submit(far_tree_manifest,
+		near_lod_readiness, near_lod_view_revision, lod_view_bounds)
+	for kind: String in ["terrain", "structures"]:
+		var empty_source_id := "lod-empty:%s" % kind
+		near_lod_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", lod_view_bounds, near_lod_view_revision)
+		near_lod_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", near_lod_view_revision)
+	near_lod_readiness.seal_source_set(near_lod_view_revision)
+	var near_lod_state: Dictionary = near_lod_readiness.region_readiness(94,
+		"seed-props", "world-props-1", near_lod_view_revision, lod_view_bounds)
+	_check("far_tree_lod_cannot_satisfy_near_detail_receipt",
+		far_in_near.status == "pending" and int(near_lod_state.byKind.trees_foliage.pending) == 1,
+		{"submit": far_in_near, "readiness": near_lod_state})
+	var horizon_readiness = VisualReadinessScript.new()
+	var horizon_near_bounds := Rect2i(-28, 56, 1, 1)
+	var horizon_view_revision := int(horizon_readiness.begin_view(95, "seed-props", "world-props-1",
+		lod_view_bounds, horizon_near_bounds, lod_center, lod_radius).viewRevision)
+	var far_in_horizon: Dictionary = ChunkPropManifestScript.submit(far_tree_manifest,
+		horizon_readiness, horizon_view_revision, horizon_near_bounds)
+	for kind: String in ["terrain", "structures"]:
+		var empty_source_id := "lod-empty:%s" % kind
+		horizon_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", lod_view_bounds, horizon_view_revision)
+		horizon_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
+			"lod-empty-rev-1", horizon_view_revision)
+	horizon_readiness.seal_source_set(horizon_view_revision)
+	var horizon_state: Dictionary = horizon_readiness.region_readiness(95,
+		"seed-props", "world-props-1", horizon_view_revision, lod_view_bounds)
+	_check("committed_far_tree_lod_can_satisfy_horizon_visual_receipt",
+		far_in_horizon.status == "ready" and int(horizon_state.byKind.trees_foliage.represented) == 1,
+		{"submit": far_in_horizon, "readiness": horizon_state})
+	var edge_prop := _make_manifest_body(chunk, "rock:outside-view", "rock")
+	edge_prop.position = Vector3(1.0 * 1.35, 0.0, 27.0 * 1.35)
+	var edge_manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-edge", true, 1.35)
+	var clipped_readiness = VisualReadinessScript.new()
+	var clipped_bounds := Rect2i(-28, 56, 28, 28)
+	var clipped_center := Vector2(-14.0, 70.0)
+	var clipped_revision := int(clipped_readiness.begin_view(96, "seed-props", "world-props-1",
+		clipped_bounds, clipped_bounds, clipped_center, 10.0).viewRevision)
+	var clipped_submit: Dictionary = ChunkPropManifestScript.submit(edge_manifest,
+		clipped_readiness, clipped_revision, clipped_bounds)
+	_check("chunk_edge_candidates_outside_view_are_not_false_blockers",
+		clipped_submit.candidateCount == 3 and clipped_submit.byKind.props.candidateCount == 1 \
+		and not clipped_readiness.has_candidate(
+			"%s:props" % edge_manifest.sourceIdentity, "rock:outside-view"), clipped_submit)
 	_check("prop_visual_manifest_does_not_advance_generation_rng",
 		String(published.scanAuthority) == "completed_production_chunk_prop_spawn_state")
+	var before_position_change: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-position", true, 1.35)
+	rock.position.x += 1.35
+	var after_position_change: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-position", true, 1.35)
+	rock.position.x -= 1.35
+	_check("candidate_position_change_advances_prop_source_revision",
+		before_position_change.sourceRevision != after_position_change.sourceRevision)
+	for index in range(128):
+		var item := Node3D.new()
+		item.set_meta("prop_id", "stable-prop-candidate-%04d" % index)
+		var item_mesh := MeshInstance3D.new()
+		item_mesh.mesh = BoxMesh.new()
+		item.add_child(item_mesh)
+		chunk.add_child(item)
+	var bounded_revision_a: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	var bounded_revision_b: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-1", true, 1.35)
+	_check("large_chunk_candidate_revision_is_bounded_and_deterministic",
+		bounded_revision_a.sourceRevision == bounded_revision_b.sourceRevision \
+		and String(bounded_revision_a.sourceRevision).length() == "source-rev-1:sha256:".length() + 64 \
+		and int(bounded_revision_a.candidateCount) == 132,
+		{"revisionLength": String(bounded_revision_a.sourceRevision).length(),
+		"candidateCount": bounded_revision_a.candidateCount})
 	chunk.queue_free()
 	await process_frame
+
+
+func test_native_terrain_visual_manifest() -> void:
+	var terrain_owner := TerrainPublisherFixture.new()
+	var readiness = VisualReadinessScript.new()
+	var bounds := Rect2i(4, 4, 8, 8)
+	var view_revision := int(readiness.begin_view(151, "terrain-seed", terrain_owner.world_revision,
+		bounds, bounds, Vector2(8.0, 8.0), 4.0).viewRevision)
+	var manifest := TerrainVisualManifestScript.new()
+	var begun: Dictionary = manifest.begin(terrain_owner, readiness, 151, "terrain-seed",
+		terrain_owner.world_revision, view_revision, bounds, bounds, Vector3(8.0, 8.0, 8.0), 4.0)
+	_check("native_terrain_manifest_plans_only_intersecting_mesh_blocks",
+		begun.status == "ready" and int(begun.blockCount) == 1)
+	var pending: Dictionary = manifest.advance(1)
+	_check("native_terrain_source_stays_pending_until_area_is_meshed",
+		pending.status == "pending" and pending.reason == "native_terrain_mesh_block_pending" \
+		and int(pending.processedBlocks) == 0)
+	terrain_owner.complete = true
+	terrain_owner.has_geometry = true
+	var represented: Dictionary = manifest.advance(1)
+	_check("native_mesh_block_receipt_uses_runtime_validator",
+		represented.status == "ready" and int(represented.representedMeshBlocks) == 1 \
+		and readiness.has_candidate("terrain-mesh:0,0,0", "terrain:0,0,0"))
+	terrain_owner.block_revision += 1
+	terrain_owner.complete = false
+	terrain_owner.visible_mesh_block_revision_changed.emit(Vector3i.ZERO, terrain_owner.block_revision)
+	var invalidated: Dictionary = manifest.advance(1)
+	_check("mesh_exit_invalidates_completed_manifest_immediately",
+		invalidated.status == "pending" and invalidated.reason == "native_terrain_mesh_block_revision_changed")
+	var revised: Dictionary = manifest.begin(terrain_owner, readiness, 151, "terrain-seed",
+		terrain_owner.world_revision, view_revision, bounds, bounds, Vector3(8.0, 8.0, 8.0), 4.0)
+	_check("changed_native_mesh_block_revision_restarts_terrain_receipt",
+		revised.status == "ready" and manifest.advance(1).status == "pending")
+	var empty_readiness = VisualReadinessScript.new()
+	var empty_revision := int(empty_readiness.begin_view(152, "terrain-seed", terrain_owner.world_revision,
+		bounds, bounds, Vector2(8.0, 8.0), 4.0).viewRevision)
+	var empty_manifest := TerrainVisualManifestScript.new()
+	terrain_owner.complete = true
+	terrain_owner.has_geometry = false
+	empty_manifest.begin(terrain_owner, empty_readiness, 152, "terrain-seed",
+		terrain_owner.world_revision, empty_revision, bounds, bounds, Vector3(8.0, 8.0, 8.0), 4.0)
+	var completed_empty: Dictionary = empty_manifest.advance(1)
+	_check("meshed_native_empty_block_finishes_explicit_empty_source",
+		completed_empty.status == "ready" and int(completed_empty.completedEmptyBlocks) == 1 \
+		and not empty_readiness.has_candidate("terrain-mesh:0,0,0", "terrain:0,0,0"))
 
 
 func _make_manifest_body(parent: Node3D, prop_id: String, kind: String) -> StaticBody3D:
@@ -150,6 +420,94 @@ func _make_manifest_body(parent: Node3D, prop_id: String, kind: String) -> Stati
 	var visual := MeshInstance3D.new()
 	visual.mesh = BoxMesh.new()
 	body.add_child(visual)
+	return body
+
+
+func test_generated_structure_visual_manifest() -> void:
+	var world := StructureWorldFixture.new()
+	world.name = "GeneratedStructureVisualFixture"
+	root.add_child(world)
+	var structure_system := StructureReadinessFixture.new()
+	var bounds := NEAR_BOUNDS
+	var readiness = VisualReadinessScript.new()
+	var view_revision := int(readiness.begin_view(160, "structure-seed", "structure-world-1",
+		BOUNDS, bounds, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var first_block := _make_structure_visual_block(Vector3i.ZERO, true)
+	world.add_child(first_block)
+	world.blocks[Vector3i.ZERO] = first_block
+	var first: Dictionary = StructureVisualManifestScript.submit(world, structure_system,
+		readiness, 160, view_revision, bounds, bounds)
+	_check("generated_structure_receipt_requires_current_physical_source",
+		first.status == "ready" and first.physicalPublication.status == "ready" \
+		and first.candidateCount == 1 and first.representedCount == 1, first)
+	var incomplete_block := _make_structure_visual_block(Vector3i(1, 0, 0), false)
+	world.add_child(incomplete_block)
+	world.blocks[Vector3i(1, 0, 0)] = incomplete_block
+	var incomplete: Dictionary = StructureVisualManifestScript.submit(world, structure_system,
+		readiness, 160, view_revision, bounds, bounds)
+	_check("generated_structure_without_installed_mesh_remains_pending",
+		incomplete.status == "pending" and incomplete.candidateCount == 2 \
+		and incomplete.representedCount == 1 and incomplete.pendingCount == 1,
+		incomplete)
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = BoxMesh.new()
+	incomplete_block.add_child(mesh)
+	var completed: Dictionary = StructureVisualManifestScript.submit(world, structure_system,
+		readiness, 160, view_revision, bounds, bounds)
+	_check("generated_structure_receipts_recover_after_mesh_installation",
+		completed.status == "ready" and completed.representedCount == 2, completed)
+	var outside_circle := _make_structure_visual_block(Vector3i(6, 0, 0), false)
+	world.add_child(outside_circle)
+	world.blocks[Vector3i(6, 0, 0)] = outside_circle
+	var circular_completed: Dictionary = StructureVisualManifestScript.submit(world,
+		structure_system, readiness, 160, view_revision, BOUNDS, bounds)
+	_check("generated_structure_square_corner_outside_circle_is_not_a_visual_candidate",
+		circular_completed.status == "ready" and circular_completed.candidateCount == 2 \
+		and circular_completed.representedCount == 2, circular_completed)
+	var pending_physical := StructureReadinessFixture.new()
+	pending_physical.physical_status = "pending"
+	var withheld_readiness = VisualReadinessScript.new()
+	var withheld_revision := int(withheld_readiness.begin_view(161, "structure-seed",
+		"structure-world-1", BOUNDS, bounds, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var withheld: Dictionary = StructureVisualManifestScript.submit(world, pending_physical,
+		withheld_readiness, 161, withheld_revision, bounds, bounds)
+	_check("structure_visual_source_is_not_declared_before_physical_source_completion",
+		withheld.status == "pending" and withheld.physicalPublication.status == "pending" \
+		and not withheld_readiness.has_candidate(
+			"generated-structure-blocks:%s" % str(bounds),
+			"structure-block:0,0,0:stoneBlock"), withheld)
+	var horizon_readiness = VisualReadinessScript.new()
+	var horizon_revision := int(horizon_readiness.begin_view(162, "structure-seed",
+		"structure-world-1", BOUNDS, bounds, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var horizon: Dictionary = StructureVisualManifestScript.submit(world, pending_physical,
+		horizon_readiness, 162, horizon_revision, BOUNDS, bounds, false)
+	_check("horizon_structure_visual_uses_complete_source_without_physical_publication",
+		horizon.status == "ready" and horizon.candidateCount == 2 \
+		and horizon.representedCount == 2 and horizon.physicalPublication.is_empty(), horizon)
+	pending_physical.description_status = "pending"
+	var unknown_readiness = VisualReadinessScript.new()
+	var unknown_revision := int(unknown_readiness.begin_view(163, "structure-seed",
+		"structure-world-1", BOUNDS, bounds, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var unknown: Dictionary = StructureVisualManifestScript.submit(world, pending_physical,
+		unknown_readiness, 163, unknown_revision, BOUNDS, bounds, false)
+	_check("horizon_structure_empty_source_waits_for_source_description",
+		unknown.status == "pending" and not unknown_readiness.has_candidate(
+			"generated-structure-blocks:%s" % str(BOUNDS),
+			"structure-block:0,0,0:stoneBlock"), unknown)
+	world.queue_free()
+	await process_frame
+
+
+func _make_structure_visual_block(cell: Vector3i, with_mesh: bool) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.set_meta("generated", true)
+	body.set_meta("player_placed", false)
+	body.set_meta("cell", cell)
+	body.set_meta("block_type", "stoneBlock")
+	if with_mesh:
+		var mesh := MeshInstance3D.new()
+		mesh.mesh = BoxMesh.new()
+		body.add_child(mesh)
 	return body
 
 
