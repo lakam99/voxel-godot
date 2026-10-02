@@ -45,7 +45,7 @@ func run() -> void:
             failures.append("night-safe player observer could not be enabled")
         elif not configure_player_for_runtime_traversal():
             failures.append("production player motor unavailable")
-        elif not await leave_starter_house():
+        elif not bool(main.launch_options.get("skipTutorial", false)) and not await leave_starter_house():
             failures.append("player could not leave the generated starter house through its real door")
         else:
             await _run_visual_act(failures)
@@ -59,9 +59,14 @@ func run() -> void:
         "evidenceLevel": "live_headed_acceptance",
         "runToken": run_token,
         "seed": String(main.get("seed_text")) if main != null and is_instance_valid(main) else "",
-        "launchPath": "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed -> real door -> player motor",
+        "launchPath": "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed -> player motor"
+            if main != null and is_instance_valid(main) and bool(main.launch_options.get("skipTutorial", false))
+            else "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed -> real door -> player motor",
         "controls": {"voxelPlaytest": OS.get_environment("VOXEL_PLAYTEST"),
             "testSeedOverride": OS.get_environment("VOXEL_TEST_SEED"), "fixedFps": false,
+            "skipTutorial": bool(main.launch_options.get("skipTutorial", false)) if main != null and is_instance_valid(main) else false,
+            "forceDaytime": bool(main.launch_options.get("forceDaytime", false)) if main != null and is_instance_valid(main) else false,
+            "forceClearWeather": bool(main.launch_options.get("forceClearWeather", false)) if main != null and is_instance_valid(main) else false,
             "playerRelocated": false, "npcMutation": false},
         "startup": {"menuToNewGameInputMs": menu_to_new_game_input_ms,
             "newGameInputToFirstLoadingFrameMs": new_game_input_to_first_loading_frame_ms,
@@ -181,6 +186,11 @@ func _trace_sample(label: String) -> Dictionary:
         int(requests.get("player", 0)), String(main.get("seed_text")),
         String(runtime.call("visible_mesh_world_revision"))) \
         if is_instance_valid(controller) and is_instance_valid(runtime) else {}
+    var pending_representations: Array = controller.call("pending_representation_diagnostics",
+        "player", int(requests.get("player", 0)), String(main.get("seed_text")),
+        String(runtime.call("visible_mesh_world_revision")), 6) \
+        if is_instance_valid(controller) and is_instance_valid(runtime) \
+        and int(full.get("pendingCount", 0)) > 0 else []
     var advance: Dictionary = main.get("visible_world_demand_last_advance")
     var view_center: Vector2 = main.get("visible_world_view_center_cells")
     var observer_cell := Vector2(player_body.global_position.x / 1.35,
@@ -198,6 +208,7 @@ func _trace_sample(label: String) -> Dictionary:
             "byKind": full.get("byKind", {}), "coverageGaps": (full.get("coverageGaps", []) as Array).slice(0, 8),
             "viewRevision": full.get("viewRevision", 0),
             "visualDemandRevision": full.get("visualDemandRevision", 0)},
+        "pendingRepresentations": pending_representations,
         "queue": full.get("queue", {}), "coverageLag": full.get("coverageLag", 0.0),
         "observerCell": [observer_cell.x, observer_cell.y],
         "viewCenterCells": [view_center.x, view_center.y],

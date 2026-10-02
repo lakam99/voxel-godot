@@ -499,7 +499,7 @@ func launch_main_via_menu_new_game_input() -> bool:
     # Keep the observer outside the production readiness deadline. The game
     # owns the structured loading failure; the runner must not terminate first
     # and discard the domain that explains it.
-    var startup_observation_seconds := minf(210.0, maxf(140.0, watchdog_seconds - duration_seconds - 30.0))
+    var startup_observation_seconds := minf(300.0, maxf(140.0, watchdog_seconds - duration_seconds - 30.0))
     var max_frames := ceili(startup_observation_seconds * float(Engine.physics_ticks_per_second))
     var loading_captured := false
     for frame in range(max_frames):
