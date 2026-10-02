@@ -29,6 +29,12 @@ const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
 const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
 const STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS := 1.6
+const STARTUP_PROP_REQUIRED_FULL_BUDGET_MS := 4.8
+# The pinned startup queue's largest observed slice was 2.756ms. Reserve that
+# much room before admitting another optional slice; one operation cannot be
+# interrupted by a cooperative frame budget.
+const STARTUP_PROP_SLICE_HEADROOM_MS := 2.8
+const StartupChunkPropPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
 const FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS := 180.0
 const VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
@@ -67,6 +73,8 @@ var visible_world_prop_last_attempt: Dictionary = {}
 var visible_world_prop_pending_reasons: Dictionary = {}
 var visible_world_demand_last_advance: Dictionary = {}
 var startup_prop_surface_extra_slices := 0
+var startup_prop_required_full_extra_slices := 0
+var startup_prop_queue_max_usec := 0
 var regional_navigation = RegionalNavigationPublicationScript.new()
 var streaming_requests: Dictionary = {}
 var streaming_request_bounds: Dictionary = {}
@@ -736,6 +744,8 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
         return StartupReadinessResultScript.failed("missing_voxel_terrain_expansion_contract")
     runtime.call("request_final_view_distance_expansion")
     startup_prop_surface_extra_slices = 0
+    startup_prop_required_full_extra_slices = 0
+    startup_prop_queue_max_usec = 0
     # The final viewer radius and stationary loading position already determine
     # scheduling order. Candidate manifests still wait for the actual view
     # revision and installed terrain before they can acknowledge coverage.
@@ -885,12 +895,30 @@ func advance_startup_prop_sources() -> void:
     process_pending_chunk_prop_spawns(prioritized_startup_prop_chunk_keys())
     var surface_priority := visible_world_prop_chunk_keys if not visible_world_prop_chunk_keys.is_empty() \
         else startup_prop_priority_chunk_keys
+    var required_full_key = StartupChunkPropPriorityScript.required_near_full_scan_key(
+        pending_chunk_prop_spawns, visible_world_prop_pending_reasons, chunks,
+        surface_priority, visible_world_near_bounds, CHUNK_SIZE)
+    if required_full_key is Vector2i:
+        for _required_slice in range(2):
+            var elapsed_ms := float(Time.get_ticks_usec() - started_usec) / 1000.0
+            if not StartupChunkPropPriorityScript.startup_spare_slice_admitted(
+                    elapsed_ms, true, STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS,
+                    STARTUP_PROP_REQUIRED_FULL_BUDGET_MS, STARTUP_PROP_SLICE_HEADROOM_MS) \
+                    or not pending_chunk_prop_spawns.has(required_full_key):
+                break
+            startup_prop_required_full_extra_slices += process_pending_chunk_prop_spawns(
+                [required_full_key])
     for _surface_slice in range(2):
-        if float(Time.get_ticks_usec() - started_usec) / 1000.0 \
-                >= STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS:
+        var elapsed_ms := float(Time.get_ticks_usec() - started_usec) / 1000.0
+        if not StartupChunkPropPriorityScript.startup_spare_slice_admitted(
+                elapsed_ms, required_full_key is Vector2i,
+                STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS,
+                STARTUP_PROP_REQUIRED_FULL_BUDGET_MS, STARTUP_PROP_SLICE_HEADROOM_MS):
             break
         startup_prop_surface_extra_slices += process_pending_chunk_prop_spawns_for_visible_surface(
             surface_priority)
+    startup_prop_queue_max_usec = maxi(startup_prop_queue_max_usec,
+        Time.get_ticks_usec() - started_usec)
 
 func advance_visible_world_prop_manifest() -> Dictionary:
     if visible_world_prop_chunk_keys.is_empty() or visible_world_readiness == null \
@@ -1769,6 +1797,8 @@ func wait_for_initial_region_readiness() -> Dictionary:
             "propVisualExpectedSources":visible_world_prop_chunk_keys.size(),
             "propVisualPendingSources":visible_world_prop_pending_reasons.values().slice(0, 8),
             "startupSurfaceExtraSlices":startup_prop_surface_extra_slices,
+            "startupRequiredFullExtraSlices":startup_prop_required_full_extra_slices,
+            "startupPropQueueMaxUsec":startup_prop_queue_max_usec,
             "terrainRetainedReason":get("voxel_terrain_runtime").retained_activation_reason}
         for domain in state.get("domains",{}):
             var owner: Dictionary = state.domains[domain]

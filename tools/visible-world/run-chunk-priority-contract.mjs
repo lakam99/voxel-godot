@@ -8,6 +8,7 @@ cli(async () => {
   launchRecord(c, [
     'scripts/testing/VisibleWorldChunkPriorityContract.gd',
     'scripts/world/ChunkPropSpawnPriority.gd',
+    'scripts/MainCore.gd',
     'scripts/MainRuntimeTools.gd',
     'tools/visible-world/run-chunk-priority-contract.mjs',
     'tools/lib/building-runner.mjs'

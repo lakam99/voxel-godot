@@ -47,6 +47,38 @@ func _run() -> void:
 		and underground_rng.state == before_underground_rng and surface_rng.state == before_surface_rng)
 	_check("same_rng_objects_retained", is_same(underground_state.rng, underground_rng)
 		and is_same(surface_state.rng, surface_rng))
+	var near_bounds := Rect2i(Vector2i.ZERO, Vector2i(56, 56))
+	var physical := {underground_key: underground_chunk, surface_key: surface_chunk}
+	var required_reason := {underground_key: {"reason": "chunk_prop_candidate_scan_incomplete"}}
+	_check("pending_near_full_scan_selects_exact_physical_dependency",
+		PRIORITY.required_near_full_scan_key(pending, required_reason, physical,
+			visible, near_bounds, 28) == underground_key)
+	_check("unreported_or_distant_source_does_not_gain_full_scan_boost",
+		PRIORITY.required_near_full_scan_key(pending, {}, physical,
+			visible, near_bounds, 28) == null
+		and PRIORITY.required_near_full_scan_key(pending,
+			{surface_key: {"reason": "chunk_prop_candidate_scan_incomplete"}},
+			physical, visible, near_bounds, 28) == null)
+	underground_chunk.set_meta("chunk_prop_candidate_scan_complete", true)
+	_check("completed_near_source_does_not_gain_full_scan_boost",
+		PRIORITY.required_near_full_scan_key(pending, required_reason, physical,
+			visible, near_bounds, 28) == null)
+	underground_chunk.set_meta("chunk_prop_candidate_scan_complete", false)
+	underground_chunk.set_meta("horizon_visual_only", true)
+	_check("horizon_source_cannot_gain_physical_full_scan_boost",
+		PRIORITY.required_near_full_scan_key(pending, required_reason, physical,
+			visible, near_bounds, 28) == null)
+	underground_chunk.set_meta("horizon_visual_only", false)
+	_check("surface_order_and_rng_remain_unchanged_after_dependency_selection",
+		PRIORITY.ordered_keys(pending, visible, false)[0] == surface_key
+		and underground_rng.state == before_underground_rng
+		and surface_rng.state == before_surface_rng)
+	_check("ordinary_surface_slice_budget_is_preserved_without_required_full_source",
+		PRIORITY.startup_spare_slice_admitted(1.5, false, 1.6, 4.8, 2.8)
+		and not PRIORITY.startup_spare_slice_admitted(1.6, false, 1.6, 4.8, 2.8))
+	_check("required_full_source_gets_only_bounded_spare_slices",
+		PRIORITY.startup_spare_slice_admitted(1.9, true, 1.6, 4.8, 2.8)
+		and not PRIORITY.startup_spare_slice_admitted(2.1, true, 1.6, 4.8, 2.8))
 	var passed := true
 	for row in _checks:
 		if not bool(row.passed):

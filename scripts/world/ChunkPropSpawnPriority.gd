@@ -45,3 +45,41 @@ static func _surface_complete(state_value) -> bool:
     var chunk = state_value.get("chunk")
     return chunk is Node3D and is_instance_valid(chunk) \
         and bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false))
+
+
+## Select only a near physical producer whose incomplete full scan is already
+## the visual region's declared missing source. Its existing state/RNG is used.
+static func required_near_full_scan_key(pending: Dictionary, pending_reasons: Dictionary,
+        physical_chunks: Dictionary, priority_keys: Array[Vector2i], near_bounds: Rect2i,
+        chunk_size: int) -> Variant:
+    if not near_bounds.has_area() or chunk_size <= 0:
+        return null
+    for key: Vector2i in priority_keys:
+        if not pending.has(key) or not pending_reasons.has(key) \
+                or not physical_chunks.has(key):
+            continue
+        var reason_value = pending_reasons[key]
+        if not (reason_value is Dictionary) or String(reason_value.get("reason", "")) \
+                != "chunk_prop_candidate_scan_incomplete":
+            continue
+        if not Rect2i(key * chunk_size, Vector2i.ONE * chunk_size).intersects(near_bounds):
+            continue
+        var state_value = pending[key]
+        if not (state_value is Dictionary):
+            continue
+        var chunk_value = state_value.get("chunk")
+        if not (chunk_value is Node3D) or not is_instance_valid(chunk_value) \
+                or not is_same(physical_chunks[key], chunk_value) \
+                or bool(chunk_value.get_meta("horizon_visual_only", false)) \
+                or not bool(chunk_value.get_meta("chunk_surface_candidate_scan_complete", false)) \
+                or bool(chunk_value.get_meta("chunk_prop_candidate_scan_complete", false)):
+            continue
+        return key
+    return null
+
+
+static func startup_spare_slice_admitted(elapsed_ms: float, required_full_scan: bool,
+        ordinary_budget_ms: float, required_budget_ms: float, slice_headroom_ms: float) -> bool:
+    if required_full_scan:
+        return elapsed_ms + slice_headroom_ms <= required_budget_ms
+    return elapsed_ms < ordinary_budget_ms
