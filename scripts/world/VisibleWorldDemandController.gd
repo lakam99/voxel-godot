@@ -263,6 +263,7 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		"terrainAdvanceUsec": terrain_advance_usec,
 		"propAdvanceUsec": prop_advance_usec,
 		"structureAdvanceUsec": structure_advance_usec,
+		"structurePhaseUsec": (pending.lastStructure as Dictionary).get("phaseUsec", {}),
 		"coverageAdvanceUsec": coverage_advance_usec,
 		"coverageGeometryUsec": full_result.get("coverageGeometryUsec", 0),
 		"receiptValidationUsec": full_result.get("receiptValidationUsec", 0),

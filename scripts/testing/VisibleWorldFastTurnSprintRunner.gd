@@ -31,6 +31,7 @@ var terrain_manifest_step_usec: Array[int] = []
 var visual_advance_total_usec: Array[int] = []
 var prop_manifest_step_usec: Array[int] = []
 var structure_manifest_step_usec: Array[int] = []
+var structure_phase_step_usec: Dictionary = {}
 var coverage_step_usec: Array[int] = []
 var coverage_geometry_step_usec: Array[int] = []
 var receipt_validation_step_usec: Array[int] = []
@@ -140,6 +141,7 @@ func run() -> void:
         "visualAdvanceTotalTiming": _timing_summary(visual_advance_total_usec),
         "propManifestStepTiming": _timing_summary(prop_manifest_step_usec),
         "structureManifestStepTiming": _timing_summary(structure_manifest_step_usec),
+        "structureManifestPhaseTiming": _timing_dictionary_summary(structure_phase_step_usec),
         "coverageStepTiming": _timing_summary(coverage_step_usec),
         "coverageGeometryStepTiming": _timing_summary(coverage_geometry_step_usec),
         "receiptValidationStepTiming": _timing_summary(receipt_validation_step_usec),
@@ -784,6 +786,12 @@ func _run_visual_act(failures: Array[String]) -> void:
             visual_advance_total_usec.append(maxi(0, int(advance.get("advanceTotalUsec", 0))))
             prop_manifest_step_usec.append(maxi(0, int(advance.get("propAdvanceUsec", 0))))
             structure_manifest_step_usec.append(maxi(0, int(advance.get("structureAdvanceUsec", 0))))
+            var structure_phases: Dictionary = advance.get("structurePhaseUsec", {})
+            for phase_value in structure_phases:
+                var phase := String(phase_value)
+                if not structure_phase_step_usec.has(phase): structure_phase_step_usec[phase] = []
+                (structure_phase_step_usec[phase] as Array).append(maxi(0,
+                    int(structure_phases[phase_value])))
             coverage_step_usec.append(maxi(0, int(advance.get("coverageAdvanceUsec", 0))))
             coverage_geometry_step_usec.append(maxi(0, int(advance.get("coverageGeometryUsec", 0))))
             receipt_validation_step_usec.append(maxi(0, int(advance.get("receiptValidationUsec", 0))))
@@ -977,6 +985,7 @@ func _trace_sample(label: String) -> Dictionary:
             "terrainAdvanceUsec": advance.get("terrainAdvanceUsec", 0),
             "propAdvanceUsec": advance.get("propAdvanceUsec", 0),
             "structureAdvanceUsec": advance.get("structureAdvanceUsec", 0),
+            "structurePhaseUsec": advance.get("structurePhaseUsec", {}),
             "coverageAdvanceUsec": advance.get("coverageAdvanceUsec", 0),
             "advanceTotalUsec": advance.get("advanceTotalUsec", 0)}}
     row["viewDemand"] = _view_demand_diagnostics(controller)
@@ -1001,6 +1010,15 @@ func _timing_summary(durations: Array[int]) -> Dictionary:
     return {"samples": sorted.size(), "p50Usec": sorted[sorted.size() / 2],
         "p95Usec": sorted[mini(sorted.size() - 1, ceili(float(sorted.size()) * 0.95) - 1)],
         "maxUsec": sorted.back(), "totalUsec": total}
+
+
+func _timing_dictionary_summary(durations_by_phase: Dictionary) -> Dictionary:
+    var result := {}
+    for phase_value in durations_by_phase:
+        var durations: Array[int] = []
+        for value in durations_by_phase[phase_value]: durations.append(int(value))
+        result[String(phase_value)] = _timing_summary(durations)
+    return result
 
 
 func _view_demand_diagnostics(controller: Object) -> Dictionary:

@@ -1682,6 +1682,7 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
         "terrainAdvanceUsec": demand_advance.get("terrainAdvanceUsec", 0),
         "propAdvanceUsec": demand_advance.get("propAdvanceUsec", 0),
         "structureAdvanceUsec": demand_advance.get("structureAdvanceUsec", 0),
+        "structurePhaseUsec": demand_advance.get("structurePhaseUsec", {}),
         "coverageAdvanceUsec": demand_advance.get("coverageAdvanceUsec", 0),
         "coverageGeometryUsec": demand_advance.get("coverageGeometryUsec", 0),
         "receiptValidationUsec": demand_advance.get("receiptValidationUsec", 0),

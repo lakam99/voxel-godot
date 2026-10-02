@@ -35,7 +35,10 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	var tier_near_bounds := global_near_bounds if global_near_bounds.has_area() else near_bounds
 	var source_method := "region_publication_readiness" if require_physical else "region_dependency_requirements"
 	var required_status := "ready" if require_physical else "described"
+	var phase_usec := {}
+	var phase_started := Time.get_ticks_usec()
 	var source_state: Dictionary = structure_system.call(source_method, bounds)
+	phase_usec["sourceDescription"] = Time.get_ticks_usec() - phase_started
 	if source_state.get("status") != required_status:
 		return {"status": String(source_state.get("status", "pending")),
 			"reason": String(source_state.get("reason", "structure_source_description_pending")),
@@ -45,24 +48,33 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	# proof counters. The Citadel scene owner is fenced separately below.
 	var dependency_method := "region_dependency_revision" if require_physical \
 		else "region_dependency_scheduling_revision"
+	phase_started = Time.get_ticks_usec()
 	var dependency_revision := JSON.stringify(structure_system.call(dependency_method, bounds))
+	phase_usec["dependencyRevision"] = Time.get_ticks_usec() - phase_started
+	phase_started = Time.get_ticks_usec()
 	var citadel_source: Dictionary = structure_system.call("region_citadel_visual_source", bounds)
+	phase_usec["citadelDescription"] = Time.get_ticks_usec() - phase_started
 	if citadel_source.get("status") != "described" or not citadel_source.get("descriptionComplete",false):
 		return {"status":String(citadel_source.get("status","pending")),
 			"reason":String(citadel_source.get("reason","citadel_visual_description_pending")),
 			"citadelSource":citadel_source}
+	phase_started = Time.get_ticks_usec()
 	var ordinary_source: Dictionary = structure_system.call("region_ordinary_visual_source", bounds)
+	phase_usec["ordinaryDescription"] = Time.get_ticks_usec() - phase_started
 	if ordinary_source.get("status") != "described":
 		return {"status":String(ordinary_source.get("status","pending")),
 			"reason":String(ordinary_source.get("reason","ordinary_visual_description_pending")),
 			"ordinarySource":ordinary_source}
-	var ordinary_producer_revision := int(structure_system.get("ordinary_visual_revision"))
+	var ordinary_revision_value: Variant = structure_system.get("ordinary_visual_revision")
+	var ordinary_producer_revision := int(ordinary_revision_value) \
+		if ordinary_revision_value is int else -1
 	var ordinary_values: Array = ordinary_source.get("candidates",[])
 	if ordinary_values.size() > MAX_BLOCKS:
 		return {"status": "pending", "reason": "generated_structure_visual_capacity", "retryable": true}
 	var candidates: Array[Dictionary] = []
 	var candidate_ids: Array[String] = []
 	var candidates_by_id := {}
+	phase_started = Time.get_ticks_usec()
 	for ordinary_value in ordinary_values:
 		if not ordinary_value is Dictionary:
 			return {"status": "failed", "reason": "generated_structure_block_record_invalid"}
@@ -132,6 +144,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	var source_identity := "generated-structure-blocks:%d:%d:%s" % [
 		main.get_instance_id(), structure_system.get_instance_id(), str(bounds)]
 	var source_revision := hasher.finish().hex_encode()
+	phase_usec["candidateDescriptionHash"] = Time.get_ticks_usec() - phase_started
 	var source_id := "generated-structure-blocks:%s" % str(bounds)
 	var declared: Dictionary = readiness.call("expect_source", source_id, "structures",
 		source_identity, source_revision, bounds, view_revision)
@@ -140,6 +153,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	var represented := 0
 	var pending := 0
 	var pending_ids: Array[String] = []
+	phase_started = Time.get_ticks_usec()
 	for candidate: Dictionary in candidates:
 		var candidate_id := String(candidate["candidateId"])
 		var position_xz: Vector2 = candidate["positionXZ"]
@@ -189,15 +203,26 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		else:
 			pending += 1
 			if pending_ids.size() < 64: pending_ids.append(candidate_id)
+	phase_usec["receiptAdmission"] = Time.get_ticks_usec() - phase_started
+	phase_started = Time.get_ticks_usec()
 	var current_source: Dictionary = structure_system.call(source_method, bounds)
+	phase_usec["sourceRecheck"] = Time.get_ticks_usec() - phase_started
+	phase_started = Time.get_ticks_usec()
 	var current_citadel: Dictionary = structure_system.call("region_citadel_visual_source", bounds)
+	phase_usec["citadelRecheck"] = Time.get_ticks_usec() - phase_started
 	# Submission and receipt checks run synchronously. Reuse the description
 	# unless its producer changed while a receipt was checked; the ledger also
 	# checks the installed owners before a completed view can be accepted.
 	var current_ordinary: Dictionary = ordinary_source
-	if int(structure_system.get("ordinary_visual_revision")) != ordinary_producer_revision:
+	phase_started = Time.get_ticks_usec()
+	var current_ordinary_revision: Variant = structure_system.get("ordinary_visual_revision")
+	if ordinary_producer_revision < 0 or not current_ordinary_revision is int \
+			or int(current_ordinary_revision) != ordinary_producer_revision:
 		current_ordinary = structure_system.call("region_ordinary_visual_source", bounds)
+	phase_usec["ordinaryRecheck"] = Time.get_ticks_usec() - phase_started
+	phase_started = Time.get_ticks_usec()
 	var current_dependency_revision := JSON.stringify(structure_system.call(dependency_method, bounds))
+	phase_usec["dependencyRecheck"] = Time.get_ticks_usec() - phase_started
 	if current_source.get("status") != required_status or current_dependency_revision != dependency_revision \
 			or current_citadel.get("status") != "described" \
 			or current_citadel.get("sourceRevision") != citadel_source.get("sourceRevision") \
@@ -221,6 +246,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		"pendingCount": pending, "pendingIds": pending_ids,
 		"ordinaryVisualProofScope":"producer_emission_ledger",
 		"ordinarySourceCount":int(ordinary_source.get("sourceCount",0)),
+		"phaseUsec":phase_usec,
 		"sourceDescription": source_state,
 		"physicalPublication": source_state if require_physical else {}}
 
