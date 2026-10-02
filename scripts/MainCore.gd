@@ -17,6 +17,7 @@ const NativePrivateMainLoadStageScript := preload("res://scripts/terrain/NativeP
 const NativeDecodedSaveRetirementScript := preload("res://scripts/terrain/NativeDecodedSaveRetirement.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const VisibleWorldReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
+const VisibleWorldDemandControllerScript := preload("res://scripts/world/VisibleWorldDemandController.gd")
 const VoxelTerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const GeneratedStructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
@@ -51,6 +52,7 @@ var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
 var visible_world_readiness: Object
+var visible_world_demand_controller = VisibleWorldDemandControllerScript.new()
 var visible_world_view_revision := 0
 var visible_world_view_center_cells := Vector2.ZERO
 var visible_world_near_bounds := Rect2i()
@@ -866,12 +868,29 @@ func advance_visible_world_prop_manifest() -> Dictionary:
 ## Coordinator-facing visual contract. The ledger verifies current installed
 ## receipts and complete per-kind source coverage for this exact gameplay area.
 func visual_region_readiness(bounds: Rect2i, request_id: int) -> Dictionary:
-    if visible_world_readiness == null or not is_instance_valid(visible_world_readiness) \
-            or visible_world_view_revision <= 0:
-        return {"status": "pending", "reason": "visual_view_not_started", "bounds": bounds}
+    var owner := ""
+    for candidate_owner in streaming_requests:
+        if int(streaming_requests[candidate_owner]) == request_id:
+            owner = String(candidate_owner)
+            break
+    if owner.is_empty():
+        return {"status": "pending", "reason": "visual_request_not_retained",
+            "requestId": request_id, "bounds": bounds}
     var runtime = get("voxel_terrain_runtime")
     if not is_instance_valid(runtime) or not runtime.has_method("visible_mesh_world_revision"):
         return {"status": "pending", "reason": "visual_world_revision_unavailable", "bounds": bounds}
+    if visible_world_demand_controller.has_owner(owner):
+        var observer := player.global_position if owner == "player" and player != null \
+            and is_instance_valid(player) else Vector3.ZERO
+        var center := Vector2(observer.x / CELL, observer.z / CELL)
+        return visible_world_demand_controller.region_readiness(owner, request_id,
+            seed_text, String(runtime.call("visible_mesh_world_revision")), bounds, center)
+    if owner != "player":
+        return {"status": "pending", "reason": "visual_request_not_started",
+            "requestId": request_id, "bounds": bounds}
+    if visible_world_readiness == null or not is_instance_valid(visible_world_readiness) \
+            or visible_world_view_revision <= 0:
+        return {"status": "pending", "reason": "visual_view_not_started", "bounds": bounds}
     var visual_request := int(streaming_requests.get("player", 0))
     if request_id > 0 and visual_request != request_id:
         return {"status": "pending", "reason": "visual_request_revision_changed",
@@ -1114,6 +1133,7 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
         return StartupReadinessResultScript.failed(regional_navigation.last_rejection)
     world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system,
         "navigation":regional_navigation, "visual":self})
+    visible_world_demand_controller.clear()
     streaming_requests.clear()
     streaming_request_bounds.clear()
     streaming_request_priorities.clear()
@@ -1515,6 +1535,7 @@ func update_streaming_region_demand() -> void:
     for owner in streaming_requests.keys():
         if active_owners.has(owner): continue
         world_streaming.release_region(streaming_requests[owner])
+        visible_world_demand_controller.release(String(owner))
         streaming_requests.erase(owner)
         streaming_request_bounds.erase(owner)
         streaming_request_priorities.erase(owner)
@@ -1532,6 +1553,41 @@ func update_streaming_region_demand() -> void:
                 maxi(0, gameplay_publication_deadline_usec - Time.get_ticks_usec())
             )
     apply_streaming_region_demand(advance_budget_usec)
+    if not startup_loading_active and not runtime_loading_active \
+            and streaming_loading_request_owner.is_empty() and not shutdown_requested:
+        advance_player_visible_world_demand(forecast, view_intent)
+
+
+func advance_player_visible_world_demand(forecast: Vector3, view_intent: Dictionary) -> void:
+    var runtime = get("voxel_terrain_runtime")
+    if not is_instance_valid(runtime) or not runtime.has_method("visible_mesh_world_revision") \
+            or player == null or not is_instance_valid(player):
+        return
+    var viewer: Object = runtime.get("viewer")
+    if not is_instance_valid(viewer): return
+    var radius_cells := float(viewer.get("view_distance")) / CELL
+    var request_id := int(streaming_requests.get("player", 0))
+    if request_id <= 0: return
+    if not visible_world_demand_controller.has_owner("player") \
+            and visible_world_readiness != null and is_instance_valid(visible_world_readiness) \
+            and visible_world_view_revision > 0:
+        var radius_int := ceili(radius_cells)
+        var initial_bounds := Rect2i(Vector2i(floori(visible_world_view_center_cells.x) - radius_int,
+            floori(visible_world_view_center_cells.y) - radius_int), Vector2i.ONE * (2 * radius_int + 1))
+        visible_world_demand_controller.adopt("player", request_id, seed_text,
+            String(runtime.call("visible_mesh_world_revision")), visible_world_readiness,
+            visible_world_view_revision, visible_world_view_center_cells, radius_cells,
+            initial_bounds, visible_world_near_bounds)
+    var foreground := player_foreground_streaming_intent(forecast)
+    if foreground.is_empty(): return
+    visible_world_demand_controller.ensure(self, runtime, "player", request_id,
+        seed_text, String(runtime.call("visible_mesh_world_revision")),
+        forecast, foreground.bounds, radius_cells, CELL, CHUNK_SIZE, view_intent)
+    if gameplay_publication_deadline_usec > 0 \
+            and Time.get_ticks_usec() + 1000 >= gameplay_publication_deadline_usec:
+        return
+    visible_world_demand_controller.advance(self, runtime, structure_system,
+        "player", CHUNK_SIZE)
 
 ## The broad player request already retains a 64 m playable radius plus its
 ## coarse-cell margin. Forecasting only needs to promote the next navigation
@@ -1573,6 +1629,7 @@ func reset_streaming_region_demand() -> void:
     streaming_requested_source_revision = -1
     streaming_applied_view_revision = -1
     visible_world_readiness = null
+    visible_world_demand_controller.clear()
     visible_world_view_revision = 0
     visible_world_view_center_cells = Vector2.ZERO
     visible_world_near_bounds = Rect2i()
@@ -3175,6 +3232,18 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
         return StartupReadinessResultScript.failed(streaming_demand_error)
     var request_id := int(streaming_requests.get(owner,0))
     var expected_seed := seed_text
+    var runtime = get("voxel_terrain_runtime")
+    if not is_instance_valid(runtime) or not runtime.has_method("visible_mesh_world_revision"):
+        return StartupReadinessResultScript.failed("missing_destination_visual_authority")
+    var viewer: Object = runtime.get("viewer")
+    if not is_instance_valid(viewer):
+        return StartupReadinessResultScript.failed("missing_destination_visual_viewer")
+    var view_distance := float(viewer.get("view_distance"))
+    if not is_finite(view_distance) or view_distance <= 0.0:
+        return StartupReadinessResultScript.failed("invalid_destination_visual_view_distance")
+    var visual_view_intent := player_streaming_view_intent(position)
+    if not world_streaming.set_request_view_intent(request_id, visual_view_intent):
+        return StartupReadinessResultScript.failed(world_streaming.last_rejection)
     var started := Time.get_ticks_msec()
     var state: Dictionary = {}
     while float(Time.get_ticks_msec()-started)/1000.0<INITIAL_READINESS_TIMEOUT_SECONDS:
@@ -3182,13 +3251,23 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
             return StartupReadinessResultScript.failed("startup_cancelled")
         if not apply_streaming_region_demand():
             return StartupReadinessResultScript.failed(streaming_demand_error)
+        var visual_demand: Dictionary = visible_world_demand_controller.ensure(
+            self, runtime, owner, request_id, seed_text,
+            String(runtime.call("visible_mesh_world_revision")), position,
+            foreground.bounds, view_distance / CELL, CELL, CHUNK_SIZE,
+            visual_view_intent)
+        if visual_demand.get("status") == "failed":
+            return StartupReadinessResultScript.failed(
+                String(visual_demand.get("reason", "destination_visual_demand_failed")))
         process_pending_chunk_loads(world_to_chunk(position.x,position.z))
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
             process_pending_chunk_prop_spawns()
+        var visual_progress: Dictionary = visible_world_demand_controller.advance(
+            self, runtime, structure_system, owner, CHUNK_SIZE)
         state = world_streaming.region_readiness(foreground.bounds,request_id)
+        state["visualDemand"] = visual_progress
         if state.get("status") == "ready" and streaming_source_handoff_complete():
-            var runtime = get("voxel_terrain_runtime")
             if runtime == null or not is_instance_valid(runtime):
                 return StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
             var remaining_seconds := maxf(0.1,INITIAL_READINESS_TIMEOUT_SECONDS-float(Time.get_ticks_msec()-started)/1000.0)
@@ -3206,7 +3285,8 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
         if state.get("status") == "failed":
             return StartupReadinessResultScript.failed("streaming_destination_dependency_failed",{},state.get("missing",[]),state)
         await startup_loading_yield("Preparing destination…","streaming_destination","pending",{
-            "owner":owner,"position":position,"reason":state.get("reason",""),"missing":state.get("missing",[])
+            "owner":owner,"position":position,"reason":state.get("reason",""),"missing":state.get("missing",[]),
+            "visualDemand": visual_progress
         })
     return StartupReadinessResultScript.failed("streaming_destination_timeout",{},state.get("missing",[]),state)
 
@@ -3233,6 +3313,7 @@ func streaming_destination_readiness(position: Vector3, owner: String, request_i
 func release_streaming_destination(owner := "runtime_relocation") -> void:
     var request_id := int(streaming_requests.get(owner,0))
     if request_id>0: world_streaming.release_region(request_id)
+    visible_world_demand_controller.release(owner)
     streaming_requests.erase(owner)
     streaming_request_bounds.erase(owner)
     streaming_request_priorities.erase(owner)

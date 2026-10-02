@@ -4,6 +4,7 @@ const TreePublicationQueueScript := preload("res://scripts/environment/TreePubli
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
 const ChunkPropVisualManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const DetailBatchVisualReceiptPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
 signal rock_published(body: StaticBody3D, collider: CollisionShape3D)
@@ -3068,6 +3069,14 @@ func process_chunk_prop_spawn_state(
             return false
         state["phase"] = "underground_props"
     if String(state.get("phase", "")) == "underground_props":
+        if not bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
+            # Surface props and decorative batches are now fully decided by
+            # their existing RNG streams. Deep-floor scanning can continue
+            # without withholding this surface source from horizon demand.
+            chunk.set_meta("chunk_surface_candidate_scan_complete", true)
+            chunk.set_meta("chunk_surface_candidate_source_revision", "%s:%d:%d:surface" % [
+                seed_text, int(get("seed_hash")), chunk.get_instance_id()
+            ])
         if not process_underground_chunk_prop_spawn_state(state, prop_attempt_budget, time_budget_ms, start_usec):
             return false
         if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
@@ -3083,23 +3092,29 @@ func process_chunk_prop_spawn_state(
 
 ## Read-only view of the real chunk prop publisher. Empty manifests are
 ## available only after the existing seeded spawn state has completed.
-func visible_chunk_prop_manifest(chunk_key: Vector2i) -> Dictionary:
+func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false) -> Dictionary:
     var chunk := chunks.get(chunk_key) as Node3D
     if chunk == null or not is_instance_valid(chunk):
         return {"status": "pending", "reason": "chunk_prop_source_missing", "chunk": chunk_key}
-    var complete := bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
-    var source_revision := String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
+    var complete := bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)) if surface_only \
+        else bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
+    var source_revision := String(chunk.get_meta("chunk_surface_candidate_source_revision", "")) if surface_only \
+        else String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
     return ChunkPropVisualManifestScript.capture(
-        chunk, chunk_key, seed_text, source_revision, complete, CELL
+        chunk, chunk_key, seed_text, source_revision, complete, CELL, surface_only
     )
 
 
 func publish_chunk_prop_visual_readiness(readiness: Object, view_revision: int,
-        near_bounds: Rect2i, chunk_key: Vector2i) -> Dictionary:
-    var manifest := visible_chunk_prop_manifest(chunk_key)
+        near_bounds: Rect2i, chunk_key: Vector2i,
+        observer_position: Vector3 = Vector3.INF) -> Dictionary:
+    var chunk_bounds := Rect2i(chunk_key * CHUNK_SIZE, Vector2i.ONE * CHUNK_SIZE)
+    var manifest := visible_chunk_prop_manifest(chunk_key, not chunk_bounds.intersects(near_bounds))
     if manifest.get("status") == "failed" or not bool(manifest.get("scanComplete", false)):
         return manifest
-    return ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision, near_bounds)
+    var visual_observer := observer_position if observer_position.is_finite() else player.global_position
+    return ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision,
+        near_bounds, visual_observer)
 
 func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> bool:
     if time_budget_ms <= 0.0:
@@ -3480,6 +3495,7 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
         return true
     var batches: Dictionary = state.get("detailBatches", {}) if state.get("detailBatches", {}) is Dictionary else {}
     if batches.is_empty():
+        chunk.set_meta("visual_detail_expected_batches", [])
         return true
     var keys: Array = state.get("detailBatchKeys", []) if state.get("detailBatchKeys", []) is Array else []
     if keys.is_empty():
@@ -3494,6 +3510,7 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
         state["detailBatchRoot"] = root
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
     var batch_index := int(state.get("detailBatchIndex", 0))
+    var expected_batches: Array = state.get("visualDetailBatchRecords", [])
     var processed := 0
     while batch_index < keys.size():
         if processed > 0 and chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
@@ -3504,11 +3521,17 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
         if not transforms.is_empty():
             var batch_start: int = runtime_perf_monitor.begin_section("chunk_detail_batch_spawn") if runtime_perf_monitor != null else Time.get_ticks_usec()
             spawn_detail_batch(root, String(detail_type_variant), transforms)
+            var published_batch := root.get_child(root.get_child_count() - 1) as MultiMeshInstance3D
+            expected_batches.append({"detailType": String(detail_type_variant),
+                "batchInstanceId": published_batch.get_instance_id(),
+                "instanceCount": published_batch.multimesh.instance_count})
+            state["visualDetailBatchRecords"] = expected_batches
             if runtime_perf_monitor != null:
                 runtime_perf_monitor.end_section("chunk_detail_batch_spawn", batch_start)
         batch_index += 1
         processed += 1
     state["detailBatchIndex"] = batch_index
+    chunk.set_meta("visual_detail_expected_batches", expected_batches.duplicate(true))
     return true
 
 func begin_chunk_detail_attempt(state: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
@@ -3613,17 +3636,24 @@ func spawn_chunk_detail_attempt(state: Dictionary, _index: int, rng: RandomNumbe
 
 func spawn_chunk_detail_batches_from_transforms(chunk: Node3D, batches: Dictionary) -> void:
     if batches.is_empty():
+        chunk.set_meta("visual_detail_expected_batches", [])
         return
     var root := Node3D.new()
     root.name = "DecorBatches"
     root.set_meta("kind", "decor")
     chunk.add_child(root)
+    var expected_batches: Array = []
     for detail_type_variant in batches.keys():
         var detail_type := String(detail_type_variant)
         var transforms: Array = batches[detail_type_variant]
         if transforms.is_empty():
             continue
         spawn_detail_batch(root, detail_type, transforms)
+        var published_batch := root.get_child(root.get_child_count() - 1) as MultiMeshInstance3D
+        expected_batches.append({"detailType": detail_type,
+            "batchInstanceId": published_batch.get_instance_id(),
+            "instanceCount": published_batch.multimesh.instance_count})
+    chunk.set_meta("visual_detail_expected_batches", expected_batches)
 
 func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
     var density: float = clampf(float(visual_quality.get("decorativeDensity", 0.74)), 0.0, 1.0)
@@ -3789,6 +3819,9 @@ func spawn_detail_batch(parent: Node3D, detail_type: String, transforms: Array) 
     instance.set_meta("detail_type", detail_type)
     instance.set_meta("detail_visibility_end", instance.visibility_range_end)
     parent.add_child(instance)
+    var visual_publisher = DetailBatchVisualReceiptPublisherScript.new()
+    visual_publisher.configure(instance, detail_type)
+    instance.set_meta("visual_detail_receipt_publisher", visual_publisher)
 
 func detail_material(detail_type: String) -> Material:
     match detail_type:

@@ -21,6 +21,8 @@ var _view_radius := 0.0
 var _view_active := false
 var _source_set_sealed := false
 var _sources: Dictionary = {}
+var _terrain_source_footprints: Dictionary = {}
+var _terrain_source_set_declared := false
 var _candidate_count := 0
 var _failure_rows: Array[Dictionary] = []
 var _queue_diagnostics: Dictionary = {}
@@ -51,12 +53,47 @@ func begin_view(request_id: int, seed: String, world_revision: String,
 		_view_active = true
 		_source_set_sealed = false
 		_sources.clear()
+		_terrain_source_footprints.clear()
+		_terrain_source_set_declared = false
 		_candidate_count = 0
 		_failure_rows.clear()
 		_queue_diagnostics.clear()
 		_coverage_lag = 0.0
 	return {"status": "ready", "viewRevision": _view_revision, "requestId": _request_id,
 		"worldRevision": _world_revision}
+
+
+## The native publisher owns the 3D block-center selection. Its admitted mesh
+## blocks form the terrain coverage obligation for this view. Each block still
+## needs a completed source and a current installed-mesh receipt.
+func declare_terrain_mesh_source_set(footprints: Dictionary, view_revision: int) -> Dictionary:
+	if not _view_active or view_revision != _view_revision:
+		return {"status": "pending", "reason": "visual_view_revision_changed"}
+	if footprints.is_empty() or footprints.size() > MAX_SOURCES:
+		return {"status": "failed", "reason": "invalid_terrain_mesh_source_set"}
+	var admitted: Dictionary = {}
+	for source_id_value in footprints:
+		if not source_id_value is String or String(source_id_value).strip_edges().is_empty() \
+				or not footprints[source_id_value] is Rect2i:
+			return {"status": "failed", "reason": "invalid_terrain_mesh_source_set"}
+		var footprint: Rect2i = footprints[source_id_value]
+		if not _valid_bounds(footprint) or not footprint.intersects(_bounds):
+			return {"status": "failed", "reason": "invalid_terrain_mesh_source_set"}
+		admitted[source_id_value] = footprint
+	if _terrain_source_set_declared:
+		if admitted == _terrain_source_footprints:
+			return {"status": "ready", "sourceCount": admitted.size()}
+		return {"status": "failed", "reason": "terrain_mesh_source_set_conflict"}
+	if _source_set_sealed:
+		return {"status": "failed", "reason": "visual_source_set_closed"}
+	for source_id_value in _sources:
+		var source: Dictionary = _sources[source_id_value]
+		if String(source.kind) == "terrain" and (not admitted.has(source_id_value) \
+				or admitted[source_id_value] != source.bounds):
+			return {"status": "failed", "reason": "terrain_mesh_source_set_conflict"}
+	_terrain_source_footprints = admitted
+	_terrain_source_set_declared = true
+	return {"status": "ready", "sourceCount": admitted.size()}
 
 
 ## Each declared source owns a complete half-open XZ footprint. The source may
@@ -71,6 +108,10 @@ func expect_source(source_id: String, kind: String, source_identity: String,
 			or source_revision.strip_edges().is_empty() or not CONTENT_KINDS.has(kind) \
 			or not _valid_bounds(source_bounds) or not source_bounds.intersects(_bounds):
 		return {"status": "failed", "reason": "invalid_visual_source_manifest"}
+	if kind == "terrain" and (not _terrain_source_set_declared \
+			or not _terrain_source_footprints.has(source_id) \
+			or _terrain_source_footprints[source_id] != source_bounds):
+		return {"status": "failed", "reason": "terrain_mesh_source_not_admitted"}
 	if _sources.has(source_id):
 		var old: Dictionary = _sources[source_id]
 		var same: bool = String(old.kind) == kind and String(old.identity) == source_identity \
@@ -306,7 +347,7 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		for candidate_id_value in source.candidates:
 			var candidate: Dictionary = source.candidates[candidate_id_value]
 			var candidate_position: Vector2 = candidate.get("metadata", {}).get("positionXZ", Vector2(INF, INF))
-			if not bounds.has_point(Vector2i(floori(candidate_position.x), floori(candidate_position.y))):
+			if kind != "terrain" and not bounds.has_point(Vector2i(floori(candidate_position.x), floori(candidate_position.y))):
 				continue
 			kind_counts.candidate = int(kind_counts.candidate) + 1
 			result.candidateCount = int(result.candidateCount) + 1
@@ -347,6 +388,21 @@ func _source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:
 	if bounds.get_area() > MAX_CANDIDATES:
 		return [{"kind":"all", "reason":"visual_query_capacity", "area":bounds.get_area()}]
 	for kind: String in CONTENT_KINDS:
+		if kind == "terrain":
+			if not _terrain_source_set_declared:
+				gaps.append({"kind":kind, "reason":"terrain_mesh_source_set_missing"})
+				continue
+			for source_id_value in _terrain_source_footprints:
+				var footprint: Rect2i = _terrain_source_footprints[source_id_value]
+				if not footprint.intersects(bounds): continue
+				var terrain_source: Dictionary = _sources.get(source_id_value, {})
+				if terrain_source.is_empty() or String(terrain_source.kind) != kind \
+						or terrain_source.bounds != footprint or not bool(terrain_source.complete) \
+						or bool(terrain_source.failed):
+					gaps.append({"kind":kind, "sourceId":String(source_id_value),
+						"reason":"terrain_mesh_source_incomplete"})
+					break
+			continue
 		var sources: Array[Dictionary] = []
 		for source_value in _sources.values():
 			var source: Dictionary = source_value
@@ -445,6 +501,14 @@ func _record_failure(source_id: String, candidate_id: String, kind: String, reas
 
 
 func _source_kind_covers_view(kind: String) -> bool:
+	if kind == "terrain":
+		if not _terrain_source_set_declared: return false
+		for source_id_value in _terrain_source_footprints:
+			var terrain_source: Dictionary = _sources.get(source_id_value, {})
+			if terrain_source.is_empty() or String(terrain_source.kind) != kind \
+					or terrain_source.bounds != _terrain_source_footprints[source_id_value]:
+				return false
+		return true
 	# Prove coverage only for integer cells intersecting the configured view
 	# disk. The rect is a broad-phase envelope; its unseen corners are excluded.
 	for z in range(_bounds.position.y, _bounds.end.y):

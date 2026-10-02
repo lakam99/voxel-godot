@@ -2,6 +2,7 @@ extends SceneTree
 
 const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const DetailBatchPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_WORLD_READINESS_REPORT"
@@ -97,10 +98,13 @@ func run() -> void:
 	test_empty_manifest_requires_complete_source_coverage()
 	test_exact_subregion_coverage_is_independent()
 	test_circular_view_coverage_ignores_outside_corner_cells()
+	await test_terrain_coverage_uses_admitted_mesh_footprints()
 	test_incomplete_discovery_never_reports_empty_ready()
 	test_candidate_must_belong_to_declared_source_footprint()
 	await test_native_terrain_visual_manifest()
 	await test_generated_structure_visual_manifest()
+	await test_surface_prop_source_completes_before_underground_scan()
+	await test_installed_detail_batch_receipts()
 	await test_production_chunk_prop_manifest()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
 	test_candidate_accounting_and_explicit_failure()
@@ -149,6 +153,17 @@ func test_circular_view_coverage_ignores_outside_corner_cells() -> void:
 	var book = VisualReadinessScript.new()
 	var revision := int(book.begin_view(113, "seed-circle", "world-circle",
 		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var terrain_footprints: Dictionary = {}
+	for z in range(BOUNDS.position.y, BOUNDS.end.y):
+		var vertical_delta := (float(z) + 0.5) - VIEW_CENTER.y
+		if absf(vertical_delta) > VIEW_RADIUS: continue
+		var reach := sqrt(maxf(0.0, VIEW_RADIUS * VIEW_RADIUS - vertical_delta * vertical_delta))
+		var row_start := maxi(BOUNDS.position.x, ceili(VIEW_CENTER.x - reach - 0.5))
+		var row_end := mini(BOUNDS.end.x, floori(VIEW_CENTER.x + reach - 0.5) + 1)
+		if row_end <= row_start: continue
+		terrain_footprints["terrain:row:%d" % z] = Rect2i(row_start, z, row_end - row_start, 1)
+	_check("native_terrain_source_footprints_admitted_before_row_receipts",
+		book.declare_terrain_mesh_source_set(terrain_footprints, revision).status == "ready")
 	for kind: String in VisualReadinessScript.CONTENT_KINDS:
 		for z in range(BOUNDS.position.y, BOUNDS.end.y):
 			var vertical_delta := (float(z) + 0.5) - VIEW_CENTER.y
@@ -165,6 +180,62 @@ func test_circular_view_coverage_ignores_outside_corner_cells() -> void:
 		"world-circle", revision, BOUNDS)
 	_check("circular_view_requires_all_in_circle_sources_but_not_square_corner_sources",
 		circle_state.status == "ready" and int(circle_state.candidateCount) == 0)
+
+
+func test_terrain_coverage_uses_admitted_mesh_footprints() -> void:
+	var book = VisualReadinessScript.new()
+	var bounds := Rect2i(248, -90, 20, 20)
+	var near_bounds := Rect2i(250, -82, 2, 2)
+	var revision := int(book.begin_view(114, "terrain-footprint-seed", "terrain-footprint-world",
+		bounds, near_bounds, Vector2(258.0, -81.0), 12.0).viewRevision)
+	var mesh_source_id := "terrain-mesh:16,5,-5"
+	var mesh_footprint := Rect2i(250, -82, 8, 8)
+	var admitted: Dictionary = book.declare_terrain_mesh_source_set(
+		{mesh_source_id: mesh_footprint}, revision)
+	var described: Dictionary = book.expect_source(mesh_source_id, "terrain",
+		"native-mesh-owner", "mesh-rev-1", mesh_footprint, revision)
+	for kind: String in VisualReadinessScript.CONTENT_KINDS:
+		if kind == "terrain": continue
+		_expect_source(book, kind, revision, bounds)
+		book.finish_source("source:" + kind, "identity:" + kind, "rev:1", revision)
+	var pending_source: Dictionary = book.region_readiness(114, "terrain-footprint-seed",
+		"terrain-footprint-world", revision, bounds)
+	_check("admitted_native_mesh_block_remains_pending_until_source_finishes",
+		admitted.status == "ready" and described.status == "ready"
+		and pending_source.status == "pending")
+	var candidate: Dictionary = book.describe_candidate(mesh_source_id, "terrain:16,5,-5",
+		"horizon", {"positionXZ": Vector2(254.0, -78.0)})
+	book.finish_source(mesh_source_id, "native-mesh-owner", "mesh-rev-1", revision)
+	book.seal_source_set(revision)
+	var pending_mesh: Dictionary = book.region_readiness(114, "terrain-footprint-seed",
+		"terrain-footprint-world", revision, bounds)
+	_check("flat_xz_edge_cell_outside_native_mesh_set_adds_no_terrain_obligation",
+		candidate.status == "ready" and pending_mesh.status == "pending"
+		and (pending_mesh.get("coverageGaps", []) as Array).is_empty()
+		and int(pending_mesh.get("byKind", {}).get("terrain", {}).get("pending", 0)) == 1,
+		{"pending": pending_mesh})
+	var owner := Node3D.new()
+	root.add_child(owner)
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = BoxMesh.new()
+	owner.add_child(mesh)
+	await process_frame
+	var accepted: Dictionary = book.accept_receipt(mesh_source_id, "terrain:16,5,-5",
+		"terrain:16,5,-5:native_mesh", "horizon", "native-mesh-owner", "mesh-rev-1",
+		revision, owner, mesh)
+	var ready: Dictionary = book.region_readiness(114, "terrain-footprint-seed",
+		"terrain-footprint-world", revision, bounds)
+	_check("admitted_mesh_receipt_completes_native_terrain_footprint",
+		accepted.status == "ready" and ready.status == "ready"
+		and int(ready.get("representedCount", 0)) == 1, {"ready": ready})
+	owner.queue_free()
+	await process_frame
+	var retired: Dictionary = book.region_readiness(114, "terrain-footprint-seed",
+		"terrain-footprint-world", revision, bounds)
+	_check("retired_admitted_mesh_receipt_reopens_terrain_pending",
+		retired.status == "pending"
+		and int(retired.get("byKind", {}).get("terrain", {}).get("pending", 0)) == 1,
+		{"retired": retired})
 
 
 func test_incomplete_discovery_never_reports_empty_ready() -> void:
@@ -187,6 +258,124 @@ func test_candidate_must_belong_to_declared_source_footprint() -> void:
 		{"positionXZ": Vector2(3.0, 1.0)})
 	_check("candidate_cannot_escape_its_declared_source_footprint",
 		outside.status == "failed" and outside.reason == "visual_candidate_outside_source_or_view")
+
+
+func test_surface_prop_source_completes_before_underground_scan() -> void:
+	var chunk := Node3D.new()
+	chunk.name = "SurfaceSourceFixture"
+	root.add_child(chunk)
+	await process_frame
+	_make_manifest_body(chunk, "surface-seed:4,5:0", "rock")
+	var unfinished_surface: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"surface-seed", "surface-rev-1", false, 1.35, true)
+	var completed_surface: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"surface-seed", "surface-rev-1", true, 1.35, true)
+	var unfinished_full: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"surface-seed", "full-rev-1", false, 1.35)
+	_check("surface_source_finishes_without_underground_scan_completion",
+		unfinished_surface.status == "pending" and completed_surface.status == "ready" \
+		and completed_surface.surfaceOnly and completed_surface.candidateCount == 1 \
+		and unfinished_full.status == "pending",
+		{"surface": completed_surface, "full": unfinished_full})
+	_make_manifest_body(chunk, "surface-seed:underground:4,-5,5", "rock")
+	var unchanged_surface: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"surface-seed", "surface-rev-1", true, 1.35, true)
+	var completed_full: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"surface-seed", "full-rev-1", true, 1.35)
+	_check("later_underground_publication_does_not_change_surface_manifest",
+		unchanged_surface.sourceRevision == completed_surface.sourceRevision \
+		and unchanged_surface.candidateCount == 1 and completed_full.candidateCount == 2,
+		{"surfaceCandidates": unchanged_surface.candidateCount,
+			"fullCandidates": completed_full.candidateCount})
+	chunk.queue_free()
+	await process_frame
+
+
+func test_installed_detail_batch_receipts() -> void:
+	var chunk := Node3D.new()
+	chunk.name = "DetailBatchReceiptFixture"
+	root.add_child(chunk)
+	var batch := MultiMeshInstance3D.new()
+	batch.set_meta("detail_type", "grass")
+	batch.visibility_range_end = 58.0
+	var instances := MultiMesh.new()
+	instances.transform_format = MultiMesh.TRANSFORM_3D
+	instances.use_colors = true
+	instances.use_custom_data = true
+	instances.mesh = BoxMesh.new()
+	instances.instance_count = 2
+	instances.set_instance_transform(0, Transform3D.IDENTITY)
+	instances.set_instance_transform(1, Transform3D(Basis.IDENTITY, Vector3(2.7, 0.0, 0.0)))
+	instances.set_instance_color(0, Color(0.2, 0.8, 0.2))
+	instances.set_instance_color(1, Color(0.4, 0.7, 0.3))
+	instances.set_instance_custom_data(0, Color(0.1, 0.0, 0.0))
+	instances.set_instance_custom_data(1, Color(0.2, 0.0, 0.0))
+	batch.multimesh = instances
+	chunk.add_child(batch)
+	var missing_publisher: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"detail-seed", "detail-scan-1", true, 1.35, true)
+	_check("completed_detail_batch_requires_producer_snapshot",
+		missing_publisher.status == "pending"
+		and missing_publisher.reason == "chunk_detail_batch_publisher_missing")
+	var publisher = DetailBatchPublisherScript.new()
+	publisher.configure(batch, "grass")
+	batch.set_meta("visual_detail_receipt_publisher", publisher)
+	chunk.set_meta("visual_detail_expected_batches", [{"detailType": "grass",
+		"batchInstanceId": batch.get_instance_id(), "instanceCount": 2}])
+	await process_frame
+	var manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"detail-seed", "detail-scan-1", true, 1.35, true)
+	_check("installed_detail_instances_are_individual_foliage_candidates",
+		manifest.status == "ready" and manifest.candidateCount == 2
+		and manifest.byKind.trees_foliage.candidateCount == 2)
+	var book = VisualReadinessScript.new()
+	var bounds := Rect2i(0, 0, 28, 28)
+	var revision := int(book.begin_view(97, "detail-seed", "detail-world-1",
+		bounds, bounds, Vector2.ZERO, 5.0).viewRevision)
+	var submitted: Dictionary = ChunkPropManifestScript.submit(manifest, book, revision,
+		bounds, Vector3.ZERO)
+	for kind: String in ["terrain", "structures"]:
+		var source_id := "detail-fixture:%s" % kind
+		if kind == "terrain":
+			book.declare_terrain_mesh_source_set({source_id: bounds}, revision)
+		book.expect_source(source_id, kind, source_id, "detail-fixture-rev-1", bounds, revision)
+		book.finish_source(source_id, source_id, "detail-fixture-rev-1", revision)
+	book.seal_source_set(revision)
+	var ready: Dictionary = book.region_readiness(97, "detail-seed", "detail-world-1",
+		revision, bounds)
+	_check("installed_detail_receipts_revalidate_per_instance",
+		submitted.status == "ready" and ready.status == "ready"
+		and ready.byKind.trees_foliage.represented == 2,
+		{"submit": submitted, "readiness": ready})
+	instances.visible_instance_count = 1
+	var hidden: Dictionary = book.region_readiness(97, "detail-seed", "detail-world-1",
+		revision, bounds)
+	_check("hidden_detail_instance_invalidates_its_receipt",
+		hidden.status == "pending" and hidden.byKind.trees_foliage.pending == 1)
+	instances.visible_instance_count = 2
+	batch.position = Vector3(1.35, 0.0, 0.0)
+	var moved: Dictionary = book.region_readiness(97, "detail-seed", "detail-world-1",
+		revision, bounds)
+	_check("moved_detail_batch_invalidates_its_instance_receipts",
+		moved.status == "pending" and moved.byKind.trees_foliage.pending == 2,
+		{"readiness": moved, "liveTransform": batch.global_transform})
+	var distant_book = VisualReadinessScript.new()
+	var distant_revision := int(distant_book.begin_view(98, "detail-seed", "detail-world-1",
+		bounds, bounds, Vector2.ZERO, 5.0).viewRevision)
+	var culled: Dictionary = ChunkPropManifestScript.submit(manifest, distant_book,
+		distant_revision, bounds, Vector3(80.0, 0.0, 0.0))
+	_check("detail_outside_existing_visibility_range_is_not_a_horizon_obligation",
+		culled.status == "ready" and culled.candidateCount == 0)
+	batch.queue_free()
+	await process_frame
+	var missing_batch: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"detail-seed", "detail-scan-1", true, 1.35, true)
+	_check("producer_batch_record_rejects_removed_decorative_visuals",
+		missing_batch.status == "pending"
+		and missing_batch.reason == "chunk_detail_batch_installation_missing",
+		missing_batch)
+	chunk.queue_free()
+	await process_frame
 
 
 func test_production_chunk_prop_manifest() -> void:
@@ -234,7 +423,7 @@ func test_production_chunk_prop_manifest() -> void:
 	var view_revision := int(readiness.begin_view(92, "seed-props", "world-props-1",
 		view_bounds, near_bounds, Vector2(-28.0, 56.0), 42.0).viewRevision)
 	var submitted_pending_tree: Dictionary = ChunkPropManifestScript.submit(queued, readiness,
-		view_revision, near_bounds)
+		view_revision, near_bounds, Vector3.ZERO)
 	_check("completed_chunk_manifest_registers_real_candidates",
 		submitted_pending_tree.status == "pending" and submitted_pending_tree.manifestSubmitted \
 		and readiness.has_candidate(
@@ -253,7 +442,7 @@ func test_production_chunk_prop_manifest() -> void:
 	_check("published_tree_visual_is_counted_from_committed_mesh",
 		published.status == "ready" and int(published.byKind.trees_foliage.representedCount) == 1)
 	var published_receipts: Dictionary = ChunkPropManifestScript.submit(published, readiness,
-		view_revision, near_bounds)
+		view_revision, near_bounds, Vector3.ZERO)
 	_check("tree_queue_commit_is_admitted_as_a_live_owner_receipt",
 		published_receipts.status == "ready" and int(published_receipts.pendingCount) == 0 \
 		and int(published_receipts.byKind.trees_foliage.representedCount) == 1)
@@ -264,9 +453,12 @@ func test_production_chunk_prop_manifest() -> void:
 	var dynamic_lod_view_revision := int(dynamic_lod_readiness.begin_view(93, "seed-props", "world-props-1",
 		lod_view_bounds, lod_view_bounds, lod_center, lod_radius).viewRevision)
 	var accepted_near_manifest: Dictionary = ChunkPropManifestScript.submit(published,
-		dynamic_lod_readiness, dynamic_lod_view_revision, lod_view_bounds)
+		dynamic_lod_readiness, dynamic_lod_view_revision, lod_view_bounds, Vector3.ZERO)
 	for kind: String in ["terrain", "structures"]:
 		var empty_source_id := "lod-empty:%s" % kind
+		if kind == "terrain":
+			dynamic_lod_readiness.declare_terrain_mesh_source_set(
+				{empty_source_id: lod_view_bounds}, dynamic_lod_view_revision)
 		dynamic_lod_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
 			"lod-empty-rev-1", lod_view_bounds, dynamic_lod_view_revision)
 		dynamic_lod_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
@@ -290,9 +482,12 @@ func test_production_chunk_prop_manifest() -> void:
 	var near_lod_view_revision := int(near_lod_readiness.begin_view(94, "seed-props", "world-props-1",
 		lod_view_bounds, lod_view_bounds, lod_center, lod_radius).viewRevision)
 	var far_in_near: Dictionary = ChunkPropManifestScript.submit(far_tree_manifest,
-		near_lod_readiness, near_lod_view_revision, lod_view_bounds)
+		near_lod_readiness, near_lod_view_revision, lod_view_bounds, Vector3.ZERO)
 	for kind: String in ["terrain", "structures"]:
 		var empty_source_id := "lod-empty:%s" % kind
+		if kind == "terrain":
+			near_lod_readiness.declare_terrain_mesh_source_set(
+				{empty_source_id: lod_view_bounds}, near_lod_view_revision)
 		near_lod_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
 			"lod-empty-rev-1", lod_view_bounds, near_lod_view_revision)
 		near_lod_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
@@ -308,9 +503,12 @@ func test_production_chunk_prop_manifest() -> void:
 	var horizon_view_revision := int(horizon_readiness.begin_view(95, "seed-props", "world-props-1",
 		lod_view_bounds, horizon_near_bounds, lod_center, lod_radius).viewRevision)
 	var far_in_horizon: Dictionary = ChunkPropManifestScript.submit(far_tree_manifest,
-		horizon_readiness, horizon_view_revision, horizon_near_bounds)
+		horizon_readiness, horizon_view_revision, horizon_near_bounds, Vector3.ZERO)
 	for kind: String in ["terrain", "structures"]:
 		var empty_source_id := "lod-empty:%s" % kind
+		if kind == "terrain":
+			horizon_readiness.declare_terrain_mesh_source_set(
+				{empty_source_id: lod_view_bounds}, horizon_view_revision)
 		horizon_readiness.expect_source(empty_source_id, kind, "lod-empty:%s" % kind,
 			"lod-empty-rev-1", lod_view_bounds, horizon_view_revision)
 		horizon_readiness.finish_source(empty_source_id, "lod-empty:%s" % kind,
@@ -331,7 +529,7 @@ func test_production_chunk_prop_manifest() -> void:
 	var clipped_revision := int(clipped_readiness.begin_view(96, "seed-props", "world-props-1",
 		clipped_bounds, clipped_bounds, clipped_center, 10.0).viewRevision)
 	var clipped_submit: Dictionary = ChunkPropManifestScript.submit(edge_manifest,
-		clipped_readiness, clipped_revision, clipped_bounds)
+		clipped_readiness, clipped_revision, clipped_bounds, Vector3.ZERO)
 	_check("chunk_edge_candidates_outside_view_are_not_false_blockers",
 		clipped_submit.candidateCount == 3 and clipped_submit.byKind.props.candidateCount == 1 \
 		and not clipped_readiness.has_candidate(
@@ -392,8 +590,10 @@ func test_native_terrain_visual_manifest() -> void:
 	terrain_owner.complete = false
 	terrain_owner.visible_mesh_block_revision_changed.emit(Vector3i.ZERO, terrain_owner.block_revision)
 	var invalidated: Dictionary = manifest.advance(1)
-	_check("mesh_exit_invalidates_completed_manifest_immediately",
-		invalidated.status == "pending" and invalidated.reason == "native_terrain_mesh_block_revision_changed")
+	_check("mesh_exit_rewalks_changed_source_and_waits_for_republication",
+		invalidated.status == "pending" and invalidated.reason == "native_terrain_mesh_block_pending"
+		and not readiness.has_candidate("terrain-mesh:0,0,0", "terrain:0,0,0"),
+		{"progress": invalidated})
 	var revised: Dictionary = manifest.begin(terrain_owner, readiness, 151, "terrain-seed",
 		terrain_owner.world_revision, view_revision, bounds, bounds, Vector3(8.0, 8.0, 8.0), 4.0)
 	_check("changed_native_mesh_block_revision_restarts_terrain_receipt",
@@ -626,6 +826,9 @@ func _declare_sources(book, revision: int, bounds: Rect2i, skip_kind := "") -> v
 
 
 func _expect_source(book, kind: String, revision: int, bounds: Rect2i) -> void:
+	if kind == "terrain":
+		_check("native_terrain_source_footprint_admitted",
+			book.declare_terrain_mesh_source_set({"source:terrain": bounds}, revision).status == "ready")
 	var result: Dictionary = book.expect_source("source:" + kind, kind, "identity:" + kind,
 		"rev:1", bounds, revision)
 	_check("source_descriptor_" + kind, result.status == "ready")

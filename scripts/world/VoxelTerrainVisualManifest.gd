@@ -34,6 +34,7 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 			or not runtime.has_method("visible_mesh_source_identity") \
 			or not runtime.has_method("visible_mesh_world_revision") \
 			or not runtime.has_method("visible_mesh_source_revision") \
+			or not runtime.has_method("visible_mesh_vertical_bounds") \
 			or not runtime.has_method("visible_mesh_area_complete") \
 			or not runtime.has_method("visible_mesh_block_has_geometry") \
 			or not runtime.has_method("visible_mesh_receipt_is_current") \
@@ -70,8 +71,19 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 		_active = false
 		return {"status": "pending", "reason": "native_terrain_source_revision_changed"}
 	_blocks = _required_blocks(runtime, center_cells, radius_cells)
-	_block_indices.clear()
-	for index in range(_blocks.size()): _block_indices[_blocks[index]] = index
+	if _blocks.is_empty():
+		_active = false
+		return {"status": "pending", "reason": "native_terrain_mesh_source_set_empty"}
+	var terrain_footprints: Dictionary = {}
+	for block: Vector3i in _blocks:
+		terrain_footprints["terrain-mesh:%d,%d,%d" % [block.x, block.y, block.z]] = \
+			Rect2i(Vector2i(block.x, block.z) * NATIVE_BLOCK_CELLS,
+				Vector2i.ONE * NATIVE_BLOCK_CELLS)
+	var admitted: Dictionary = readiness.call("declare_terrain_mesh_source_set",
+		terrain_footprints, view_revision)
+	if admitted.get("status") != "ready":
+		_active = false
+		return admitted
 	_blocks.sort_custom(func(a: Vector3i, b: Vector3i):
 		var da := _distance_squared_to_block(center_cells, a)
 		var db := _distance_squared_to_block(center_cells, b)
@@ -80,6 +92,8 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 		if a.y != b.y: return a.y < b.y
 		return a.z < b.z
 	)
+	_block_indices.clear()
+	for index in range(_blocks.size()): _block_indices[_blocks[index]] = index
 	_cursor = 0
 	_represented_blocks = 0
 	_empty_blocks = 0
@@ -94,7 +108,13 @@ func advance(block_budget: int = 24) -> Dictionary:
 	if not _active or not is_instance_valid(runtime) or not is_instance_valid(_readiness):
 		return {"status": "pending", "reason": "native_terrain_visual_manifest_not_started"}
 	if _source_stale:
-		return _progress("pending", "native_terrain_mesh_block_revision_changed")
+		# Recheck the bounded source list after a previously accepted block changes.
+		# expect_source replaces only changed revisions; its old receipt cannot pass
+		# the publisher validator while the replacement is absent.
+		_cursor = 0
+		_represented_blocks = 0
+		_empty_blocks = 0
+		_source_stale = false
 	if String(runtime.call("visible_mesh_source_identity")) != _source_identity \
 			or String(runtime.call("visible_mesh_world_revision")) != _source_world_revision:
 		return _progress("pending", "native_terrain_source_revision_changed")
@@ -182,7 +202,10 @@ func _bind_runtime_mesh_revision_signal(runtime: Object) -> void:
 
 
 func _on_mesh_block_revision_changed(block_position: Vector3i, _revision: int) -> void:
-	if _block_indices.has(block_position): _source_stale = true
+	# The current pending block can publish while this scan is waiting for it.
+	# A changed block already acknowledged by the scan invalidates that proof.
+	if _block_indices.has(block_position) and int(_block_indices[block_position]) < _cursor:
+		_source_stale = true
 
 
 func _required_blocks(runtime: Object, center: Vector3, radius: float) -> Array[Vector3i]:

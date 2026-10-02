@@ -8,7 +8,8 @@ const MAX_BLOCKS := 100000
 
 static func submit(main: Object, structure_system: Object, readiness: Object,
 		request_id: int, view_revision: int, bounds: Rect2i,
-		near_bounds: Rect2i, require_physical: bool = true) -> Dictionary:
+		near_bounds: Rect2i, require_physical: bool = true,
+		global_near_bounds: Rect2i = Rect2i()) -> Dictionary:
 	if not is_instance_valid(main) or not is_instance_valid(structure_system) \
 			or not is_instance_valid(readiness) \
 			or not main.has_method("generated_structure_visual_blocks") \
@@ -25,6 +26,10 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	if bounds.size.x <= 0 or bounds.size.y <= 0 or near_bounds.size.x <= 0 \
 			or near_bounds.size.y <= 0 or not bounds.encloses(near_bounds):
 		return {"status": "failed", "reason": "invalid_generated_structure_visual_bounds"}
+	# A chunk source may straddle the near/horizon boundary. The source-local
+	# rectangle proves coverage; this optional view rectangle selects the tier
+	# without claiming physical readiness for the horizon.
+	var tier_near_bounds := global_near_bounds if global_near_bounds.has_area() else near_bounds
 	var source_method := "region_publication_readiness" if require_physical else "region_dependency_requirements"
 	var required_status := "ready" if require_physical else "described"
 	var source_state: Dictionary = structure_system.call(source_method, bounds)
@@ -92,7 +97,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	for candidate: Dictionary in candidates:
 		var candidate_id := String(candidate["candidateId"])
 		var position_xz: Vector2 = candidate["positionXZ"]
-		var required_tier := "near" if near_bounds.has_point(
+		var required_tier := "near" if tier_near_bounds.has_point(
 			Vector2i(floori(position_xz.x), floori(position_xz.y))) else "horizon"
 		if not bool(readiness.call("has_candidate", source_id, candidate_id)):
 			var described: Dictionary = readiness.call("describe_candidate", source_id,

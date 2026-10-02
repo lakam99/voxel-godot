@@ -337,3 +337,60 @@ candidates before underground completion, including batched decorative
 foliage; the view envelope must follow the native mesh publication footprint.
 Only then can a full-view startup gate and continuous movement ledger be
 accepted honestly.
+
+## Surface, detail, terrain-footprint and movement integration probe
+
+The surface prop source now completes after surface props and decorative detail
+batches are installed, without waiting for the separate underground scan.
+Each decorative MultiMesh instance has a candidate and a publisher receipt;
+the completed chunk records the expected batch IDs/counts so removing an entire
+batch cannot turn a completed source into a false empty success. The terrain
+ledger uses the exact 3D mesh-block set admitted by the native viewer, and a
+new request-scoped controller refreshes visual demand during movement and
+relocation while retaining the previous valid foreground representation.
+
+The focused synthetic owner-receipt contract passed 122 checks at
+`artifacts/citadel-runtime-integration/visible-world-readiness-detail-source-record-pass-20261001/report.json`.
+Startup loading and world-streaming consumer contracts passed, and the project
+compile smoke loaded both production scenes. These checks do not prove live
+visual completeness or smooth traversal.
+
+A second normal-menu headed full-view gate probe used the same seed
+`atlas-1492` and command:
+
+```text
+node tools/run-playtest.mjs --visible --timeout-seconds 600 --report-path artifacts/citadel-runtime-integration/visible-world-full-gate-integrated-20261001/report.json --progress-path artifacts/citadel-runtime-integration/visible-world-full-gate-integrated-20261001/progress.txt --screenshot-path artifacts/citadel-runtime-integration/visible-world-full-gate-integrated-20261001/final.png
+```
+
+The foreground readiness path passed and the loading screen reached
+`Completing visible world` at about 144 seconds. At the playtest's 240-second
+startup observation limit, the new terrain owner had represented all 363
+admitted mesh blocks, but trees/foliage, props and wildlife had only 17
+complete source rectangles among 42 view chunks. The visual queue still had
+25 source obligations, with its first XZ coverage gap at `(224, -56)`.
+The run did not reach first control. The owned process failed functionally
+with exit code 1 but cleaned up with authoritative zero remaining members at
+`artifacts/node-tools/process-runs/godot-YtLaOG/watchdog.json`.
+
+The temporary full-view startup gate was removed after this failed probe.
+Normal startup still requires foreground visual readiness and native terrain
+mesh coverage. The remaining bottleneck is surface candidate publication
+across the configured horizon; a new deterministic far-source/proxy contract
+or measured acceleration of the existing generator is needed before the full
+gate can be restored. No live full-view acceptance is claimed.
+
+After removing the gate, a normal-menu headed playtest on the same seed
+reached first control and recorded 25 passing checks, including initial
+chunks, tutorial start/interactions, and mouse look:
+
+```text
+node tools/run-playtest.mjs --visible --timeout-seconds 600 --report-path artifacts/citadel-runtime-integration/visible-world-normal-headed-integrated-20261001/report.json --progress-path artifacts/citadel-runtime-integration/visible-world-normal-headed-integrated-20261001/progress.txt --screenshot-path artifacts/citadel-runtime-integration/visible-world-normal-headed-integrated-20261001/final.png
+```
+
+The report remained `finished=false`: during the runner's later world reset,
+the already recorded `WorldGenerationSystem.underground_air_density_at` nil
+call recurred. The owned process was stopped; watchdog
+`artifacts/node-tools/process-runs/godot-p7O0rc/watchdog.json` reports
+authoritative zero job members but cleanup not passed because a run-local stop
+was requested. This is partial headed foreground evidence, not a clean
+playtest or full-view/traversal acceptance. No final screenshot was saved.
