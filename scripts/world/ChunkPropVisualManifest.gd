@@ -25,7 +25,7 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 	var candidates: Array[Dictionary] = []
 	var seen_ids: Dictionary = {}
 	var overflow: Array = [false]
-	var source_issue: Array = [""]
+	var source_issue: Array = ["", ""]
 	var detail_ordinals := {}
 	var observed_detail_batches := {}
 	_collect_candidates(chunk, chunk, chunk_key, seed, cell_scale, candidates, seen_ids,
@@ -35,7 +35,8 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 			chunk.get_meta("visual_detail_expected_batches"), observed_detail_batches)
 	if not String(source_issue[0]).is_empty():
 		return {"status": "pending", "reason": String(source_issue[0]), "retryable": true,
-			"chunk": chunk_key, "candidateCount": candidates.size()}
+			"chunk": chunk_key, "candidateCount": candidates.size(),
+			"candidateId": String(source_issue[1])}
 	if bool(overflow[0]):
 		return {"status": "pending", "reason": "chunk_prop_manifest_capacity", "retryable": true,
 			"chunk": chunk_key, "candidateCount": candidates.size()}
@@ -281,7 +282,11 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 			var world_position := batch.global_transform * transform.origin
 			var candidate_id := "%s:detail:%d,%d:%s:%d:%d" % [seed,
 				chunk_key.x, chunk_key.y, detail_type, ordinal, index]
-			if seen_ids.has(candidate_id) or candidates.size() >= MAX_CANDIDATES_PER_CHUNK:
+			if seen_ids.has(candidate_id):
+				source_issue[0] = "chunk_prop_candidate_id_duplicate"
+				source_issue[1] = candidate_id
+				return
+			if candidates.size() >= MAX_CANDIDATES_PER_CHUNK:
 				overflow[0] = true
 				return
 			seen_ids[candidate_id] = true
@@ -308,8 +313,12 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 		var prop_id := String(current.get_meta("prop_id", ""))
 		if surface_only and prop_id.begins_with("%s:underground:" % seed):
 			return
-		if prop_id.is_empty() or seen_ids.has(prop_id):
-			overflow[0] = true
+		if prop_id.is_empty():
+			source_issue[0] = "chunk_prop_candidate_id_missing"
+			return
+		if seen_ids.has(prop_id):
+			source_issue[0] = "chunk_prop_candidate_id_duplicate"
+			source_issue[1] = prop_id
 			return
 		seen_ids[prop_id] = true
 		var kind := _content_kind(current)

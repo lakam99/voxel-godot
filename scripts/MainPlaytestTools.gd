@@ -3194,6 +3194,15 @@ func process_underground_chunk_prop_spawn_state(
     if state.get("undergroundCandidates", null) == null:
         state["undergroundCandidates"] = []
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
+    if bool(state.get("undergroundScanComplete", false)) and int(state.get("undergroundIndex", 0)) == 0 \
+            and world_generation_system != null and world_generation_system.has_method("terrain_volume_revision"):
+        var completed_scan: Dictionary = state.get("undergroundVolumeFloorScan", {}) \
+            if state.get("undergroundVolumeFloorScan", {}) is Dictionary else {}
+        if completed_scan.has("revision") \
+                and int(completed_scan.revision) != int(world_generation_system.call("terrain_volume_revision")):
+            # Revalidate the completed scan before its first RNG draw. Once
+            # publication starts, that source/order is pinned for this chunk.
+            state["undergroundScanComplete"] = false
     if not bool(state.get("undergroundScanComplete", false)):
         var scan_budget := maxi(8, maxi(1, attempt_budget) * 8)
         var scan_start: int = runtime_perf_monitor.begin_section("chunk_underground_prop_scan") if runtime_perf_monitor != null else Time.get_ticks_usec()
@@ -3340,7 +3349,6 @@ func scan_underground_prop_candidates_from_volume_service(
             state["undergroundScanComplete"] = true
             state["undergroundCandidates"] = candidates
             return true
-    var found_count_before := candidates.size()
     var result: Dictionary = world_generation_system.call(
         "advance_exposed_underground_floor_scan",
         scan_state,
@@ -3350,16 +3358,32 @@ func scan_underground_prop_candidates_from_volume_service(
     )
     scan_state = result.get("state", scan_state) if result.get("state", scan_state) is Dictionary else scan_state
     state["undergroundVolumeFloorScan"] = scan_state
+    if bool(result.get("restarted", false)):
+        # The volume owner discarded its old scan cursor after a source
+        # revision change. Its prior cells are no longer one complete source;
+        # no underground RNG draws have happened before scan completion.
+        candidates.clear()
+        state["undergroundIndex"] = 0
+        if runtime_perf_monitor != null:
+            runtime_perf_monitor.increment_counter("underground_prop_scan_restarts")
+    var found_count_before := candidates.size()
     var new_candidates: Array = result.get("newCandidates", []) if result.get("newCandidates", []) is Array else []
+    var seen_cells := {}
+    for candidate_value in candidates:
+        if candidate_value is Vector3i:
+            seen_cells[candidate_value] = true
     for cell_value in new_candidates:
         if candidates.size() >= max_candidates:
             break
         if not (cell_value is Vector3i):
             continue
         var floor_cell: Vector3i = cell_value
+        if seen_cells.has(floor_cell):
+            continue
         var roll := hash01("underground-prop-candidate:%d,%d,%d" % [floor_cell.x, floor_cell.y, floor_cell.z])
         if roll <= 0.18:
             candidates.append(floor_cell)
+            seen_cells[floor_cell] = true
     state["undergroundCandidates"] = candidates
     if bool(result.get("complete", false)) or candidates.size() >= max_candidates:
         state["undergroundScanComplete"] = true

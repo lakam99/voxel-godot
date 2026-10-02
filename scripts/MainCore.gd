@@ -911,7 +911,9 @@ func advance_visible_world_prop_manifest() -> Dictionary:
     else:
         visible_world_prop_pending_reasons[key] = {
             "chunk": key, "status": visible_world_prop_last_attempt.get("status", "pending"),
-            "reason": visible_world_prop_last_attempt.get("reason", "source_unavailable")}
+            "reason": visible_world_prop_last_attempt.get("reason", "source_unavailable"),
+            "candidateCount": visible_world_prop_last_attempt.get("candidateCount", 0),
+            "candidateId": visible_world_prop_last_attempt.get("candidateId", "")}
     return visible_world_prop_last_attempt
 
 ## Coordinator-facing visual contract. The ledger verifies current installed

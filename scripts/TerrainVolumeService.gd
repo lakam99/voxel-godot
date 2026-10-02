@@ -3004,7 +3004,8 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 		}
 	var chunk_key: Vector2i = state.get("chunkKey", Vector2i.ZERO)
 	var size := maxi(1, int(state.get("chunkSize", SECTION_SIZE)))
-	if int(state.get("revision", revision)) != revision:
+	var restarted := int(state.get("revision", revision)) != revision
+	if restarted:
 		state = begin_exposed_underground_floor_scan(chunk_key, size)
 	var start_x := chunk_key.x * size
 	var start_z := chunk_key.y * size
@@ -3054,7 +3055,8 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 		"state": state,
 		"complete": complete,
 		"newCandidates": new_candidates,
-		"processed": processed
+		"processed": processed,
+		"restarted": restarted
 	}
 
 func underground_air_floor_cell_is_spawnable(air_cell: Vector3i) -> bool:
