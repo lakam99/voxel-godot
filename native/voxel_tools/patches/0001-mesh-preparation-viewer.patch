@@ -1,0 +1,378 @@
+diff --git a/engine/voxel_engine.cpp b/engine/voxel_engine.cpp
+index 38c7920..e1152e1 100644
+--- a/engine/voxel_engine.cpp
++++ b/engine/voxel_engine.cpp
+@@ -209,6 +209,16 @@ bool VoxelEngine::is_viewer_requiring_visuals(ViewerID viewer_id) const {
+ 	return viewer.require_visuals;
+ }
+ 
++void VoxelEngine::set_viewer_requires_mesh_preparation(ViewerID viewer_id, bool enabled) {
++	Viewer &viewer = _world.viewers.get(viewer_id);
++	viewer.require_mesh_preparation = enabled;
++}
++
++bool VoxelEngine::is_viewer_requiring_mesh_preparation(ViewerID viewer_id) const {
++	const Viewer &viewer = _world.viewers.get(viewer_id);
++	return viewer.require_mesh_preparation;
++}
++
+ void VoxelEngine::set_viewer_requires_collisions(ViewerID viewer_id, bool enabled) {
+ 	Viewer &viewer = _world.viewers.get(viewer_id);
+ 	viewer.require_collisions = enabled;
+diff --git a/engine/voxel_engine.h b/engine/voxel_engine.h
+index 8f8dae7..15eb32e 100644
+--- a/engine/voxel_engine.h
++++ b/engine/voxel_engine.h
+@@ -142,6 +142,7 @@ public:
+ 		Distances view_distances;
+ 		bool require_collisions = true;
+ 		bool require_visuals = true;
++		bool require_mesh_preparation = false;
+ 		bool requires_data_block_notifications = false;
+ 		int network_peer_id = -1;
+ 	};
+@@ -184,6 +185,8 @@ public:
+ 	Viewer::Distances get_viewer_distances(ViewerID viewer_id) const;
+ 	void set_viewer_requires_visuals(ViewerID viewer_id, bool enabled);
+ 	bool is_viewer_requiring_visuals(ViewerID viewer_id) const;
++	void set_viewer_requires_mesh_preparation(ViewerID viewer_id, bool enabled);
++	bool is_viewer_requiring_mesh_preparation(ViewerID viewer_id) const;
+ 	void set_viewer_requires_collisions(ViewerID viewer_id, bool enabled);
+ 	bool is_viewer_requiring_collisions(ViewerID viewer_id) const;
+ 	void set_viewer_requires_data_block_notifications(ViewerID viewer_id, bool enabled);
+diff --git a/terrain/fixed_lod/voxel_mesh_block_vt.h b/terrain/fixed_lod/voxel_mesh_block_vt.h
+index 815d80b..b5d4e07 100644
+--- a/terrain/fixed_lod/voxel_mesh_block_vt.h
++++ b/terrain/fixed_lod/voxel_mesh_block_vt.h
+@@ -20,7 +20,10 @@ public:
+ 	zylann::godot::DirectMeshInstance shadow_occluder;
+ 
+ 	RefCount mesh_viewers;
++	// Rendering demand is separate from mesh preparation demand.
++	RefCount render_viewers;
+ 	RefCount collision_viewers;
++	uint32_t visual_upload_count = 0;
+ 
+ 	// True if this block is in the update list of `VoxelTerrain`, so multiple edits done before it processes will not
+ 	// add it multiple times
+diff --git a/terrain/fixed_lod/voxel_terrain.cpp b/terrain/fixed_lod/voxel_terrain.cpp
+index 7592db2..e1b97e1 100644
+--- a/terrain/fixed_lod/voxel_terrain.cpp
++++ b/terrain/fixed_lod/voxel_terrain.cpp
+@@ -460,8 +460,8 @@ void VoxelTerrain::try_schedule_mesh_update(VoxelMeshBlockVT &mesh_block) {
+ 	}
+ }
+ 
+-void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision_flag) {
+-	if (mesh_flag == false && collision_flag == false) {
++void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool render_flag, bool collision_flag) {
++	if (mesh_flag == false && render_flag == false && collision_flag == false) {
+ 		// Why even call the function?
+ 		return;
+ 	}
+@@ -476,9 +476,16 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
+ 	}
+ 	CRASH_COND(block == nullptr);
+ 
++	const bool needs_mesh_update = (mesh_flag && block->mesh_viewers.get() == 0) ||
++			(collision_flag && block->collision_viewers.get() == 0);
+ 	if (mesh_flag) {
+ 		block->mesh_viewers.add();
+ 	}
++	if (render_flag) {
++		block->render_viewers.add();
++		// A prepared mesh can be displayed immediately, without another worker task.
++		block->set_visible(true);
++	}
+ 	if (collision_flag) {
+ 		block->collision_viewers.add();
+ 	}
+@@ -486,27 +493,32 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
+ 	// This is needed in case a viewer wants to view meshes in places data blocks are already present.
+ 	// Before that, meshes were updated only when a data block was loaded or modified,
+ 	// so changing block size or viewer flags did not make meshes appear.
+-	try_schedule_mesh_update(*block);
+-
+-	// TODO this logic schedules a mesh update even if there is a mesh already. It hides the fact that mixing up
+-	// viewers with collisions and viewers without will not actually create colliders/meshes individually.
++	if (needs_mesh_update) {
++		try_schedule_mesh_update(*block);
++	}
+ 
+-	// TODO viewers with varying flags during the game is not supported at the moment.
+-	// They have to be re-created, which may cause world re-load...
++	// A newly requested mesh or collision needs a worker update even if the
++	// other resource was already installed. Render-only promotion reuses it.
+ }
+ 
+-void VoxelTerrain::unview_mesh_block(Vector3i bpos, bool mesh_flag, bool collision_flag) {
++void VoxelTerrain::unview_mesh_block(Vector3i bpos, bool mesh_flag, bool render_flag, bool collision_flag) {
+ 	VoxelMeshBlockVT *block = _mesh_map.get_block(bpos);
+ 	// Mesh blocks are created on first view call,
+ 	// so that would mean we unview one without viewing it in the first place
+ 	ERR_FAIL_COND(block == nullptr);
+ 
++	if (render_flag) {
++		block->render_viewers.remove();
++		if (block->render_viewers.get() == 0) {
++			block->set_visible(false);
++		}
++	}
++
+ 	if (mesh_flag) {
+ 		block->mesh_viewers.remove();
+ 		if (block->mesh_viewers.get() == 0) {
+ 			// Mesh no longer required
+ 			block->drop_mesh();
+-			block->set_visible(false);
+ 		}
+ 	}
+ 
+@@ -691,6 +703,22 @@ Array VoxelTerrain::get_mesh_block_surface(Vector3i block_pos) const {
+ 	return Array();
+ }
+ 
++Dictionary VoxelTerrain::get_mesh_block_viewer_state(Vector3i block_pos) const {
++	Dictionary state;
++	const VoxelMeshBlockVT *block = _mesh_map.get_block(block_pos);
++	state["present"] = block != nullptr;
++	if (block != nullptr) {
++		state["mesh_viewers"] = block->mesh_viewers.get();
++		state["render_viewers"] = block->render_viewers.get();
++		state["collision_viewers"] = block->collision_viewers.get();
++		state["is_loaded"] = block->is_loaded;
++		state["has_mesh"] = block->has_mesh();
++		state["is_visible"] = block->is_visible();
++		state["visual_upload_count"] = block->visual_upload_count;
++	}
++	return state;
++}
++
+ Dictionary VoxelTerrain::_b_get_statistics() const {
+ 	Dictionary d;
+ 
+@@ -1377,8 +1405,11 @@ void VoxelTerrain::process_viewers() {
+ 
+ 				state.local_position_voxels = math::floor_to_int(local_position);
+ 				state.requires_collisions = VoxelEngine::get_singleton().is_viewer_requiring_collisions(viewer_id);
+-				state.requires_meshes =
++				state.requires_rendering =
+ 						VoxelEngine::get_singleton().is_viewer_requiring_visuals(viewer_id) && self._mesher.is_valid();
++				state.requires_meshes = state.requires_rendering ||
++						(VoxelEngine::get_singleton().is_viewer_requiring_mesh_preparation(viewer_id) &&
++								self._mesher.is_valid());
+ 
+ 				// Update data and mesh view boxes
+ 
+@@ -1476,7 +1507,8 @@ void VoxelTerrain::process_viewers() {
+ 					prev_mesh_box.difference(new_mesh_box, [this, &viewer](Box3i out_of_range_box) {
+ 						out_of_range_box.for_each_cell([this, &viewer](Vector3i bpos) {
+ 							unview_mesh_block(
+-									bpos, viewer.prev_state.requires_meshes, viewer.prev_state.requires_collisions
++								bpos, viewer.prev_state.requires_meshes, viewer.prev_state.requires_rendering,
++								viewer.prev_state.requires_collisions
+ 							);
+ 						});
+ 					});
+@@ -1485,7 +1517,8 @@ void VoxelTerrain::process_viewers() {
+ 					new_mesh_box.difference(prev_mesh_box, [this, &viewer](Box3i box_to_load) {
+ 						box_to_load.for_each_cell([this, &viewer](Vector3i bpos) {
+ 							// Load or update block
+-							view_mesh_block(bpos, viewer.state.requires_meshes, viewer.state.requires_collisions);
++							view_mesh_block(bpos, viewer.state.requires_meshes, viewer.state.requires_rendering,
++								viewer.state.requires_collisions);
+ 						});
+ 					});
+ 				}
+@@ -1497,29 +1530,40 @@ void VoxelTerrain::process_viewers() {
+ 					const Box3i box = new_mesh_box.clipped(prev_mesh_box);
+ 					if (viewer.state.requires_collisions) {
+ 						box.for_each_cell([this](Vector3i bpos) { //
+-							view_mesh_block(bpos, false, true);
++							view_mesh_block(bpos, false, false, true);
+ 						});
+ 
+ 					} else {
+ 						box.for_each_cell([this](Vector3i bpos) { //
+-							unview_mesh_block(bpos, false, true);
++							unview_mesh_block(bpos, false, false, true);
+ 						});
+ 					}
+ 				}
+ 
+-				if (viewer.state.requires_meshes != viewer.prev_state.requires_meshes) {
+-					const Box3i box = new_mesh_box.clipped(prev_mesh_box);
+-					if (viewer.state.requires_meshes) {
+-						box.for_each_cell([this](Vector3i bpos) { //
+-							view_mesh_block(bpos, true, false);
++				// Acquire a mesh before rendering it, and retire rendering before
++				// releasing the last mesh reference.
++				const Box3i retained_mesh_box = new_mesh_box.clipped(prev_mesh_box);
++				if (viewer.state.requires_meshes && !viewer.prev_state.requires_meshes) {
++					retained_mesh_box.for_each_cell([this](Vector3i bpos) {
++						view_mesh_block(bpos, true, false, false);
++					});
++				}
++				if (viewer.state.requires_rendering != viewer.prev_state.requires_rendering) {
++					if (viewer.state.requires_rendering) {
++						retained_mesh_box.for_each_cell([this](Vector3i bpos) {
++							view_mesh_block(bpos, false, true, false);
+ 						});
+-
+ 					} else {
+-						box.for_each_cell([this](Vector3i bpos) { //
+-							unview_mesh_block(bpos, true, false);
++						retained_mesh_box.for_each_cell([this](Vector3i bpos) {
++							unview_mesh_block(bpos, false, true, false);
+ 						});
+ 					}
+ 				}
++				if (!viewer.state.requires_meshes && viewer.prev_state.requires_meshes) {
++					retained_mesh_box.for_each_cell([this](Vector3i bpos) {
++							unview_mesh_block(bpos, true, false, false);
++					});
++				}
+ 			}
+ 		}
+ 	}
+@@ -2013,6 +2057,9 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+ 		return;
+ 	}
+ 
++	// A viewer may retire or promote while a worker result is in flight. Only
++	// install visuals requested by that worker if the block still has mesh demand.
++	if (ob.visual_was_required && block->mesh_viewers.get() > 0) {
+ 	Ref<ArrayMesh> mesh;
+ 	Ref<Mesh> shadow_occluder_mesh;
+ 	StdVector<uint16_t> material_indices;
+@@ -2086,10 +2133,12 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+ 			shadow_occluder_mode
+ #endif
+ 	);
++	++block->visual_upload_count;
+ 
+ 	if (_material_override.is_valid()) {
+ 		block->set_material_override(_material_override);
+ 	}
++	}
+ 
+ 	const bool gen_collisions = _generate_collisions && block->collision_viewers.get() > 0;
+ 	if (gen_collisions) {
+@@ -2113,7 +2162,7 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+ 		block->set_collision_mask(_collision_mask);
+ 	}
+ 
+-	block->set_visible(block->mesh_viewers.get() > 0);
++	block->set_visible(block->render_viewers.get() > 0);
+ 	block->set_collision_enabled(gen_collisions);
+ 	block->set_parent_visible(is_visible());
+ 	block->set_parent_transform(get_global_transform());
+@@ -2501,6 +2550,8 @@ void VoxelTerrain::_bind_methods() {
+ 	ClassDB::bind_method(D_METHOD("set_mesh_block_size", "size"), &Self::set_mesh_block_size);
+ 
+ 	ClassDB::bind_method(D_METHOD("get_statistics"), &Self::_b_get_statistics);
++	ClassDB::bind_method(D_METHOD("get_mesh_block_viewer_state", "block_position"),
++			&Self::get_mesh_block_viewer_state);
+ 	ClassDB::bind_method(D_METHOD("get_voxel_tool"), &Self::get_voxel_tool);
+ 
+ 	ClassDB::bind_method(D_METHOD("save_modified_blocks"), &Self::_b_save_modified_blocks);
+diff --git a/terrain/fixed_lod/voxel_terrain.h b/terrain/fixed_lod/voxel_terrain.h
+index 769aee1..28726f1 100644
+--- a/terrain/fixed_lod/voxel_terrain.h
++++ b/terrain/fixed_lod/voxel_terrain.h
+@@ -177,6 +177,7 @@ public:
+ #endif
+ 	void get_meshed_block_positions(StdVector<Vector3i> &out_positions) const;
+ 	Array get_mesh_block_surface(Vector3i block_pos) const;
++	Dictionary get_mesh_block_viewer_state(Vector3i block_pos) const;
+ 
+ 	VolumeID get_volume_id() const override {
+ 		return _volume_id;
+@@ -229,9 +230,9 @@ private:
+ 	void clear_mesh_map();
+ 
+ 	// void view_data_block(Vector3i bpos, uint32_t viewer_id, bool require_notification);
+-	void view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision_flag);
++	void view_mesh_block(Vector3i bpos, bool mesh_flag, bool render_flag, bool collision_flag);
+ 	// void unview_data_block(Vector3i bpos);
+-	void unview_mesh_block(Vector3i bpos, bool mesh_flag, bool collision_flag);
++	void unview_mesh_block(Vector3i bpos, bool mesh_flag, bool render_flag, bool collision_flag);
+ 	// void unload_data_block(Vector3i bpos);
+ 	void unload_mesh_block(Vector3i bpos);
+ 	// void make_data_block_dirty(Vector3i bpos);
+@@ -300,6 +301,7 @@ private:
+ 			int vertical_view_distance_voxels = 0;
+ 			bool requires_collisions = false;
+ 			bool requires_meshes = false;
++			bool requires_rendering = false;
+ 		};
+ 		ViewerID id;
+ 		State state;
+diff --git a/terrain/voxel_viewer.cpp b/terrain/voxel_viewer.cpp
+index c2a0897..fa4b367 100644
+--- a/terrain/voxel_viewer.cpp
++++ b/terrain/voxel_viewer.cpp
+@@ -44,6 +44,17 @@ bool VoxelViewer::is_requiring_visuals() const {
+ 	return _requires_visuals;
+ }
+ 
++void VoxelViewer::set_requires_mesh_preparation(bool enabled) {
++	_requires_mesh_preparation = enabled;
++	if (is_active()) {
++		VoxelEngine::get_singleton().set_viewer_requires_mesh_preparation(_viewer_id, enabled);
++	}
++}
++
++bool VoxelViewer::is_requiring_mesh_preparation() const {
++	return _requires_mesh_preparation;
++}
++
+ void VoxelViewer::set_requires_collisions(bool enabled) {
+ 	_requires_collisions = enabled;
+ 	if (is_active()) {
+@@ -124,6 +135,7 @@ void VoxelViewer::sync_all_parameters() {
+ 	sync_view_distances();
+ 	VoxelEngine &ve = VoxelEngine::get_singleton();
+ 	ve.set_viewer_requires_visuals(_viewer_id, _requires_visuals);
++	ve.set_viewer_requires_mesh_preparation(_viewer_id, _requires_mesh_preparation);
+ 	ve.set_viewer_requires_collisions(_viewer_id, _requires_collisions);
+ 	ve.set_viewer_requires_data_block_notifications(_viewer_id, _requires_data_block_notifications);
+ 	ve.set_viewer_network_peer_id(_viewer_id, _network_peer_id);
+@@ -214,6 +226,8 @@ void VoxelViewer::_bind_methods() {
+ 
+ 	ClassDB::bind_method(D_METHOD("set_requires_visuals", "enabled"), &VoxelViewer::set_requires_visuals);
+ 	ClassDB::bind_method(D_METHOD("is_requiring_visuals"), &VoxelViewer::is_requiring_visuals);
++	ClassDB::bind_method(D_METHOD("set_requires_mesh_preparation", "enabled"), &VoxelViewer::set_requires_mesh_preparation);
++	ClassDB::bind_method(D_METHOD("is_requiring_mesh_preparation"), &VoxelViewer::is_requiring_mesh_preparation);
+ 
+ 	ClassDB::bind_method(D_METHOD("set_requires_collisions", "enabled"), &VoxelViewer::set_requires_collisions);
+ 	ClassDB::bind_method(D_METHOD("is_requiring_collisions"), &VoxelViewer::is_requiring_collisions);
+@@ -239,6 +253,7 @@ void VoxelViewer::_bind_methods() {
+ 			"get_view_distance_vertical_ratio"
+ 	);
+ 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "requires_visuals"), "set_requires_visuals", "is_requiring_visuals");
++	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "requires_mesh_preparation"), "set_requires_mesh_preparation", "is_requiring_mesh_preparation");
+ 	ADD_PROPERTY(
+ 			PropertyInfo(Variant::BOOL, "requires_collisions"), "set_requires_collisions", "is_requiring_collisions"
+ 	);
+diff --git a/terrain/voxel_viewer.h b/terrain/voxel_viewer.h
+index 10138da..4a11458 100644
+--- a/terrain/voxel_viewer.h
++++ b/terrain/voxel_viewer.h
+@@ -26,6 +26,8 @@ public:
+ 
+ 	void set_requires_visuals(bool enabled);
+ 	bool is_requiring_visuals() const;
++	void set_requires_mesh_preparation(bool enabled);
++	bool is_requiring_mesh_preparation() const;
+ 
+ 	void set_requires_collisions(bool enabled);
+ 	bool is_requiring_collisions() const;
+@@ -57,6 +59,7 @@ private:
+ 	unsigned int _view_distance = 128;
+ 	float _view_distance_vertical_ratio = 1.f;
+ 	bool _requires_visuals = true;
++	bool _requires_mesh_preparation = false;
+ 	bool _requires_collisions = true;
+ 	bool _requires_data_block_notifications = false;
+ 	bool _enabled_in_editor = false;

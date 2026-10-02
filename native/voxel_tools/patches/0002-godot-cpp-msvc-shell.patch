@@ -1,0 +1,27 @@
+diff --git a/tools/windows.py b/tools/windows.py
+index 93ca89e..5499a97 100644
+--- a/tools/windows.py
++++ b/tools/windows.py
+@@ -88,6 +88,13 @@ def exists(env):
+ 
+ 
+ def generate(env):
++    # SCons 4.10 can miss BuildTools discovery even inside an initialized
++    # vcvars shell unless this construction variable is present.
++    if os.getenv("VSCMD_ARG_TGT_ARCH") and "MSVC_USE_SCRIPT" not in env:
++        env["MSVC_USE_SCRIPT"] = False
++        for key in ("INCLUDE", "LIB", "LIBPATH", "PATH"):
++            if key in os.environ:
++                env["ENV"][key] = os.environ[key]
+     if not env["use_mingw"] and msvc.exists(env):
+         if env["arch"] == "x86_64":
+             env["TARGET_ARCH"] = "amd64"
+@@ -109,6 +116,8 @@ def generate(env):
+         env.Tool("msvc")
+         env.Tool("mslib")
+         env.Tool("mslink")
++        if os.getenv("VSCMD_ARG_TGT_ARCH") and env.get("MSVS_VERSION") is None:
++            env["MSVS_VERSION"] = "17.0"
+ 
+         env.Append(CPPDEFINES=["TYPED_METHOD_BIND", "NOMINMAX"])
+         env.Append(CCFLAGS=["/utf-8"])

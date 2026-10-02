@@ -1,0 +1,30 @@
+{
+  "schema": "voxel-tools-mesh-preparation-lock/v1",
+  "voxelTools": {
+    "repository": "https://github.com/Zylann/godot_voxel.git",
+    "tag": "v1.6x",
+    "commit": "595f52ee4e23203a865eeb981f115909f7aa92f4",
+    "patch": "patches/0001-mesh-preparation-viewer.patch",
+    "patchSha256": "59583f5b1ed505f88092701f9a25ea65b67a637589d0cef78bf8e615bbe50b49"
+  },
+  "godotCpp": {
+    "tag": "godot-4.5-stable",
+    "commit": "e83fd0904c13356ed1d4c3d09f8bb9132bdc6b77",
+    "patch": "patches/0002-godot-cpp-msvc-shell.patch",
+    "patchSha256": "6f00d213778a71b53900aa406272f748cf352581eb0ab3df957ede745536cab1"
+  },
+  "windows": {
+    "msvc": {
+      "toolsetVersion": "14.44.35207",
+      "compilerVersion": "19.44.35228",
+      "linkerVersion": "14.44.35228.0",
+      "vcvarsArgs": "-vcvars_ver=14.44.35207",
+      "vcvars64Sha256": "6b516d8fcf543c14b2d861e1f45661e0029230fe0dc48e86ce78522801822209",
+      "clSha256": "88c8344236a27a6e727e0a8edc49aaa2690bdc7a9464b9d18cc7abe70a9f1c0d",
+      "linkSha256": "ca11e6c45debd34bf652dfe984c5360a531a005ed78bf72852330c9c2590cf0d"
+    },
+    "targets": ["editor", "template_release"],
+    "editorDll": "libvoxel.windows.editor.x86_64.dll",
+    "releaseDll": "libvoxel.windows.template_release.x86_64.dll"
+  }
+}
