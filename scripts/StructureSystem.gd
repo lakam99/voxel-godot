@@ -167,8 +167,14 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
         if expected.is_empty() and omitted.is_empty():
             pending_ids.append(source_id+":no_emitted_blocks")
             continue
-        var cells: Array=expected.keys()
-        cells.sort_custom(func(a: Vector3i,b: Vector3i): return a.z<b.z if a.z!=b.z else (a.x<b.x if a.x!=b.x else a.y<b.y))
+        # Producer records are stable after completion until their revision
+        # changes. Reuse the deterministic order across regional queries.
+        var cells: Array=source.get("sortedExpectedCells",[])
+        if int(source.get("sortedExpectedRevision",-1))!=int(source.get("revision",0)):
+            cells=expected.keys()
+            cells.sort_custom(func(a: Vector3i,b: Vector3i): return a.z<b.z if a.z!=b.z else (a.x<b.x if a.x!=b.x else a.y<b.y))
+            source.sortedExpectedCells=cells
+            source.sortedExpectedRevision=int(source.get("revision",0))
         for cell_value in cells:
             var cell: Vector3i=cell_value
             if not bounds.has_point(Vector2i(cell.x,cell.z)): continue

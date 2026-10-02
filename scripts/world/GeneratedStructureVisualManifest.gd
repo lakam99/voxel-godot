@@ -56,6 +56,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		return {"status":String(ordinary_source.get("status","pending")),
 			"reason":String(ordinary_source.get("reason","ordinary_visual_description_pending")),
 			"ordinarySource":ordinary_source}
+	var ordinary_producer_revision := int(structure_system.get("ordinary_visual_revision"))
 	var ordinary_values: Array = ordinary_source.get("candidates",[])
 	if ordinary_values.size() > MAX_BLOCKS:
 		return {"status": "pending", "reason": "generated_structure_visual_capacity", "retryable": true}
@@ -190,7 +191,12 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 			if pending_ids.size() < 64: pending_ids.append(candidate_id)
 	var current_source: Dictionary = structure_system.call(source_method, bounds)
 	var current_citadel: Dictionary = structure_system.call("region_citadel_visual_source", bounds)
-	var current_ordinary: Dictionary = structure_system.call("region_ordinary_visual_source", bounds)
+	# Submission and receipt checks run synchronously. Reuse the description
+	# unless its producer changed while a receipt was checked; the ledger also
+	# checks the installed owners before a completed view can be accepted.
+	var current_ordinary: Dictionary = ordinary_source
+	if int(structure_system.get("ordinary_visual_revision")) != ordinary_producer_revision:
+		current_ordinary = structure_system.call("region_ordinary_visual_source", bounds)
 	var current_dependency_revision := JSON.stringify(structure_system.call(dependency_method, bounds))
 	if current_source.get("status") != required_status or current_dependency_revision != dependency_revision \
 			or current_citadel.get("status") != "described" \
