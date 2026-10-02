@@ -236,6 +236,7 @@ func run() -> void:
 	await test_surface_prop_source_completes_before_underground_scan()
 	test_underground_floor_scan_revision_restart()
 	await test_installed_detail_batch_receipts()
+	await test_large_detail_batch_live_receipts()
 	await test_production_chunk_prop_manifest()
 	await test_horizon_prop_candidate_snapshot_cache()
 	test_horizon_ecology_owner_lifetime()
@@ -832,6 +833,116 @@ func test_installed_detail_batch_receipts() -> void:
 		missing_batch.status == "pending"
 		and missing_batch.reason == "chunk_detail_batch_installation_missing",
 		missing_batch)
+	chunk.queue_free()
+	await process_frame
+
+
+func test_large_detail_batch_live_receipts() -> void:
+	var value_metadata := {"detailType": "grass", "positionXZ": Vector2.ONE,
+		"instanceTransform": Transform3D.IDENTITY, "instanceColor": Color.WHITE}
+	var value_schema: bool = VisualReadinessScript._is_value_only_detail_metadata(value_metadata)
+	var value_copy: Dictionary = VisualReadinessScript._publisher_metadata_copy(
+		value_metadata, value_schema)
+	value_copy.detailType = "changed"
+	var nested_metadata := {"detailType": "grass", "nested": [{"value": 1}]}
+	var nested_schema: bool = VisualReadinessScript._is_value_only_detail_metadata(nested_metadata)
+	var nested_copy: Dictionary = VisualReadinessScript._publisher_metadata_copy(
+		nested_metadata, nested_schema)
+	nested_copy.nested[0].value = 2
+	_check("detail_metadata_copy_isolated_and_nested_schema_uses_deep_copy",
+		value_schema and not nested_schema and value_metadata.detailType == "grass"
+		and nested_metadata.nested[0].value == 1)
+	var chunk := Node3D.new()
+	chunk.name = "LargeDetailReceiptFixture"
+	root.add_child(chunk)
+	var batch := MultiMeshInstance3D.new()
+	batch.set_meta("detail_type", "grass")
+	batch.position = Vector3(1.0, 0.0, 1.0)
+	batch.visibility_range_end = 58.0
+	var instances := MultiMesh.new()
+	instances.transform_format = MultiMesh.TRANSFORM_3D
+	instances.mesh = BoxMesh.new()
+	instances.instance_count = 800
+	for index in 800:
+		instances.set_instance_transform(index, Transform3D.IDENTITY)
+	batch.multimesh = instances
+	chunk.add_child(batch)
+	var publisher = DetailBatchPublisherScript.new()
+	publisher.configure(batch, "grass")
+	batch.set_meta("visual_detail_receipt_publisher", publisher)
+	chunk.set_meta("visual_detail_expected_batches", [{"detailType": "grass",
+		"batchInstanceId": batch.get_instance_id(), "instanceCount": 800}])
+	await process_frame
+	var manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"large-detail-seed", "large-detail-scan-1", true, 1.35, true)
+	var book = VisualReadinessScript.new()
+	var bounds := Rect2i(0, 0, 28, 28)
+	var revision := int(book.begin_view(99, "large-detail-seed", "large-detail-world",
+		bounds, bounds, Vector2.ONE, 5.0).viewRevision)
+	var submitted: Dictionary = ChunkPropManifestScript.submit(manifest, book, revision,
+		bounds, Vector3.ZERO)
+	for kind: String in ["terrain", "structures"]:
+		var source_id := "large-detail-fixture:%s" % kind
+		if kind == "terrain":
+			book.declare_terrain_mesh_source_set({source_id: bounds}, revision)
+		book.expect_source(source_id, kind, source_id, "large-detail-rev-1", bounds, revision)
+		book.finish_source(source_id, source_id, "large-detail-rev-1", revision)
+	book.seal_source_set(revision)
+	var ready: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	_check("large_detail_batch_has_800_live_receipts",
+		manifest.get("status") == "ready" and manifest.get("candidateCount") == 800
+		and submitted.get("status") == "ready" and ready.get("status") == "ready"
+		and int(ready.byKind.trees_foliage.represented) == 800,
+		{"manifestStatus": manifest.get("status"), "submitted": submitted,
+			"ready": ready.get("status"), "represented": ready.byKind.trees_foliage.represented})
+	batch.visible = false
+	var hidden: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	batch.visible = true
+	instances.visible_instance_count = 799
+	var short_count: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	instances.visible_instance_count = 800
+	var original_multimesh := batch.multimesh
+	var replacement := MultiMesh.new()
+	replacement.transform_format = MultiMesh.TRANSFORM_3D
+	replacement.mesh = BoxMesh.new()
+	replacement.instance_count = 800
+	batch.multimesh = replacement
+	var swapped_resource: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	batch.multimesh = original_multimesh
+	chunk.remove_child(batch)
+	var removed_owner: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	chunk.add_child(batch)
+	var restored: Dictionary = book.region_readiness(99, "large-detail-seed",
+		"large-detail-world", revision, bounds)
+	_check("large_detail_receipts_invalidate_same_frame_on_live_changes",
+		hidden.get("status") == "pending" and int(hidden.byKind.trees_foliage.pending) == 800
+		and short_count.get("status") == "pending"
+		and int(short_count.byKind.trees_foliage.pending) == 1
+		and swapped_resource.get("status") == "pending"
+		and int(swapped_resource.byKind.trees_foliage.pending) == 800
+		and removed_owner.get("status") == "pending"
+		and int(removed_owner.byKind.trees_foliage.pending) == 800
+		and restored.get("status") == "ready",
+		{"hidden": hidden.byKind.trees_foliage.pending,
+			"shortCount": short_count.byKind.trees_foliage.pending,
+			"resource": swapped_resource.byKind.trees_foliage.pending,
+			"owner": removed_owner.byKind.trees_foliage.pending,
+			"restored": restored.get("status")})
+	var receipt_usecs: Array[int] = []
+	for sample in 10:
+		var measured: Dictionary = book.region_readiness(99, "large-detail-seed",
+			"large-detail-world", revision, bounds)
+		receipt_usecs.append(int(measured.get("receiptValidationUsec", -1)))
+	receipt_usecs.sort()
+	_check("large_detail_receipts_report_bounded_live_validation_timing",
+		receipt_usecs[0] > 0,
+		{"candidateCount": 800, "samples": 10, "receiptP50Usec": receipt_usecs[5],
+			"receiptP90Usec": receipt_usecs[9]})
 	chunk.queue_free()
 	await process_frame
 

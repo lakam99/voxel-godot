@@ -9,11 +9,35 @@ const MAX_ENTRIES := 64
 ## prior capture only while the producer's installed source data is identical.
 var _entries: Dictionary = {}
 var _clock := 0
+var _eligible_requests := 0
+var _hits := 0
+var _captures := 0
+var _fallbacks := 0
+var _blocked := 0
+var _validation_usec := 0
+var _refresh_usec := 0
+var _capture_usec := 0
 
 
 func clear() -> void:
 	_entries.clear()
 	_clock = 0
+	_eligible_requests = 0
+	_hits = 0
+	_captures = 0
+	_fallbacks = 0
+	_blocked = 0
+	_validation_usec = 0
+	_refresh_usec = 0
+	_capture_usec = 0
+
+
+func diagnostics() -> Dictionary:
+	return {"eligibleRequests": _eligible_requests, "hits": _hits,
+		"captures": _captures, "fallbacks": _fallbacks,
+		"blocked": _blocked, "entries": _entries.size(),
+		"validationUsec": _validation_usec,
+		"refreshUsec": _refresh_usec, "captureUsec": _capture_usec}
 
 
 func capture_or_refresh(main: Node, chunk: Node3D, chunk_key: Vector2i,
@@ -23,14 +47,18 @@ func capture_or_refresh(main: Node, chunk: Node3D, chunk_key: Vector2i,
 			or not bool(chunk.get_meta("horizon_visual_only", false)):
 		return ManifestScript.capture(chunk, chunk_key, seed, scan_revision,
 			scan_complete, cell_scale, surface_only)
+	_eligible_requests += 1
 	var validation_started := Time.get_ticks_usec()
 	var witness := _producer_witness(main, chunk, chunk_key, scan_revision, chunk_size)
 	var validation_usec := maxi(0, Time.get_ticks_usec() - validation_started)
+	_validation_usec += validation_usec
 	if witness.has("blocked"):
+		_blocked += 1
 		_entries.erase(chunk_key)
 		return {"status": "pending", "reason": String(witness.blocked),
 			"retryable": true, "chunk": chunk_key}
 	if witness.is_empty():
+		_fallbacks += 1
 		_entries.erase(chunk_key)
 		return ManifestScript.capture(chunk, chunk_key, seed, scan_revision,
 			scan_complete, cell_scale, surface_only)
@@ -41,7 +69,9 @@ func capture_or_refresh(main: Node, chunk: Node3D, chunk_key: Vector2i,
 		var refresh_started := Time.get_ticks_usec()
 		var refreshed: Dictionary = ManifestScript.refresh_cached(cached.manifest, chunk)
 		var refresh_usec := maxi(0, Time.get_ticks_usec() - refresh_started)
+		_refresh_usec += refresh_usec
 		if bool(refreshed.get("scanComplete", false)):
+			_hits += 1
 			_clock += 1
 			cached.lastUse = _clock
 			_entries[chunk_key] = cached
@@ -54,6 +84,8 @@ func capture_or_refresh(main: Node, chunk: Node3D, chunk_key: Vector2i,
 	var captured: Dictionary = ManifestScript.capture(chunk, chunk_key, seed,
 		scan_revision, scan_complete, cell_scale, surface_only)
 	var capture_usec := maxi(0, Time.get_ticks_usec() - capture_started)
+	_captures += 1
+	_capture_usec += capture_usec
 	if bool(captured.get("scanComplete", false)):
 		_clock += 1
 		_entries[chunk_key] = {"seed": seed, "cellScale": cell_scale,

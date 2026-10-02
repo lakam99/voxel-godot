@@ -611,6 +611,9 @@ func _trace_sample(label: String) -> Dictionary:
             "coverageAdvanceUsec": advance.get("coverageAdvanceUsec", 0),
             "advanceTotalUsec": advance.get("advanceTotalUsec", 0)}}
     row["viewDemand"] = _view_demand_diagnostics(controller)
+    var horizon_cache = main.get("horizon_chunk_prop_manifest_cache")
+    row["horizonManifestCache"] = horizon_cache.call("diagnostics") \
+        if is_instance_valid(horizon_cache) and horizon_cache.has_method("diagnostics") else {}
     if not data_prefetch_probe_mode.is_empty() and label == "sprint":
         row["dataPrefetch"] = _data_prefetch_snapshot(label, false)
     return row

@@ -334,6 +334,7 @@ func describe_candidate(source_id: String, candidate_id: String, required_tier: 
 		return {"status": "pending", "reason": "visual_candidate_capacity", "retryable": true}
 	source.candidates[candidate_id] = {"requiredTier": required_tier,
 		"candidateId": candidate_id, "metadata": metadata.duplicate(true),
+		"valueOnlyDetailMetadata": _is_value_only_detail_metadata(metadata),
 		"receipt": {}, "failed": false, "failureReason": ""}
 	_candidate_count += 1
 	return {"status": "ready", "candidateId": candidate_id}
@@ -715,9 +716,29 @@ func _publisher_installation_valid(publisher: Object, validator_method: StringNa
 		return false
 	var proof: Variant = publisher.call(validator_method, String(source.identity), String(source.revision),
 		_world_revision, view_revision, String(candidate.candidateId),
-		candidate.get("metadata", {}).duplicate(true),
+		_publisher_metadata_copy(candidate.get("metadata", {}),
+			bool(candidate.get("valueOnlyDetailMetadata", false))),
 		representation_id, tier)
 	return proof is bool and proof
+
+
+static func _is_value_only_detail_metadata(metadata: Dictionary) -> bool:
+	if not metadata.has("detailType") or not (metadata.get("detailType") is String) \
+			or String(metadata.detailType).is_empty():
+		return false
+	for key in metadata:
+		if not (key is String or key is StringName) \
+				or typeof(metadata[key]) not in [TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT,
+				TYPE_STRING, TYPE_STRING_NAME, TYPE_VECTOR2, TYPE_VECTOR2I,
+				TYPE_VECTOR3, TYPE_VECTOR3I, TYPE_TRANSFORM3D, TYPE_COLOR]:
+			return false
+	return true
+
+
+static func _publisher_metadata_copy(metadata: Dictionary, value_only_detail: bool) -> Dictionary:
+	# The schema is checked once on admission and the owned metadata is deep
+	# copied there. Only immutable Variant values can take this shallow path.
+	return metadata.duplicate() if value_only_detail else metadata.duplicate(true)
 
 
 func _record_failure(source_id: String, candidate_id: String, kind: String, reason: String,
