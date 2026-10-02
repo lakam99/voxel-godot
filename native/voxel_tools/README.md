@@ -28,3 +28,19 @@ The first command writes an ignored preflight report; the second writes a
 build report with owned-process watchdog receipts and hashes for both staged
 DLLs. The `ready/` directory appears only when both builds and output checks
 succeed. These files are isolated build artifacts, not a production install.
+
+To review an install without changing the addon, pass the ready build receipt
+to the separate installer. The earlier `cd5f2b52-707` build also requires its
+matching MSVC preflight receipt because its build report predates toolchain
+hash recording:
+
+```powershell
+node tools/dependencies/install-staged-voxel-tools-mesh-preparation.mjs --build-report=artifacts/vt/b/cd5f2b52-707/build-report.json --preflight-report=artifacts/vt/b/msvc-preflight-d9ff5ade-690.json
+```
+
+Only an explicit `--install` copies the verified editor and release pair into
+the addon. Before copying, it preserves the original pair under ignored
+`artifacts/vt/install/backups/` and writes an active install receipt. Run the
+same command with `--restore` to reinstate that exact backup. While the patched
+receipt exists, the upstream installer validates ordinary use and refuses
+`--force`; restore first before deliberately reinstalling upstream binaries.

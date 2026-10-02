@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { runGodotProcess } from './godot-process.mjs';
+import { inspectPatchedInstall } from './voxel-tools-patched-install.mjs';
 
 const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(runtimeDirectory, '..', '..');
@@ -940,6 +941,17 @@ async function runStaticTool(toolId, rawArgs) {
     const url = String(parsed.options.url ?? 'https://github.com/Zylann/godot_voxel/releases/download/v1.6x/GodotVoxelExtension.zip');
     const expectedSha256 = String(parsed.options.sha256 ?? 'dfee985a0cff7059a31ada665e88a634fdcc3eab51f83fe5f6dd48939dd5372a').toLowerCase();
     const targetDirectory = join(projectPath, 'addons/zylann.voxel');
+    const patched = await inspectPatchedInstall(projectPath);
+    if (patched) {
+      if (asBoolean(parsed.options.force)) {
+        throw new Error('Refusing --force: a patched Voxel Tools install receipt exists. Restore its backed-up upstream DLL pair first.');
+      }
+      if (!patched.valid) {
+        throw new Error('Patched Voxel Tools install receipt does not match the installed DLL pair; resolve or restore it before using the upstream installer.');
+      }
+      process.stdout.write(`Patched Voxel Tools installation validated at ${targetDirectory}\n`);
+      return;
+    }
     if ((await exists(join(targetDirectory, 'voxel.gdextension'))) && !asBoolean(parsed.options.force)) {
       process.stdout.write(`Voxel Tools is already installed at ${targetDirectory}\n`);
       return;
