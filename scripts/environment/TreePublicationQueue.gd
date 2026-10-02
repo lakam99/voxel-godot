@@ -55,8 +55,9 @@ const ESTIMATED_RUNTIME_FOLIAGE_CLUSTER_TRIANGLES := 112
 const ESTIMATED_IMPOSTOR_TRIANGLES := 100
 # Visual publication is intentionally viewer-facing: a fully assembled nearby
 # canopy is more useful than a distant one whose body already owns collision.
-# The age term keeps a newly streamed horizon from starving older requests.
-const PUBLICATION_PRIORITY_AGE_DISCOUNT_PER_SECOND := 576.0
+# Age reduces effective distance without collapsing every long-waiting task
+# to zero. The oldest non-local request still competes with one local request.
+const PUBLICATION_PRIORITY_AGE_SCALE_SECONDS := 20.0
 const MAX_LOD_REEVALUATIONS_PER_FRAME := 6
 # Completed recipes can arrive in a burst after a chunk stream-in or recipe
 # cache hit.  Priority selection must stay local to the player rather than
@@ -905,7 +906,9 @@ func effective_priority_at(task: Dictionary, now_usec: int, viewer_position := V
 	if not is_finite(base):
 		return base
 	var waited_seconds := maxf(0.0, float(now_usec - int(task.get("enqueuedUsec", now_usec))) / 1000000.0)
-	return maxf(0.0, base - waited_seconds * PUBLICATION_PRIORITY_AGE_DISCOUNT_PER_SECOND)
+	# A positive floor lets a very old distant request eventually beat even a
+	# zero-distance local request; square root restores world-distance units.
+	return sqrt(maxf(0.0, base) + 1.0) / (1.0 + waited_seconds / PUBLICATION_PRIORITY_AGE_SCALE_SECONDS)
 
 func live_publication_priority(task: Dictionary) -> float:
 	# Publication order is presentation-only and must follow the current player
@@ -1148,7 +1151,7 @@ func highest_priority_completed_index() -> int:
 		var oldest_index := oldest_completed_index()
 		if local_index >= 0:
 			# The oldest request is the only non-local candidate that can outrank
-			# a local request through the monotonic age discount.  Comparing just
+			# a local request through monotonic age weighting. Comparing just
 			# these two preserves starvation protection without a global rescan.
 			if oldest_index >= 0 and priority_score_precedes(
 				completed[oldest_index],
@@ -1888,7 +1891,7 @@ func metrics() -> Dictionary:
 			"enabled": true,
 			"queuedWithViewerPriority": priority_scheduled_count,
 			"preemptedDetachedTasks": preempted_publication_count,
-			"ageDiscountPerSecond": PUBLICATION_PRIORITY_AGE_DISCOUNT_PER_SECOND,
+			"ageScaleSeconds": PUBLICATION_PRIORITY_AGE_SCALE_SECONDS,
 			"spatialCellSize": COMPLETED_PRIORITY_CELL_SIZE,
 			"localCellRadius": COMPLETED_PRIORITY_LOCAL_CELL_RADIUS,
 			"selectionCount": priority_selection_count,

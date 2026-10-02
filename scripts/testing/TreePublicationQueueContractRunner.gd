@@ -284,6 +284,53 @@ func run_contract() -> void:
 		"selectedIndex": viewless_selected_index,
 		"priority": viewless_priority
 	})
+	# The pinned startup failure left a 20m tree behind hundreds of recipes for
+	# 171 seconds. Test actual bounded completed selection with an older distant
+	# task, then prove the oldest can still win after substantially more waiting.
+	var age_queue = TreePublicationQueueScript.new()
+	fixture.add_child(age_queue)
+	var age_viewer := Node3D.new()
+	fixture.add_child(age_viewer)
+	age_queue.set_viewer(age_viewer)
+	var age_far := tree_body("queue-age-far")
+	age_far.position = Vector3(120.0, 0.0, 0.0)
+	fixture.add_child(age_far)
+	var age_near := tree_body("queue-age-near")
+	age_near.position = Vector3(20.0, 0.0, 0.0)
+	fixture.add_child(age_near)
+	var age_now := Time.get_ticks_usec()
+	age_queue.enqueue_completed_task({"body": weakref(age_far),
+		"publicationPosition": age_far.global_position,
+		"enqueuedUsec": age_now - 172000000,
+		"enqueueSequence": 1, "request": {}, "recipe": {}})
+	age_queue.enqueue_completed_task({"body": weakref(age_near),
+		"publicationPosition": age_near.global_position,
+		"enqueuedUsec": age_now - 171000000,
+		"enqueueSequence": 2, "request": {}, "recipe": {}})
+	var aged_near_index := age_queue.highest_priority_completed_index()
+	var aged_near_score := age_queue.effective_priority_at(age_queue.completed[1], age_now, Vector3.ZERO)
+	var aged_far_score := age_queue.effective_priority_at(age_queue.completed[0], age_now, Vector3.ZERO)
+	add_result("aged_near_tree_outranks_slightly_older_far_recipe_without_zero_score_collapse", \
+		aged_near_index == 1 and aged_near_score > 0.0 and aged_near_score < aged_far_score, {
+		"selectedIndex": aged_near_index, "nearScore": aged_near_score,
+		"farScore": aged_far_score})
+	age_queue.completed[0]["enqueuedUsec"] = age_now - 1200000000
+	var very_old_far_index := age_queue.highest_priority_completed_index()
+	var very_old_far_score := age_queue.effective_priority_at(age_queue.completed[0], age_now, Vector3.ZERO)
+	var age_priority: Dictionary = age_queue.metrics().get("priorityScheduling", {})
+	add_result("very_old_far_tree_eventually_wins_with_two_candidate_bounded_selection", \
+		very_old_far_index == 0 and very_old_far_score < aged_near_score \
+		and int(age_priority.get("maxSelectionCandidates", 0)) <= 2 \
+		and int(age_priority.get("fullFallbackSelections", 0)) == 0, {
+		"selectedIndex": very_old_far_index, "nearScore": aged_near_score,
+		"farScore": very_old_far_score, "priority": age_priority})
+	var tie_older := {"publicationPosition": Vector3(20.0, 0.0, 0.0),
+		"enqueuedUsec": age_now - 171000000, "enqueueSequence": 4}
+	var tie_newer := tie_older.duplicate()
+	tie_newer["enqueueSequence"] = 5
+	add_result("equal_age_and_distance_preserve_enqueue_sequence_tie_break", \
+		age_queue.task_precedes_at(tie_older, tie_newer, age_now, Vector3.ZERO) \
+		and not age_queue.task_precedes_at(tie_newer, tie_older, age_now, Vector3.ZERO), {})
 	# Direction is a presentation signal only, but a confidently sprinting
 	# player must see the tree in their actual arrival corridor before equally
 	# near side/behind work. The task data itself remains immutable and no RNG
