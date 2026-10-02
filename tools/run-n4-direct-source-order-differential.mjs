@@ -12,7 +12,7 @@ const reportPath = join(output, `report-${token}.json`);
 const executable = await findGodot();
 const command = ['--headless', '--path', projectRoot, '--script', 'res://scripts/testing/native_world/N4DirectSourceOrderProbe.gd'];
 const processResult = await runGodotProcess(executable, command, {
-  cwd: projectRoot, timeoutSeconds: 90, workTimeoutSeconds: 60,
+  cwd: projectRoot, timeoutSeconds: 150, workTimeoutSeconds: 120,
   env: { ...process.env, N4_DIRECT_SOURCE_ORDER_PROBE_REPORT: probePath },
 });
 const failures = [];
@@ -131,6 +131,8 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   const uint64 = value => BigInt.asUintN(64, BigInt(value)).toString();
   for (let index = 0; index < Math.min(sample.direct?.length ?? 0, sample.native?.length ?? 0); index++) {
     const direct = sample.direct[index], native = sample.native[index];
+    if (direct.decisionOutcome !== native.outcome)
+      failures.push(`${label} attempt ${index} direct decision ${direct.decisionOutcome} != native outcome ${native.outcome}`);
     for (const field of ['ordinal', 'durableId'])
       if (direct[field] !== native[field]) failures.push(`${label} attempt ${index} ${field}: ${direct[field]} != ${native[field]}`);
     if (JSON.stringify(direct.cell) !== JSON.stringify(native.cell)) failures.push(`${label} attempt ${index} cell mismatch`);

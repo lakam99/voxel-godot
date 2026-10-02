@@ -215,6 +215,36 @@ func direct_tree_halo_margins(main: Object, row: Dictionary) -> Dictionary:
 		"naturalMarginCells":ceili(maxf(0.0, trunk + exclusion) / MainScript.CELL),
 		"structureMarginCells":ceili(maxf(0.0, canopy + exclusion) / MainScript.CELL)}
 
+## Test-only decision oracle. Use the production policy methods and a copy of
+## the RNG immediately after the coordinate draws; never advance the live RNG.
+func direct_prop_decision(main: Object, prop_id: String, x: int, z: int,
+		sample: Dictionary, removed: Array, decision_rng: RandomNumberGenerator) -> int:
+	if removed.has(prop_id) or main.natural_props_blocked_at_cell(x, z):
+		return 1
+	if sample.is_empty() or not bool(sample.get("found", false)):
+		return 1
+	var height := float(sample.get("height", 0.0))
+	var biome := String(sample.get("biome", "plains"))
+	if height < MainScript.WATER_LEVEL + 1.0 or height > 92.0 or biome == "town":
+		return 1
+	var rock: float = main.rock_chance(biome, height)
+	var tree: float = main.tree_chance(biome) if height <= 70.0 else 0.0
+	var forage: float = main.forage_chance(biome)
+	var wildlife: float = main.wildlife_chance(biome, height)
+	var roll: float = decision_rng.randf()
+	if roll < rock:
+		match String(main.ore_for_cell(biome, height, decision_rng)):
+			"ironOre": return 6
+			"copperOre": return 7
+		return 3
+	if roll < rock + tree:
+		return 5 if biome in ["taiga", "snow", "tundra"] else 4
+	if roll < rock + tree + forage:
+		return 8
+	if roll < rock + tree + forage + wildlife:
+		return 9
+	return 2
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -344,9 +374,14 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		var x: int = state.startX + 2 + preview.randi_range(0, 24)
 		var z: int = state.startZ + 2 + preview.randi_range(0, 24)
 		var sample: Dictionary = main.surface_volume_spawn_sample_at_cell(x, z)
+		var id := "%s:%d,%d:%d" % [main.seed_text,x,z,index]
+		var decision_rng := RandomNumberGenerator.new()
+		decision_rng.seed = preview.seed
+		decision_rng.state = preview.state
+		var direct_outcome := direct_prop_decision(main, id, x, z,
+			sample, removed, decision_rng)
 		var child_count_before := chunk.get_child_count()
 		main.spawn_chunk_prop_attempt(state, index, rng)
-		var id := "%s:%d,%d:%d" % [main.seed_text,x,z,index]
 		var native_attempt: Dictionary = ordered_attempts[index] if index < ordered_attempts.size() else {}
 		var direct_tree_request := {}
 		if int(native_attempt.get("outcome", -1)) in [4, 5]:
@@ -357,6 +392,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			direct_tree_request = main.tree_runtime_spec_for_prop(String(sample.get("biome", "plains")),
 				id, float(legacy_spec.get("height", 4.0)), Vector2i(x, z))
 		var direct_row := {"ordinal":index,"cell":[x,z],
+			"decisionOutcome":direct_outcome,
 			"durableId":id,"sourceSampleApplicable":not removed.has(id),
 			"stateBeforeCoordinates":str(before_state),"stateAfterRecipe":str(rng.state),
 			"sourceBiome":String(sample.get("biome","")),
