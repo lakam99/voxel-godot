@@ -50,10 +50,12 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 	candidate_hasher.start(HashingContext.HASH_SHA256)
 	for candidate_id: String in stable_ids:
 		var candidate: Dictionary = candidates_by_id[candidate_id]
-		for field: String in [candidate_id, String(candidate.kind), String(candidate.treeVisualState),
-				String(candidate.treeRenderLodTier), String(candidate.treeRecipeSignature),
+		# This revision describes the producer's candidate set. Publication
+		# state and LOD are live receipt facts and must not restart all other
+		# candidates in the chunk when one tree finishes its visual queue.
+		for field: String in [candidate_id, String(candidate.kind),
 				String.num(float(candidate.positionXZ.x), 6), String.num(float(candidate.positionXZ.y), 6),
-				"1" if bool(candidate.renderable) else "0", str(candidate.get("detailType", "")),
+				str(candidate.get("detailType", "")),
 				str(candidate.get("detailInstanceIndex", -1)),
 				str(candidate.get("detailInstanceTransform", "")),
 				str(candidate.get("detailBatchGlobalTransform", "")),
@@ -150,6 +152,22 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 		var required_tier := "near" if near_bounds.has_point(Vector2i(floori(position_xz.x), floori(position_xz.y))) else "horizon"
 		if not bool(readiness.call("has_candidate", source_id, candidate_id)):
 			var metadata := {"positionXZ": position_xz}
+			if candidate.has("horizonSnapshot"):
+				var horizon: Dictionary = candidate.horizonSnapshot
+				metadata.merge({"horizonBodyInstanceId": horizon.bodyInstanceId,
+					"horizonChunkInstanceId": horizon.chunkInstanceId,
+					"horizonBatchInstanceId": horizon.batchInstanceId,
+					"horizonGroupKey": horizon.groupKey,
+					"horizonPageIndex": horizon.pageIndex,
+					"horizonSlot": horizon.slot,
+					"horizonBodyGlobalTransform": horizon.bodyGlobalTransform,
+					"horizonBatchGlobalTransform": horizon.batchGlobalTransform,
+					"horizonVisibilityRange": horizon.visibilityRange,
+					"horizonInstanceTransforms": horizon.instanceTransforms,
+					"horizonMeshInstanceIds": horizon.meshInstanceIds,
+					"horizonMultimeshIds": horizon.multimeshIds,
+					"horizonMeshResourceIds": horizon.meshResourceIds,
+					"horizonMaterialIds": horizon.materialIds})
 			if candidate.has("detailType"):
 				metadata.merge({"detailType": candidate.detailType,
 					"batchInstanceId": candidate.detailBatchInstanceId,
@@ -176,6 +194,12 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 				var publisher := candidate.get("detailPublisher") as Object
 				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
 					"%s:installed" % candidate_id, required_tier,
+					source_identity, source_revision, view_revision, publisher,
+					&"visual_receipt_installed")
+			elif required_tier == "horizon" and candidate.has("horizonSnapshot"):
+				var publisher := candidate.get("horizonPublisher") as Object
+				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
+					"%s:horizon" % candidate_id, required_tier,
 					source_identity, source_revision, view_revision, publisher,
 					&"visual_receipt_installed")
 			else:
@@ -299,13 +323,29 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 		var renderable := _has_visible_renderable(current)
 		if is_tree and not tree_published:
 			renderable = false
-		candidates.append({"candidateId": prop_id, "kind": kind,
+		var horizon_publisher: Object = null
+		var horizon_snapshot := {}
+		if is_tree and not tree_published and current.has_meta("horizon_visual_publisher"):
+			horizon_publisher = current.get_meta("horizon_visual_publisher") as Object
+			if is_instance_valid(horizon_publisher) and horizon_publisher.has_method("installed_snapshot"):
+				horizon_snapshot = horizon_publisher.call("installed_snapshot", current)
+				if horizon_snapshot.get("status") == "ready" \
+						and String(horizon_snapshot.get("propId", "")) == prop_id \
+						and int(horizon_snapshot.get("chunkInstanceId", 0)) == owner.get_instance_id():
+					renderable = true
+				else:
+					horizon_snapshot = {}
+		var candidate := {"candidateId": prop_id, "kind": kind,
 			"positionXZ": Vector2(body.global_position.x / cell_scale, body.global_position.z / cell_scale),
 			"owner": current, "representation": current if renderable else null,
 			"renderable": renderable, "treeVisualState": String(current.get_meta("tree_visual_state", "")),
 			"treeRenderLodTier": String(current.get_meta("tree_render_lod_tier", "")),
 			"treeRecipeSignature": String(current.get_meta("tree_recipe_signature", "")),
-			"chunk": chunk_key})
+			"chunk": chunk_key}
+		if not horizon_snapshot.is_empty():
+			candidate["horizonPublisher"] = horizon_publisher
+			candidate["horizonSnapshot"] = horizon_snapshot
+		candidates.append(candidate)
 	for child in current.get_children():
 		if child is Node:
 			_collect_candidates(owner, child, chunk_key, seed, cell_scale, candidates, seen_ids,
@@ -370,6 +410,7 @@ static func _candidate_lod_satisfies_tier(candidate: Dictionary, required_tier: 
 	if candidate.has("detailType"): return true
 	var lod_tier := String(candidate.get("treeRenderLodTier", ""))
 	if required_tier == "near": return lod_tier == "near"
+	if candidate.has("horizonSnapshot"): return true
 	return lod_tier in ["near", "mid", "far", "impostor"]
 
 

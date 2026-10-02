@@ -11,6 +11,7 @@ signal tree_visual_published(body: StaticBody3D, recipe: Dictionary)
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRecipeCacheScript := preload("res://scripts/environment/TreeRecipeCache.gd")
 const VisualFactoryScript := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
+const HorizonEcologyTreeBatchScript := preload("res://scripts/world/HorizonEcologyTreeBatch.gd")
 const MAX_ACTIVE_WORKERS := 2
 # Each visual is assembled across small main-thread stages. This avoids
 # treating a dense tree as one indivisible frame of work while keeping a body
@@ -233,6 +234,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 	if not body.has_meta("tree_collision_ready_usec"):
 		body.set_meta("tree_collision_ready_usec", Time.get_ticks_usec())
 	ensure_collision_visible_representation(body, prepared_request, "enqueue")
+	ensure_horizon_visible_representation(body, prepared_request)
 	queued_count += 1
 	var cached_recipe: Dictionary = recipe_cache.fetch(recipe_key)
 	if not cached_recipe.is_empty():
@@ -260,6 +262,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 func cancel_body_publication(body: StaticBody3D) -> Dictionary:
 	if not is_instance_valid(body): return {"status":"failed", "reason":"invalid_tree"}
 	body.set_meta("tree_publication_cancelled", true)
+	release_horizon_visible_representation(body)
 	return {"status":"cancelled", "bodyInstanceId":body.get_instance_id()}
 
 func _publication_body(record: Dictionary) -> StaticBody3D:
@@ -362,6 +365,36 @@ func body_is_collision_visible(body: StaticBody3D) -> bool:
 		return false
 	return body.get_node_or_null("GeneratedTreeVisual") != null or body.get_node_or_null("TreeVisibilityProxy") != null
 
+## The horizon silhouette is installed on the same generated candidate through
+## a chunk-owned MultiMesh slot. It does not change collision, recipe, or LOD
+## authority and is never a near-detail receipt.
+func ensure_horizon_visible_representation(body: StaticBody3D, request: Dictionary) -> bool:
+	if not _is_live_node(body) or body.get_node_or_null("GeneratedTreeVisual") != null \
+			or body.get_node_or_null("TreeVisibilityProxy") != null:
+		return false
+	var visual_factory: ProceduralTreeVisualFactory = publication_service.get_visual_factory()
+	if visual_factory.is_headless_renderer():
+		return false
+	var parent := body.get_parent() as Node3D
+	if parent == null or not _is_live_node(parent):
+		return false
+	var batch := parent.get_node_or_null("HorizonEcologyTreeBatch") as Node3D
+	if batch == null:
+		batch = HorizonEcologyTreeBatchScript.new()
+		batch.name = "HorizonEcologyTreeBatch"
+		parent.add_child(batch)
+		batch.call("configure", parent, visual_factory)
+	if not batch.has_method("add_tree"):
+		return false
+	return bool(batch.call("add_tree", body, request))
+
+func release_horizon_visible_representation(body: StaticBody3D) -> void:
+	if not is_instance_valid(body) or not body.has_meta(HorizonEcologyTreeBatchScript.PUBLISHER_META):
+		return
+	var batch := body.get_meta(HorizonEcologyTreeBatchScript.PUBLISHER_META) as Node3D
+	if is_instance_valid(batch) and batch.has_method("release_tree"):
+		batch.call("release_tree", body)
+
 func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
 	if not _is_live_node(body) or bool(body.get_meta("tree_publication_cancelled", false)):
 		return false
@@ -407,6 +440,9 @@ func ensure_collision_visible_representation(body: StaticBody3D, request: Dictio
 	proxy.set_meta("tree_visibility_proxy_reason", reason)
 	proxy.set_meta("tree_visibility_proxy_attached_usec", Time.get_ticks_usec())
 	body.add_child(proxy)
+	# The near collision silhouette is now visible. Retire the horizon batch
+	# slot only after attaching it, so approach never creates a blank interval.
+	release_horizon_visible_representation(body)
 	body.set_meta("tree_visibility_proxy", true)
 	body.set_meta("tree_visibility_proxy_reason", reason)
 	body.set_meta("tree_visibility_proxy_attached_usec", int(proxy.get_meta("tree_visibility_proxy_attached_usec", 0)))
@@ -1514,6 +1550,7 @@ func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3
 	# renderer never observes a collision-owning body with no tree visual.
 	record_first_collision_visible(body, "procedural_tree_recipe")
 	release_collision_visibility_proxy(body)
+	release_horizon_visible_representation(body)
 	body.set_meta("visual_source", "procedural_tree_recipe")
 	body.set_meta("visual_asset_id", "procedural:%s" % String(request.get("speciesGrammar", "tree")))
 	body.set_meta("tree_recipe_signature", String(recipe.get("signature", "")))

@@ -476,8 +476,8 @@ func test_production_chunk_prop_manifest() -> void:
 		{"before": accepted_near_state, "after": demoted_tree_state})
 	var far_tree_manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
 		"seed-props", "source-rev-1", true, 1.35)
-	_check("tree_lod_change_advances_visual_source_revision",
-		far_tree_manifest.sourceRevision != published.sourceRevision)
+	_check("tree_lod_change_keeps_candidate_source_revision",
+		far_tree_manifest.sourceRevision == published.sourceRevision)
 	var near_lod_readiness = VisualReadinessScript.new()
 	var near_lod_view_revision := int(near_lod_readiness.begin_view(94, "seed-props", "world-props-1",
 		lod_view_bounds, lod_view_bounds, lod_center, lod_radius).viewRevision)

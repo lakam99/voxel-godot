@@ -1,6 +1,9 @@
 extends "res://scripts/MainDiscoveryFlow.gd"
 
 const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
+const ChunkPropSpawnPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
+
+var chunk_prop_spawn_queue_turn := 0
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
 const STREAMING_CHUNK_RETIREMENTS_PER_FRAME := 1
@@ -1627,19 +1630,34 @@ func queue_chunk_prop_spawn(chunk_key: Vector2i, chunk: Node3D) -> void:
     pending_chunk_prop_spawns[chunk_key] = begin_chunk_prop_spawn_state(chunk, chunk_key.x, chunk_key.y)
 
 func process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i] = []) -> int:
+    return _process_pending_chunk_prop_spawns(priority_keys, false)
+
+func process_pending_chunk_prop_spawns_for_visible_surface(priority_keys: Array[Vector2i]) -> int:
+    return _process_pending_chunk_prop_spawns(priority_keys, true)
+
+func _process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i], surface_first: bool) -> int:
     if pending_chunk_prop_spawns.is_empty():
         return 0
     var monitor = runtime_perf_monitor
     var queue_start: int = monitor.begin_section("chunk_prop_spawn_queue") if monitor != null else Time.get_ticks_usec()
     var processed := 0
     var pending_keys: Array[Vector2i] = []
-    var priority_set: Dictionary = {}
-    for key_value in priority_keys:
-        if pending_chunk_prop_spawns.has(key_value) and not priority_set.has(key_value):
-            pending_keys.append(key_value)
-            priority_set[key_value] = true
-    for key_value in pending_chunk_prop_spawns.keys():
-        if key_value is Vector2i and not priority_set.has(key_value): pending_keys.append(key_value)
+    if surface_first:
+        # The foreground startup gate requires full near-chunk publication;
+        # only the later full-view stage opts into surface-first scheduling.
+        # Every fourth slice still advances already-decided underground work.
+        chunk_prop_spawn_queue_turn += 1
+        var underground_turn := chunk_prop_spawn_queue_turn % 4 == 0
+        pending_keys = ChunkPropSpawnPriorityScript.ordered_keys(
+            pending_chunk_prop_spawns, priority_keys, underground_turn)
+    else:
+        var priority_set: Dictionary = {}
+        for key_value in priority_keys:
+            if pending_chunk_prop_spawns.has(key_value) and not priority_set.has(key_value):
+                pending_keys.append(key_value)
+                priority_set[key_value] = true
+        for key_value in pending_chunk_prop_spawns.keys():
+            if key_value is Vector2i and not priority_set.has(key_value): pending_keys.append(key_value)
     for key in pending_keys:
         var state_value = pending_chunk_prop_spawns[key]
         if not (state_value is Dictionary):

@@ -27,6 +27,7 @@ const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
 const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
+const STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS := 1.6
 const FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS := 180.0
 const VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
@@ -60,6 +61,8 @@ var visible_world_prop_chunk_keys: Array[Vector2i] = []
 var visible_world_prop_chunk_cursor := 0
 var visible_world_prop_manifest_sources: Dictionary = {}
 var visible_world_prop_last_attempt: Dictionary = {}
+var visible_world_prop_pending_reasons: Dictionary = {}
+var startup_prop_surface_extra_slices := 0
 var regional_navigation = RegionalNavigationPublicationScript.new()
 var streaming_requests: Dictionary = {}
 var streaming_request_bounds: Dictionary = {}
@@ -724,6 +727,7 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
         or not runtime.has_method("final_view_distance_expansion_state"):
         return StartupReadinessResultScript.failed("missing_voxel_terrain_expansion_contract")
     runtime.call("request_final_view_distance_expansion")
+    startup_prop_surface_extra_slices = 0
     var started_usec := Time.get_ticks_usec()
     var state: Dictionary = {}
     while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS:
@@ -746,7 +750,7 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
         process_pending_chunk_loads(world_to_chunk(player.position.x, player.position.z))
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
-            process_pending_chunk_prop_spawns()
+            advance_startup_prop_sources()
         await startup_loading_yield("Drawing nearby terrain", "terrain_view_expansion", "pending", state.get("metrics", {}))
     return StartupReadinessResultScript.failed(
         "final_terrain_expansion_timeout",
@@ -788,6 +792,7 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
     visible_world_prop_chunk_keys = visible_prop_chunk_keys_for_bounds(view_bounds, center)
     visible_world_prop_chunk_cursor = 0
     visible_world_prop_manifest_sources.clear()
+    visible_world_prop_pending_reasons.clear()
     var manifest = VoxelTerrainVisualManifestScript.new()
     var begin_result: Dictionary = manifest.begin(runtime, readiness, request_id, seed_text,
         world_revision, int(view_result.viewRevision), view_bounds, near_bounds, center, radius_cells)
@@ -809,7 +814,7 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
         process_pending_chunk_loads(world_to_chunk(player.position.x, player.position.z))
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
-            process_pending_chunk_prop_spawns(visible_world_prop_chunk_keys)
+            advance_startup_prop_sources()
         await startup_loading_yield("Finishing visible terrain", "visible_terrain_meshes", "pending", state)
     return StartupReadinessResultScript.failed("initial_visible_terrain_mesh_coverage_timeout", {}, [],
         state.merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true))
@@ -846,6 +851,26 @@ func visible_prop_chunk_keys_for_bounds(bounds: Rect2i, center: Vector3) -> Arra
         if keys_by_id.has(id): result.append(keys_by_id[id])
     return result
 
+func prioritized_startup_prop_chunk_keys() -> Array[Vector2i]:
+    var priority: Array[Vector2i] = []
+    var foreground: Rect2i = streaming_request_foreground_bounds.get("player", Rect2i())
+    if foreground.has_area():
+        priority.append_array(WorldStreamingCoordinatorScript.chunks_for_bounds(foreground))
+    priority.append_array(visible_world_prop_chunk_keys)
+    return priority
+
+func advance_startup_prop_sources() -> void:
+    # Preserve the full near source while using otherwise idle loading time
+    # to decide the visible surface candidates in other retained chunks.
+    var started_usec := Time.get_ticks_usec()
+    process_pending_chunk_prop_spawns(prioritized_startup_prop_chunk_keys())
+    for _surface_slice in range(2):
+        if float(Time.get_ticks_usec() - started_usec) / 1000.0 \
+                >= STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS:
+            break
+        startup_prop_surface_extra_slices += process_pending_chunk_prop_spawns_for_visible_surface(
+            visible_world_prop_chunk_keys)
+
 func advance_visible_world_prop_manifest() -> Dictionary:
     if visible_world_prop_chunk_keys.is_empty() or visible_world_readiness == null \
             or not is_instance_valid(visible_world_readiness) or visible_world_view_revision <= 0:
@@ -863,6 +888,11 @@ func advance_visible_world_prop_manifest() -> Dictionary:
     visible_world_prop_last_attempt["spawnQueueDepth"] = pending_chunk_prop_spawns.size()
     if bool(visible_world_prop_last_attempt.get("manifestSubmitted", false)):
         visible_world_prop_manifest_sources[key] = true
+        visible_world_prop_pending_reasons.erase(key)
+    else:
+        visible_world_prop_pending_reasons[key] = {
+            "chunk": key, "status": visible_world_prop_last_attempt.get("status", "pending"),
+            "reason": visible_world_prop_last_attempt.get("reason", "source_unavailable")}
     return visible_world_prop_last_attempt
 
 ## Coordinator-facing visual contract. The ledger verifies current installed
@@ -1636,6 +1666,7 @@ func reset_streaming_region_demand() -> void:
     visible_world_prop_chunk_keys.clear()
     visible_world_prop_chunk_cursor = 0
     visible_world_prop_manifest_sources.clear()
+    visible_world_prop_pending_reasons.clear()
     var runtime = get("voxel_terrain_runtime")
     if runtime != null: runtime.clear_retained_gameplay_chunks()
 
@@ -1660,7 +1691,7 @@ func wait_for_initial_region_readiness() -> Dictionary:
         process_pending_chunk_loads(world_to_chunk(player.position.x,player.position.z))
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
-            process_pending_chunk_prop_spawns(visible_world_prop_chunk_keys)
+            advance_startup_prop_sources()
         advance_visible_world_prop_manifest()
         state = world_streaming.initial_physical_readiness(
             streaming_request_foreground_bounds.player, int(streaming_requests.get("player", -1)))
@@ -1687,6 +1718,10 @@ func wait_for_initial_region_readiness() -> Dictionary:
             "coordinatorMaxAdvanceUsec":world_streaming.max_advance_usec,
             "navigationQueue":regional_navigation._stats(),
             "propVisualScan":visible_world_prop_last_attempt.duplicate(true),
+            "propVisualSubmittedSources":visible_world_prop_manifest_sources.size(),
+            "propVisualExpectedSources":visible_world_prop_chunk_keys.size(),
+            "propVisualPendingSources":visible_world_prop_pending_reasons.values().slice(0, 8),
+            "startupSurfaceExtraSlices":startup_prop_surface_extra_slices,
             "terrainRetainedReason":get("voxel_terrain_runtime").retained_activation_reason}
         for domain in state.get("domains",{}):
             var owner: Dictionary = state.domains[domain]

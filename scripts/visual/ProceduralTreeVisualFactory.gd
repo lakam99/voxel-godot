@@ -107,6 +107,10 @@ func runtime_shared_branch_mesh() -> Mesh:
 	ensure_shared_geometry()
 	return branch_mesh
 
+func runtime_shared_impostor_crown_mesh() -> Mesh:
+	ensure_shared_geometry()
+	return impostor_crown_mesh
+
 func runtime_shared_foliage_cluster_mesh(cluster_variant := 1) -> Mesh:
 	ensure_shared_geometry()
 	if foliage_cluster_meshes.is_empty():

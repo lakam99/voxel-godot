@@ -182,7 +182,11 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		"reason": String(near_result.get("reason", "visual_representation_pending")),
 		"requestId": int(pending.requestId), "viewRevision": int(pending.viewRevision),
 		"visualDemandRevision": int(pending.demandRevision),
-		"queueDepth": unscanned + terrain_pending, "terrain": terrain,
+		"queueDepth": unscanned + terrain_pending,
+		"expectedChunkSources": keys.size(),
+		"propSourcesComplete": pending.propSources.size(),
+		"structureSourcesComplete": pending.structureSources.size(),
+		"terrain": terrain,
 		"prop": pending.lastProp, "structures": pending.lastStructure}
 
 
