@@ -3077,6 +3077,8 @@ func process_chunk_prop_spawn_state(
             chunk.set_meta("chunk_surface_candidate_source_revision", "%s:%d:%d:surface" % [
                 seed_text, int(get("seed_hash")), chunk.get_instance_id()
             ])
+        if bool(chunk.get_meta("horizon_visual_only", false)):
+            return true
         if not process_underground_chunk_prop_spawn_state(state, prop_attempt_budget, time_budget_ms, start_usec):
             return false
         if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
@@ -3094,6 +3096,31 @@ func process_chunk_prop_spawn_state(
 ## available only after the existing seeded spawn state has completed.
 func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false) -> Dictionary:
     var chunk := chunks.get(chunk_key) as Node3D
+    var horizon_chunk := horizon_ecology_source.source_for(chunk_key) as Node3D
+    if surface_only and horizon_chunk != null:
+        # Keep the old far visual until the physical producer has completed
+        # its surface scan and its live visual receipt can replace it.
+        if chunk == null or not is_instance_valid(chunk) \
+                or not bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
+            chunk = horizon_chunk
+        else:
+            var physical_manifest := ChunkPropVisualManifestScript.capture(chunk,
+                chunk_key, seed_text,
+                String(chunk.get_meta("chunk_surface_candidate_source_revision", "")),
+                true, CELL, true)
+            if physical_manifest.get("status") == "ready":
+                horizon_ecology_source.retire(chunk_key)
+            else:
+                chunk = horizon_chunk
+    elif not surface_only and horizon_chunk != null and chunk != null \
+            and is_instance_valid(chunk) and bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false)):
+        # The far visual stays installed while the near producer catches up.
+        var near_manifest := ChunkPropVisualManifestScript.capture(chunk,
+            chunk_key, seed_text,
+            String(chunk.get_meta("chunk_prop_candidate_source_revision", "")),
+            true, CELL, false)
+        if near_manifest.get("status") == "ready":
+            horizon_ecology_source.retire(chunk_key)
     if chunk == null or not is_instance_valid(chunk):
         return {"status": "pending", "reason": "chunk_prop_source_missing", "chunk": chunk_key}
     var complete := bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)) if surface_only \
@@ -3109,6 +3136,8 @@ func publish_chunk_prop_visual_readiness(readiness: Object, view_revision: int,
         near_bounds: Rect2i, chunk_key: Vector2i,
         observer_position: Vector3 = Vector3.INF) -> Dictionary:
     var chunk_bounds := Rect2i(chunk_key * CHUNK_SIZE, Vector2i.ONE * CHUNK_SIZE)
+    if horizon_ecology_source.source_for(chunk_key) != null:
+        horizon_ecology_source.refresh_ordinary_visual_ranges(self, chunk_key)
     var manifest := visible_chunk_prop_manifest(chunk_key, not chunk_bounds.intersects(near_bounds))
     if manifest.get("status") == "failed" or not bool(manifest.get("scanComplete", false)):
         return manifest
@@ -4305,20 +4334,23 @@ func _publish_tree_body(
     body.set_meta("tree_visual_height", float(spec.get("height", legacy_height)))
     body.set_meta("tree_collision_height", float(runtime_spec.get("collisionHeight", spec.get("height", legacy_height))))
     body.set_meta("tree_old_growth", bool(runtime_spec.get("oldGrowth", false)))
-    body.add_to_group("generated_tree_trunks")
+    var horizon_only := bool(parent.get_meta("horizon_visual_only", false))
+    if not horizon_only:
+        body.add_to_group("generated_tree_trunks")
 
     var height := float(spec.get("height", 4.0))
     # Branches and foliage are deliberately non-colliding. The recipe supplies
     # one bounded interaction trunk rather than a collider that reaches through
     # the complete crown.
     var collision_height := clampf(float(runtime_spec.get("collisionHeight", height)), 1.0, height)
-    var trunk_shape := CylinderShape3D.new()
-    trunk_shape.radius = trunk_radius
-    trunk_shape.height = collision_height
-    var collider := CollisionShape3D.new()
-    collider.shape = trunk_shape
-    collider.position.y = collision_height * 0.5
-    body.add_child(collider)
+    if not horizon_only:
+        var trunk_shape := CylinderShape3D.new()
+        trunk_shape.radius = trunk_radius
+        trunk_shape.height = collision_height
+        var collider := CollisionShape3D.new()
+        collider.shape = trunk_shape
+        collider.position.y = collision_height * 0.5
+        body.add_child(collider)
 
     parent.add_child(body)
     # The visual queue ranks publication by distance from the live viewer.  The
@@ -4326,9 +4358,9 @@ func _publish_tree_body(
     # enqueued; using global_position before this point asks Godot for an
     # invalid transform during ordinary chunk prop creation.
     add_tree_visual(body, prop_id, biome, spec)
-    if resolve_player_overlap:
+    if resolve_player_overlap and not horizon_only:
         resolve_player_tree_publication_overlap(body)
-    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+    if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
@@ -4479,6 +4511,7 @@ func prop_biome_for_position(parent: Node, position: Vector3) -> String:
     return surface_biome_at_cell(Vector3i(world_to_cell(world_position.x), world_to_cell(world_position.y), world_to_cell(world_position.z)))
 
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator):
+    var horizon_only := bool(parent.get_meta("horizon_visual_only", false))
     var setup_started: int = runtime_perf_monitor.begin_section("rock_setup") if runtime_perf_monitor != null else Time.get_ticks_usec()
     var spec := rock_visual_spec(rng)
     var biome := prop_biome_for_position(parent, position)
@@ -4502,24 +4535,27 @@ func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumb
         runtime_perf_monitor.end_section("rock_visual", visual_started)
 
     var collision_started: int = runtime_perf_monitor.begin_section("rock_collision") if runtime_perf_monitor != null else Time.get_ticks_usec()
-    var shape := SphereShape3D.new()
-    shape.radius = radius * 1.05
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = radius * 0.42
-    body.add_child(collider)
+    var collider: CollisionShape3D
+    if not horizon_only:
+        var shape := SphereShape3D.new()
+        shape.radius = radius * 1.05
+        collider = CollisionShape3D.new()
+        collider.shape = shape
+        collider.position.y = radius * 0.42
+        body.add_child(collider)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.end_section("rock_collision", collision_started)
     var tree_started: int = runtime_perf_monitor.begin_section("rock_tree_attach") if runtime_perf_monitor != null else Time.get_ticks_usec()
     parent.add_child(body)
     if runtime_perf_monitor != null:
         runtime_perf_monitor.end_section("rock_tree_attach", tree_started)
-    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+    if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         var navigation_started: int = runtime_perf_monitor.begin_section("rock_navigation_notify") if runtime_perf_monitor != null else Time.get_ticks_usec()
         npc_system.notify_navigation_prop_created(prop_id, body)
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("rock_navigation_notify", navigation_started)
-    rock_published.emit(body, collider)
+    if not horizon_only:
+        rock_published.emit(body, collider)
     return body
 
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array:

@@ -2,6 +2,7 @@ extends SceneTree
 
 const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologySource.gd")
 const DetailBatchPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
@@ -26,9 +27,49 @@ class ReceiptPublisher extends RefCounted:
 			and metadata.get("positionXZ") == Vector2(3.0, 1.0) \
 			and representation_id == "tree-native-mesh:stable-id" and tier == "horizon"
 
+class BenchmarkPublisher extends RefCounted:
+	var installed := true
+	var validation_count := 0
+
+	func visual_receipt_is_current(_source_identity: String, _source_revision: String,
+			_world_revision: String, _view_revision: int, _candidate_id: String,
+			_metadata: Dictionary, _representation_id: String, _tier: String) -> bool:
+		validation_count += 1
+		return installed
+
 class ScanMain extends "res://scripts/Main.gd":
 	func hash01(_text: String) -> float:
 		return 0.0
+
+class HorizonMainFixture extends Node:
+	var chunks := {}
+	var chunk_root: Node3D
+	var player: Node3D
+	var voxel_terrain_runtime: Object
+	var removed_props := {}
+	var removed_props_revision := 0
+	var world_generation_system: Object
+	var visible_world_demand_controller: Object
+	var scan_calls := 0
+
+	func begin_chunk_prop_spawn_state(chunk: Node3D, _cx: int, _cz: int) -> Dictionary:
+		return {"chunk": chunk}
+
+	func process_chunk_prop_spawn_state(state: Dictionary, _props: int,
+			_details: int, _budget_ms: float) -> bool:
+		scan_calls += 1
+		var chunk: Node3D = state.chunk
+		chunk.set_meta("chunk_surface_candidate_scan_complete", true)
+		return true
+
+class HorizonPlayerFixture extends Node3D:
+	var camera: Camera3D
+
+class HorizonRuntimeFixture extends RefCounted:
+	var viewer: Object
+
+class HorizonViewerFixture extends RefCounted:
+	var view_distance := 96
 
 class UndergroundScanFixture extends RefCounted:
 	var calls := 0
@@ -164,6 +205,8 @@ func _initialize() -> void:
 
 
 func run() -> void:
+	test_full_view_query_cost_split()
+	test_coverage_cache_tracks_source_lifecycle()
 	test_empty_manifest_requires_complete_source_coverage()
 	test_exact_subregion_coverage_is_independent()
 	test_circular_view_coverage_ignores_outside_corner_cells()
@@ -181,11 +224,172 @@ func run() -> void:
 	test_underground_floor_scan_revision_restart()
 	await test_installed_detail_batch_receipts()
 	await test_production_chunk_prop_manifest()
+	test_horizon_ecology_owner_lifetime()
+	test_horizon_ordinary_visual_range_receipt()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
 	await test_bounded_overlap_transfer_revalidates_receipts()
 	test_candidate_accounting_and_explicit_failure()
 	write_report()
 	quit(0 if _passed else 1)
+
+
+func test_full_view_query_cost_split() -> void:
+	# A synthetic, live-receipt workload isolates query geometry from owner
+	# validation. It is a cost diagnostic, never headed gameplay acceptance.
+	var book = VisualReadinessScript.new()
+	var bounds := Rect2i(-96, -96, 192, 192)
+	var revision := int(book.begin_view(501, "cost-seed", "cost-world", bounds,
+		Rect2i(-8, -8, 16, 16), Vector2.ZERO, 96.0).viewRevision)
+	book.declare_terrain_mesh_source_set({"cost:terrain": bounds}, revision)
+	book.expect_source("cost:terrain", "terrain", "cost-terrain-owner", "cost-rev-1",
+		bounds, revision)
+	var publisher := BenchmarkPublisher.new()
+	for z in range(-20, 20):
+		for x in range(20, 50):
+			var candidate_id := "cost-terrain:%d,%d" % [x, z]
+			var metadata := {"positionXZ": Vector2(float(x) + 0.5, float(z) + 0.5)}
+			book.describe_candidate("cost:terrain", candidate_id, "horizon", metadata)
+			book.accept_publisher_receipt("cost:terrain", candidate_id, candidate_id,
+				"horizon", "cost-terrain-owner", "cost-rev-1", revision, publisher,
+				&"visual_receipt_is_current")
+	book.finish_source("cost:terrain", "cost-terrain-owner", "cost-rev-1", revision)
+	for kind: String in ["structures", "trees_foliage", "props", "wildlife"]:
+		for tile_z in range(-3, 4):
+			for tile_x in range(-3, 4):
+				var source_id := "cost:%s:%d,%d" % [kind, tile_x, tile_z]
+				var footprint := Rect2i(tile_x * 32, tile_z * 32, 32, 32)
+				book.expect_source(source_id, kind, source_id, "cost-rev-1", footprint, revision)
+				book.finish_source(source_id, source_id, "cost-rev-1", revision)
+	var geometry_usecs: Array[int] = []
+	var receipt_usecs: Array[int] = []
+	var last: Dictionary = {}
+	for _sample in 12:
+		last = book.region_readiness(501, "cost-seed", "cost-world", revision, bounds)
+		geometry_usecs.append(int(last.get("coverageGeometryUsec", -1)))
+		receipt_usecs.append(int(last.get("receiptValidationUsec", -1)))
+	geometry_usecs.sort()
+	receipt_usecs.sort()
+	_check("full_view_query_reports_geometry_and_live_receipt_costs",
+		last.get("status") == "ready" and int(last.get("candidateCount", 0)) == 1200
+		and geometry_usecs[11] > 0 and receipt_usecs[11] > 0
+		and int((last.get("receiptValidationByKindUsec", {}) as Dictionary).get("terrain", 0)) > 0
+		and publisher.validation_count == 1200 * 13,
+		{"samples": 12, "geometryP50Usec": geometry_usecs[6],
+			"geometryP95Usec": geometry_usecs[11],
+			"receiptP50Usec": receipt_usecs[6],
+			"receiptP95Usec": receipt_usecs[11],
+			"receiptValidationCount": publisher.validation_count})
+	publisher.installed = false
+	var validation_count_before := publisher.validation_count
+	var retired: Dictionary = book.region_readiness(501, "cost-seed", "cost-world",
+		revision, bounds)
+	_check("cached_coverage_still_revalidates_all_live_receipts",
+		retired.get("status") == "pending" and int(retired.get("pendingCount", 0)) == 1200
+		and publisher.validation_count == validation_count_before + 1200,
+		{"status": retired.get("status"), "pendingCount": retired.get("pendingCount"),
+			"validationCount": publisher.validation_count})
+
+
+func test_coverage_cache_tracks_source_lifecycle() -> void:
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(502, "cache-seed", "cache-world",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	_declare_sources(book, revision, BOUNDS, "props")
+	var missing: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	book.expect_source("cache:props", "props", "cache-owner", "rev-1", BOUNDS, revision)
+	var incomplete: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	book.finish_source("cache:props", "cache-owner", "rev-1", revision)
+	var complete: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	_check("coverage_cache_updates_from_missing_to_complete_source",
+		missing.get("status") == "pending" and incomplete.get("status") == "pending"
+		and complete.get("status") == "ready")
+	book.fail_source("cache:props", "source_retired")
+	var failed: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	book.expect_source("cache:props", "props", "cache-owner", "rev-2", BOUNDS, revision)
+	var replaced: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	book.finish_source("cache:props", "cache-owner", "rev-2", revision)
+	var recovered: Dictionary = book.region_readiness(502, "cache-seed", "cache-world",
+		revision, BOUNDS)
+	_check("coverage_cache_invalidates_failed_and_replaced_source",
+		failed.get("status") == "pending" and replaced.get("status") == "pending"
+		and recovered.get("status") == "ready",
+		{"failedGaps": failed.get("coverageGaps", []),
+			"replacedGaps": replaced.get("coverageGaps", [])})
+
+
+func test_horizon_ecology_owner_lifetime() -> void:
+	var main := HorizonMainFixture.new()
+	main.chunk_root = Node3D.new()
+	root.add_child(main)
+	main.add_child(main.chunk_root)
+	var source = HorizonEcologySourceScript.new()
+	var keys: Array[Vector2i] = [Vector2i(4, 0), Vector2i(5, 0)]
+	source.retain_view(main, keys, keys, Rect2i(-2, -2, 4, 4), 1.35, 28, true)
+	_check("horizon_owner_creation_is_one_per_slice", source.roots.size() == 1)
+	source.retain_view(main, keys, keys, Rect2i(-2, -2, 4, 4), 1.35, 28, true)
+	_check("horizon_owner_retains_both_view_sources", source.roots.size() == 2)
+	_check("horizon_owner_uses_visual_only_roots",
+		bool(source.source_for(keys[0]).get_meta("horizon_visual_only", false))
+		and bool(source.source_for(keys[1]).get_meta("horizon_visual_only", false)))
+	_check("horizon_owner_advances_seeded_producer_once",
+		source.advance_one(main, keys, 1.0, 4, 8) == 1 and main.scan_calls == 1)
+	source.retain_view(main, keys, [], Rect2i(-2, -2, 4, 4), 1.35, 28, false)
+	_check("completed_view_keeps_horizon_roots", source.roots.size() == 2)
+	source.retain_view(main, [], [], Rect2i(-2, -2, 4, 4), 1.35, 28, false)
+	_check("horizon_owner_retires_one_stale_root_per_slice", source.roots.size() == 1)
+	source.clear()
+	main.queue_free()
+
+
+func test_horizon_ordinary_visual_range_receipt() -> void:
+	var main := HorizonMainFixture.new()
+	main.chunk_root = Node3D.new()
+	main.player = HorizonPlayerFixture.new()
+	(main.player as HorizonPlayerFixture).camera = Camera3D.new()
+	main.voxel_terrain_runtime = HorizonRuntimeFixture.new()
+	(main.voxel_terrain_runtime as HorizonRuntimeFixture).viewer = HorizonViewerFixture.new()
+	root.add_child(main)
+	main.add_child(main.chunk_root)
+	main.add_child(main.player)
+	main.player.add_child((main.player as HorizonPlayerFixture).camera)
+	var source = HorizonEcologySourceScript.new()
+	var key := Vector2i(4, 0)
+	var keys: Array[Vector2i] = [key]
+	source.retain_view(main, keys, keys, Rect2i(-2, -2, 4, 4), 1.35, 28, true)
+	var far_root := source.source_for(key)
+	var body := StaticBody3D.new()
+	body.set_meta("prop_id", "seed:ordinary")
+	body.position.y = 60.0
+	far_root.add_child(body)
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = BoxMesh.new()
+	body.add_child(mesh)
+	far_root.set_meta("chunk_surface_candidate_source_revision",
+		"seed:1:%d:surface" % far_root.get_instance_id())
+	source.refresh_ordinary_visual_ranges(main, key)
+	var publisher := body.get_meta("horizon_ordinary_visual_publisher") as Object
+	var metadata := {"horizonOrdinaryBodyId": body.get_instance_id(),
+		"horizonOrdinaryRootId": far_root.get_instance_id()}
+	var source_revision := String(far_root.get_meta("chunk_surface_candidate_source_revision")) + ":sha256:test"
+	var outside: bool = publisher.call("visual_receipt_installed", "chunk-props:seed:4,0",
+		source_revision, "world", 1, "seed:ordinary", metadata,
+		"seed:ordinary:installed", "horizon")
+	_check("retained_horizon_root_outside_player_range_has_no_live_receipt",
+		far_root.is_inside_tree() and not outside and mesh.visibility_range_end <= 100.1)
+	main.player.position = Vector3(60.0, 0.0, 0.0)
+	source.refresh_ordinary_visual_ranges(main, key)
+	var inside: bool = publisher.call("visual_receipt_installed", "chunk-props:seed:4,0",
+		source_revision, "world", 1, "seed:ordinary", metadata,
+		"seed:ordinary:installed", "horizon")
+	_check("inside_horizontal_view_elevated_horizon_prop_has_live_receipt",
+		inside and mesh.visibility_range_end > 100.0)
+	source.clear()
+	main.queue_free()
 
 
 func test_empty_manifest_requires_complete_source_coverage() -> void:

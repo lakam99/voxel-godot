@@ -231,9 +231,12 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 	# presentation queue is called.  Record that boundary once, then make a
 	# nearby blocker visible immediately with shared geometry while its full
 	# mathematical recipe remains worker/queue owned.
-	if not body.has_meta("tree_collision_ready_usec"):
-		body.set_meta("tree_collision_ready_usec", Time.get_ticks_usec())
-	ensure_collision_visible_representation(body, prepared_request, "enqueue")
+	var horizon_only := body.get_parent() != null \
+		and bool(body.get_parent().get_meta("horizon_visual_only", false))
+	if not horizon_only:
+		if not body.has_meta("tree_collision_ready_usec"):
+			body.set_meta("tree_collision_ready_usec", Time.get_ticks_usec())
+		ensure_collision_visible_representation(body, prepared_request, "enqueue")
 	ensure_horizon_visible_representation(body, prepared_request)
 	queued_count += 1
 	var cached_recipe: Dictionary = recipe_cache.fetch(recipe_key)
@@ -397,6 +400,9 @@ func release_horizon_visible_representation(body: StaticBody3D) -> void:
 
 func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
 	if not _is_live_node(body) or bool(body.get_meta("tree_publication_cancelled", false)):
+		return false
+	if body.get_parent() != null \
+			and bool(body.get_parent().get_meta("horizon_visual_only", false)):
 		return false
 	var viewer_position := current_viewer_position()
 	if viewer_position == Vector3.INF:

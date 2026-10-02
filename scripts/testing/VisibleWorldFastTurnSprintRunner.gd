@@ -21,6 +21,14 @@ var data_prefetch_move_attempts := 0
 var data_prefetch_move_admitted := 0
 var data_prefetch_last_cell := Vector2i(2147483000, 2147483000)
 var data_prefetch_samples: Array[Dictionary] = []
+var terrain_manifest_step_usec: Array[int] = []
+var visual_advance_total_usec: Array[int] = []
+var prop_manifest_step_usec: Array[int] = []
+var structure_manifest_step_usec: Array[int] = []
+var coverage_step_usec: Array[int] = []
+var coverage_geometry_step_usec: Array[int] = []
+var receipt_validation_step_usec: Array[int] = []
+var receipt_validation_by_kind_timing: Dictionary = {}
 
 
 class SeededMain extends "res://scripts/Main.gd":
@@ -117,6 +125,14 @@ func run() -> void:
         "sectionPercentiles": monitor.call("section_percentiles") if is_instance_valid(monitor) else {},
         "gameplayPresentationCadence": cadence,
         "dataPrefetchProbe": data_prefetch_probe,
+        "terrainManifestStepTiming": _terrain_manifest_step_timing(),
+        "visualAdvanceTotalTiming": _timing_summary(visual_advance_total_usec),
+        "propManifestStepTiming": _timing_summary(prop_manifest_step_usec),
+        "structureManifestStepTiming": _timing_summary(structure_manifest_step_usec),
+        "coverageStepTiming": _timing_summary(coverage_step_usec),
+        "coverageGeometryStepTiming": _timing_summary(coverage_geometry_step_usec),
+        "receiptValidationStepTiming": _timing_summary(receipt_validation_step_usec),
+        "receiptValidationByKindTiming": receipt_validation_by_kind_timing,
         "failures": failures,
         "resultCount": 1,
         "failureCount": 0 if failures.is_empty() else 1,
@@ -315,6 +331,25 @@ func _run_visual_act(failures: Array[String]) -> void:
     write_progress("continuous_sprint")
     while float(Time.get_ticks_msec() - sprint_started) / 1000.0 < RUN_SECONDS:
         await get_tree().process_frame
+        if terrain_manifest_step_usec.size() < 600:
+            var advance: Dictionary = main.get("visible_world_demand_last_advance")
+            terrain_manifest_step_usec.append(maxi(0, int(advance.get("terrainAdvanceUsec", 0))))
+            visual_advance_total_usec.append(maxi(0, int(advance.get("advanceTotalUsec", 0))))
+            prop_manifest_step_usec.append(maxi(0, int(advance.get("propAdvanceUsec", 0))))
+            structure_manifest_step_usec.append(maxi(0, int(advance.get("structureAdvanceUsec", 0))))
+            coverage_step_usec.append(maxi(0, int(advance.get("coverageAdvanceUsec", 0))))
+            coverage_geometry_step_usec.append(maxi(0, int(advance.get("coverageGeometryUsec", 0))))
+            receipt_validation_step_usec.append(maxi(0, int(advance.get("receiptValidationUsec", 0))))
+            var by_kind: Dictionary = advance.get("receiptValidationByKindUsec", {})
+            for kind_value in by_kind:
+                var kind := String(kind_value)
+                var elapsed_usec := maxi(0, int(by_kind[kind_value]))
+                var timing: Dictionary = receipt_validation_by_kind_timing.get(kind,
+                    {"samples": 0, "totalUsec": 0, "maxUsec": 0})
+                timing.samples = int(timing.samples) + 1
+                timing.totalUsec = int(timing.totalUsec) + elapsed_usec
+                timing.maxUsec = maxi(int(timing.maxUsec), elapsed_usec)
+                receipt_validation_by_kind_timing[kind] = timing
         if bool(player_body.get("is_sprinting")):
             observed_sprint_ticks += 1
         if frame % 30 == 0:
@@ -460,10 +495,62 @@ func _trace_sample(label: String) -> Dictionary:
         "viewCenterCells": [view_center.x, view_center.y],
         "liveCenterLagCells": center_lag,
         "demandAdvance": {"status": advance.get("status", ""),
-            "reason": advance.get("reason", ""), "queueDepth": advance.get("queueDepth", 0)}}
+            "reason": advance.get("reason", ""), "queueDepth": advance.get("queueDepth", 0),
+            "terrainAdvanceUsec": advance.get("terrainAdvanceUsec", 0),
+            "propAdvanceUsec": advance.get("propAdvanceUsec", 0),
+            "structureAdvanceUsec": advance.get("structureAdvanceUsec", 0),
+            "coverageAdvanceUsec": advance.get("coverageAdvanceUsec", 0),
+            "advanceTotalUsec": advance.get("advanceTotalUsec", 0)}}
+    row["viewDemand"] = _view_demand_diagnostics(controller)
     if not data_prefetch_probe_mode.is_empty() and label == "sprint":
         row["dataPrefetch"] = _data_prefetch_snapshot(label, false)
     return row
+
+
+func _terrain_manifest_step_timing() -> Dictionary:
+    return _timing_summary(terrain_manifest_step_usec)
+
+
+func _timing_summary(durations: Array[int]) -> Dictionary:
+    if durations.is_empty(): return {"samples": 0}
+    var sorted := durations.duplicate()
+    sorted.sort()
+    var total := 0
+    for duration: int in sorted: total += duration
+    return {"samples": sorted.size(), "p50Usec": sorted[sorted.size() / 2],
+        "p95Usec": sorted[mini(sorted.size() - 1, ceili(float(sorted.size()) * 0.95) - 1)],
+        "maxUsec": sorted.back(), "totalUsec": total}
+
+
+func _view_demand_diagnostics(controller: Object) -> Dictionary:
+    if not is_instance_valid(controller): return {}
+    var owners_value = controller.get("_owners")
+    if not owners_value is Dictionary: return {}
+    var state: Dictionary = owners_value.get("player", {})
+    var result := {}
+    for role in ["current", "pending"]:
+        var view: Dictionary = state.get(role, {})
+        if view.is_empty(): continue
+        var center: Vector2 = view.get("center", Vector2.INF)
+        var terrain: Dictionary = view.get("terrainState", {})
+        var chunk_keys: Array = view.get("chunkKeys", [])
+        var prop_sources: Dictionary = view.get("propSources", {})
+        var structure_sources: Dictionary = view.get("structureSources", {})
+        result[role] = {"centerCells": [center.x, center.y],
+            "centerWorld": vec3(view.get("centerWorld", Vector3.ZERO)),
+            "demandRevision": int(view.get("demandRevision", 0)),
+            "publicationComplete": bool(view.get("publicationComplete", false)),
+            "terrainRequiredBlocks": int(terrain.get("requiredBlocks", 0)),
+            "terrainProcessedBlocks": int(terrain.get("processedBlocks", 0)),
+            "terrainPendingBlocks": int(terrain.get("pendingBlocks", 0)),
+            "terrainReason": String(terrain.get("reason", "")),
+            "chunkSourcesExpected": chunk_keys.size(),
+            "propSourcesComplete": prop_sources.size(),
+            "structureSourcesComplete": structure_sources.size(),
+            "missingChunkSourceCount": (view.get("missingChunkSources", {}) as Dictionary).size(),
+            "lastPropReason": String((view.get("lastProp", {}) as Dictionary).get("reason", "")),
+            "lastStructureReason": String((view.get("lastStructure", {}) as Dictionary).get("reason", ""))}
+    return result
 
 
 func _measured_cadence() -> Dictionary:

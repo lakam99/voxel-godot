@@ -23,6 +23,7 @@ func forage_cylinder_mesh(key: String, bottom_radius: float, top_radius: float, 
     return mesh
 
 func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator):
+    var horizon_only := bool(parent.get_meta("horizon_visual_only", false))
     if ore_type == "":
         ore_type = "copperOre"
     var body := StaticBody3D.new()
@@ -78,18 +79,20 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
         glint.scale = Vector3(1.0, 0.72 + rng.randf() * 0.38, 1.0)
         body.add_child(glint)
 
-    var shape := SphereShape3D.new()
-    shape.radius = radius * 1.05
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = radius * 0.42
-    body.add_child(collider)
+    if not horizon_only:
+        var shape := SphereShape3D.new()
+        shape.radius = radius * 1.05
+        var collider := CollisionShape3D.new()
+        collider.shape = shape
+        collider.position.y = radius * 0.42
+        body.add_child(collider)
     parent.add_child(body)
-    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+    if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+    var horizon_only := bool(parent.get_meta("horizon_visual_only", false))
     var spec := forage_for_biome(biome)
     if spec.is_empty():
         return null
@@ -160,22 +163,25 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
                 berry.position = Vector3(cos(angle) * spread, 0.40 + rng.randf() * 0.20, sin(angle) * spread)
                 body.add_child(berry)
 
-    var shape := SphereShape3D.new()
-    shape.radius = float(spec.get("radius", 0.50))
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = shape.radius * 0.45
-    body.add_child(collider)
+    if not horizon_only:
+        var shape := SphereShape3D.new()
+        shape.radius = float(spec.get("radius", 0.50))
+        var collider := CollisionShape3D.new()
+        collider.shape = shape
+        collider.position.y = shape.radius * 0.45
+        body.add_child(collider)
     parent.add_child(body)
-    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+    if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
 
 func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
+    var horizon_only := bool(parent.get_meta("horizon_visual_only", false))
     var profile := wildlife_profile(biome, rng)
     var cold := bool(profile.get("cold", false))
     var body := StaticBody3D.new()
-    body.add_to_group(&"world_moving_physics_actor")
+    if not horizon_only:
+        body.add_to_group(&"world_moving_physics_actor")
     body.name = "Wildlife_%s" % String(profile.get("variant", "boar"))
     body.position = position
     body.rotation.y = rng.randf() * TAU
@@ -192,14 +198,15 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     if add_animated_wildlife_visual(body, profile, rng) == null:
         add_procedural_wildlife_visual(body, profile, rng)
 
-    var shape := BoxShape3D.new()
-    shape.size = profile.get("collider_size", Vector3(1.18, 1.05, 0.78))
-    var collider := CollisionShape3D.new()
-    collider.shape = shape
-    collider.position.y = float(profile.get("collider_y", 0.52))
-    body.add_child(collider)
+    if not horizon_only:
+        var shape := BoxShape3D.new()
+        shape.size = profile.get("collider_size", Vector3(1.18, 1.05, 0.78))
+        var collider := CollisionShape3D.new()
+        collider.shape = shape
+        collider.position.y = float(profile.get("collider_y", 0.52))
+        body.add_child(collider)
     parent.add_child(body)
-    if npc_system and npc_system.has_method("notify_navigation_prop_created"):
+    if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     register_wildlife(body, rng, cold)
     return body

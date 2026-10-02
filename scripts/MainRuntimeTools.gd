@@ -625,17 +625,29 @@ func update_voxel_authority_chunks(force: bool) -> void:
 
 
 func advance_visible_surface_prop_publication_shared() -> int:
-    if pending_chunk_prop_spawns.is_empty() or visible_world_demand_controller == null \
+    if visible_world_demand_controller == null \
             or not visible_world_demand_controller.has_method("ranked_chunk_keys"):
         return 0
     var ranked_keys: Array[Vector2i] = visible_world_demand_controller.ranked_chunk_keys("player")
+    var retained_keys: Array[Vector2i] = visible_world_demand_controller.retained_chunk_keys("player")
+    var foreground: Dictionary = player_foreground_streaming_intent()
+    if foreground.is_empty(): return 0
+    var foreground_bounds: Rect2i = foreground.get("bounds", Rect2i())
+    var live_near_bounds := foreground_bounds.grow(CHUNK_SIZE >> 1)
+    horizon_ecology_source.retain_view(self, retained_keys, ranked_keys, live_near_bounds,
+        CELL, CHUNK_SIZE, gameplay_publication_deadline_usec - Time.get_ticks_usec() > 2000)
+    if gameplay_publication_lane == 2 \
+            and gameplay_publication_deadline_usec - Time.get_ticks_usec() > 2000:
+        horizon_ecology_source.retire_promoted_one(self, live_near_bounds,
+            seed_text, CELL, CHUNK_SIZE)
     if ranked_keys.is_empty(): return 0
     var has_retained_source := false
     for key: Vector2i in ranked_keys:
         if pending_chunk_prop_spawns.has(key):
             has_retained_source = true
             break
-    if not has_retained_source: return 0
+    var has_horizon_source: bool = not horizon_ecology_source.states.is_empty()
+    if not has_retained_source and not has_horizon_source: return 0
     var monitor = runtime_perf_monitor
     var remaining_usec := gameplay_publication_deadline_usec - Time.get_ticks_usec()
     var required_usec := ceili(STREAMING_CHUNK_PROP_FRAME_BUDGET_MS * 1000.0) + 250
@@ -644,7 +656,14 @@ func advance_visible_surface_prop_publication_shared() -> int:
             monitor.increment_counter("gameplay_visible_surface_prop_budget_deferred")
         return 0
     var started_usec := Time.get_ticks_usec()
-    var processed := process_pending_chunk_prop_spawns_for_visible_surface(ranked_keys)
+    horizon_ecology_publication_turn += 1
+    var process_horizon: bool = has_horizon_source and (not has_retained_source \
+        or horizon_ecology_publication_turn % 3 == 0)
+    var processed := horizon_ecology_source.advance_one(self, ranked_keys,
+        STREAMING_CHUNK_PROP_FRAME_BUDGET_MS,
+        STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME,
+        STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME) if process_horizon \
+        else process_pending_chunk_prop_spawns_for_visible_surface(ranked_keys)
     if monitor != null:
         monitor.observe_external_duration("gameplay_visible_surface_prop_slice",
             float(Time.get_ticks_usec() - started_usec) / 1000.0)

@@ -614,6 +614,7 @@ func restore_single_slot(slot_value) -> Dictionary:
 
 func reload_chunks(defer_rebuild := false) -> void:
     playtest_progress("reload_chunks_start")
+    horizon_ecology_source.clear()
     for chunk in chunks.values():
         var node := chunk as Node
         if node:

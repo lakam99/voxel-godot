@@ -54,7 +54,9 @@ func register_wildlife(body: StaticBody3D, rng: RandomNumberGenerator, cold := f
     body.set_meta("wildlife_timer", rng.randf_range(0.8, 2.6))
     body.set_meta("wildlife_speed", rng.randf_range(0.42, 0.74) * (0.86 if cold else 1.0) * float(body.get_meta("wildlife_speed_multiplier", 1.0)))
     body.set_meta("wildlife_last_move", 0.0)
-    if not wildlife_nodes.has(body):
+    var parent := body.get_parent()
+    if (parent == null or not bool(parent.get_meta("horizon_visual_only", false))) \
+            and not wildlife_nodes.has(body):
         wildlife_nodes.append(body)
 
 func random_horizontal_direction(rng: RandomNumberGenerator = null) -> Vector3:

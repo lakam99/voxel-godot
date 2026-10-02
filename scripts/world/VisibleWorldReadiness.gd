@@ -28,6 +28,10 @@ var _failure_rows: Array[Dictionary] = []
 var _queue_diagnostics: Dictionary = {}
 var _coverage_lag := 0.0
 var _overlap_transfers: Dictionary = {}
+var _coverage_geometry_revision := 0
+var _cached_coverage_revision := -1
+var _cached_coverage_bounds := Rect2i()
+var _cached_coverage_gaps: Array[Dictionary] = []
 
 
 ## A changed request, source revision, or view envelope starts a fresh visual
@@ -61,6 +65,7 @@ func begin_view(request_id: int, seed: String, world_revision: String,
 		_queue_diagnostics.clear()
 		_coverage_lag = 0.0
 		_overlap_transfers.clear()
+		_invalidate_coverage_geometry()
 	return {"status": "ready", "viewRevision": _view_revision, "requestId": _request_id,
 		"worldRevision": _world_revision}
 
@@ -181,6 +186,7 @@ func _abort_overlap_transfer(source_id: String) -> void:
 	if _sources.has(source_id):
 		_candidate_count = maxi(0, _candidate_count - _sources[source_id].candidates.size())
 		_sources.erase(source_id)
+		_invalidate_coverage_geometry()
 
 
 func _footprint_inside_view(footprint: Rect2i) -> bool:
@@ -225,6 +231,7 @@ func declare_terrain_mesh_source_set(footprints: Dictionary, view_revision: int)
 			return {"status": "failed", "reason": "terrain_mesh_source_set_conflict"}
 	_terrain_source_footprints = admitted
 	_terrain_source_set_declared = true
+	_invalidate_coverage_geometry()
 	return {"status": "ready", "sourceCount": admitted.size()}
 
 
@@ -262,6 +269,7 @@ func expect_source(source_id: String, kind: String, source_identity: String,
 	_sources[source_id] = {"kind": kind, "identity": source_identity, "revision": source_revision,
 		"bounds": source_bounds, "viewRevision": _view_revision, "complete": false,
 		"failed": false, "failureReason": "", "candidates": {}}
+	_invalidate_coverage_geometry()
 	return {"status": "ready", "sourceId": source_id, "viewRevision": _view_revision}
 
 
@@ -343,7 +351,9 @@ func finish_source(source_id: String, source_identity: String, source_revision: 
 		return {"status": "pending", "reason": "visual_source_revision_changed"}
 	if bool(source.failed):
 		return {"status": "failed", "reason": String(source.failureReason)}
-	source.complete = true
+	if not bool(source.complete):
+		source.complete = true
+		_invalidate_coverage_geometry()
 	return {"status": "ready", "sourceId": source_id, "candidateCount": source.candidates.size()}
 
 
@@ -354,6 +364,7 @@ func fail_source(source_id: String, reason: String, diagnostic: Dictionary = {})
 	source.failed = true
 	source.complete = true
 	source.failureReason = reason.strip_edges() if not reason.strip_edges().is_empty() else "visual_source_failed"
+	_invalidate_coverage_geometry()
 	_record_failure(source_id, "", String(source.kind), String(source.failureReason), diagnostic)
 	return {"status": "failed", "reason": String(source.failureReason)}
 
@@ -457,6 +468,7 @@ func fail_candidate(source_id: String, candidate_id: String, reason: String,
 	var candidate: Dictionary = source.candidates[candidate_id]
 	candidate.failed = true
 	candidate.failureReason = reason.strip_edges() if not reason.strip_edges().is_empty() else "visual_candidate_failed"
+	_invalidate_coverage_geometry()
 	_record_failure(source_id, candidate_id, String(source.kind), String(candidate.failureReason), diagnostic)
 	return {"status": "failed", "reason": String(candidate.failureReason)}
 
@@ -470,6 +482,8 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		view_revision: int, bounds: Rect2i) -> Dictionary:
 	var result := {"status": "pending", "reason": "visual_manifest_incomplete", "requestId": _request_id,
 		"bounds": bounds, "viewBounds": _bounds, "worldRevision": _world_revision, "viewRevision": _view_revision,
+		"coverageGeometryUsec": 0, "receiptValidationUsec": 0,
+		"receiptValidationByKindUsec": {},
 		"candidateCount": 0, "representedCount": 0, "pendingCount": 0, "failedCount": 0,
 		"byKind": {}, "tiers": {"near": {"candidate": 0, "represented": 0},
 			"horizon": {"candidate": 0, "represented": 0}},
@@ -485,16 +499,20 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 			or view_revision != _view_revision or not _bounds.encloses(bounds) or not _valid_bounds(bounds):
 		result.reason = "visual_request_or_revision_changed"
 		return result
+	var coverage_started_usec := Time.get_ticks_usec()
 	var coverage_gaps := _source_coverage_gaps(bounds)
+	result.coverageGeometryUsec = maxi(0, Time.get_ticks_usec() - coverage_started_usec)
 	if not coverage_gaps.is_empty():
 		result.reason = "visual_source_coverage_incomplete"
 		result["coverageGaps"] = coverage_gaps
 		return result
 	var has_failure := false
+	var receipt_started_usec := Time.get_ticks_usec()
 	for source_id_value in _sources:
 		var source: Dictionary = _sources[source_id_value]
 		var source_bounds: Rect2i = source.bounds
 		if not source_bounds.intersects(bounds): continue
+		var source_started_usec := Time.get_ticks_usec()
 		var kind := String(source.kind)
 		var kind_counts: Dictionary = result.byKind[kind]
 		if not bool(source.complete):
@@ -526,6 +544,10 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		if not bool(source.complete):
 			kind_counts.pending = int(kind_counts.pending) + 1
 			result.pendingCount = int(result.pendingCount) + 1
+		var by_kind_timing: Dictionary = result.receiptValidationByKindUsec
+		by_kind_timing[kind] = int(by_kind_timing.get(kind, 0)) \
+			+ maxi(0, Time.get_ticks_usec() - source_started_usec)
+	result.receiptValidationUsec = maxi(0, Time.get_ticks_usec() - receipt_started_usec)
 	if has_failure:
 		result.status = "failed"
 		result.reason = "visual_candidate_failed"
@@ -568,6 +590,25 @@ func pending_candidate_diagnostics(request_id: int, seed: String,
 
 
 func _source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:
+	# Source geometry and completion change only through the ledger mutation
+	# methods. Keep one exact-bounds result; installed candidate receipts are
+	# intentionally validated live by region_readiness on every query.
+	if _cached_coverage_revision == _coverage_geometry_revision \
+			and _cached_coverage_bounds == bounds:
+		return _cached_coverage_gaps.duplicate(true)
+	_cached_coverage_gaps = _compute_source_coverage_gaps(bounds)
+	_cached_coverage_bounds = bounds
+	_cached_coverage_revision = _coverage_geometry_revision
+	return _cached_coverage_gaps.duplicate(true)
+
+
+func _invalidate_coverage_geometry() -> void:
+	_coverage_geometry_revision += 1
+	_cached_coverage_revision = -1
+	_cached_coverage_gaps.clear()
+
+
+func _compute_source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:
 	# Exact row-wise union coverage avoids mistaking a pair of separated source
 	# rectangles for a complete visual region. The bounded ledger caps demand.
 	var gaps: Array[Dictionary] = []

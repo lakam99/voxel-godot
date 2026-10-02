@@ -54,6 +54,7 @@ func _run() -> void:
 	_test_full_view_promotion()
 	_test_stale_native_receipt_without_signal()
 	_test_bounded_chunk_diagnostics()
+	_test_retained_chunk_keys()
 	var passed := true
 	for check: Dictionary in checks:
 		passed = passed and bool(check.passed)
@@ -169,6 +170,27 @@ func _test_bounded_chunk_diagnostics() -> void:
 	_check("zero_diagnostic_limit_returns_no_keys",
 		controller.pending_chunk_source_keys("player", 0).is_empty()
 		and controller.missing_chunk_source_keys("player", 0).is_empty())
+
+func _test_retained_chunk_keys() -> void:
+	var controller = ControllerScript.new()
+	var current_keys: Array[Vector2i] = [Vector2i(2, 0), Vector2i(0, 0)]
+	var pending_keys: Array[Vector2i] = [Vector2i(1, 0), Vector2i(2, 0)]
+	controller._owners["player"] = {"current": {
+		"chunkKeys": current_keys, "publicationComplete": true}, "pending": {
+		"chunkKeys": pending_keys, "publicationComplete": false}}
+	_check("retained_keys_include_accepted_and_pending_views",
+		controller.retained_chunk_keys("player") == [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)])
+	controller._owners.player.pending = {}
+	_check("retained_keys_survive_publication_completion",
+		controller.retained_chunk_keys("player") == [Vector2i(0, 0), Vector2i(2, 0)]
+		and controller.ranked_chunk_keys("player").is_empty())
+	controller._owners.player.current.dirtyChunkKeys = [Vector2i(2, 0)]
+	_check("completed_view_retries_dirty_far_source",
+		controller.ranked_chunk_keys("player") == [Vector2i(2, 0)]
+		and controller.retained_chunk_keys("player") == [Vector2i(0, 0), Vector2i(2, 0)])
+	controller._owners.player.current = {"chunkKeys": pending_keys, "publicationComplete": true}
+	_check("retained_keys_retire_superseded_view_only_after_rebase",
+		controller.retained_chunk_keys("player") == [Vector2i(1, 0), Vector2i(2, 0)])
 
 func _test_stale_native_receipt_without_signal() -> void:
 	var block := Vector3i(4, 1, 0)

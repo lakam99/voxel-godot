@@ -135,6 +135,9 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 	var state: Dictionary = _owners[owner]
 	var pending: Dictionary = state.get("pending", {})
 	var advancing_pending := not pending.is_empty()
+	var coverage_advance_usec := 0
+	var prop_advance_usec := 0
+	var structure_advance_usec := 0
 	if pending.is_empty():
 		pending = state.get("current", {})
 		var terrain_changed: bool = pending.has("terrain") \
@@ -149,12 +152,18 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 					and String(runtime.call("visible_mesh_world_revision")) == String(pending.worldRevision):
 				if not (pending.get("dirtyChunkKeys", []) as Array).is_empty():
 					return _refresh_current_chunk(main, state, pending, owner)
+				var coverage_started_usec := Time.get_ticks_usec()
 				var confirmed: Dictionary = _full_view_result(pending)
+				coverage_advance_usec += maxi(0, Time.get_ticks_usec() - coverage_started_usec)
 				if confirmed.get("status") == "ready":
 					return {"status": "ready", "reason": "", "requestId": int(pending.requestId),
 						"viewRevision": int(pending.viewRevision),
 						"visualDemandRevision": int(pending.demandRevision),
-						"exactReceiptValidation": true}
+						"exactReceiptValidation": true,
+						"coverageAdvanceUsec": coverage_advance_usec,
+						"coverageGeometryUsec": confirmed.get("coverageGeometryUsec", 0),
+						"receiptValidationUsec": confirmed.get("receiptValidationUsec", 0),
+						"receiptValidationByKindUsec": confirmed.get("receiptValidationByKindUsec", {})}
 				_request_stale_terrain_revisits(pending, confirmed)
 			# A removed owner, changed tree tier, or missing source must be retried
 			# through the same bounded publisher, never acknowledged from a flag.
@@ -167,7 +176,9 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		else: state.current = {}
 		_owners[owner] = state
 		return {"status": "pending", "reason": "visual_world_revision_changed", "retryable": true}
+	var terrain_started_usec := Time.get_ticks_usec()
 	var terrain: Dictionary = pending.terrain.advance(TERRAIN_BLOCKS_PER_STEP)
+	var terrain_advance_usec := maxi(0, Time.get_ticks_usec() - terrain_started_usec)
 	pending.terrainState = terrain
 	if String(terrain.get("reason", "")).contains("revision_changed"):
 		if advancing_pending: state.pending = {}
@@ -180,9 +191,11 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		for _step in CHUNK_SOURCE_STEPS_PER_STEP:
 			var prop_key: Vector2i = keys[int(pending.propCursor)]
 			pending.propCursor = (int(pending.propCursor) + 1) % keys.size()
+			var prop_started_usec := Time.get_ticks_usec()
 			var prop: Dictionary = main.call("publish_chunk_prop_visual_readiness",
 				pending.ledger, int(pending.viewRevision), pending.nearBounds,
 				prop_key, pending.centerWorld)
+			prop_advance_usec += maxi(0, Time.get_ticks_usec() - prop_started_usec)
 			pending.lastProp = prop
 			if bool(prop.get("manifestSubmitted", false)):
 				pending.propSources[prop_key] = true
@@ -194,10 +207,12 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 			pending.structureCursor = (int(pending.structureCursor) + 1) % keys.size()
 			var source_bounds := Rect2i(structure_key * chunk_size,
 				Vector2i.ONE * chunk_size)
+			var structure_started_usec := Time.get_ticks_usec()
 			var structure: Dictionary = StructureManifestScript.submit(main,
 				structure_system, pending.ledger, int(pending.requestId),
 				int(pending.viewRevision), source_bounds, source_bounds, false,
 				pending.nearBounds)
+			structure_advance_usec += maxi(0, Time.get_ticks_usec() - structure_started_usec)
 			pending.lastStructure = structure
 			if structure.get("status") == "ready":
 				pending.structureSources[structure_key] = true
@@ -211,9 +226,12 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		pending.overlapLedgers = []
 	pending.ledger.record_queue_diagnostics(mini(ReadinessScript.MAX_SOURCES,
 		unscanned + terrain_pending), 0.0)
+	var coverage_started_usec := Time.get_ticks_usec()
 	var full_result: Dictionary = _full_view_result(pending) \
 		if bool(pending.publicationComplete) else {"status": "pending",
 			"reason": "visual_source_publication_pending"}
+	if bool(pending.publicationComplete):
+		coverage_advance_usec += maxi(0, Time.get_ticks_usec() - coverage_started_usec)
 	var stale_revisits := 0
 	if full_result.get("status") == "pending":
 		stale_revisits = _request_stale_terrain_revisits(pending, full_result)
@@ -242,6 +260,13 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		"pendingChunkSourceCount": maxi(0, keys.size() - pending.propSources.size()),
 		"pendingChunkSourceKeys": pending_keys,
 		"staleTerrainRevisitsQueued": stale_revisits,
+		"terrainAdvanceUsec": terrain_advance_usec,
+		"propAdvanceUsec": prop_advance_usec,
+		"structureAdvanceUsec": structure_advance_usec,
+		"coverageAdvanceUsec": coverage_advance_usec,
+		"coverageGeometryUsec": full_result.get("coverageGeometryUsec", 0),
+		"receiptValidationUsec": full_result.get("receiptValidationUsec", 0),
+		"receiptValidationByKindUsec": full_result.get("receiptValidationByKindUsec", {}),
 		"terrain": terrain,
 		"prop": pending.lastProp, "structures": pending.lastStructure}
 
@@ -301,11 +326,37 @@ func ranked_chunk_keys(owner: String) -> Array[Vector2i]:
 	var view: Dictionary = state.get("pending", {})
 	if view.is_empty():
 		view = state.get("current", {})
-	if view.is_empty() or bool(view.get("publicationComplete", false)) \
-			or not view.has("chunkKeys"):
+	if view.is_empty() or not view.has("chunkKeys"):
+		return result
+	if bool(view.get("publicationComplete", false)):
+		var dirty: Dictionary = {}
+		for key_value in view.get("dirtyChunkKeys", []):
+			if key_value is Vector2i: dirty[key_value] = true
+		for key: Vector2i in view.chunkKeys:
+			if dirty.has(key): result.append(key)
 		return result
 	for key: Vector2i in view.chunkKeys:
 		result.append(key)
+	return result
+
+
+## Retention covers both the accepted view and its replacement. Work ranking
+## above may become empty after publication, but its installed visual sources
+## must stay alive until neither view references their chunk.
+func retained_chunk_keys(owner: String) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if not _owners.has(owner): return result
+	var state: Dictionary = _owners[owner]
+	var seen: Dictionary = {}
+	for view_value in [state.get("current", {}), state.get("pending", {})]:
+		if not view_value is Dictionary: continue
+		var view: Dictionary = view_value
+		for key_value in view.get("chunkKeys", []):
+			if not key_value is Vector2i or seen.has(key_value): continue
+			seen[key_value] = true
+			result.append(key_value)
+	result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x < b.x or (a.x == b.x and a.y < b.y))
 	return result
 
 

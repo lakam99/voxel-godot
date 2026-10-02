@@ -10,6 +10,8 @@ cli(async () => {
     'scripts/world/VisibleWorldReadiness.gd',
     'scripts/world/VoxelTerrainVisualManifest.gd',
     'scripts/world/ChunkPropVisualManifest.gd',
+    'scripts/world/HorizonEcologySource.gd',
+    'scripts/world/HorizonEcologyPropReceiptPublisher.gd',
     'scripts/world/GeneratedStructureVisualManifest.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd',
     'scripts/MainPlaytestTools.gd',

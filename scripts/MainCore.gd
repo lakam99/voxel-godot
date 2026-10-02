@@ -18,6 +18,7 @@ const NativeDecodedSaveRetirementScript := preload("res://scripts/terrain/Native
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const VisibleWorldReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const VisibleWorldDemandControllerScript := preload("res://scripts/world/VisibleWorldDemandController.gd")
+const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologySource.gd")
 const VoxelTerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const GeneratedStructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
@@ -53,6 +54,8 @@ var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
 var visible_world_readiness: Object
 var visible_world_demand_controller = VisibleWorldDemandControllerScript.new()
+var horizon_ecology_source = HorizonEcologySourceScript.new()
+var horizon_ecology_publication_turn := 0
 var visible_world_view_revision := 0
 var visible_world_view_center_cells := Vector2.ZERO
 var visible_world_near_bounds := Rect2i()
@@ -1637,8 +1640,10 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
     if gameplay_publication_deadline_usec > 0 \
             and Time.get_ticks_usec() + 1000 >= gameplay_publication_deadline_usec:
         return
+    var demand_advance_started_usec := Time.get_ticks_usec()
     var demand_advance: Dictionary = visible_world_demand_controller.advance(
         self, runtime, structure_system, "player", CHUNK_SIZE)
+    var demand_advance_total_usec := maxi(0, Time.get_ticks_usec() - demand_advance_started_usec)
     visible_world_demand_last_advance = {
         "status": demand_advance.get("status", "pending"),
         "reason": demand_advance.get("reason", ""),
@@ -1646,6 +1651,14 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
         "propSourcesComplete": demand_advance.get("propSourcesComplete", 0),
         "structureSourcesComplete": demand_advance.get("structureSourcesComplete", 0),
         "queueDepth": demand_advance.get("queueDepth", 0),
+        "terrainAdvanceUsec": demand_advance.get("terrainAdvanceUsec", 0),
+        "propAdvanceUsec": demand_advance.get("propAdvanceUsec", 0),
+        "structureAdvanceUsec": demand_advance.get("structureAdvanceUsec", 0),
+        "coverageAdvanceUsec": demand_advance.get("coverageAdvanceUsec", 0),
+        "coverageGeometryUsec": demand_advance.get("coverageGeometryUsec", 0),
+        "receiptValidationUsec": demand_advance.get("receiptValidationUsec", 0),
+        "receiptValidationByKindUsec": demand_advance.get("receiptValidationByKindUsec", {}),
+        "advanceTotalUsec": demand_advance_total_usec,
         "terrainReason": (demand_advance.get("terrain", {}) as Dictionary).get("reason", ""),
         "propReason": (demand_advance.get("prop", {}) as Dictionary).get("reason", ""),
         "structureReason": (demand_advance.get("structures", {}) as Dictionary).get("reason", "")}
@@ -1674,6 +1687,7 @@ func navigation_terrain_publication_readiness(bounds: Rect2i) -> Dictionary:
     return runtime.region_publication_readiness(bounds)
 
 func reset_streaming_region_demand() -> void:
+    horizon_ecology_source.clear()
     streaming_active = false
     streaming_actor_physical_demand_diagnostics = {"actorCount":0,"ownerCount":0,"groups":[]}
     if structure_system != null and structure_system.citadel_publication != null:

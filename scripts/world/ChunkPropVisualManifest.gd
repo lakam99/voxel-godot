@@ -19,7 +19,7 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 		return {"status": "failed", "reason": "invalid_chunk_prop_source_identity"}
 	if not scan_complete:
 		return {"status": "pending", "reason": "chunk_prop_candidate_scan_incomplete",
-			"chunk": chunk_key, "sourceIdentity": _source_identity(chunk, chunk_key)}
+			"chunk": chunk_key, "sourceIdentity": _source_identity(seed, chunk_key)}
 	if source_revision.strip_edges().is_empty():
 		return {"status": "failed", "reason": "invalid_chunk_prop_source_identity"}
 	var candidates: Array[Dictionary] = []
@@ -85,7 +85,7 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 			counts.pendingIds.append(String(candidate.candidateId))
 	return {"status": "ready" if _all_represented(by_kind) else "pending",
 		"reason": "" if _all_represented(by_kind) else "chunk_prop_visual_publication_pending",
-		"chunk": chunk_key, "sourceIdentity": _source_identity(chunk, chunk_key),
+		"chunk": chunk_key, "sourceIdentity": _source_identity(seed, chunk_key),
 		"sourceRevision": candidate_source_revision, "scanRevision": source_revision,
 		"seed": seed, "chunkInstanceId": chunk.get_instance_id(),
 		"cellScale": cell_scale,
@@ -181,10 +181,22 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 					"instanceColor": candidate.detailInstanceColor,
 					"instanceCustomData": candidate.detailInstanceCustomData,
 					"detailVisibilityEnd": candidate.detailVisibilityEnd})
+			if candidate.has("horizonOrdinaryPublisher"):
+				metadata.merge({"horizonOrdinaryBodyId": candidate.horizonOrdinaryBodyId,
+					"horizonOrdinaryRootId": candidate.horizonOrdinaryRootId})
 			var described: Dictionary = readiness.call("describe_candidate", source_id, candidate_id,
 				required_tier, metadata)
 			if described.get("status") != "ready": return described
 		if bool(candidate.get("renderable", false)):
+			var candidate_owner := candidate.get("owner") as Node
+			if required_tier == "horizon" and kind != "trees_foliage" \
+					and is_instance_valid(candidate_owner) and candidate_owner.get_parent() != null \
+					and bool(candidate_owner.get_parent().get_meta("horizon_visual_only", false)) \
+					and not _has_geometry_in_view_range(candidate_owner, viewer_world_position):
+				pending_candidate_count += 1
+				counts.pendingCount = int(counts.pendingCount) + 1
+				counts.pendingIds.append(candidate_id)
+				continue
 			if not _candidate_lod_satisfies_tier(candidate, required_tier):
 				pending_candidate_count += 1
 				counts.pendingCount = int(counts.pendingCount) + 1
@@ -201,6 +213,12 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 				var publisher := candidate.get("horizonPublisher") as Object
 				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
 					"%s:horizon" % candidate_id, required_tier,
+					source_identity, source_revision, view_revision, publisher,
+					&"visual_receipt_installed")
+			elif required_tier == "horizon" and candidate.has("horizonOrdinaryPublisher"):
+				var publisher := candidate.get("horizonOrdinaryPublisher") as Object
+				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
+					"%s:installed" % candidate_id, required_tier,
 					source_identity, source_revision, view_revision, publisher,
 					&"visual_receipt_installed")
 			else:
@@ -330,6 +348,10 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 		var is_tree := current.has_meta("tree_visual_state")
 		var tree_published := is_tree and String(current.get_meta("tree_visual_state", "")) == "published"
 		var renderable := _has_visible_renderable(current)
+		var horizon_ordinary := current.get_parent() == owner \
+			and bool(owner.get_meta("horizon_visual_only", false)) and kind != "trees_foliage"
+		if horizon_ordinary and not current.has_meta("horizon_ordinary_visual_publisher"):
+			renderable = false
 		if is_tree and not tree_published:
 			renderable = false
 		var horizon_publisher: Object = null
@@ -354,6 +376,11 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 		if not horizon_snapshot.is_empty():
 			candidate["horizonPublisher"] = horizon_publisher
 			candidate["horizonSnapshot"] = horizon_snapshot
+		if horizon_ordinary \
+				and current.has_meta("horizon_ordinary_visual_publisher"):
+			candidate["horizonOrdinaryPublisher"] = current.get_meta("horizon_ordinary_visual_publisher")
+			candidate["horizonOrdinaryBodyId"] = current.get_instance_id()
+			candidate["horizonOrdinaryRootId"] = owner.get_instance_id()
 		candidates.append(candidate)
 	for child in current.get_children():
 		if child is Node:
@@ -408,6 +435,24 @@ static func _has_visible_renderable(root_node: Node) -> bool:
 	return false
 
 
+static func _has_geometry_in_view_range(root_node: Node, viewer_world_position: Vector3) -> bool:
+	if not viewer_world_position.is_finite():
+		return false
+	if root_node is GeometryInstance3D:
+		var geometry := root_node as GeometryInstance3D
+		if geometry.visible and geometry.is_visible_in_tree():
+			var end_distance := geometry.visibility_range_end
+			if end_distance <= 0.0 or geometry.global_position.distance_to(viewer_world_position) + 3.0 < end_distance:
+				if geometry is MeshInstance3D and (geometry as MeshInstance3D).mesh != null:
+					return true
+				if geometry is MultiMeshInstance3D and (geometry as MultiMeshInstance3D).multimesh != null:
+					return true
+	for child in root_node.get_children():
+		if child is Node and _has_geometry_in_view_range(child, viewer_world_position):
+			return true
+	return false
+
+
 static func _all_represented(by_kind: Dictionary) -> bool:
 	for kind: String in CONTENT_KINDS:
 		if int(by_kind[kind].pendingCount) > 0: return false
@@ -436,5 +481,5 @@ static func _update_candidate_hasher_bytes(hasher: HashingContext, bytes: Packed
 	if not bytes.is_empty(): hasher.update(bytes)
 
 
-static func _source_identity(chunk: Node3D, chunk_key: Vector2i) -> String:
-	return "chunk-props:%d,%d:%d" % [chunk_key.x, chunk_key.y, chunk.get_instance_id()]
+static func _source_identity(seed: String, chunk_key: Vector2i) -> String:
+	return "chunk-props:%s:%d,%d" % [seed, chunk_key.x, chunk_key.y]
