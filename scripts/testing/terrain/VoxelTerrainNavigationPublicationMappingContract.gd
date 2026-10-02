@@ -106,6 +106,13 @@ func _run() -> void:
 	var unsafe_forecast := Vector3(0.0,0.0,-Runtime.CELL*80.0)
 	check("unsafe_forecast_falls_back_to_current_player_coverage",
 		Runtime.foreground_viewer_target(player_position,unsafe_forecast,Runtime.FINAL_VIEW_DISTANCE) == player_position)
+	check("hidden_prepared_mesh_does_not_satisfy_render_receipt",
+		not Runtime.native_mesh_viewer_state_rendered({"is_loaded":true, "has_mesh":true,
+			"mesh_viewers":1, "render_viewers":0, "is_visible":false})
+		and Runtime.native_mesh_viewer_state_rendered({"is_loaded":true, "has_mesh":true,
+			"mesh_viewers":2, "render_viewers":1, "is_visible":true})
+		and not Runtime.native_mesh_viewer_state_rendered({"is_loaded":true, "has_mesh":true,
+			"mesh_viewers":1, "render_viewers":1, "is_visible":false}))
 	check("covered_and_published_foreground_allows_native_backpressure_defer",
 		Runtime.primary_viewer_request_may_defer(
 			Runtime.SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS + 1,true,true,true,true))

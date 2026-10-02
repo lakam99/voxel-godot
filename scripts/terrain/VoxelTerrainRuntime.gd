@@ -1787,6 +1787,7 @@ func visible_mesh_area_diagnostics(block_position: Vector3i) -> Dictionary:
 		if pending_sections.size() >= 16: break
 	return {"block": block_position, "area": area, "areaMeshed": terrain.is_area_meshed(area),
 		"hasGeometryReceipt": published_mesh_blocks.has(block_position),
+		"nativeViewerState": native_mesh_block_viewer_state(block_position),
 		"pendingEditSections": pending_sections,
 		"viewerPosition": viewer.global_position if is_instance_valid(viewer) else Vector3.ZERO,
 		"viewerDistance": int(viewer.view_distance) if is_instance_valid(viewer) else 0,
@@ -1794,7 +1795,28 @@ func visible_mesh_area_diagnostics(block_position: Vector3i) -> Dictionary:
 
 
 func visible_mesh_block_has_geometry(block_position: Vector3i) -> bool:
-	return published_mesh_blocks.has(block_position)
+	if not published_mesh_blocks.has(block_position): return false
+	if terrain == null or not terrain.has_method("get_mesh_block_viewer_state"): return true
+	var state := native_mesh_block_viewer_state(block_position)
+	return bool(state.get("is_loaded", false)) and bool(state.get("has_mesh", false))
+
+func native_mesh_block_viewer_state(block_position: Vector3i) -> Dictionary:
+	if terrain == null or not is_instance_valid(terrain) \
+			or not terrain.has_method("get_mesh_block_viewer_state"):
+		return {}
+	var state_value = terrain.call("get_mesh_block_viewer_state", block_position)
+	return state_value if state_value is Dictionary else {}
+
+func visible_mesh_block_rendered(block_position: Vector3i) -> bool:
+	if not published_mesh_blocks.has(block_position): return false
+	if terrain == null or not terrain.has_method("get_mesh_block_viewer_state"):
+		return true
+	return native_mesh_viewer_state_rendered(native_mesh_block_viewer_state(block_position))
+
+static func native_mesh_viewer_state_rendered(state: Dictionary) -> bool:
+	return bool(state.get("is_loaded", false)) and bool(state.get("has_mesh", false)) \
+		and int(state.get("render_viewers", 0)) > 0 \
+		and bool(state.get("is_visible", false))
 
 
 func visible_mesh_receipt_is_current(source_identity: String, source_revision: String,
@@ -1811,7 +1833,7 @@ func visible_mesh_receipt_is_current(source_identity: String, source_revision: S
 			or representation_id != candidate_id + ":native_mesh" \
 			or tier not in ["near", "horizon"]:
 		return false
-	return published_mesh_blocks.has(block_position) and visible_mesh_area_complete(block_position)
+	return visible_mesh_block_rendered(block_position) and visible_mesh_area_complete(block_position)
 
 static func native_mesh_block_bounds(block_position: Vector3i) -> AABB:
 	return AABB(Vector3(block_position * NATIVE_MESH_BLOCK_SIZE_CELLS),
