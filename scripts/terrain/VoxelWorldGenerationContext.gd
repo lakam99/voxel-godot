@@ -23,6 +23,9 @@ var town_slope_apron_cache := {}
 var initial_terrain_edits := {}
 var generated_site_profiles: Array = []
 var generated_site_profile_store
+var cave_field
+var _cave_fields_mutex := Mutex.new()
+var _cave_fields_by_revision := {}
 # Worker contexts need the generator only for a few callback-style terrain
 # queries. A strong reference here would close a RefCounted cycle with the
 # short-lived WorldGenerationSystem created by VoxelTerrain's native workers.
@@ -64,7 +67,25 @@ func clone_for_worker():
 	context.seed_hash = seed_hash
 	context.pinned_town_regions = pinned_town_regions
 	context.initial_terrain_edits = initial_terrain_edits
-	context.generated_site_profiles = generated_site_profile_store.snapshot() if generated_site_profile_store != null else generated_site_profiles
+	var profile_revision := 0
+	if generated_site_profile_store != null:
+		var profile_snapshot: Dictionary = generated_site_profile_store.snapshot_with_revision()
+		context.generated_site_profiles = profile_snapshot.profiles
+		profile_revision = int(profile_snapshot.revision)
+	else:
+		context.generated_site_profiles = generated_site_profiles
+	# Cave recipes depend on this exact admitted profile snapshot. Share the
+	# native, mutex-protected recipe cache only among blocks of one revision.
+	_cave_fields_mutex.lock()
+	if not _cave_fields_by_revision.has(profile_revision):
+		var field = ClassDB.instantiate("NativeCaveField")
+		assert(field != null and bool(field.setup(seed_text, CELL)))
+		_cave_fields_by_revision[profile_revision] = field
+		if _cave_fields_by_revision.size() > 4:
+			var oldest_revision: int = _cave_fields_by_revision.keys().min()
+			_cave_fields_by_revision.erase(oldest_revision)
+	context.cave_field = _cave_fields_by_revision[profile_revision]
+	_cave_fields_mutex.unlock()
 	# These noise resources are immutable after setup and safe to share for
 	# concurrent sampling. Reusing them avoids constructing five resources for
 	# every 16^3 VoxelTerrain generation block.

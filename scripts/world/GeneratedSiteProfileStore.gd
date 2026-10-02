@@ -7,6 +7,7 @@ class_name GeneratedSiteProfileStore
 var _mutex := Mutex.new()
 var _profiles: Array = []
 var _seed: String
+var _revision := 0
 
 func _init(world_seed: String = "") -> void:
 	_seed = world_seed
@@ -15,6 +16,12 @@ func _init(world_seed: String = "") -> void:
 func snapshot() -> Array:
 	_mutex.lock()
 	var result := _profiles
+	_mutex.unlock()
+	return result
+
+func snapshot_with_revision() -> Dictionary:
+	_mutex.lock()
+	var result := {"profiles": _profiles, "revision": _revision}
 	_mutex.unlock()
 	return result
 
@@ -38,5 +45,6 @@ func append_prepared_profile(profile: Dictionary) -> bool:
 	next.sort_custom(func(a, b): return String(a.siteId) < String(b.siteId))
 	next.make_read_only()
 	_profiles = next
+	_revision += 1
 	_mutex.unlock()
 	return true

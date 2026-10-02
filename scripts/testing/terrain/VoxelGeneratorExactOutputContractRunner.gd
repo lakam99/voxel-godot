@@ -3,6 +3,7 @@ extends SceneTree
 const CONTEXT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const GENERATION := preload("res://scripts/WorldGenerationSystem.gd")
 const WORKER := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
+const PROFILE_STORE := preload("res://scripts/world/GeneratedSiteProfileStore.gd")
 const CELL := 1.35
 const BLOCK_SIZE := Vector3i(16, 16, 16)
 const MAX_MISMATCHES := 8
@@ -21,11 +22,13 @@ func run() -> void:
 			{"name": "deep_lod", "origin": Vector3i(-32, -60, 24), "lod": 1},
 		]:
 			rows.append(compare_block(seed_text, block))
-	var passed := rows.all(func(row: Dictionary) -> bool:
+	var revision_isolation := check_cave_cache_revision_isolation()
+	var passed := revision_isolation and rows.all(func(row: Dictionary) -> bool:
 		return row.passed and row.voxels == 4096 and row.savedEditVoxels == 2)
 	var report := {"schema": "voxel-generator-exact-output-contract/v1",
 		"evidenceLevel": "synthetic_service_contract", "liveGameplayAcceptance": false,
-		"passed": passed, "complete": true, "blocks": rows}
+		"passed": passed, "complete": true, "revisionIsolation": revision_isolation,
+		"blocks": rows}
 	var report_path := OS.get_environment("VOXEL_GENERATOR_EXACT_OUTPUT_REPORT")
 	if report_path.is_empty():
 		report_path = ProjectSettings.globalize_path(
@@ -38,6 +41,32 @@ func run() -> void:
 		return
 	file.store_string(JSON.stringify(report, "  "))
 	quit(0 if passed else 1)
+
+
+func check_cave_cache_revision_isolation() -> bool:
+	var template = CONTEXT.new()
+	template.seed_text = "revision-isolation-407"
+	template.seed_hash = template.hash_string(template.seed_text)
+	template.setup_noise()
+	var store = PROFILE_STORE.new(template.seed_text)
+	template.generated_site_profile_store = store
+	var before = template.clone_for_worker()
+	var same = template.clone_for_worker()
+	var empty: Array = []
+	empty.make_read_only()
+	var profile := {"worldSeed": template.seed_text, "siteId": "test-site",
+		"envelopeCells": Rect2i(0, 0, 4, 4), "supportMask": empty,
+		"distanceCells": empty, "groundRootPoints": empty}
+	profile.make_read_only()
+	if not store.append_prepared_profile(profile):
+		return false
+	var after = template.clone_for_worker()
+	var after_same = template.clone_for_worker()
+	return is_same(before.cave_field, same.cave_field) \
+		and not is_same(before.cave_field, after.cave_field) \
+		and is_same(after.cave_field, after_same.cave_field) \
+		and before.generated_site_profiles.is_empty() \
+		and after.generated_site_profiles.size() == 1
 
 
 func compare_block(seed_text: String, block: Dictionary) -> Dictionary:
@@ -56,20 +85,31 @@ func compare_block(seed_text: String, block: Dictionary) -> Dictionary:
 		"density": CELL * 2.0, "material": "copperOre"}
 	var worker = WORKER.new()
 	worker.setup(context)
+	var shared_field = context.clone_for_worker().cave_field
 	var actual := make_buffer()
 	var worker_started := Time.get_ticks_usec()
 	worker._generate_block(actual, origin, lod)
 	var worker_usec := Time.get_ticks_usec() - worker_started
+	var first_builds := int(shared_field.cache_stats().get("recipe_build_count", 0))
+	var repeat := make_buffer()
+	var repeat_started := Time.get_ticks_usec()
+	worker._generate_block(repeat, origin, lod)
+	var repeat_usec := Time.get_ticks_usec() - repeat_started
+	var repeat_builds := int(shared_field.cache_stats().get("recipe_build_count", 0))
 	var reference := make_buffer()
 	var direct_context = context.clone_for_worker()
+	direct_context.cave_field = null
 	var world = GENERATION.new()
+	var setup_started := Time.get_ticks_usec()
 	world.setup(direct_context)
 	direct_context.set_generator(world)
+	var setup_usec := Time.get_ticks_usec() - setup_started
 	var material_worker = WORKER.new()
 	var reference_started := Time.get_ticks_usec()
 	var saved_edit_voxels := fill_direct_reference(reference, direct_context, world,
 		material_worker, origin, lod)
 	var reference_usec := Time.get_ticks_usec() - reference_started
+	var cave_stats: Dictionary = world.cave_field.cache_stats()
 	var mismatch_count := 0
 	var mismatches: Array[Dictionary] = []
 	var material_ids: Dictionary = {}
@@ -85,7 +125,10 @@ func compare_block(seed_text: String, block: Dictionary) -> Dictionary:
 				var reference_data5 := reference.get_voxel(x, y, z, VoxelBuffer.CHANNEL_DATA5)
 				material_ids[actual_indices] = true
 				if actual_sdf != reference_sdf or actual_indices != reference_indices \
-						or actual_data5 != reference_data5:
+						or actual_data5 != reference_data5 \
+						or repeat.get_voxel_f(x, y, z, VoxelBuffer.CHANNEL_SDF) != actual_sdf \
+						or repeat.get_voxel(x, y, z, VoxelBuffer.CHANNEL_INDICES) != actual_indices \
+						or repeat.get_voxel(x, y, z, VoxelBuffer.CHANNEL_DATA5) != actual_data5:
 					mismatch_count += 1
 					if mismatches.size() < MAX_MISMATCHES:
 						mismatches.append({"cell": origin + at * voxel_scale,
@@ -95,9 +138,14 @@ func compare_block(seed_text: String, block: Dictionary) -> Dictionary:
 	return {"seed": seed_text, "block": block.name, "origin": origin, "lod": lod,
 		"voxels": BLOCK_SIZE.x * BLOCK_SIZE.y * BLOCK_SIZE.z,
 		"savedEditVoxels": saved_edit_voxels, "materialCount": material_ids.size(),
-		"workerUsec": worker_usec, "referenceUsec": reference_usec,
+		"workerUsec": worker_usec, "repeatWorkerUsec": repeat_usec,
+		"firstRecipeBuilds": first_builds, "repeatRecipeBuilds": repeat_builds,
+		"referenceUsec": reference_usec,
+		"worldSetupUsec": setup_usec, "caveRecipeBuilds": cave_stats.get("recipe_build_count", 0),
+		"caveRecipeBuildUsec": cave_stats.get("recipe_build_total_usec", 0),
+		"caveRecipeBuildMaxUsec": cave_stats.get("recipe_build_max_usec", 0),
 		"mismatchCount": mismatch_count, "mismatches": mismatches,
-		"passed": mismatch_count == 0}
+		"passed": mismatch_count == 0 and first_builds >= 1 and repeat_builds == first_builds}
 
 
 func make_buffer() -> VoxelBuffer:

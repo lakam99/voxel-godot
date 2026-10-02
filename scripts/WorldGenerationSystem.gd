@@ -51,11 +51,17 @@ func setup(main_node) -> void:
 	terrain_volume_service.setup(main, self)
 
 func _setup_native_cave_field() -> void:
-	if cave_field == null:
-		cave_field = ClassDB.instantiate("NativeCaveField")
+	var shared_field = main.get("cave_field") if main != null else null
+	if shared_field != null:
+		cave_field = shared_field
+	else:
+		# Main gameplay and non-worker consumers own their own field.
+		# A worker clone receives a revision-bound field from its context.
+		if cave_field == null:
+			cave_field = ClassDB.instantiate("NativeCaveField")
 		assert(cave_field != null, "The native cave authority extension must be loaded before world generation")
-	var seed_text := String(main.get("seed_text")) if main != null else "default"
-	assert(bool(cave_field.setup(seed_text, cell_size())), "Native cave authority setup failed")
+		var seed_text := String(main.get("seed_text")) if main != null else "default"
+		assert(bool(cave_field.setup(seed_text, cell_size())), "Native cave authority setup failed")
 	cave_surface_callable = Callable(self, "_native_cave_surface_y")
 	cave_protected_bounds_callable = Callable(self, "_native_cave_bounds_protected")
 
