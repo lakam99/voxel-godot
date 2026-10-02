@@ -28,10 +28,12 @@ func add_tree(body: StaticBody3D, request: Dictionary) -> bool:
 	var biome := String(request.get("biome", ""))
 	var height := float(request.get("visualHeight", 0.0))
 	var crown_radius := float(request.get("canopyRadius", 0.0))
+	var canopy_density := float(request.get("canopyDensity", 0.78))
 	var trunk_radius := float(request.get("trunkRadius", 0.0))
 	var visibility_range := float((request.get("biomeParameters", {}) as Dictionary).get("visibilityRange", 0.0))
 	if prop_id.is_empty() or architecture.is_empty() or biome.is_empty() \
-			or not is_finite(height) or not is_finite(crown_radius) or not is_finite(trunk_radius) \
+			or not is_finite(height) or not is_finite(crown_radius) or not is_finite(canopy_density) \
+			or not is_finite(trunk_radius) \
 			or not is_finite(visibility_range) or height <= 0.0 or crown_radius <= 0.0 \
 			or trunk_radius <= 0.0 or visibility_range <= 0.0:
 		return false
@@ -58,7 +60,8 @@ func add_tree(body: StaticBody3D, request: Dictionary) -> bool:
 	var slot := int(free_slots.pop_back()) if not free_slots.is_empty() else int(page.nextSlot)
 	page.freeSlots = free_slots
 	var world_to_batch := global_transform.affine_inverse() * body.global_transform
-	var transforms := _tree_transforms(world_to_batch, height, crown_radius, trunk_radius)
+	var transforms := _tree_transforms(world_to_batch, architecture, height,
+		crown_radius, trunk_radius, canopy_density)
 	var meshes: Array = page.meshes
 	for index in range(3):
 		(meshes[index] as MultiMesh).set_instance_transform(slot, transforms[index])
@@ -221,7 +224,7 @@ func _create_page(architecture: String, biome: String,
 		visibility_range: float, page_index: int) -> Dictionary:
 	_factory.ensure_shared_geometry()
 	var branch_mesh := _factory.runtime_shared_branch_mesh()
-	var crown_mesh := _factory.runtime_shared_impostor_crown_mesh()
+	var crown_mesh := _factory.runtime_shared_horizon_crown_mesh(architecture)
 	if branch_mesh == null or crown_mesh == null:
 		return {}
 	var meshes: Array = []
@@ -249,16 +252,23 @@ func _create_page(architecture: String, biome: String,
 		"nextSlot": 0, "freeSlots": [], "liveCount": 0}
 
 
-static func _tree_transforms(body_to_batch: Transform3D, height: float,
-		crown_radius: float, trunk_radius: float) -> Array:
+static func _tree_transforms(body_to_batch: Transform3D, architecture: String,
+		height: float, crown_radius: float, trunk_radius: float,
+		canopy_density: float) -> Array:
 	var trunk := Transform3D(Basis.IDENTITY.scaled(Vector3(trunk_radius,
 		height * 0.68, trunk_radius)), Vector3(0.0, height * 0.34, 0.0))
-	var crown_scale := Vector3(crown_radius * 2.0,
-		maxf(crown_radius * 1.2, height * 0.42), 1.0)
+	var fullness := lerpf(0.82, 1.04, clampf(canopy_density, 0.2, 1.0))
+	var crown_height := maxf(crown_radius * 1.2, height * 0.42)
+	var crown_center_y := height * 0.68
+	if architecture == "savanna":
+		crown_height *= 0.66
+		crown_center_y = height * 0.78
+	var crown_scale := Vector3(crown_radius * 2.0 * fullness,
+		crown_height, 1.0)
 	var first_crown := Transform3D(Basis(Vector3.UP, 0.0).scaled(crown_scale),
-		Vector3(0.0, height * 0.68, 0.0))
+		Vector3(0.0, crown_center_y, 0.0))
 	var second_crown := Transform3D(Basis(Vector3.UP, PI * 0.5).scaled(crown_scale),
-		Vector3(0.0, height * 0.68, 0.0))
+		Vector3(0.0, crown_center_y, 0.0))
 	return [body_to_batch * trunk, body_to_batch * first_crown,
 		body_to_batch * second_crown]
 

@@ -64,13 +64,21 @@ func run_fixture() -> void:
 	queue.set_process(false)
 	var first := tree_body("horizon-tree-first", Vector3(-11.0, 0.0, 0.0))
 	var second := tree_body("horizon-tree-second", Vector3(11.0, 0.0, 0.0))
+	var conifer := tree_body("horizon-tree-conifer", Vector3(-32.0, 0.0, 0.0))
+	var savanna := tree_body("horizon-tree-savanna", Vector3(32.0, 0.0, 0.0))
 	chunk.add_child(first)
 	chunk.add_child(second)
+	chunk.add_child(conifer)
+	chunk.add_child(savanna)
 	var first_enqueued: bool = queue.enqueue(first, tree_request(first))
 	var second_enqueued: bool = queue.enqueue(second, tree_request(second))
+	var conifer_enqueued: bool = queue.enqueue(conifer, tree_request(conifer, "conifer"))
+	var savanna_enqueued: bool = queue.enqueue(savanna, tree_request(savanna, "savanna"))
 	var batch := chunk.get_node_or_null("HorizonEcologyTreeBatch") as Node3D
 	var first_snapshot: Dictionary = batch.call("installed_snapshot", first) if batch != null else {}
 	var second_snapshot: Dictionary = batch.call("installed_snapshot", second) if batch != null else {}
+	var conifer_snapshot: Dictionary = batch.call("installed_snapshot", conifer) if batch != null else {}
+	var savanna_snapshot: Dictionary = batch.call("installed_snapshot", savanna) if batch != null else {}
 	var distinct_slots := first_enqueued and second_enqueued \
 		and String(first_snapshot.get("status", "")) == "ready" \
 		and String(second_snapshot.get("status", "")) == "ready" \
@@ -79,13 +87,36 @@ func run_fixture() -> void:
 	observe("two_generated_tree_bodies_have_distinct_installed_batch_slots", distinct_slots,
 		{"first": snapshot_summary(first_snapshot), "second": snapshot_summary(second_snapshot),
 		"firstState": first.get_meta("tree_visual_state", ""),
-		"secondState": second.get_meta("tree_visual_state", "")})
+			"secondState": second.get_meta("tree_visual_state", "")})
+	var visual_factory: ProceduralTreeVisualFactory = queue.publication_service.get_visual_factory()
+	var broadleaf_mesh := visual_factory.runtime_shared_horizon_crown_mesh("broadleaf")
+	var conifer_mesh := visual_factory.runtime_shared_horizon_crown_mesh("conifer")
+	var savanna_mesh := visual_factory.runtime_shared_horizon_crown_mesh("savanna")
+	observe("architecture_crowns_share_prepared_shaped_meshes_without_extra_batch_roles",
+		conifer_enqueued and savanna_enqueued \
+		and String(conifer_snapshot.get("status", "")) == "ready" \
+		and String(savanna_snapshot.get("status", "")) == "ready" \
+		and broadleaf_mesh is ArrayMesh and conifer_mesh is ArrayMesh and savanna_mesh is ArrayMesh \
+		and broadleaf_mesh.get_instance_id() != conifer_mesh.get_instance_id() \
+		and broadleaf_mesh.get_instance_id() != savanna_mesh.get_instance_id() \
+		and broadleaf_mesh.surface_get_array_len(0) > 12 \
+		and conifer_mesh.surface_get_array_len(0) > 12 \
+		and savanna_mesh.surface_get_array_len(0) > 12 \
+		and batch.get_child_count() == 9,
+		{"broadleafVertices": broadleaf_mesh.surface_get_array_len(0),
+		"coniferVertices": conifer_mesh.surface_get_array_len(0),
+		"savannaVertices": savanna_mesh.surface_get_array_len(0),
+		"batchMeshInstances": batch.get_child_count(),
+		"conifer": snapshot_summary(conifer_snapshot),
+		"savanna": snapshot_summary(savanna_snapshot)})
 	await capture("horizon_pending")
 	var slot_was_visible := first.get_node_or_null("GeneratedTreeVisual") == null \
 		and second.get_node_or_null("GeneratedTreeVisual") == null \
 		and String(first_snapshot.get("status", "")) == "ready"
 	observe("horizon_capture_precedes_recipe_publication", slot_was_visible, {})
 	queue.cancel_body_publication(second)
+	queue.cancel_body_publication(conifer)
+	queue.cancel_body_publication(savanna)
 	var cancelled_snapshot: Dictionary = batch.call("installed_snapshot", second) if batch != null else {}
 	var sibling_snapshot: Dictionary = batch.call("installed_snapshot", first) if batch != null else {}
 	observe("cancelling_one_body_invalidates_only_its_slot",
@@ -122,7 +153,8 @@ func run_fixture() -> void:
 		"scope": "Real TreePublicationQueue, recipe worker, chunk-owned HorizonEcologyTreeBatch, renderer frames and screenshots. Does not prove seeded chunk enumeration, normal gameplay startup, traversal, or full-view readiness.",
 		"checks": observations, "captures": captures,
 		"queueSourceSha256": FileAccess.get_sha256("res://scripts/environment/TreePublicationQueue.gd"),
-		"batchSourceSha256": FileAccess.get_sha256("res://scripts/world/HorizonEcologyTreeBatch.gd")}
+		"batchSourceSha256": FileAccess.get_sha256("res://scripts/world/HorizonEcologyTreeBatch.gd"),
+		"factorySourceSha256": FileAccess.get_sha256("res://scripts/visual/ProceduralTreeVisualFactory.gd")}
 	var file := FileAccess.open(report_path, FileAccess.WRITE)
 	if file == null:
 		quit(2)
@@ -148,10 +180,18 @@ func tree_body(id: String, position_value: Vector3) -> StaticBody3D:
 	return body
 
 
-func tree_request(body: StaticBody3D) -> Dictionary:
+func tree_request(body: StaticBody3D, architecture := "broadleaf") -> Dictionary:
+	var biome := "forest"
+	var grammar := "bushy_oak"
+	if architecture == "conifer":
+		biome = "taiga"
+		grammar = "norway_spruce"
+	elif architecture == "savanna":
+		biome = "savanna"
+		grammar = "acacia"
 	return {"treeId": String(body.get_meta("prop_id")),
-		"worldSeed": "horizon-headed-fixture", "biome": "forest",
-		"architecture": "broadleaf", "speciesGrammar": "bushy_oak",
+		"worldSeed": "horizon-headed-fixture", "biome": biome,
+		"architecture": architecture, "speciesGrammar": grammar,
 		"growthStage": 0.80, "visualHeight": 20.0, "trunkRadius": 0.88,
 		"canopyRadius": 8.0, "canopyDensity": 0.82,
 		"treeWorldPosition": body.global_position,

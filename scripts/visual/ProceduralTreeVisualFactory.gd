@@ -18,6 +18,7 @@ const RUNTIME_JUNCTION_HULL_LATITUDES := 1
 var branch_mesh: CylinderMesh
 var foliage_cluster_meshes: Array[ArrayMesh] = []
 var impostor_crown_mesh: QuadMesh
+var horizon_crown_meshes := {}
 var branch_materials := {}
 var foliage_materials := {}
 
@@ -88,6 +89,30 @@ func ensure_shared_geometry() -> void:
 		impostor_crown_mesh = QuadMesh.new()
 		impostor_crown_mesh.resource_name = "procedural_tree_shared_impostor_crown"
 		impostor_crown_mesh.size = Vector2.ONE
+	if horizon_crown_meshes.is_empty():
+		# Temporary chunk-batched silhouettes use the same material and two
+		# crossed cards as the existing impostor, but a small shared outline keeps
+		# their crowns legible while mathematical recipes are still queued.
+		horizon_crown_meshes["broadleaf"] = build_horizon_crown_mesh([
+			Vector2(-0.47, -0.34), Vector2(-0.50, 0.06),
+			Vector2(-0.37, 0.34), Vector2(-0.15, 0.49),
+			Vector2(0.13, 0.48), Vector2(0.39, 0.29),
+			Vector2(0.50, -0.04), Vector2(0.43, -0.34),
+			Vector2(0.19, -0.49), Vector2(-0.20, -0.47)
+		], "broadleaf")
+		horizon_crown_meshes["conifer"] = build_horizon_crown_mesh([
+			Vector2(0.0, 0.50), Vector2(0.20, 0.17),
+			Vector2(0.32, -0.08), Vector2(0.50, -0.48),
+			Vector2(-0.50, -0.48), Vector2(-0.32, -0.08),
+			Vector2(-0.20, 0.17)
+		], "conifer")
+		horizon_crown_meshes["savanna"] = build_horizon_crown_mesh([
+			Vector2(-0.46, -0.21), Vector2(-0.50, 0.08),
+			Vector2(-0.30, 0.33), Vector2(0.04, 0.43),
+			Vector2(0.36, 0.29), Vector2(0.50, 0.06),
+			Vector2(0.46, -0.20), Vector2(0.21, -0.35),
+			Vector2(-0.24, -0.34)
+		], "savanna")
 
 func prewarm_runtime_resources() -> void:
 	# Geometry and material variants are immutable shared resources. Build them
@@ -110,6 +135,25 @@ func runtime_shared_branch_mesh() -> Mesh:
 func runtime_shared_impostor_crown_mesh() -> Mesh:
 	ensure_shared_geometry()
 	return impostor_crown_mesh
+
+
+func runtime_shared_horizon_crown_mesh(architecture: String) -> Mesh:
+	ensure_shared_geometry()
+	return horizon_crown_meshes.get(architecture, horizon_crown_meshes["broadleaf"]) as Mesh
+
+
+func build_horizon_crown_mesh(outline: Array[Vector2], architecture: String) -> ArrayMesh:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for index in range(outline.size()):
+		for point in [Vector2.ZERO, outline[(index + 1) % outline.size()], outline[index]]:
+			surface.set_normal(Vector3.BACK)
+			surface.set_uv(point + Vector2(0.5, 0.5))
+			surface.set_color(Color(0.85, 0.53, 0.84 + point.y * 0.10, 1.0))
+			surface.add_vertex(Vector3(point.x, point.y, 0.0))
+	var mesh := surface.commit()
+	mesh.resource_name = "procedural_tree_shared_horizon_crown_%s" % architecture
+	return mesh
 
 func runtime_shared_foliage_cluster_mesh(cluster_variant := 1) -> Mesh:
 	ensure_shared_geometry()
