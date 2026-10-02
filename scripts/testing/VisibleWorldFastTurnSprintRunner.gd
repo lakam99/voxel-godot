@@ -74,6 +74,7 @@ func run() -> void:
     write_progress("menu_new_game")
     var failures: Array[String] = []
     var startup_prop_timeout := {}
+    var startup_tree_timeout := {}
     if normal_runtime_environment_failure() != "":
         failures.append(normal_runtime_environment_failure())
     else:
@@ -85,6 +86,7 @@ func run() -> void:
         if not launched:
             failures.append(startup_loading_failure if not startup_loading_failure.is_empty() else "New Game did not reach gameplay readiness")
             startup_prop_timeout = _initial_region_prop_timeout_diagnostics()
+            startup_tree_timeout = _initial_region_tree_timeout_diagnostics()
         else:
             playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "fast_turn_sprint_observer")
             if not bool(playtest_survival_policy.get("enabled", false)):
@@ -150,6 +152,8 @@ func run() -> void:
     }
     if not startup_prop_timeout.is_empty():
         report["startup"]["propSourceTimeout"] = startup_prop_timeout
+    if not startup_tree_timeout.is_empty():
+        report["startup"]["treeCandidateTimeout"] = startup_tree_timeout
     write_report(report)
     finish(0 if failures.is_empty() else 1)
 
@@ -261,6 +265,121 @@ func _initial_region_prop_timeout_diagnostics() -> Dictionary:
             "horizonStateCount": horizon_states.size(),
             "horizonPromotionCursor": int(horizon.get("promotion_cursor")) if is_instance_valid(horizon) else -1},
         "lastManifestAttempt": _chunk_prop_timeout_last_attempt(main.get("visible_world_prop_last_attempt"))}
+
+
+func _initial_region_tree_timeout_diagnostics() -> Dictionary:
+    # Only inspect the already failed initial foreground. The ledger query
+    # validates receipts but neither admits candidates nor advances producers.
+    if not is_instance_valid(main): return {}
+    var failure_value = main.get("startup_loading_failure_result")
+    var failure: Dictionary = failure_value if failure_value is Dictionary else {}
+    if startup_loading_failure != "initial_region_readiness_timeout" \
+            and String(failure.get("reason", "")) != "initial_region_readiness_timeout":
+        return {}
+    var ledger = main.get("visible_world_readiness") as Object
+    var runtime = main.get("voxel_terrain_runtime") as Object
+    var requests_value = main.get("streaming_requests")
+    var requests: Dictionary = requests_value if requests_value is Dictionary else {}
+    var foreground_value = main.get("streaming_request_foreground_bounds")
+    var foreground: Dictionary = foreground_value if foreground_value is Dictionary else {}
+    var bounds: Rect2i = foreground.get("player", Rect2i())
+    var request_id := int(requests.get("player", 0))
+    var seed := String(main.get("seed_text"))
+    var world_revision := String(runtime.call("visible_mesh_world_revision")) \
+        if is_instance_valid(runtime) and runtime.has_method("visible_mesh_world_revision") else ""
+    var view_revision := int(main.get("visible_world_view_revision"))
+    var result := {"evidenceLevel": "failure_only_read_only_candidate_snapshot",
+        "requestId": request_id, "seed": seed, "worldRevision": world_revision,
+        "viewRevision": view_revision, "foregroundBounds": bounds,
+        "ledgerPresent": is_instance_valid(ledger)}
+    if not is_instance_valid(ledger) or not ledger.has_method("pending_candidate_diagnostics") \
+            or request_id <= 0 or not bounds.has_area() or world_revision.is_empty():
+        result["reason"] = "initial_visual_ledger_query_unavailable"
+        return result
+    result["ledgerIdentity"] = {"requestId": int(ledger.get("_request_id")),
+        "seed": String(ledger.get("_seed")),
+        "worldRevision": String(ledger.get("_world_revision")),
+        "viewRevision": int(ledger.get("_view_revision")),
+        "bounds": ledger.get("_bounds"), "active": bool(ledger.get("_view_active"))}
+    var pending: Array[Dictionary] = ledger.call("pending_candidate_diagnostics",
+        request_id, seed, world_revision, view_revision, bounds, 8)
+    result["pendingCandidates"] = pending
+    result["pendingCandidateLimit"] = 8
+    for row: Dictionary in pending:
+        if String(row.get("kind", "")) == "trees_foliage":
+            result["treeProducer"] = _tree_timeout_producer(row, seed)
+            break
+    return result
+
+
+func _tree_timeout_producer(row: Dictionary, seed: String) -> Dictionary:
+    var source_id := String(row.get("sourceId", ""))
+    var candidate_id := String(row.get("candidateId", ""))
+    var prefix := "chunk-props:%s:" % seed
+    var suffix := ":trees_foliage"
+    var result := {"sourceId": source_id, "candidateId": candidate_id,
+        "nodeSearchLimitPerRoot": 512}
+    if not source_id.begins_with(prefix) or not source_id.ends_with(suffix):
+        result["reason"] = "tree_source_identity_unrecognized"
+        return result
+    var coordinates := source_id.substr(prefix.length(),
+        source_id.length() - prefix.length() - suffix.length()).split(",")
+    if coordinates.size() != 2 or not coordinates[0].is_valid_int() \
+            or not coordinates[1].is_valid_int():
+        result["reason"] = "tree_chunk_coordinates_invalid"
+        return result
+    var key := Vector2i(int(coordinates[0]), int(coordinates[1]))
+    result["chunk"] = key
+    var chunks_value = main.get("chunks")
+    var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
+    var physical_root := chunks.get(key) as Node if is_instance_valid(chunks.get(key)) else null
+    var horizon = main.get("horizon_ecology_source") as Object
+    var horizon_root := horizon.call("source_for", key) as Node \
+        if is_instance_valid(horizon) and horizon.has_method("source_for") else null
+    result["physical"] = _tree_timeout_node(physical_root, candidate_id)
+    result["horizon"] = _tree_timeout_node(horizon_root, candidate_id)
+    var queue = main.get("tree_publication_queue") as Object
+    if is_instance_valid(queue) and queue.has_method("metrics"):
+        var metrics_value = queue.call("metrics")
+        var metrics: Dictionary = metrics_value if metrics_value is Dictionary else {}
+        result["publicationQueue"] = {"pending": int(metrics.get("pending", 0)),
+            "activeWorkers": int(metrics.get("activeWorkers", 0)),
+            "completed": int(metrics.get("completed", 0)),
+            "queued": int(metrics.get("queued", 0)),
+            "published": int(metrics.get("published", 0)),
+            "failed": int(metrics.get("failed", 0))}
+    return result
+
+
+func _tree_timeout_node(root: Node, candidate_id: String) -> Dictionary:
+    var result := {"rootPresent": is_instance_valid(root), "found": false}
+    if not is_instance_valid(root): return result
+    result["rootInstanceId"] = root.get_instance_id()
+    result["rootInsideTree"] = root.is_inside_tree()
+    result["surfaceSourceRevision"] = String(root.get_meta("chunk_surface_candidate_source_revision", ""))
+    result["fullSourceRevision"] = String(root.get_meta("chunk_prop_candidate_source_revision", ""))
+    var remaining: Array[Node] = [root]
+    var inspected := 0
+    while not remaining.is_empty() and inspected < 512:
+        var node: Node = remaining.pop_back()
+        inspected += 1
+        if String(node.get_meta("prop_id", "")) == candidate_id:
+            result["found"] = true
+            result["bodyInstanceId"] = node.get_instance_id()
+            result["bodyInsideTree"] = node.is_inside_tree()
+            result["bodyVisible"] = node.visible if node is Node3D else false
+            result["queuedForDeletion"] = node.is_queued_for_deletion()
+            result["treeVisualState"] = String(node.get_meta("tree_visual_state", ""))
+            result["treeRenderLodTier"] = String(node.get_meta("tree_render_lod_tier", ""))
+            result["treeRecipeSignature"] = String(node.get_meta("tree_recipe_signature", ""))
+            result["horizonPublisherPresent"] = node.has_meta("horizon_visual_publisher")
+            result["publicationCancelled"] = bool(node.get_meta("tree_publication_cancelled", false))
+            break
+        for child in node.get_children():
+            if child is Node: remaining.append(child)
+    result["inspectedNodes"] = inspected
+    result["searchTruncated"] = not remaining.is_empty() and inspected >= 512
+    return result
 
 
 func _chunk_prop_timeout_producer(root: Node3D, state: Dictionary) -> Dictionary:
