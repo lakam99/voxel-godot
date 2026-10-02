@@ -107,6 +107,7 @@ func run() -> void:
 	await test_installed_detail_batch_receipts()
 	await test_production_chunk_prop_manifest()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
+	await test_bounded_overlap_transfer_revalidates_receipts()
 	test_candidate_accounting_and_explicit_failure()
 	write_report()
 	quit(0 if _passed else 1)
@@ -768,7 +769,25 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	_check("stale_source_revision_is_rejected", stale.status == "pending")
 	var low_tier: Dictionary = book.accept_receipt("source:props", "tree:stable-id", "tree:stable-id:near",
 		"near", "identity:props", "rev:1", revision, owner, representation)
-	_check("lower_tier_does_not_satisfy_horizon", low_tier.status == "pending")
+	_check("near_receipt_satisfies_horizon_candidate", low_tier.status == "ready")
+	var near_book = VisualReadinessScript.new()
+	var near_revision := int(near_book.begin_view(131, "seed-c", "world-3", BOUNDS,
+		NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	near_book.expect_source("near:props", "props", "near:owner", "rev:1",
+		Rect2i(-1, -1, 2, 2), near_revision)
+	near_book.describe_candidate("near:props", "near:rock", "near",
+		{"positionXZ": Vector2(0.0, 0.0)})
+	var weak_near: Dictionary = near_book.accept_receipt("near:props", "near:rock",
+		"near:rock:horizon", "horizon", "near:owner", "rev:1",
+		near_revision, owner, representation)
+	_check("horizon_receipt_cannot_satisfy_near_candidate",
+		weak_near.status == "pending" and weak_near.reason == "visual_representation_tier_insufficient",
+		weak_near)
+	var strong_near: Dictionary = near_book.accept_receipt("near:props", "near:rock",
+		"near:rock:near", "near", "near:owner", "rev:1",
+		near_revision, owner, representation)
+	_check("near_receipt_satisfies_near_candidate", strong_near.status == "ready",
+		strong_near)
 	var detached: Node3D = Node3D.new()
 	root.add_child(detached)
 	var unowned: Dictionary = book.accept_receipt("source:props", "tree:stable-id", "tree:stable-id:unowned",
@@ -794,6 +813,98 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 		book.region_readiness(13, "seed-c", "world-4", revision, BOUNDS).status == "pending")
 	detached.queue_free()
 	await process_frame
+
+
+func test_bounded_overlap_transfer_revalidates_receipts() -> void:
+	var source_bounds := Rect2i(2, 0, 2, 2)
+	var old = VisualReadinessScript.new()
+	var old_revision := int(old.begin_view(200, "overlap-seed", "overlap-world",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	old.expect_source("overlap:props", "props", "overlap-owner", "overlap-rev-1",
+		source_bounds, old_revision)
+	var owner := Node3D.new()
+	root.add_child(owner)
+	var visual := MeshInstance3D.new()
+	visual.mesh = BoxMesh.new()
+	owner.add_child(visual)
+	await process_frame
+	for index in 2:
+		var candidate_id := "overlap-prop:%d" % index
+		old.describe_candidate("overlap:props", candidate_id, "horizon",
+			{"positionXZ": Vector2(2.5 + float(index), 0.5)})
+		old.accept_receipt("overlap:props", candidate_id, candidate_id + ":installed",
+			"horizon", "overlap-owner", "overlap-rev-1", old_revision, owner, visual)
+	old.finish_source("overlap:props", "overlap-owner", "overlap-rev-1", old_revision)
+	var shifted_bounds := Rect2i(-5, -6, 12, 12)
+	var shifted_center := Vector2(1.0, 0.0)
+	var shifted = VisualReadinessScript.new()
+	shifted.begin_view(200, "overlap-seed", "overlap-world", BOUNDS,
+		NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS)
+	var shifted_revision := int(shifted.begin_view(200, "overlap-seed", "overlap-world",
+		shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)
+	var first: Dictionary = shifted.transfer_complete_overlap_source(old, "overlap:props",
+		"overlap-owner", "overlap-rev-1", shifted_revision, 1)
+	_check("overlap_transfer_is_bounded_and_retryable",
+		first.status == "pending" and first.reason == "visual_overlap_transfer_budget" \
+		and first.remainingCandidates == 1 and shifted.has_candidate("overlap:props", "overlap-prop:0"), first)
+	var completed: Dictionary = shifted.transfer_complete_overlap_source(old, "overlap:props",
+		"overlap-owner", "overlap-rev-1", shifted_revision, 1)
+	_check("complete_interior_source_reaccepts_all_receipts_in_new_view_revision",
+		completed.status == "ready" and completed.copiedCandidates == 2 \
+		and completed.viewRevision == shifted_revision and shifted_revision > old_revision \
+		and shifted.has_candidate("overlap:props", "overlap-prop:1"), completed)
+	var wrong_request = VisualReadinessScript.new()
+	var wrong_revision := int(wrong_request.begin_view(201, "overlap-seed", "overlap-world",
+		shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)
+	var borrowed: Dictionary = wrong_request.transfer_complete_overlap_source(old,
+		"overlap:props", "overlap-owner", "overlap-rev-1", wrong_revision)
+	_check("overlap_transfer_never_borrows_another_request",
+		borrowed.status == "pending" and not wrong_request.has_candidate(
+			"overlap:props", "overlap-prop:0"), borrowed)
+	var changed = VisualReadinessScript.new()
+	var changed_revision := int(changed.begin_view(200, "overlap-seed", "overlap-world",
+		shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)
+	var stale: Dictionary = changed.transfer_complete_overlap_source(old,
+		"overlap:props", "overlap-owner", "overlap-rev-2", changed_revision)
+	_check("overlap_transfer_requires_current_source_revision",
+		stale.status == "pending" and not changed.has_candidate(
+			"overlap:props", "overlap-prop:0"), stale)
+	var promoted = VisualReadinessScript.new()
+	var promoted_near := Rect2i(2, 0, 2, 2)
+	var promoted_revision := int(promoted.begin_view(200, "overlap-seed", "overlap-world",
+		shifted_bounds, promoted_near, shifted_center, VIEW_RADIUS).viewRevision)
+	var tier_changed: Dictionary = promoted.transfer_complete_overlap_source(old,
+		"overlap:props", "overlap-owner", "overlap-rev-1", promoted_revision)
+	_check("overlap_transfer_leaves_new_near_tier_for_publisher",
+		tier_changed.status == "pending" and tier_changed.reason == "visual_overlap_tier_promotion_required" \
+		and not promoted.has_candidate("overlap:props", "overlap-prop:0"), tier_changed)
+	var boundary_bounds := Rect2i(5, 0, 2, 2)
+	old.expect_source("overlap:boundary", "props", "boundary-owner", "boundary-rev-1",
+		boundary_bounds, old_revision)
+	old.finish_source("overlap:boundary", "boundary-owner", "boundary-rev-1", old_revision)
+	var boundary: Dictionary = changed.transfer_complete_overlap_source(old,
+		"overlap:boundary", "boundary-owner", "boundary-rev-1", changed_revision)
+	_check("view_clipped_source_must_be_rescanned_even_when_empty",
+		boundary.status == "pending" and boundary.reason == "visual_overlap_boundary_requires_scan",
+		boundary)
+	var empty_bounds := Rect2i(-2, 0, 2, 2)
+	old.expect_source("overlap:empty", "props", "empty-owner", "empty-rev-1",
+		empty_bounds, old_revision)
+	old.finish_source("overlap:empty", "empty-owner", "empty-rev-1", old_revision)
+	var empty: Dictionary = changed.transfer_complete_overlap_source(old,
+		"overlap:empty", "empty-owner", "empty-rev-1", changed_revision)
+	_check("complete_interior_empty_source_transfers_only_with_matching_revision",
+		empty.status == "ready" and empty.copiedCandidates == 0, empty)
+	owner.queue_free()
+	await process_frame
+	var retired = VisualReadinessScript.new()
+	var retired_revision := int(retired.begin_view(200, "overlap-seed", "overlap-world",
+		shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)
+	var stale_owner: Dictionary = retired.transfer_complete_overlap_source(old,
+		"overlap:props", "overlap-owner", "overlap-rev-1", retired_revision)
+	_check("retired_representation_cannot_transfer_to_new_ledger",
+		stale_owner.status == "pending" and stale_owner.reason == "visual_overlap_receipt_not_current" \
+		and not retired.has_candidate("overlap:props", "overlap-prop:0"), stale_owner)
 
 
 func test_candidate_accounting_and_explicit_failure() -> void:

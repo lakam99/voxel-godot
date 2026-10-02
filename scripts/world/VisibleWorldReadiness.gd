@@ -5,7 +5,7 @@ class_name VisibleWorldReadiness
 ## geometry: publishers describe deterministic candidates and acknowledge an
 ## installed representation only after their own publication has committed.
 const CONTENT_KINDS := ["terrain", "structures", "trees_foliage", "props", "wildlife"]
-const REPRESENTATION_TIERS := ["near", "horizon"]
+const REPRESENTATION_TIERS := ["horizon", "near"]
 const MAX_SOURCES := 4096
 const MAX_CANDIDATES := 250000
 const MAX_FAILURES := 256
@@ -27,6 +27,7 @@ var _candidate_count := 0
 var _failure_rows: Array[Dictionary] = []
 var _queue_diagnostics: Dictionary = {}
 var _coverage_lag := 0.0
+var _overlap_transfers: Dictionary = {}
 
 
 ## A changed request, source revision, or view envelope starts a fresh visual
@@ -59,8 +60,139 @@ func begin_view(request_id: int, seed: String, world_revision: String,
 		_failure_rows.clear()
 		_queue_diagnostics.clear()
 		_coverage_lag = 0.0
+		_overlap_transfers.clear()
 	return {"status": "ready", "viewRevision": _view_revision, "requestId": _request_id,
 		"worldRevision": _world_revision}
+
+
+## Re-admits one complete interior source from an older view in bounded slices.
+## The caller must obtain current_identity/current_revision from the producer;
+## this book cannot infer whether an explicit empty source changed upstream.
+## A boundary source is rescanned by its producer because its old view may have
+## excluded candidates now inside the new circle.
+func transfer_complete_overlap_source(previous: VisibleWorldReadiness,
+		source_id: String, current_identity: String, current_revision: String,
+		view_revision: int, candidate_budget := 64) -> Dictionary:
+	if previous == null or previous == self or not previous._view_active or not _view_active \
+			or view_revision != _view_revision or _request_id != previous._request_id \
+			or _seed != previous._seed or _world_revision != previous._world_revision:
+		return {"status": "pending", "reason": "visual_overlap_request_revision_changed"}
+	if source_id.is_empty() or current_identity.is_empty() or current_revision.is_empty():
+		return {"status": "failed", "reason": "invalid_visual_overlap_source"}
+	if not previous._sources.has(source_id):
+		return {"status": "pending", "reason": "visual_overlap_source_missing"}
+	var old_source: Dictionary = previous._sources[source_id]
+	var footprint: Rect2i = old_source.bounds
+	if not bool(old_source.complete) or bool(old_source.failed) \
+			or String(old_source.identity) != current_identity \
+			or String(old_source.revision) != current_revision:
+		_abort_overlap_transfer(source_id)
+		return {"status": "pending", "reason": "visual_overlap_source_revision_changed"}
+	if not _footprint_inside_view(footprint) or not previous._footprint_inside_view(footprint):
+		_abort_overlap_transfer(source_id)
+		return {"status": "pending", "reason": "visual_overlap_boundary_requires_scan"}
+	if String(old_source.kind) == "terrain" and (not _terrain_source_set_declared \
+			or not previous._terrain_source_set_declared \
+			or _terrain_source_footprints.get(source_id) != footprint \
+			or previous._terrain_source_footprints.get(source_id) != footprint):
+		return {"status": "pending", "reason": "visual_overlap_terrain_source_not_admitted"}
+	var transfer: Dictionary = _overlap_transfers.get(source_id, {})
+	if transfer.is_empty():
+		if _sources.has(source_id):
+			return {"status": "pending", "reason": "visual_overlap_source_already_started"}
+		var declared := expect_source(source_id, String(old_source.kind), current_identity,
+			current_revision, footprint, view_revision)
+		if declared.get("status") != "ready": return declared
+		transfer = {"previous": weakref(previous), "sourceIdentity": current_identity,
+			"sourceRevision": current_revision, "viewRevision": view_revision,
+			"candidateIds": old_source.candidates.keys(), "cursor": 0}
+		_overlap_transfers[source_id] = transfer
+	else:
+		var old_ref: WeakRef = transfer.previous
+		if old_ref.get_ref() != previous or String(transfer.sourceIdentity) != current_identity \
+				or String(transfer.sourceRevision) != current_revision \
+				or int(transfer.viewRevision) != view_revision \
+				or not _sources.has(source_id):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_transfer_changed"}
+	var candidate_ids: Array = transfer.candidateIds
+	var processed := 0
+	while int(transfer.cursor) < candidate_ids.size() and processed < maxi(1, candidate_budget):
+		var candidate_id := String(candidate_ids[int(transfer.cursor)])
+		if not old_source.candidates.has(candidate_id):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_candidate_changed"}
+		var old_candidate: Dictionary = old_source.candidates[candidate_id]
+		var metadata: Dictionary = old_candidate.get("metadata", {})
+		var position: Vector2 = metadata.get("positionXZ", Vector2(INF, INF))
+		if bool(old_candidate.failed) or not position.is_finite() or not candidate_in_view(position) \
+				or not previous._candidate_receipt_current(old_source, old_candidate,
+					previous._view_revision):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_receipt_not_current"}
+		var tier := "near" if _near_bounds.has_point(Vector2i(floori(position.x),
+			floori(position.y))) else "horizon"
+		var receipt: Dictionary = old_candidate.get("receipt", {})
+		if _tier_rank(String(receipt.get("tier", ""))) < _tier_rank(tier):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_tier_promotion_required"}
+		var described := describe_candidate(source_id, candidate_id, tier, metadata)
+		if described.get("status") != "ready":
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_candidate_rejected"}
+		var accepted: Dictionary
+		if receipt.has("publisher"):
+			var publisher_ref: WeakRef = receipt.publisher
+			var publisher: Object = publisher_ref.get_ref() if publisher_ref != null else null
+			accepted = accept_publisher_receipt(source_id, candidate_id,
+				String(receipt.representationId), String(receipt.tier), current_identity,
+				current_revision, view_revision, publisher, StringName(receipt.validatorMethod))
+		else:
+			var owner_ref: WeakRef = receipt.get("owner") as WeakRef
+			var representation_ref: WeakRef = receipt.get("representation") as WeakRef
+			var owner: Node = owner_ref.get_ref() as Node if owner_ref != null else null
+			var representation: Node3D = representation_ref.get_ref() as Node3D \
+				if representation_ref != null else null
+			accepted = accept_receipt(source_id, candidate_id,
+				String(receipt.representationId), String(receipt.tier), current_identity,
+				current_revision, view_revision, owner, representation)
+		if accepted.get("status") != "ready" or not _candidate_receipt_current(
+				_sources[source_id], _sources[source_id].candidates[candidate_id], view_revision):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_receipt_not_current"}
+		transfer.cursor = int(transfer.cursor) + 1
+		processed += 1
+	if int(transfer.cursor) < candidate_ids.size():
+		return {"status": "pending", "reason": "visual_overlap_transfer_budget",
+			"retryable": true, "copiedCandidates": int(transfer.cursor),
+			"remainingCandidates": candidate_ids.size() - int(transfer.cursor)}
+	var finished := finish_source(source_id, current_identity, current_revision, view_revision)
+	if finished.get("status") != "ready":
+		_abort_overlap_transfer(source_id)
+		return finished
+	_overlap_transfers.erase(source_id)
+	return {"status": "ready", "sourceId": source_id,
+		"copiedCandidates": candidate_ids.size(), "viewRevision": view_revision}
+
+
+func _abort_overlap_transfer(source_id: String) -> void:
+	if not _overlap_transfers.has(source_id): return
+	_overlap_transfers.erase(source_id)
+	if _sources.has(source_id):
+		_candidate_count = maxi(0, _candidate_count - _sources[source_id].candidates.size())
+		_sources.erase(source_id)
+
+
+func _footprint_inside_view(footprint: Rect2i) -> bool:
+	if not _bounds.encloses(footprint) or not _valid_bounds(footprint): return false
+	# Check the whole half-open rectangle, not only cell centers: production
+	# candidates may occupy any position inside a boundary cell.
+	var xs := [float(footprint.position.x), float(footprint.end.x)]
+	var ys := [float(footprint.position.y), float(footprint.end.y)]
+	for x: float in xs:
+		for y: float in ys:
+			if Vector2(x, y).distance_to(_view_center) > _view_radius: return false
+	return true
 
 
 ## The native publisher owns the 3D block-center selection. Its admitted mesh
@@ -379,6 +511,35 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 		result.status = "ready"
 		result.reason = ""
 	return result
+
+
+func pending_candidate_diagnostics(request_id: int, seed: String,
+		world_revision: String, view_revision: int, bounds: Rect2i,
+		limit := 8) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	if not _view_active or request_id != _request_id or seed != _seed \
+			or world_revision != _world_revision or view_revision != _view_revision \
+			or not _bounds.encloses(bounds):
+		return rows
+	for source_id_value in _sources:
+		var source: Dictionary = _sources[source_id_value]
+		if not (source.bounds as Rect2i).intersects(bounds): continue
+		for candidate_id_value in source.candidates:
+			var candidate: Dictionary = source.candidates[candidate_id_value]
+			var position: Vector2 = candidate.get("metadata", {}).get("positionXZ", Vector2(INF, INF))
+			if String(source.kind) != "terrain" \
+					and not bounds.has_point(Vector2i(floori(position.x), floori(position.y))):
+				continue
+			if _candidate_receipt_current(source, candidate, view_revision): continue
+			var receipt: Dictionary = candidate.get("receipt", {})
+			rows.append({"sourceId": String(source_id_value),
+				"candidateId": String(candidate_id_value), "kind": String(source.kind),
+				"requiredTier": String(candidate.requiredTier),
+				"receiptTier": String(receipt.get("tier", "")),
+				"representationId": String(receipt.get("representationId", "")),
+				"receiptMissing": receipt.is_empty()})
+			if rows.size() >= maxi(1, limit): return rows
+	return rows
 
 
 func _source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:

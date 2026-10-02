@@ -4352,9 +4352,15 @@ func ensure_tree_publication_queue():
     tree_publication_queue = TreePublicationQueueScript.new()
     tree_publication_queue.name = "TreePublicationQueue"
     add_child(tree_publication_queue)
+    tree_publication_queue.tree_visual_published.connect(_on_visible_world_tree_visual_published)
     if player != null and is_instance_valid(player) and tree_publication_queue.has_method("set_viewer"):
         tree_publication_queue.set_viewer(player)
     return tree_publication_queue
+
+func _on_visible_world_tree_visual_published(body: StaticBody3D, _recipe: Dictionary) -> void:
+    if body == null or not is_instance_valid(body): return
+    visible_world_demand_controller.mark_chunk_dirty("player",
+        world_to_chunk(body.global_position.x, body.global_position.z))
 
 func player_position_overlaps_generated_tree(position: Vector3, tree: Node3D) -> bool:
     if tree == null or not is_instance_valid(tree):

@@ -1604,10 +1604,10 @@ func update_streaming_region_demand() -> void:
     apply_streaming_region_demand(advance_budget_usec)
     if not startup_loading_active and not runtime_loading_active \
             and streaming_loading_request_owner.is_empty() and not shutdown_requested:
-        advance_player_visible_world_demand(forecast, view_intent)
+        advance_player_visible_world_demand(player.global_position, view_intent)
 
 
-func advance_player_visible_world_demand(forecast: Vector3, view_intent: Dictionary) -> void:
+func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dictionary) -> void:
     var runtime = get("voxel_terrain_runtime")
     if not is_instance_valid(runtime) or not runtime.has_method("visible_mesh_world_revision") \
             or player == null or not is_instance_valid(player):
@@ -1627,11 +1627,11 @@ func advance_player_visible_world_demand(forecast: Vector3, view_intent: Diction
             String(runtime.call("visible_mesh_world_revision")), visible_world_readiness,
             visible_world_view_revision, visible_world_view_center_cells, radius_cells,
             initial_bounds, visible_world_near_bounds)
-    var foreground := player_foreground_streaming_intent(forecast)
+    var foreground := player_foreground_streaming_intent()
     if foreground.is_empty(): return
     visible_world_demand_controller.ensure(self, runtime, "player", request_id,
         seed_text, String(runtime.call("visible_mesh_world_revision")),
-        forecast, foreground.bounds, radius_cells, CELL, CHUNK_SIZE, view_intent,
+        center_world, foreground.bounds, radius_cells, CELL, CHUNK_SIZE, view_intent,
         0 if startup_loading_active or runtime_loading_active else -1)
     if gameplay_publication_deadline_usec > 0 \
             and Time.get_ticks_usec() + 1000 >= gameplay_publication_deadline_usec:
@@ -1810,7 +1810,13 @@ func wait_for_initial_visible_world_readiness() -> Dictionary:
             "queue": state.get("queue", {}),
             "coverageLag": state.get("coverageLag", 0.0),
             "visualDemandRevision": state.get("visualDemandRevision", 0),
-            "publication": visible_world_demand_last_advance.duplicate()}
+            "publication": visible_world_demand_last_advance.duplicate(),
+            "startupPropSourcesComplete": visible_world_prop_manifest_sources.size(),
+            "startupPropSourcesExpected": visible_world_prop_chunk_keys.size(),
+            "startupPropPending": visible_world_prop_pending_reasons.values().slice(0, 6),
+            "startupLastPropAttempt": visible_world_prop_last_attempt.duplicate(),
+            "pendingChunkLoads": pending_chunk_loads.size(),
+            "pendingNativeTerrainTasks": int(runtime.call("voxel_engine_pending_task_count"))}
         await startup_loading_yield("Finishing visible world", "visible_world", "pending", progress)
     return StartupReadinessResultScript.failed("initial_visible_world_timeout", {}, [],
         state.merged({"timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS}, true))

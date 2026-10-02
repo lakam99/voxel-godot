@@ -529,6 +529,11 @@ func update_voxel_authority_chunks(force: bool) -> void:
     if shared_gameplay_schedule and structure_system!=null and player!=null:
         var citadel_cell:=Vector2i(world_to_cell(player.position.x),world_to_cell(player.position.z))
         advance_citadel_publication_shared(Rect2i(citadel_cell-Vector2i(2,2),Vector2i(5,5)),true)
+    # Give accepted visible-source demand one bounded surface slice before
+    # unrelated terrain and structure queues consume the shared deadline.
+    # The chunk publisher still owns its seeded RNG and candidate completion.
+    var visible_surface_prop_slice := advance_visible_surface_prop_publication_shared() \
+        if shared_gameplay_schedule else 0
     var center := world_to_chunk(player.position.x, player.position.z)
     var demand_start: int = monitor.begin_section("streaming_region_demand") if monitor != null else 0
     update_streaming_region_demand()
@@ -596,7 +601,7 @@ func update_voxel_authority_chunks(force: bool) -> void:
     if not force and deferred_time_available:
         if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
             process_streaming_structure_work()
-        if pending_chunk_loads.is_empty():
+        if pending_chunk_loads.is_empty() and visible_surface_prop_slice <= 0:
             process_pending_chunk_prop_spawns()
     elif not force and monitor != null:
         monitor.increment_counter("gameplay_publication_world_work_deferred")
@@ -617,6 +622,35 @@ func update_voxel_authority_chunks(force: bool) -> void:
         if orchestration_usec>GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC:
             gameplay_publication_overrun_count+=1
             monitor.increment_counter("gameplay_publication_budget_overrun")
+
+
+func advance_visible_surface_prop_publication_shared() -> int:
+    if pending_chunk_prop_spawns.is_empty() or visible_world_demand_controller == null \
+            or not visible_world_demand_controller.has_method("ranked_chunk_keys"):
+        return 0
+    var ranked_keys: Array[Vector2i] = visible_world_demand_controller.ranked_chunk_keys("player")
+    if ranked_keys.is_empty(): return 0
+    var has_retained_source := false
+    for key: Vector2i in ranked_keys:
+        if pending_chunk_prop_spawns.has(key):
+            has_retained_source = true
+            break
+    if not has_retained_source: return 0
+    var monitor = runtime_perf_monitor
+    var remaining_usec := gameplay_publication_deadline_usec - Time.get_ticks_usec()
+    var required_usec := ceili(STREAMING_CHUNK_PROP_FRAME_BUDGET_MS * 1000.0) + 250
+    if remaining_usec < required_usec:
+        if monitor != null:
+            monitor.increment_counter("gameplay_visible_surface_prop_budget_deferred")
+        return 0
+    var started_usec := Time.get_ticks_usec()
+    var processed := process_pending_chunk_prop_spawns_for_visible_surface(ranked_keys)
+    if monitor != null:
+        monitor.observe_external_duration("gameplay_visible_surface_prop_slice",
+            float(Time.get_ticks_usec() - started_usec) / 1000.0)
+        if processed > 0:
+            monitor.increment_counter("gameplay_visible_surface_prop_slices", processed)
+    return processed
 
 ## The only ordinary-gameplay claim for Citadel publication. Main establishes
 ## one frame token/deadline before any lane work; a child callback may consume

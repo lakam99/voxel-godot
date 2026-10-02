@@ -63,8 +63,8 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 			or String(pending.seed) != seed or String(pending.worldRevision) != world_revision):
 		pending = {}
 	# The adopted startup ledger proves nearby playability, but it has no
-	# controller-owned horizon publishers. Build a replacement request while
-	# retaining that already accepted foreground representation.
+	# controller-owned horizon publishers. Build the full-view replacement before
+	# first control, then retain that accepted view during ordinary movement.
 	var current_covers := current.has("terrain") \
 		and _covers(current, center, near_bounds, REFRESH_DISTANCE_CELLS)
 	var pending_covers := _covers(pending, center, near_bounds, PENDING_REBASE_DISTANCE_CELLS)
@@ -99,7 +99,8 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 			"radius": radius_cells, "bounds": bounds, "nearBounds": prepared_near,
 			"chunkKeys": keys,
 			"propCursor": 0, "structureCursor": 0,
-			"propSources": {}, "structureSources": {}, "lastProp": {}, "lastStructure": {}}
+			"propSources": {}, "structureSources": {}, "lastProp": {}, "lastStructure": {},
+			"dirtyChunkKeys": []}
 	state.current = current
 	state.pending = pending
 	_owners[owner] = state
@@ -121,7 +122,10 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		pending = state.get("current", {})
 		if pending.is_empty() or not pending.has("terrain") \
 				or bool(pending.get("publicationComplete", false)):
-			return {"status": "ready", "reason": ""}
+			if pending.is_empty() or not pending.has("terrain") \
+					or (pending.get("dirtyChunkKeys", []) as Array).is_empty():
+				return {"status": "ready", "reason": ""}
+			return _refresh_current_chunk(main, state, pending, owner)
 	if not is_instance_valid(main) or not is_instance_valid(runtime) \
 			or not is_instance_valid(structure_system):
 		return {"status": "pending", "reason": "visual_publisher_unavailable"}
@@ -241,6 +245,69 @@ func full_view_readiness(owner: String, request_id: int, seed: String,
 	return result
 
 
+func ranked_chunk_keys(owner: String) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if not _owners.has(owner): return result
+	var state: Dictionary = _owners[owner]
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty():
+		view = state.get("current", {})
+	if view.is_empty() or bool(view.get("publicationComplete", false)) \
+			or not view.has("chunkKeys"):
+		return result
+	for key: Vector2i in view.chunkKeys:
+		result.append(key)
+	return result
+
+
+func mark_chunk_dirty(owner: String, chunk_key: Vector2i) -> void:
+	if not _owners.has(owner): return
+	var state: Dictionary = _owners[owner]
+	var current: Dictionary = state.get("current", {})
+	if current.is_empty() or not current.has("terrain") \
+			or not (current.get("chunkKeys", []) as Array).has(chunk_key):
+		return
+	var dirty: Array = current.get("dirtyChunkKeys", [])
+	if not dirty.has(chunk_key): dirty.append(chunk_key)
+	current.dirtyChunkKeys = dirty
+	state.current = current
+	_owners[owner] = state
+
+
+func _refresh_current_chunk(main: Object, state: Dictionary,
+		current: Dictionary, owner: String) -> Dictionary:
+	if not is_instance_valid(main):
+		return {"status": "pending", "reason": "visual_publisher_unavailable"}
+	var dirty: Array = current.get("dirtyChunkKeys", [])
+	var chunk_key: Vector2i = dirty.pop_front()
+	var refresh: Dictionary = main.call("publish_chunk_prop_visual_readiness",
+		current.ledger, int(current.viewRevision), current.nearBounds,
+		chunk_key, current.centerWorld)
+	if refresh.get("status") != "ready" or not bool(refresh.get("manifestSubmitted", false)):
+		dirty.append(chunk_key)
+	current.dirtyChunkKeys = dirty
+	state.current = current
+	_owners[owner] = state
+	return {"status": "ready" if dirty.is_empty() else "pending",
+		"reason": "" if dirty.is_empty() else "visual_receipt_refresh_pending",
+		"queueDepth": dirty.size(), "refreshedChunk": chunk_key,
+		"prop": refresh}
+
+
+func pending_representation_diagnostics(owner: String, request_id: int,
+		seed: String, world_revision: String, limit := 8) -> Array[Dictionary]:
+	if not _owners.has(owner): return []
+	var state: Dictionary = _owners[owner]
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty(): view = state.get("current", {})
+	if view.is_empty() or int(view.get("requestId", 0)) != request_id \
+			or String(view.get("seed", "")) != seed \
+			or String(view.get("worldRevision", "")) != world_revision:
+		return []
+	return (view.ledger as Object).call("pending_candidate_diagnostics", request_id,
+		seed, world_revision, int(view.viewRevision), view.bounds, limit)
+
+
 static func _covers(view: Dictionary, center: Vector2, near_bounds: Rect2i,
 		maximum_lag: float) -> bool:
 	return not view.is_empty() and view.get("bounds", Rect2i()) is Rect2i \
@@ -265,7 +332,8 @@ static func _ranked_chunk_keys(bounds: Rect2i, center_world: Vector3,
 			keys_by_id[id] = key
 	var intent := view_intent.duplicate(true)
 	intent["origin"] = center_world
-	intent["predictedOrigin"] = center_world
+	if not intent.get("predictedOrigin") is Vector3:
+		intent["predictedOrigin"] = center_world
 	var ranked: Array[Dictionary] = ViewPriorityScript.ranked_groups(groups,
 		ViewPriorityScript.normalize(intent))
 	var result: Array[Vector2i] = []
