@@ -7,10 +7,15 @@ const ReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const TerrainManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const ViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
-const REFRESH_DISTANCE_CELLS := 24.0
+## Begin the next all-direction source view before the old 24-cell rebase.
+## This only schedules existing owners; it does not enlarge the rendered view.
+const REFRESH_DISTANCE_CELLS := 12.0
 const PENDING_REBASE_DISTANCE_CELLS := 24.0
 const TERRAIN_BLOCKS_PER_STEP := 6
 const CHUNK_SOURCE_STEPS_PER_STEP := 1
+const MAX_CHUNK_SOURCES_PER_VIEW := 256
+const MAX_MISSING_CHUNK_DIAGNOSTICS := 8
+const MAX_STALE_TERRAIN_REVISITS_PER_STEP := 8
 
 var _owners: Dictionary = {}
 var _next_demand_revision := 0
@@ -84,14 +89,25 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 		var admitted: Dictionary = ledger.begin_view(request_id, seed, world_revision,
 			bounds, prepared_near, center, radius_cells)
 		if admitted.get("status") != "ready": return admitted
+		var previous_ledgers: Array = []
+		for old_view: Dictionary in [pending, current]:
+			if not old_view.is_empty() and is_instance_valid(old_view.get("ledger")) \
+					and not previous_ledgers.has(old_view.ledger):
+				previous_ledgers.append(old_view.ledger)
 		var manifest = TerrainManifestScript.new()
 		var terrain_start: Dictionary = manifest.begin(runtime, ledger, request_id, seed,
 			world_revision, int(admitted.viewRevision), bounds, prepared_near,
-			center_cells, radius_cells)
+			center_cells, radius_cells, previous_ledgers)
 		if terrain_start.get("status") != "ready": return terrain_start
 		var keys := _ranked_chunk_keys(bounds, center_world, cell_scale,
 			chunk_size, view_intent)
+		if keys.size() > MAX_CHUNK_SOURCES_PER_VIEW:
+			return {"status": "failed", "reason": "visual_chunk_source_capacity",
+				"chunkSourceCount": keys.size(), "limit": MAX_CHUNK_SOURCES_PER_VIEW}
 		pending = {"ledger": ledger, "terrain": manifest, "terrainState": terrain_start,
+			# Retain only the two immediately superseded ledgers while their
+			# complete interior sources can be checked against this demand.
+			"overlapLedgers": previous_ledgers,
 			"requestId": request_id, "seed": seed, "worldRevision": world_revision,
 			"demandRevision": _next_demand_revision,
 			"viewRevision": int(admitted.viewRevision), "center": center,
@@ -100,6 +116,7 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 			"chunkKeys": keys,
 			"propCursor": 0, "structureCursor": 0,
 			"propSources": {}, "structureSources": {}, "lastProp": {}, "lastStructure": {},
+			"missingChunkSources": {},
 			"dirtyChunkKeys": []}
 	state.current = current
 	state.pending = pending
@@ -120,13 +137,29 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 	var advancing_pending := not pending.is_empty()
 	if pending.is_empty():
 		pending = state.get("current", {})
-		if pending.is_empty() or not pending.has("terrain") \
-				or bool(pending.get("publicationComplete", false)):
-			if pending.is_empty() or not pending.has("terrain") \
-					or (pending.get("dirtyChunkKeys", []) as Array).is_empty():
-				return {"status": "ready", "reason": ""}
-			return _refresh_current_chunk(main, state, pending, owner)
+		var terrain_changed: bool = pending.has("terrain") \
+			and pending.terrain.has_method("needs_advance") \
+			and bool(pending.terrain.call("needs_advance"))
+		if pending.is_empty() or not pending.has("terrain"):
+			return {"status": "pending", "reason": "visual_full_view_source_not_started"}
+		if bool(pending.get("publicationComplete", false)) and not terrain_changed:
+			if is_instance_valid(main) and is_instance_valid(runtime) \
+					and is_instance_valid(structure_system) \
+					and runtime.has_method("visible_mesh_world_revision") \
+					and String(runtime.call("visible_mesh_world_revision")) == String(pending.worldRevision):
+				if not (pending.get("dirtyChunkKeys", []) as Array).is_empty():
+					return _refresh_current_chunk(main, state, pending, owner)
+				var confirmed: Dictionary = _full_view_result(pending)
+				if confirmed.get("status") == "ready":
+					return {"status": "ready", "reason": "", "requestId": int(pending.requestId),
+						"viewRevision": int(pending.viewRevision),
+						"visualDemandRevision": int(pending.demandRevision),
+						"exactReceiptValidation": true}
+				_request_stale_terrain_revisits(pending, confirmed)
+			# A removed owner, changed tree tier, or missing source must be retried
+			# through the same bounded publisher, never acknowledged from a flag.
 	if not is_instance_valid(main) or not is_instance_valid(runtime) \
+			or not runtime.has_method("visible_mesh_world_revision") \
 			or not is_instance_valid(structure_system):
 		return {"status": "pending", "reason": "visual_publisher_unavailable"}
 	if String(runtime.call("visible_mesh_world_revision")) != String(pending.worldRevision):
@@ -153,6 +186,10 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 			pending.lastProp = prop
 			if bool(prop.get("manifestSubmitted", false)):
 				pending.propSources[prop_key] = true
+			if String(prop.get("reason", "")) in ["chunk_prop_source_missing", "chunk_prop_source_not_live"]:
+				pending.missingChunkSources[prop_key] = true
+			else:
+				pending.missingChunkSources.erase(prop_key)
 			var structure_key: Vector2i = keys[int(pending.structureCursor)]
 			pending.structureCursor = (int(pending.structureCursor) + 1) % keys.size()
 			var source_bounds := Rect2i(structure_key * chunk_size,
@@ -170,14 +207,19 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 	pending.publicationComplete = terrain.get("status") == "ready" \
 		and pending.propSources.size() == keys.size() \
 		and pending.structureSources.size() == keys.size()
+	if bool(pending.publicationComplete):
+		pending.overlapLedgers = []
 	pending.ledger.record_queue_diagnostics(mini(ReadinessScript.MAX_SOURCES,
 		unscanned + terrain_pending), 0.0)
-	var near_result: Dictionary = pending.ledger.region_readiness(
-		int(pending.requestId), String(pending.seed), String(pending.worldRevision),
-		int(pending.viewRevision), pending.nearBounds)
-	# The old acknowledged view stays available until the replacement has
-	# complete near evidence. Far coverage is still checked on the new ledger.
-	if advancing_pending and near_result.get("status") == "ready":
+	var full_result: Dictionary = _full_view_result(pending) \
+		if bool(pending.publicationComplete) else {"status": "pending",
+			"reason": "visual_source_publication_pending"}
+	var stale_revisits := 0
+	if full_result.get("status") == "pending":
+		stale_revisits = _request_stale_terrain_revisits(pending, full_result)
+	# Keep the previous accepted all-direction view until this replacement's
+	# complete view and live owner receipts validate, including its far sources.
+	if advancing_pending and full_result.get("status") == "ready":
 		state.current = pending
 		state.pending = {}
 	elif advancing_pending:
@@ -185,14 +227,21 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 	else:
 		state.current = pending
 	_owners[owner] = state
-	return {"status": String(near_result.get("status", "pending")),
-		"reason": String(near_result.get("reason", "visual_representation_pending")),
+	var missing_keys: Array[Vector2i] = _bounded_missing_chunk_keys(pending)
+	var pending_keys: Array[Vector2i] = _bounded_pending_chunk_keys(pending)
+	return {"status": String(full_result.get("status", "pending")),
+		"reason": String(full_result.get("reason", "visual_representation_pending")),
 		"requestId": int(pending.requestId), "viewRevision": int(pending.viewRevision),
 		"visualDemandRevision": int(pending.demandRevision),
 		"queueDepth": unscanned + terrain_pending,
 		"expectedChunkSources": keys.size(),
 		"propSourcesComplete": pending.propSources.size(),
 		"structureSourcesComplete": pending.structureSources.size(),
+		"missingChunkSourceCount": (pending.get("missingChunkSources", {}) as Dictionary).size(),
+		"missingChunkSourceKeys": missing_keys,
+		"pendingChunkSourceCount": maxi(0, keys.size() - pending.propSources.size()),
+		"pendingChunkSourceKeys": pending_keys,
+		"staleTerrainRevisitsQueued": stale_revisits,
 		"terrain": terrain,
 		"prop": pending.lastProp, "structures": pending.lastStructure}
 
@@ -260,6 +309,22 @@ func ranked_chunk_keys(owner: String) -> Array[Vector2i]:
 	return result
 
 
+func missing_chunk_source_keys(owner: String, limit := MAX_MISSING_CHUNK_DIAGNOSTICS) -> Array[Vector2i]:
+	if not _owners.has(owner): return []
+	var state: Dictionary = _owners[owner]
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty(): view = state.get("current", {})
+	return _bounded_missing_chunk_keys(view, limit)
+
+
+func pending_chunk_source_keys(owner: String, limit := MAX_MISSING_CHUNK_DIAGNOSTICS) -> Array[Vector2i]:
+	if not _owners.has(owner): return []
+	var state: Dictionary = _owners[owner]
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty(): view = state.get("current", {})
+	return _bounded_pending_chunk_keys(view, limit)
+
+
 func mark_chunk_dirty(owner: String, chunk_key: Vector2i) -> void:
 	if not _owners.has(owner): return
 	var state: Dictionary = _owners[owner]
@@ -288,8 +353,10 @@ func _refresh_current_chunk(main: Object, state: Dictionary,
 	current.dirtyChunkKeys = dirty
 	state.current = current
 	_owners[owner] = state
-	return {"status": "ready" if dirty.is_empty() else "pending",
-		"reason": "" if dirty.is_empty() else "visual_receipt_refresh_pending",
+	var confirmed: Dictionary = _full_view_result(current) if dirty.is_empty() \
+		else {"status": "pending", "reason": "visual_receipt_refresh_pending"}
+	return {"status": String(confirmed.get("status", "pending")),
+		"reason": String(confirmed.get("reason", "visual_receipt_refresh_pending")),
 		"queueDepth": dirty.size(), "refreshedChunk": chunk_key,
 		"prop": refresh}
 
@@ -313,6 +380,64 @@ static func _covers(view: Dictionary, center: Vector2, near_bounds: Rect2i,
 	return not view.is_empty() and view.get("bounds", Rect2i()) is Rect2i \
 		and view.bounds.encloses(near_bounds) and view.nearBounds.encloses(near_bounds) \
 		and center.distance_to(view.center) < maximum_lag
+
+
+static func _full_view_result(view: Dictionary) -> Dictionary:
+	var ledger: Object = view.get("ledger")
+	if not is_instance_valid(ledger):
+		return {"status": "pending", "reason": "visual_ledger_owner_missing"}
+	return ledger.region_readiness(int(view.requestId), String(view.seed),
+		String(view.worldRevision), int(view.viewRevision), view.bounds)
+
+
+static func _request_stale_terrain_revisits(view: Dictionary, result: Dictionary) -> int:
+	var terrain: Object = view.get("terrain")
+	var ledger: Object = view.get("ledger")
+	if not is_instance_valid(terrain) or not terrain.has_method("revisit_candidate") \
+			or not is_instance_valid(ledger) \
+			or not ledger.has_method("pending_candidate_diagnostics"):
+		return 0
+	var by_kind: Dictionary = result.get("byKind", {})
+	var terrain_counts: Dictionary = by_kind.get("terrain", {})
+	if int(terrain_counts.get("pending", 0)) <= 0: return 0
+	var rows: Array = ledger.pending_candidate_diagnostics(int(view.requestId),
+		String(view.seed), String(view.worldRevision), int(view.viewRevision),
+		view.bounds, MAX_STALE_TERRAIN_REVISITS_PER_STEP)
+	var admitted := 0
+	for row_value in rows:
+		if not row_value is Dictionary: continue
+		var row: Dictionary = row_value
+		if String(row.get("kind", "")) != "terrain": continue
+		if bool(terrain.call("revisit_candidate", String(row.get("sourceId", "")),
+				String(row.get("candidateId", "")))):
+			admitted += 1
+	return admitted
+
+
+static func _bounded_missing_chunk_keys(view: Dictionary,
+		limit := MAX_MISSING_CHUNK_DIAGNOSTICS) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if view.is_empty() or limit <= 0: return result
+	var missing: Dictionary = view.get("missingChunkSources", {})
+	for key_value in missing.keys():
+		if key_value is Vector2i:
+			result.append(key_value)
+	result.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x < b.x or (a.x == b.x and a.y < b.y))
+	if result.size() > limit: result.resize(limit)
+	return result
+
+
+static func _bounded_pending_chunk_keys(view: Dictionary,
+		limit := MAX_MISSING_CHUNK_DIAGNOSTICS) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if view.is_empty() or limit <= 0: return result
+	var complete: Dictionary = view.get("propSources", {})
+	for key_value in view.get("chunkKeys", []):
+		if key_value is Vector2i and not complete.has(key_value):
+			result.append(key_value)
+			if result.size() >= limit: break
+	return result
 
 
 static func _ranked_chunk_keys(bounds: Rect2i, center_world: Vector3,

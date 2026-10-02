@@ -322,6 +322,98 @@ func own_node_root() -> Node3D:
 	return _root if is_instance_valid(_root) else null
 
 
+## Source-owned durable removal of a generated site tree. Such a member has
+## no visual obligation after the same publisher acknowledged its removal.
+func visual_member_omitted(member_id: String, expected_binding: Dictionary) -> bool:
+	if not member_id.begins_with("tree:") or not _group_owner_available(expected_binding) \
+			or not _groups.get("treeMembers",{}).has(member_id): return false
+	return _skipped_tree_indices.has(int(_groups.treeMembers[member_id].index))
+
+
+## Visual receipt for one immutable publication member. This deliberately
+## validates installed render witnesses without asking for collision, door,
+## navigation, or group physical acknowledgement. The readiness ledger calls
+## it again whenever a previously accepted receipt is queried.
+func visual_receipt_installed(source_identity: String, source_revision: String,
+		_world_revision: String, _view_revision: int, candidate_id: String,
+		metadata: Dictionary, representation_id: String, _tier: String) -> bool:
+	var member_id := String(metadata.get("citadelMemberId",""))
+	var expected_binding: Variant = metadata.get("citadelBinding")
+	var base: Preparation.PreparedPublicationBase = _cpu.get("publicationBase")
+	if not expected_binding is Dictionary or member_id.is_empty() \
+			or candidate_id != String(metadata.get("citadelCandidateId","")) \
+			or candidate_id != "citadel:%s:%s" % [String(expected_binding.get("siteId","")),member_id] \
+			or source_identity != String(metadata.get("citadelVisualSourceIdentity","")) \
+			or source_revision != String(metadata.get("citadelVisualSourceRevision","")) \
+			or base == null or base.publication_plan == null \
+			or String(metadata.get("citadelSourceSignature","")) != base.publication_plan.output_signature \
+			or representation_id != "%s:scene:%d" % [candidate_id,get_instance_id()] \
+			or not _group_owner_available(expected_binding) or not _scene_owner_live() \
+			or not _groups.get("memberSources",{}).has(member_id) \
+			or not _member_witnesses.has(member_id) or _active_member == member_id:
+		return false
+	var witness: Dictionary = _member_witnesses[member_id]
+	var proof := _begin_physical_proof("visual_member",expected_binding)
+	if member_id.begins_with("tree:"):
+		var source_index := int(_groups.treeMembers.get(member_id,{}).get("index",-1))
+		if source_index < 0 or _skipped_tree_indices.has(source_index) \
+				or not _tree_by_source_index.has(source_index):
+			_finish_physical_proof(proof)
+			return false
+		var body: Node3D = _tree_bodies[int(_tree_by_source_index[source_index])].get_ref() as Node3D
+		var visual: Node = body.get_node_or_null("GeneratedTreeVisual") if is_instance_valid(body) else null
+		var ready := _tree_body_valid(body) and String(body.get_meta("tree_visual_state","")) == "published" \
+			and _tree_source_pose_matches(body,source_index) and _first_visible_renderable(visual) != null
+		_finish_physical_proof(proof)
+		return ready
+	var live := _weak_nodes_live(witness.get("nodes",[]),proof)
+	if member_id.begins_with("furnishing:"):
+		var body: Node3D = witness.body.get_ref() as Node3D if witness.get("body") is WeakRef else null
+		live = live and _tree_body_valid(body) and body.get_parent() == _root \
+			and String(body.get_meta("furnishing_part_id","")) == member_id.trim_prefix("furnishing:") \
+			and int(witness.sourceIndex) < _plan.parts.size() \
+			and _plan.parts[int(witness.sourceIndex)] == witness.source \
+			and _furniture_geometry(witness.source) == witness.geometry \
+			and body.transform == Transform3D(Basis.from_euler(witness.source.rotation),witness.source.position) \
+			and _first_visible_renderable(body) != null
+	else:
+		var source = witness.get("source",null)
+		var part_id := member_id.trim_prefix("building:")
+		var epoch: int = _building.source_part_publication_epoch(part_id) if _building != null else 0
+		live = live and source != null and epoch > 0 \
+			and epoch == int(witness.get("publicationEpoch",0)) \
+			and int(witness.sourceIndex) < _blueprint.parts.size() \
+			and _blueprint.parts[int(witness.sourceIndex)] == source \
+			and _building_geometry(source) == witness.geometry \
+			and _boundary_live_with_context(epoch,proof) \
+			and (_visible_witness_renderable(witness.get("nodes",[])) != null \
+				or _visible_witness_renderable(_boundary_witnesses.get(epoch,[])) != null)
+	_finish_physical_proof(proof)
+	return live
+
+
+func _visible_witness_renderable(witnesses: Array) -> Node3D:
+	for entry: Dictionary in witnesses:
+		var node: Node = entry.node.get_ref() as Node if entry.get("node") is WeakRef else null
+		var renderable := _first_visible_renderable(node)
+		if renderable != null: return renderable
+	return null
+
+
+func _first_visible_renderable(node: Node) -> Node3D:
+	if not is_instance_valid(node) or not node.is_inside_tree() or node.is_queued_for_deletion(): return null
+	if node is GeometryInstance3D and node.is_visible_in_tree():
+		if node is MeshInstance3D and (node as MeshInstance3D).mesh != null \
+				and (node as MeshInstance3D).mesh.get_surface_count() > 0: return node
+		if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null \
+				and (node as MultiMeshInstance3D).multimesh.instance_count > 0 \
+				and (node as MultiMeshInstance3D).multimesh.visible_instance_count != 0: return node
+	for child in node.get_children():
+		var found := _first_visible_renderable(child)
+		if found != null: return found
+	return null
+
+
 ## Optional for construction-only diagnostics; an ordinary owner must bind both.
 ## register(body) acknowledges {status:registered, portalId:<exact source ID>}.
 ## pending_budget may retry only with sideEffects:false. retire(body) returns

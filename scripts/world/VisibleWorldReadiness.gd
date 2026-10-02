@@ -269,6 +269,31 @@ func has_candidate(source_id: String, candidate_id: String) -> bool:
 	return _sources.has(source_id) and _sources[source_id].candidates.has(candidate_id)
 
 
+## Used by a producer before carrying a complete source into another view.
+## An empty source still needs its current producer revision and installation
+## state checked by that producer before it can be reused.
+func complete_source_candidate_count(source_id: String, source_identity: String,
+		source_revision: String) -> int:
+	if not _sources.has(source_id): return -1
+	var source: Dictionary = _sources[source_id]
+	if not bool(source.complete) or bool(source.failed) \
+			or String(source.identity) != source_identity \
+			or String(source.revision) != source_revision:
+		return -1
+	return source.candidates.size()
+
+
+func complete_source_candidate_position(source_id: String, candidate_id: String,
+		source_identity: String, source_revision: String) -> Vector2:
+	if complete_source_candidate_count(source_id, source_identity, source_revision) < 0:
+		return Vector2(INF, INF)
+	var source: Dictionary = _sources[source_id]
+	if not source.candidates.has(candidate_id): return Vector2(INF, INF)
+	var metadata: Dictionary = source.candidates[candidate_id].get("metadata", {})
+	var position: Variant = metadata.get("positionXZ")
+	return position if position is Vector2 else Vector2(INF, INF)
+
+
 func candidate_in_view(position_xz: Vector2) -> bool:
 	return _view_active and position_xz.is_finite() \
 		and position_xz.distance_to(_view_center) <= _view_radius

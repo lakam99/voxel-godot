@@ -5,6 +5,8 @@ const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualMan
 const DetailBatchPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
+const CitadelPlanScript := preload("res://scripts/world/CitadelPublicationPlan.gd")
+const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_WORLD_READINESS_REPORT"
 const BOUNDS := Rect2i(-6, -6, 12, 12)
 const NEAR_BOUNDS := Rect2i(-2, -2, 4, 4)
@@ -24,6 +26,22 @@ class ReceiptPublisher extends RefCounted:
 			and metadata.get("positionXZ") == Vector2(3.0, 1.0) \
 			and representation_id == "tree-native-mesh:stable-id" and tier == "horizon"
 
+class ScanMain extends "res://scripts/Main.gd":
+	func hash01(_text: String) -> float:
+		return 0.0
+
+class UndergroundScanFixture extends RefCounted:
+	var calls := 0
+	func begin_exposed_underground_floor_scan(_chunk_key: Vector2i, _chunk_size: int) -> Dictionary:
+		return {"revision": 1}
+	func advance_exposed_underground_floor_scan(_state: Dictionary, _sample_budget: int,
+			_time_budget_ms: float, _budget_start_usec: int) -> Dictionary:
+		calls += 1
+		var first := Vector3i(-28, -5, 0)
+		return {"state": {"revision": calls}, "complete": calls == 2,
+			"newCandidates": [first] if calls == 1 else [first, first, Vector3i(-27, -5, 0)],
+			"processed": 1, "restarted": calls == 2}
+
 class TerrainPublisherFixture extends RefCounted:
 	signal visible_mesh_block_revision_changed(block_position: Vector3i, revision: int)
 	var complete := false
@@ -32,6 +50,9 @@ class TerrainPublisherFixture extends RefCounted:
 	var owner_identity := "terrain-fixture-owner"
 	var world_revision := "terrain-fixture-world"
 	var vertical_bounds := Vector2i(0, 15)
+	var block_complete: Dictionary = {}
+	var block_geometry: Dictionary = {}
+	var block_revisions: Dictionary = {}
 
 	func visible_mesh_source_identity() -> String:
 		return owner_identity
@@ -40,22 +61,24 @@ class TerrainPublisherFixture extends RefCounted:
 		return world_revision
 
 	func visible_mesh_source_revision(block: Vector3i) -> String:
-		return "%s:%d:%d,%d,%d" % [world_revision, block_revision, block.x, block.y, block.z]
+		return "%s:%d:%d,%d,%d" % [world_revision, int(block_revisions.get(block, block_revision)),
+			block.x, block.y, block.z]
 
 	func visible_mesh_vertical_bounds() -> Vector2i:
 		return vertical_bounds
 
-	func visible_mesh_area_complete(_block: Vector3i) -> bool:
-		return complete
+	func visible_mesh_area_complete(block: Vector3i) -> bool:
+		return bool(block_complete.get(block, complete))
 
-	func visible_mesh_block_has_geometry(_block: Vector3i) -> bool:
-		return has_geometry
+	func visible_mesh_block_has_geometry(block: Vector3i) -> bool:
+		return bool(block_geometry.get(block, has_geometry))
 
 	func visible_mesh_receipt_is_current(source_identity: String, source_revision: String,
 		current_world_revision: String, _view_revision: int, candidate_id: String,
 		metadata: Dictionary, representation_id: String, tier: String) -> bool:
 		var block: Vector3i = metadata.get("nativeBlock", Vector3i(-1, -1, -1))
-		return complete and has_geometry and source_identity == owner_identity \
+		return visible_mesh_area_complete(block) and visible_mesh_block_has_geometry(block) \
+			and source_identity == owner_identity \
 			and source_revision == visible_mesh_source_revision(block) \
 			and current_world_revision == world_revision \
 			and candidate_id == "terrain:%d,%d,%d" % [block.x, block.y, block.z] \
@@ -76,6 +99,9 @@ class StructureReadinessFixture extends RefCounted:
 	var physical_status := "ready"
 	var description_status := "described"
 	var revision := "structure-region-revision-1"
+	var citadel_status := "described"
+	var citadel_candidates: Array[Dictionary] = []
+	var citadel_revision := "citadel-source-1"
 
 	func region_publication_readiness(_bounds: Rect2i) -> Dictionary:
 		return {"status": physical_status, "reason": "physical_fixture_" + physical_status}
@@ -85,6 +111,24 @@ class StructureReadinessFixture extends RefCounted:
 
 	func region_dependency_revision(_bounds: Rect2i) -> String:
 		return revision
+
+	func region_dependency_scheduling_revision(_bounds: Rect2i) -> Array:
+		return [revision,{"status":"described","source":"citadel-fixture"}]
+
+	func region_citadel_visual_source(_bounds: Rect2i) -> Dictionary:
+		return {"status":citadel_status,"descriptionComplete":citadel_status == "described",
+			"reason":"citadel_fixture_" + citadel_status,
+			"sourceRevision":citadel_revision,"candidates":citadel_candidates}
+
+class CitadelVisualPublisherFixture extends RefCounted:
+	var installed := false
+
+	func visual_receipt_installed(_source_identity: String, _source_revision: String,
+			_world_revision: String, _view_revision: int, candidate_id: String,
+			metadata: Dictionary, representation_id: String, _tier: String) -> bool:
+		return installed and candidate_id == "citadel:site-1:building:wall-1" \
+			and String(metadata.get("citadelMemberId","")) == "building:wall-1" \
+			and representation_id == "%s:scene:%d" % [candidate_id,get_instance_id()]
 
 var _checks: Array[Dictionary] = []
 var _passed := true
@@ -102,8 +146,13 @@ func run() -> void:
 	test_incomplete_discovery_never_reports_empty_ready()
 	test_candidate_must_belong_to_declared_source_footprint()
 	await test_native_terrain_visual_manifest()
+	test_native_terrain_scan_continues_past_pending_block()
+	test_native_terrain_overlap_uses_current_installed_source()
 	await test_generated_structure_visual_manifest()
+	await test_citadel_visual_member_source()
+	test_citadel_visual_member_bucket_query()
 	await test_surface_prop_source_completes_before_underground_scan()
+	test_underground_floor_scan_revision_restart()
 	await test_installed_detail_batch_receipts()
 	await test_production_chunk_prop_manifest()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
@@ -290,6 +339,34 @@ func test_surface_prop_source_completes_before_underground_scan() -> void:
 			"fullCandidates": completed_full.candidateCount})
 	chunk.queue_free()
 	await process_frame
+
+
+func test_underground_floor_scan_revision_restart() -> void:
+	var volume = TerrainVolumeServiceScript.new()
+	var scan: Dictionary = volume.begin_exposed_underground_floor_scan(Vector2i.ZERO, 28)
+	scan["columnIndex"] = 20
+	volume.revision += 1
+	var restarted: Dictionary = volume.advance_exposed_underground_floor_scan(scan, 1)
+	_check("volume_floor_scan_exposes_source_revision_restart",
+		bool(restarted.get("restarted", false))
+		and int(restarted.state.get("revision", -1)) == volume.revision
+		and int(restarted.state.get("columnIndex", -1)) == 0,
+		{"restarted": restarted.get("restarted"), "state": restarted.get("state", {})})
+	var main = ScanMain.new()
+	var source := UndergroundScanFixture.new()
+	main.world_generation_system = source
+	var state := {"cx": -1, "cz": 0, "undergroundCandidates": [],
+		"undergroundScanComplete": false, "undergroundIndex": 0}
+	var first_complete: bool = main.scan_underground_prop_candidates_from_volume_service(state, 1)
+	var first_candidates: Array = (state.get("undergroundCandidates", []) as Array).duplicate()
+	var second_complete: bool = main.scan_underground_prop_candidates_from_volume_service(state, 1)
+	var current_candidates: Array = state.get("undergroundCandidates", [])
+	_check("restarted_volume_scan_replaces_prior_candidates_and_deduplicates_cells",
+		not first_complete and first_candidates == [Vector3i(-28, -5, 0)]
+		and second_complete and current_candidates == [Vector3i(-28, -5, 0), Vector3i(-27, -5, 0)]
+		and source.calls == 2,
+		{"first": first_candidates, "current": current_candidates, "calls": source.calls})
+	main.free()
 
 
 func test_installed_detail_batch_receipts() -> void:
@@ -562,6 +639,30 @@ func test_production_chunk_prop_manifest() -> void:
 		and int(bounded_revision_a.candidateCount) == 132,
 		{"revisionLength": String(bounded_revision_a.sourceRevision).length(),
 		"candidateCount": bounded_revision_a.candidateCount})
+	var duplicate_prop := _make_manifest_body(chunk, "rock:stable", "rock")
+	var duplicate_manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-duplicate", true, 1.35)
+	_check("duplicate_prop_id_is_reported_separately_from_manifest_capacity",
+		duplicate_manifest.status == "pending"
+		and duplicate_manifest.reason == "chunk_prop_candidate_id_duplicate"
+		and duplicate_manifest.candidateId == "rock:stable"
+		and int(duplicate_manifest.candidateCount) < ChunkPropManifestScript.MAX_CANDIDATES_PER_CHUNK,
+		duplicate_manifest)
+	duplicate_prop.queue_free()
+	var overfull_chunk := Node3D.new()
+	root.add_child(overfull_chunk)
+	for index in range(ChunkPropManifestScript.MAX_CANDIDATES_PER_CHUNK + 1):
+		var prop := Node3D.new()
+		prop.set_meta("prop_id", "capacity-prop-%d" % index)
+		overfull_chunk.add_child(prop)
+	var capacity_manifest: Dictionary = ChunkPropManifestScript.capture(overfull_chunk,
+		Vector2i(0, 0), "seed-props", "source-rev-capacity", true, 1.35)
+	_check("true_candidate_limit_retains_distinct_capacity_reason",
+		capacity_manifest.status == "pending"
+		and capacity_manifest.reason == "chunk_prop_manifest_capacity"
+		and int(capacity_manifest.candidateCount) == ChunkPropManifestScript.MAX_CANDIDATES_PER_CHUNK,
+		capacity_manifest)
+	overfull_chunk.queue_free()
 	chunk.queue_free()
 	await process_frame
 
@@ -611,6 +712,63 @@ func test_native_terrain_visual_manifest() -> void:
 	_check("meshed_native_empty_block_finishes_explicit_empty_source",
 		completed_empty.status == "ready" and int(completed_empty.completedEmptyBlocks) == 1 \
 		and not empty_readiness.has_candidate("terrain-mesh:0,0,0", "terrain:0,0,0"))
+
+
+func test_native_terrain_scan_continues_past_pending_block() -> void:
+	var terrain_owner := TerrainPublisherFixture.new()
+	terrain_owner.block_complete[Vector3i(1, 0, 0)] = true
+	terrain_owner.block_geometry[Vector3i(1, 0, 0)] = true
+	var readiness = VisualReadinessScript.new()
+	var bounds := Rect2i(0, 0, 32, 16)
+	var center := Vector3(16.0, 8.0, 8.0)
+	var revision := int(readiness.begin_view(153, "terrain-scan-seed", terrain_owner.world_revision,
+		bounds, bounds, Vector2(center.x, center.z), 15.0).viewRevision)
+	var manifest := TerrainVisualManifestScript.new()
+	manifest.begin(terrain_owner, readiness, 153, "terrain-scan-seed",
+		terrain_owner.world_revision, revision, bounds, bounds, center, 15.0)
+	var first: Dictionary = manifest.advance(2)
+	_check("terrain_scan_receipts_ready_block_beyond_unmeshed_frontier",
+		first.status == "pending" and int(first.processedBlocks) == 1 \
+		and int(first.pendingBlocks) == 1 \
+		and readiness.has_candidate("terrain-mesh:1,0,0", "terrain:1,0,0"), first)
+	terrain_owner.block_complete[Vector3i(0, 0, 0)] = true
+	terrain_owner.block_geometry[Vector3i(0, 0, 0)] = true
+	var finished: Dictionary = manifest.advance(1)
+	_check("terrain_scan_retries_frontier_and_completes_without_restart",
+		finished.status == "ready" and int(finished.processedBlocks) == 2, finished)
+
+
+func test_native_terrain_overlap_uses_current_installed_source() -> void:
+	var terrain_owner := TerrainPublisherFixture.new()
+	terrain_owner.complete = true
+	terrain_owner.has_geometry = true
+	var bounds := Rect2i(-32, -32, 80, 80)
+	var near_bounds := Rect2i(0, 0, 16, 16)
+	var old := VisualReadinessScript.new()
+	var old_center := Vector3(8.0, 8.0, 8.0)
+	var old_revision := int(old.begin_view(154, "terrain-overlap-seed", terrain_owner.world_revision,
+		bounds, near_bounds, Vector2(old_center.x, old_center.z), 32.0).viewRevision)
+	var old_manifest := TerrainVisualManifestScript.new()
+	old_manifest.begin(terrain_owner, old, 154, "terrain-overlap-seed",
+		terrain_owner.world_revision, old_revision, bounds, near_bounds, old_center, 32.0)
+	var old_complete: Dictionary = old_manifest.advance(64)
+	var moved := VisualReadinessScript.new()
+	var moved_center := Vector3(9.0, 8.0, 8.0)
+	var moved_revision := int(moved.begin_view(154, "terrain-overlap-seed", terrain_owner.world_revision,
+		bounds, near_bounds, Vector2(moved_center.x, moved_center.z), 32.0).viewRevision)
+	var moved_manifest := TerrainVisualManifestScript.new()
+	moved_manifest.begin(terrain_owner, moved, 154, "terrain-overlap-seed",
+		terrain_owner.world_revision, moved_revision, bounds, near_bounds, moved_center, 32.0,
+		[old])
+	var moved_complete: Dictionary = moved_manifest.advance(64)
+	_check("terrain_overlap_transfers_only_valid_installed_interior_blocks",
+		old_complete.status == "ready" and moved_complete.status == "ready" \
+		and int(moved_complete.transferredBlocks) > 0 \
+		and moved.has_candidate("terrain-mesh:0,0,0", "terrain:0,0,0"), moved_complete)
+	var central_source_revision := terrain_owner.visible_mesh_source_revision(Vector3i.ZERO)
+	_check("terrain_overlap_rebuilds_center_dependent_candidate_metadata",
+		moved.complete_source_candidate_position("terrain-mesh:0,0,0", "terrain:0,0,0",
+			terrain_owner.owner_identity, central_source_revision) == Vector2(9.0, 8.0))
 
 
 func _make_manifest_body(parent: Node3D, prop_id: String, kind: String) -> StaticBody3D:
@@ -697,6 +855,85 @@ func test_generated_structure_visual_manifest() -> void:
 			"structure-block:0,0,0:stoneBlock"), unknown)
 	world.queue_free()
 	await process_frame
+
+
+func test_citadel_visual_member_source() -> void:
+	var world := StructureWorldFixture.new()
+	root.add_child(world)
+	var structure_system := StructureReadinessFixture.new()
+	structure_system.physical_status = "pending"
+	var publisher := CitadelVisualPublisherFixture.new()
+	var readiness = VisualReadinessScript.new()
+	var view_revision := int(readiness.begin_view(164,"citadel-seed","citadel-world-1",
+		BOUNDS,NEAR_BOUNDS,VIEW_CENTER,VIEW_RADIUS).viewRevision)
+	var pending_description: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_completed_empty_description_can_be_ready",
+		pending_description.status == "ready" and pending_description.candidateCount == 0,
+		pending_description)
+	structure_system.citadel_status = "pending"
+	var missing: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_description_pending_cannot_finish_empty_source",
+		missing.status == "pending" and missing.reason == "citadel_fixture_pending",missing)
+	structure_system.citadel_status = "described"
+	structure_system.citadel_candidates = [{"candidateId":"citadel:site-1:building:wall-1",
+		"memberId":"building:wall-1","positionXZ":Vector2(0.5,0.5),
+		"binding":{"siteId":"site-1"},"sourceSignature":"immutable-source-1",
+		"publisher":publisher}]
+	var unpublished: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_described_member_needs_installed_scene_receipt",
+		unpublished.status == "pending" and unpublished.candidateCount == 1 \
+		and unpublished.pendingCount == 1 and unpublished.representedCount == 0,unpublished)
+	publisher.installed = true
+	var published: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_member_receipt_is_visual_only_when_physical_pending",
+		published.status == "ready" and published.candidateCount == 1 \
+		and published.representedCount == 1 and published.physicalPublication.is_empty(),published)
+	publisher.installed = false
+	var revoked: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_member_receipt_revoked_when_scene_installation_lost",
+		revoked.status == "pending" and revoked.representedCount == 0,revoked)
+	var replacement := CitadelVisualPublisherFixture.new()
+	structure_system.citadel_candidates[0].publisher = replacement
+	var replaced: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_replacement_scene_cannot_borrow_prior_member_receipt",
+		replaced.status == "pending" and replaced.representedCount == 0,replaced)
+	replacement.installed = true
+	var restored: Dictionary = StructureVisualManifestScript.submit(world,structure_system,
+		readiness,164,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("citadel_replacement_scene_receipts_its_own_member",
+		restored.status == "ready" and restored.representedCount == 1,restored)
+	world.queue_free()
+	await process_frame
+
+
+func test_citadel_visual_member_bucket_query() -> void:
+	var plan = CitadelPlanScript.new()
+	plan.binding = {"siteId":"site-1"}
+	plan.output_signature = "fixture-immutable-source"
+	for index in range(512):
+		var member_id := "building:member-%d" % index
+		var world_z := 1.0+float(index/16)
+		plan.member_records.append({"memberId":member_id,"groupId":"group-1",
+			"bounds":AABB(Vector3(1.0+float(index%16),0.0,world_z),
+				Vector3(0.5,1.0,0.5)),"visual":true})
+		var bucket_key := "0,%d" % floori(world_z/CitadelPlanScript.BUCKET_WORLD_SIZE)
+		if not plan.member_buckets.has(bucket_key): plan.member_buckets[bucket_key] = []
+		plan.member_buckets[bucket_key].append(index)
+	var started := Time.get_ticks_usec()
+	var query: Dictionary = plan.visual_member_requirements(Rect2i(0,0,28,28))
+	var elapsed := Time.get_ticks_usec()-started
+	_check("citadel_visual_source_queries_complete_exact_immutable_member_bucket",
+		query.status == "described" and query.descriptionComplete \
+		and query.members.size() == 512 and int(query.queryMemberCandidateCount) == 512,
+		{"candidateCount":query.get("queryMemberCandidateCount",-1),
+			"memberCount":query.get("members",[]).size(),"elapsedUsec":elapsed,
+			"evidenceLevel":"synthetic_member_bucket_query_not_live_scene_cost"})
 
 
 func _make_structure_visual_block(cell: Vector3i, with_mesh: bool) -> StaticBody3D:

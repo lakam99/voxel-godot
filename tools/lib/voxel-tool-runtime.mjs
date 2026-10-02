@@ -519,6 +519,16 @@ async function runHeadedTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
   if (['run-normal-runtime-performance-pass', 'run-visible-world-fast-turn-sprint'].includes(toolId) && parsed.options.seed !== undefined)
     throw new Error('Normal runtime performance chooses its seed through New Game; omit -Seed.');
+  if (toolId === 'run-visible-world-fast-turn-sprint' && parsed.options.diagnosticReplaySeed !== undefined) {
+    const replaySeed = String(parsed.options.diagnosticReplaySeed);
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(replaySeed) || !asBoolean(parsed.options.skipTutorial))
+      throw new Error('Diagnostic replay requires a simple seed and --skip-tutorial.');
+  }
+  if (toolId === 'run-visible-world-fast-turn-sprint' && parsed.options.dataPrefetchProbe !== undefined) {
+    if (!['control', 'data'].includes(String(parsed.options.dataPrefetchProbe))
+        || parsed.options.diagnosticReplaySeed === undefined)
+      throw new Error('Data prefetch probe requires control or data mode and --diagnostic-replay-seed.');
+  }
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
   const [scene, reportEnvironment, progressEnvironment, screenshotEnvironment, configuredReport, configuredProgress, configuredScreenshots] = config;
@@ -573,6 +583,10 @@ async function runHeadedTool(toolId, rawArgs) {
     delete environment.VOXEL_PLAYTEST;
     delete environment.VOXEL_TEST_SEED;
   }
+  if (toolId === 'run-visible-world-fast-turn-sprint' && parsed.options.diagnosticReplaySeed !== undefined)
+    environment.VOXEL_VISIBLE_WORLD_DIAGNOSTIC_REPLAY_SEED = String(parsed.options.diagnosticReplaySeed);
+  if (toolId === 'run-visible-world-fast-turn-sprint')
+    environment.VOXEL_VISIBLE_WORLD_DATA_PREFETCH_PROBE = String(parsed.options.dataPrefetchProbe ?? '');
   if (toolId === 'npc/run-npc-observation-tests') {
     environment.VOXEL_NPC_TEST_SEED = String(parsed.options.seed ?? 'atlas-1492');
     environment.VOXEL_NPC_TEST_RUN_TOKEN = runToken;

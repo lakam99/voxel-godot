@@ -2774,6 +2774,86 @@ func scene_state(region: Vector2i) -> Dictionary:
 func scene_root(region: Vector2i) -> Node3D:
 	return _scenes[region].job.own_node_root() if _scenes.has(region) else null
 
+
+## Visual-only description of exact immutable source members. The scene job is
+## retained as the receipt publisher; no collision, door or navigation proof is
+## consulted here. An absent scene cannot turn a described site into an empty
+## source, and a replacement scene cannot inherit its predecessor's receipts.
+func visual_source_state(bounds: Rect2i) -> Dictionary:
+	if _admission == null or not _bounded_region_rectangle(bounds):
+		return {"status":"failed","reason":"invalid_citadel_visual_request"}
+	var admitted: Dictionary = _admission.request_bounds(bounds)
+	if admitted.get("status") != "ready": return admitted
+	if _closing or _world_reset_pending:
+		return {"status":"pending","reason":"citadel_visual_world_reset_pending"}
+	var candidates: Array[Dictionary] = []
+	var source_rows: Array = []
+	var cell_world_bounds := Rect2(Vector2(bounds.position)*CitadelPublicationPlan.CELL,
+		Vector2(bounds.size)*CitadelPublicationPlan.CELL)
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
+	for z in range(low.y,high.y+1):
+		for x in range(low.x,high.x+1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			# request_bounds returns ready only when every intersecting candidate
+			# has a prepared or authoritative absent decision. Unknown states are
+			# never interpreted as an empty visual source.
+			if source.get("status") == "absent": continue
+			if source.get("status") not in ["ready","prepared"]:
+				return {"status":"pending","reason":"citadel_visual_source_decision_pending","region":region}
+			if not source.get("reservationCells") is Rect2i:
+				return {"status":"failed","reason":"citadel_visual_reservation_missing","region":region}
+			if not source.reservationCells.intersects(bounds): continue
+			if _failures.has(region):
+				return {"status":"failed","reason":String(_failures[region].reason),"region":region}
+			var binding: Dictionary = source.binding
+			var plan = _publication_plan_for_binding(binding)
+			if plan == null and _packet_bootstrap_bases.has(region):
+				var bootstrap: Dictionary = _packet_bootstrap_bases[region]
+				var base = bootstrap.get("base",null)
+				if bootstrap.get("binding",{}) == binding and base != null:
+					plan = base.publication_plan
+			if plan == null and _prepared.has(region):
+				var prepared: Dictionary = _prepared[region]
+				var base = prepared.get("base",null)
+				if prepared.get("binding",{}) == binding and base != null:
+					plan = base.publication_plan
+			if plan == null or not plan.matches(binding,plan.groups):
+				return {"status":"pending","reason":"citadel_visual_description_pending","region":region}
+			var described: Dictionary = plan.visual_member_requirements(bounds)
+			if described.get("status") != "described": return described
+			var job = _scenes[region].job if _scenes.has(region) and _scenes[region].binding == binding \
+				and not _region_retiring(region) else null
+			var site_id := String(binding.siteId)
+			var omitted_members: Array[String] = []
+			for record: Dictionary in described.members:
+				var member_id := String(record.memberId)
+				if job != null and job.visual_member_omitted(member_id,binding):
+					omitted_members.append(member_id)
+					continue
+				if candidates.size() >= 16384:
+					return {"status":"pending","reason":"citadel_visual_candidate_capacity","retryable":true}
+				var member_bounds: AABB = record.bounds
+				var member_world_bounds := Rect2(
+					Vector2(member_bounds.position.x,member_bounds.position.z),
+					Vector2(member_bounds.size.x,member_bounds.size.z))
+				var clipped := member_world_bounds.intersection(cell_world_bounds)
+				var world_position := clipped.get_center() if clipped.has_area() \
+					else member_world_bounds.get_center()
+				candidates.append({"candidateId":"citadel:%s:%s" % [site_id,member_id],
+					"memberId":member_id,"positionXZ":world_position/CitadelPublicationPlan.CELL,
+					"bounds":member_bounds,"binding":binding,"sourceSignature":plan.output_signature,
+					"publisher":job})
+			source_rows.append([site_id,binding,plan.output_signature,
+				job.get_instance_id() if job != null else 0,omitted_members])
+	var digest := HashingContext.new()
+	digest.start(HashingContext.HASH_SHA256)
+	digest.update(var_to_bytes([_seed,_generation,source_rows]))
+	return {"status":"described","reason":"","descriptionComplete":true,
+		"sourceRevision":digest.finish().hex_encode(),"candidates":candidates,
+		"siteCount":source_rows.size(),"candidateCount":candidates.size()}
+
 func _source_description_requirements(region: Vector2i, bounds: Rect2i, binding: Dictionary) -> Dictionary:
 	if _closing or _world_reset_pending or _region_retiring(region):
 		return {"status":"pending","reason":"structure_dependency_source_pending"}

@@ -506,6 +506,14 @@ func test_streaming_forecast_and_navigation_terrain_gate() -> void:
 		is_equal_approx(origin.distance_to(forecast),main.CELL*main.STREAMING_FORECAST_MAX_CELLS),{
 			"evidenceLevel":"pure_scheduling_contract","origin":origin,"forecast":forecast,
 			"doesNotProve":"No terrain, player movement, or frame pacing is exercised."})
+	var stationary_centered := true
+	for facing in [Vector3.FORWARD,Vector3.BACK,Vector3.LEFT,Vector3.RIGHT,Vector3.UP]:
+		stationary_centered = stationary_centered and main.bounded_streaming_forecast_position(
+			origin,Vector3.ZERO,facing)==origin
+	add_result("stationary_facing_keeps_visual_viewer_forecast_at_player_center",
+		stationary_centered,{
+			"evidenceLevel":"pure_scheduling_contract","origin":origin,
+			"doesNotProve":"No native viewer, terrain mesh, or headed turn is exercised."})
 	main.free()
 	const Adapter := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
 	var terrain_main := SyntheticNavigationTerrainGateMain.new()

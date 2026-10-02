@@ -109,6 +109,12 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 		signature.update(var_to_bytes([id,bounds,dependencies,group.get("members",[]),
 			group.get("doorPartIds",[]),bool(group.get("hasCollision",false))]))
 	var by_part: Dictionary = description.publication_groups.get("groupByPart",{})
+	var building_visuals: Dictionary = {}
+	for raw_part in building_source.get("parts",[]):
+		if raw_part is Dictionary:
+			var recipe: Variant = raw_part.get("recipe",{})
+			building_visuals["building:"+String(raw_part.get("id",""))] = \
+				bool(recipe.get("visual",true)) if recipe is Dictionary else true
 	var part_member_ids: Array[String] = []
 	for member_id: String in description.parts: part_member_ids.append(member_id)
 	part_member_ids.sort()
@@ -116,7 +122,8 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 		if not by_part.has(member_id): return {"ready":false,"reason":"publication_plan_member_group_missing","memberId":member_id}
 		var member_bounds: Variant = description.parts[member_id].get("bounds")
 		if not _member_bounds_valid(member_bounds): return {"ready":false,"reason":"publication_plan_member_bounds_invalid","memberId":member_id}
-		_add_member_record(plan,member_id,String(by_part[member_id]),member_bounds)
+		_add_member_record(plan,member_id,String(by_part[member_id]),member_bounds,
+			bool(building_visuals.get(member_id,true)))
 	var tree_members: Dictionary = description.publication_groups.get("treeMembers",{})
 	var tree_member_ids: Array[String] = []
 	for member_id: String in tree_members: tree_member_ids.append(member_id)
@@ -181,7 +188,7 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 		plan.selected_courtyard_group_ids]))
 	var canonical_members: Array = []
 	for record: Dictionary in plan.member_records:
-		canonical_members.append([record.memberId,record.groupId,record.bounds])
+		canonical_members.append([record.memberId,record.groupId,record.bounds,record.visual])
 	signature.update(var_to_bytes(canonical_members))
 	plan.order.make_read_only()
 	plan.dependency_closures.make_read_only()
@@ -262,6 +269,24 @@ func physical_group_requirements(bounds: Rect2i) -> Dictionary:
 		"groupDescriptionComplete":true,"publicationAcknowledged":false,
 		"queryCandidateCount":direct_groups.size(),"queryMemberCandidateCount":candidates.size(),
 		"queryOwner":"citadel_publication_plan_exact_members"}
+
+
+## Exact visual obligations from the same immutable members used to build the
+## scene. A group may extend beyond this rectangle, so group completion alone
+## cannot describe which visible members belong to a view chunk.
+func visual_member_requirements(bounds: Rect2i) -> Dictionary:
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		return {"status":"failed","reason":"invalid_visual_member_bounds"}
+	var world_query := _world_rect_for_cells(bounds)
+	var indices := _bucket_record_candidates(member_buckets,world_query,member_records.size())
+	var members: Array[Dictionary] = []
+	for index: int in indices:
+		var record: Dictionary = member_records[index]
+		if bool(record.visual) and _rect_intersects_aabb(world_query,record.bounds):
+			members.append(record)
+	return {"status":"described","binding":binding,"members":members,
+		"descriptionComplete":true,"sourceSignature":output_signature,
+		"queryMemberCandidateCount":indices.size()}
 
 
 func exterior_structural_group_requirements(bounds: Rect2i, runtime_eligible: Dictionary = {}) -> Dictionary:
@@ -386,9 +411,10 @@ static func _freeze_bucket_index(index: Dictionary) -> void:
 		ids.make_read_only()
 
 
-static func _add_member_record(plan, member_id: String, group_id: String, bounds: AABB) -> void:
+static func _add_member_record(plan, member_id: String, group_id: String, bounds: AABB,
+		visual := true) -> void:
 	var index: int = plan.member_records.size()
-	var record := {"memberId":member_id,"groupId":group_id,"bounds":bounds}
+	var record := {"memberId":member_id,"groupId":group_id,"bounds":bounds,"visual":visual}
 	record.make_read_only()
 	plan.member_records.append(record)
 	var low := _bucket_for_point(bounds.position)

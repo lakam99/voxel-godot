@@ -33,7 +33,6 @@ const VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 const STREAMING_FORECAST_SECONDS := 1.5
 const STREAMING_FORECAST_MAX_CELLS := 16.0
-const STREAMING_STATIONARY_FORECAST_SECONDS := 1.0
 const GAMEPLAY_REGIONAL_NAVIGATION_BUDGET_USEC := 1500
 const PRIVATE_NATIVE_LOAD_AUTHORITATIVE := false
 
@@ -1657,12 +1656,12 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
 ## hundreds of metres long and repeatedly rebuilt terrain/navigation far ahead.
 func bounded_streaming_forecast_position(position: Vector3, movement: Vector3, facing: Vector3) -> Vector3:
     var horizontal_movement := Vector3(movement.x,0.0,movement.z)
-    var horizontal_facing := Vector3(facing.x,0.0,facing.z).normalized()
-    var direction := horizontal_movement.normalized() if horizontal_movement.length_squared()>=0.1 else horizontal_facing
-    if direction.length_squared()<=0.0: return position
+    # Facing alone must not move the one visual-producing native viewer away
+    # from the player-centered sphere already certified before gameplay.
+    if horizontal_movement.length_squared()<0.1: return position
+    var direction := horizontal_movement.normalized()
     var lead_metres := minf(CELL*STREAMING_FORECAST_MAX_CELLS,
-        horizontal_movement.length()*STREAMING_FORECAST_SECONDS) if horizontal_movement.length_squared()>=0.1 \
-        else minf(CELL*STREAMING_FORECAST_MAX_CELLS,PlayerController.WALK_SPEED*STREAMING_STATIONARY_FORECAST_SECONDS)
+        horizontal_movement.length()*STREAMING_FORECAST_SECONDS)
     return position+direction*lead_metres
 
 ## Navigation capture consumes authoritative terrain facts. Refuse to start a

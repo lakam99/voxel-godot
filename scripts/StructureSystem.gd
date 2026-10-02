@@ -89,6 +89,9 @@ func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
         return {"status":"pending", "reason":"landmark_runtime_owners_pending"}
     return result
 
+func region_citadel_visual_source(bounds: Rect2i) -> Dictionary:
+    return citadel_publication.visual_source_state(bounds)
+
 func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false, budget_usec := CITADEL_PUBLICATION_BUDGET_USEC) -> Dictionary:
     if budget_usec<=0:
         return citadel_publication.stats()

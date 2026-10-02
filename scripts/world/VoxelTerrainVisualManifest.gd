@@ -20,16 +20,20 @@ var _source_world_revision := ""
 var _blocks: Array[Vector3i] = []
 var _block_indices: Dictionary = {}
 var _cursor := 0
+var _completed_blocks: Dictionary = {}
+var _revisit_blocks: Array[Vector3i] = []
+var _previous_ledgers: Array = []
+var _pending_block := Vector3i(-2147483648, -2147483648, -2147483648)
 var _represented_blocks := 0
 var _empty_blocks := 0
+var _transferred_blocks := 0
 var _active := false
-var _source_stale := false
 var _bound_runtime_instance_id := 0
 
 
 func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 		world_revision: String, view_revision: int, bounds: Rect2i, near_bounds: Rect2i,
-		center_cells: Vector3, radius_cells: float) -> Dictionary:
+		center_cells: Vector3, radius_cells: float, previous_ledgers: Array = []) -> Dictionary:
 	if not is_instance_valid(runtime) or not is_instance_valid(readiness) \
 			or not runtime.has_method("visible_mesh_source_identity") \
 			or not runtime.has_method("visible_mesh_world_revision") \
@@ -46,7 +50,7 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 	var identity := {"requestId": request_id, "seed": seed, "worldRevision": world_revision,
 		"viewRevision": view_revision, "bounds": bounds, "nearBounds": near_bounds,
 		"center": center_cells, "radius": radius_cells, "runtime": runtime.get_instance_id()}
-	var same := _active and not _source_stale and _request_id == request_id and _seed == seed \
+	var same := _active and _request_id == request_id and _seed == seed \
 		and _world_revision == world_revision and _view_revision == view_revision \
 		and _bounds == bounds and _near_bounds == near_bounds and _center_cells == center_cells \
 		and is_equal_approx(_radius_cells, radius_cells) \
@@ -95,10 +99,17 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 	_block_indices.clear()
 	for index in range(_blocks.size()): _block_indices[_blocks[index]] = index
 	_cursor = 0
+	_completed_blocks.clear()
+	_revisit_blocks.clear()
+	_previous_ledgers.clear()
+	for previous_value in previous_ledgers:
+		if previous_value is Object and is_instance_valid(previous_value):
+			_previous_ledgers.append(weakref(previous_value))
+	_pending_block = Vector3i(-2147483648, -2147483648, -2147483648)
 	_represented_blocks = 0
 	_empty_blocks = 0
+	_transferred_blocks = 0
 	_active = true
-	_source_stale = false
 	return {"status": "ready", "viewRevision": _view_revision, "blockCount": _blocks.size(),
 		"sourceIdentity": _source_identity, "sourceRevision": _source_world_revision}
 
@@ -107,32 +118,69 @@ func advance(block_budget: int = 24) -> Dictionary:
 	var runtime: Object = _runtime_ref.get_ref() if _runtime_ref != null else null
 	if not _active or not is_instance_valid(runtime) or not is_instance_valid(_readiness):
 		return {"status": "pending", "reason": "native_terrain_visual_manifest_not_started"}
-	if _source_stale:
-		# Recheck the bounded source list after a previously accepted block changes.
-		# expect_source replaces only changed revisions; its old receipt cannot pass
-		# the publisher validator while the replacement is absent.
-		_cursor = 0
-		_represented_blocks = 0
-		_empty_blocks = 0
-		_source_stale = false
 	if String(runtime.call("visible_mesh_source_identity")) != _source_identity \
 			or String(runtime.call("visible_mesh_world_revision")) != _source_world_revision:
 		return _progress("pending", "native_terrain_source_revision_changed")
 	var processed := 0
-	while _cursor < _blocks.size() and processed < maxi(1, block_budget):
+	var examined := 0
+	var attempted_revisits: Dictionary = {}
+	var first_pending_reason := "native_terrain_visual_coverage_pending"
+	_pending_block = Vector3i(-2147483648, -2147483648, -2147483648)
+	# A missing frontier mesh must not prevent already installed blocks later in
+	# the source list from being described. Visit a bounded slice, then resume
+	# at the next block on the following frame.
+	while examined < _blocks.size() and processed < maxi(1, block_budget) \
+			and _completed_blocks.size() < _blocks.size():
 		var block: Vector3i = _blocks[_cursor]
+		var revisit_found := false
+		for _queued_index in range(_revisit_blocks.size()):
+			var queued: Vector3i = _revisit_blocks.pop_front()
+			_revisit_blocks.append(queued)
+			if not attempted_revisits.has(queued):
+				block = queued
+				attempted_revisits[queued] = true
+				revisit_found = true
+				break
+		if not revisit_found:
+			_cursor = (_cursor + 1) % _blocks.size()
+		examined += 1
+		if _completed_blocks.has(block):
+			_revisit_blocks.erase(block)
+			continue
+		processed += 1
 		var source_id := "terrain-mesh:%d,%d,%d" % [block.x, block.y, block.z]
 		var source_revision := String(runtime.call("visible_mesh_source_revision", block))
 		var source_bounds := Rect2i(Vector2i(block.x, block.z) * NATIVE_BLOCK_CELLS,
 			Vector2i.ONE * NATIVE_BLOCK_CELLS)
+		if not bool(runtime.call("visible_mesh_area_complete", block)):
+			# A changed native revision must retire its old receipt even while
+			# the replacement mesh is still pending.
+			var invalidated: Dictionary = _readiness.call("expect_source", source_id,
+				"terrain", _source_identity, source_revision, source_bounds, _view_revision)
+			if invalidated.get("status") == "failed":
+				return _progress("failed", String(invalidated.get("reason", "native_terrain_source_declaration_failed")), block)
+			if _pending_block.x == -2147483648:
+				_pending_block = block
+				first_pending_reason = "native_terrain_mesh_block_pending"
+			continue
+		var has_geometry := bool(runtime.call("visible_mesh_block_has_geometry", block))
+		if _transfer_complete_block(block, source_id, source_revision, has_geometry):
+			_completed_blocks[block] = "represented" if has_geometry else "empty"
+			_revisit_blocks.erase(block)
+			_transferred_blocks += 1
+			if has_geometry: _represented_blocks += 1
+			else: _empty_blocks += 1
+			continue
 		var declared: Dictionary = _readiness.call("expect_source", source_id, "terrain",
 			_source_identity, source_revision, source_bounds, _view_revision)
 		if declared.get("status") != "ready":
-			return _progress(String(declared.get("status", "pending")),
-				String(declared.get("reason", "native_terrain_source_declaration_pending")), block)
-		if not bool(runtime.call("visible_mesh_area_complete", block)):
-			return _progress("pending", "native_terrain_mesh_block_pending", block)
-		if bool(runtime.call("visible_mesh_block_has_geometry", block)):
+			if declared.get("status") == "failed":
+				return _progress("failed", String(declared.get("reason", "native_terrain_source_declaration_failed")), block)
+			if _pending_block.x == -2147483648:
+				_pending_block = block
+				first_pending_reason = String(declared.get("reason", "native_terrain_source_declaration_pending"))
+			continue
+		if has_geometry:
 			var candidate_id := "terrain:%d,%d,%d" % [block.x, block.y, block.z]
 			var position_xz := _representative_position(block)
 			var tier := "near" if _near_bounds.has_point(Vector2i(floori(position_xz.x), floori(position_xz.y))) else "horizon"
@@ -140,41 +188,91 @@ func advance(block_budget: int = 24) -> Dictionary:
 				var described: Dictionary = _readiness.call("describe_candidate", source_id,
 					candidate_id, tier, {"positionXZ": position_xz, "nativeBlock": block})
 				if described.get("status") != "ready":
-					return _progress(String(described.get("status", "pending")),
-						String(described.get("reason", "native_terrain_candidate_pending")), block)
+					if described.get("status") == "failed":
+						return _progress("failed", String(described.get("reason", "native_terrain_candidate_failed")), block)
+					if _pending_block.x == -2147483648:
+						_pending_block = block
+						first_pending_reason = String(described.get("reason", "native_terrain_candidate_pending"))
+					continue
 			var receipt: Dictionary = _readiness.call("accept_publisher_receipt", source_id,
 				candidate_id, candidate_id + ":native_mesh", tier, _source_identity,
 				source_revision, _view_revision, runtime, &"visible_mesh_receipt_is_current")
 			if receipt.get("status") != "ready":
-				return _progress(String(receipt.get("status", "pending")),
-					String(receipt.get("reason", "native_terrain_receipt_pending")), block)
-			_represented_blocks += 1
-		else:
-			_empty_blocks += 1
+				if receipt.get("status") == "failed":
+					return _progress("failed", String(receipt.get("reason", "native_terrain_receipt_failed")), block)
+				if _pending_block.x == -2147483648:
+					_pending_block = block
+					first_pending_reason = String(receipt.get("reason", "native_terrain_receipt_pending"))
+				continue
 		var finished: Dictionary = _readiness.call("finish_source", source_id,
 			_source_identity, source_revision, _view_revision)
 		if finished.get("status") != "ready":
-			return _progress(String(finished.get("status", "pending")),
-				String(finished.get("reason", "native_terrain_source_finish_pending")), block)
-		_cursor += 1
-		processed += 1
-	return _progress("ready" if _cursor >= _blocks.size() else "pending",
-		"" if _cursor >= _blocks.size() else "native_terrain_visual_coverage_pending")
+			if finished.get("status") == "failed":
+				return _progress("failed", String(finished.get("reason", "native_terrain_source_finish_failed")), block)
+			if _pending_block.x == -2147483648:
+				_pending_block = block
+				first_pending_reason = String(finished.get("reason", "native_terrain_source_finish_pending"))
+			continue
+		_completed_blocks[block] = "represented" if has_geometry else "empty"
+		_revisit_blocks.erase(block)
+		if has_geometry: _represented_blocks += 1
+		else: _empty_blocks += 1
+	var complete := _completed_blocks.size() == _blocks.size()
+	return _progress("ready" if complete else "pending", "" if complete else first_pending_reason,
+		_pending_block)
+
+
+func _transfer_complete_block(block: Vector3i, source_id: String, source_revision: String,
+		has_geometry: bool) -> bool:
+	for previous_value in _previous_ledgers:
+		var previous_ref: WeakRef = previous_value as WeakRef
+		var previous: Object = previous_ref.get_ref() if previous_ref != null else null
+		if not is_instance_valid(previous) or previous == _readiness \
+				or not previous.has_method("complete_source_candidate_count") \
+				or not previous.has_method("complete_source_candidate_position"): continue
+		var candidate_count: int = int(previous.call("complete_source_candidate_count",
+			source_id, _source_identity, source_revision))
+		if candidate_count != (1 if has_geometry else 0): continue
+		if has_geometry:
+			var candidate_id := "terrain:%d,%d,%d" % [block.x, block.y, block.z]
+			var prior_position: Vector2 = previous.call("complete_source_candidate_position",
+				source_id, candidate_id, _source_identity, source_revision)
+			# The terrain candidate's representative position is selected from
+			# the view center. Re-describe it when that changes; the old tier and
+			# metadata do not prove the new view's requirement.
+			if not prior_position.is_finite() \
+					or not prior_position.is_equal_approx(_representative_position(block)):
+				continue
+		var transferred: Dictionary = _readiness.call("transfer_complete_overlap_source",
+			previous, source_id, _source_identity, source_revision, _view_revision, 1)
+		if transferred.get("status") == "ready": return true
+	return false
 
 
 func pending_block_diagnostics(runtime: Object) -> Dictionary:
-	if _cursor >= _blocks.size() or not is_instance_valid(runtime): return {}
-	var block: Vector3i = _blocks[_cursor]
+	if _completed_blocks.size() == _blocks.size() or not is_instance_valid(runtime): return {}
+	var block := _pending_block
+	if block.x == -2147483648:
+		for offset in range(_blocks.size()):
+			var candidate: Vector3i = _blocks[(_cursor + offset) % _blocks.size()]
+			if not _completed_blocks.has(candidate):
+				block = candidate
+				break
 	return runtime.call("visible_mesh_area_diagnostics", block) \
 		if runtime.has_method("visible_mesh_area_diagnostics") else {"block": block}
+
+
+func needs_advance() -> bool:
+	return _active and _completed_blocks.size() < _blocks.size()
 
 
 func _progress(status: String, reason: String, pending_block := Vector3i(-2147483648, -2147483648, -2147483648)) -> Dictionary:
 	return {"status": status, "reason": reason, "requestId": _request_id,
 		"viewRevision": _view_revision, "sourceIdentity": _source_identity,
 		"sourceRevision": _source_world_revision, "requiredBlocks": _blocks.size(),
-		"processedBlocks": _cursor, "pendingBlocks": _blocks.size() - _cursor,
+		"processedBlocks": _completed_blocks.size(), "pendingBlocks": _blocks.size() - _completed_blocks.size(),
 		"representedMeshBlocks": _represented_blocks, "completedEmptyBlocks": _empty_blocks,
+		"transferredBlocks": _transferred_blocks,
 		"pendingBlock": pending_block if pending_block.x != -2147483648 else null}
 
 
@@ -202,10 +300,32 @@ func _bind_runtime_mesh_revision_signal(runtime: Object) -> void:
 
 
 func _on_mesh_block_revision_changed(block_position: Vector3i, _revision: int) -> void:
-	# The current pending block can publish while this scan is waiting for it.
-	# A changed block already acknowledged by the scan invalidates that proof.
-	if _block_indices.has(block_position) and int(_block_indices[block_position]) < _cursor:
-		_source_stale = true
+	# Revisit only the changed block. The old receipt remains in the ledger but
+	# its source revision fails validation until expect_source replaces it.
+	revisit_block(block_position)
+
+
+func revisit_candidate(source_id: String, candidate_id: String) -> bool:
+	if not source_id.begins_with("terrain-mesh:") \
+			or not candidate_id.begins_with("terrain:") \
+			or source_id.trim_prefix("terrain-mesh:") != candidate_id.trim_prefix("terrain:"):
+		return false
+	var components := candidate_id.trim_prefix("terrain:").split(",")
+	if components.size() != 3 or not components[0].is_valid_int() \
+			or not components[1].is_valid_int() or not components[2].is_valid_int():
+		return false
+	return revisit_block(Vector3i(int(components[0]), int(components[1]),
+		int(components[2])))
+
+
+func revisit_block(block_position: Vector3i) -> bool:
+	if not _active or not _block_indices.has(block_position): return false
+	if _completed_blocks.has(block_position):
+		if String(_completed_blocks[block_position]) == "represented": _represented_blocks -= 1
+		else: _empty_blocks -= 1
+		_completed_blocks.erase(block_position)
+	if not _revisit_blocks.has(block_position): _revisit_blocks.append(block_position)
+	return true
 
 
 func _required_blocks(runtime: Object, center: Vector3, radius: float) -> Array[Vector3i]:
