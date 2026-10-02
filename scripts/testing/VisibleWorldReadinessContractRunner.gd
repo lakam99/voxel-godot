@@ -95,6 +95,20 @@ class UndergroundScanFixture extends RefCounted:
 			"newCandidates": [first] if calls == 1 else [first, first, Vector3i(-27, -5, 0)],
 			"processed": 1, "restarted": calls == 2}
 
+class CompletedUndergroundScanFixture extends RefCounted:
+	var chunk_source_revision := 1
+	var global_revision := 1
+	var advance_calls := 0
+	func terrain_volume_chunk_revision(_chunk_key: Vector2i, _chunk_size: int) -> int:
+		return chunk_source_revision
+	func terrain_volume_revision() -> int:
+		return global_revision
+	func advance_exposed_underground_floor_scan(_state: Dictionary, _sample_budget: int,
+			_time_budget_ms: float, _budget_start_usec: int) -> Dictionary:
+		advance_calls += 1
+		return {"state": {"revision": chunk_source_revision}, "complete": true,
+			"newCandidates": [], "processed": 1, "restarted": true}
+
 class TerrainPublisherFixture extends RefCounted:
 	signal visible_mesh_block_revision_changed(block_position: Vector3i, revision: int)
 	var complete := false
@@ -727,12 +741,45 @@ func test_underground_floor_scan_revision_restart() -> void:
 	var scan: Dictionary = volume.begin_exposed_underground_floor_scan(Vector2i.ZERO, 28)
 	scan["columnIndex"] = 20
 	volume.revision += 1
-	var restarted: Dictionary = volume.advance_exposed_underground_floor_scan(scan, 1)
+	volume.mark_section_dirty(Vector3i(10, 0, 10))
+	var unrelated: Dictionary = volume.advance_exposed_underground_floor_scan(scan, 1)
+	_check("unrelated_volume_edit_keeps_underground_floor_scan_cursor",
+		not bool(unrelated.get("restarted", true))
+		and int(unrelated.state.get("revision", -1)) == 0
+		and int(unrelated.state.get("columnIndex", -1)) == 20,
+		{"restarted": unrelated.get("restarted"), "state": unrelated.get("state", {})})
+	volume.revision += 1
+	volume.mark_section_dirty(Vector3i.ZERO)
+	var restarted: Dictionary = volume.advance_exposed_underground_floor_scan(unrelated.state, 1)
 	_check("volume_floor_scan_exposes_source_revision_restart",
 		bool(restarted.get("restarted", false))
-		and int(restarted.state.get("revision", -1)) == volume.revision
+		and int(restarted.state.get("revision", -1)) == volume.chunk_revision(Vector2i.ZERO, 28)
 		and int(restarted.state.get("columnIndex", -1)) == 0,
 		{"restarted": restarted.get("restarted"), "state": restarted.get("state", {})})
+	var completed_main = ScanMain.new()
+	var completed_source := CompletedUndergroundScanFixture.new()
+	completed_main.world_generation_system = completed_source
+	var completed_chunk := Node3D.new()
+	var completed_state := {"chunk": completed_chunk, "cx": 0, "cz": 0,
+		"undergroundCandidates": [], "undergroundScanComplete": true,
+		"undergroundIndex": 0, "undergroundVolumeFloorScan": {"revision": 1}}
+	completed_source.global_revision = 2
+	var unaffected_complete: bool = completed_main.process_underground_chunk_prop_spawn_state(
+		completed_state, 1)
+	_check("completed_underground_scan_ignores_unrelated_global_edit",
+		unaffected_complete and completed_source.advance_calls == 0
+		and bool(completed_state.undergroundScanComplete),
+		{"advanceCalls": completed_source.advance_calls, "state": completed_state})
+	completed_source.global_revision = 3
+	completed_source.chunk_source_revision = 3
+	var refreshed_complete: bool = completed_main.process_underground_chunk_prop_spawn_state(
+		completed_state, 1)
+	_check("completed_underground_scan_revalidates_overlapping_chunk_edit",
+		refreshed_complete and completed_source.advance_calls == 1
+		and int(completed_state.undergroundVolumeFloorScan.revision) == 3,
+		{"advanceCalls": completed_source.advance_calls, "state": completed_state})
+	completed_chunk.free()
+	completed_main.free()
 	var main = ScanMain.new()
 	var source := UndergroundScanFixture.new()
 	main.world_generation_system = source

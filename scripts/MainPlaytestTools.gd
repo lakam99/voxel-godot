@@ -3233,11 +3233,13 @@ func process_underground_chunk_prop_spawn_state(
         state["undergroundCandidates"] = []
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
     if bool(state.get("undergroundScanComplete", false)) and int(state.get("undergroundIndex", 0)) == 0 \
-            and world_generation_system != null and world_generation_system.has_method("terrain_volume_revision"):
+            and world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
         var completed_scan: Dictionary = state.get("undergroundVolumeFloorScan", {}) \
             if state.get("undergroundVolumeFloorScan", {}) is Dictionary else {}
         if completed_scan.has("revision") \
-                and int(completed_scan.revision) != int(world_generation_system.call("terrain_volume_revision")):
+                and int(completed_scan.revision) != int(world_generation_system.call(
+                    "terrain_volume_chunk_revision", Vector2i(int(state.get("cx", 0)),
+                        int(state.get("cz", 0))), CHUNK_SIZE)):
             # Revalidate the completed scan before its first RNG draw. Once
             # publication starts, that source/order is pinned for this chunk.
             state["undergroundScanComplete"] = false

@@ -2983,14 +2983,15 @@ func exposed_underground_floor_cells(chunk_key: Vector2i, chunk_size := SECTION_
 	return result
 
 func begin_exposed_underground_floor_scan(chunk_key: Vector2i, chunk_size := SECTION_SIZE) -> Dictionary:
+	var size := maxi(1, int(chunk_size))
 	return {
 		"chunkKey": chunk_key,
-		"chunkSize": maxi(1, int(chunk_size)),
+		"chunkSize": size,
 		"columnIndex": 0,
 		"scanY": 0,
 		"columnStarted": false,
 		"complete": false,
-		"revision": revision
+		"revision": chunk_revision(chunk_key, size)
 	}
 
 func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, time_budget_ms := -1.0, budget_start_usec := 0) -> Dictionary:
@@ -3004,7 +3005,8 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 		}
 	var chunk_key: Vector2i = state.get("chunkKey", Vector2i.ZERO)
 	var size := maxi(1, int(state.get("chunkSize", SECTION_SIZE)))
-	var restarted := int(state.get("revision", revision)) != revision
+	var source_revision := chunk_revision(chunk_key, size)
+	var restarted := int(state.get("revision", source_revision)) != source_revision
 	if restarted:
 		state = begin_exposed_underground_floor_scan(chunk_key, size)
 	var start_x := chunk_key.x * size
@@ -3050,7 +3052,7 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 	state["scanY"] = y
 	state["columnStarted"] = column_started
 	state["complete"] = complete
-	state["revision"] = revision
+	state["revision"] = source_revision
 	return {
 		"state": state,
 		"complete": complete,

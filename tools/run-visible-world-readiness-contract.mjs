@@ -14,6 +14,7 @@ cli(async () => {
     'scripts/world/HorizonEcologyPropReceiptPublisher.gd',
     'scripts/world/GeneratedStructureVisualManifest.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd',
+    'scripts/TerrainVolumeService.gd',
     'scripts/MainPlaytestTools.gd',
     'scripts/MainChunkTerrain.gd',
     'scripts/MainCore.gd',
