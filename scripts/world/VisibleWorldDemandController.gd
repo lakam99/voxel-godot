@@ -44,7 +44,8 @@ func adopt(owner: String, request_id: int, seed: String, world_revision: String,
 func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 		seed: String, world_revision: String, center_world: Vector3,
 		near_bounds: Rect2i, radius_cells: float, cell_scale: float,
-		chunk_size: int, view_intent: Dictionary = {}) -> Dictionary:
+		chunk_size: int, view_intent: Dictionary = {},
+		near_margin_cells := -1) -> Dictionary:
 	if not is_instance_valid(main) or not is_instance_valid(runtime) or owner.is_empty() \
 			or request_id <= 0 or seed.is_empty() or world_revision.is_empty() \
 			or not center_world.is_finite() or not is_finite(radius_cells) or radius_cells <= 0.0 \
@@ -73,9 +74,11 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 			floori(center.y) - radius_int), Vector2i.ONE * (2 * radius_int + 1))
 		if not bounds.encloses(near_bounds):
 			return {"status": "failed", "reason": "visual_near_region_outside_view"}
-		# A modest buffer lets the foreground move through several cells before
-		# its next request revision, while staying inside the existing view.
-		var prepared_near := near_bounds.grow(chunk_size / 2).intersection(bounds)
+		# Gameplay prepares a small moving buffer. Loading can request the exact
+		# stationary foreground so optional adjacent underground scans do not
+		# become first-control dependencies.
+		var margin := chunk_size / 2 if near_margin_cells < 0 else maxi(0, near_margin_cells)
+		var prepared_near := near_bounds.grow(margin).intersection(bounds)
 		var ledger = ReadinessScript.new()
 		_next_demand_revision += 1
 		var admitted: Dictionary = ledger.begin_view(request_id, seed, world_revision,

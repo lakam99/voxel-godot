@@ -41,12 +41,12 @@ func _run() -> void:
 		if load_status not in [GDExtensionManager.LOAD_STATUS_OK,
 				GDExtensionManager.LOAD_STATUS_ALREADY_LOADED]:
 			_failure = "native_extension_load_failed:%s:%d" % [extension_path, load_status]
-			_finish(null, "setup_failed")
+			await _finish(null, "setup_failed")
 			return
 	await process_frame
 	if not ClassDB.class_exists("NativeCaveField") or not ClassDB.class_exists("VoxelTerrain"):
 		_failure = "native_class_missing"
-		_finish(null, "setup_failed")
+		await _finish(null, "setup_failed")
 		return
 	var menu = MENU.instantiate()
 	root.add_child(menu)
@@ -79,7 +79,7 @@ func _run() -> void:
 		# two viewer admissions alone cannot prove that all retained demand drained.
 	if main == null and _failure.is_empty():
 		_failure = "main_missing"
-	_finish(main, stop_reason)
+	await _finish(main, stop_reason)
 
 func _observe_cadence() -> void:
 	var now := Time.get_ticks_usec()
@@ -149,9 +149,34 @@ func _sample(main: Node) -> void:
 		"pendingGameplayChunks": runtime_stats.get("pendingGameplayChunks", 0),
 		"collisionProbeAttempts": runtime_stats.get("collisionProbeAttempts", 0),
 		"collisionProbePasses": runtime_stats.get("collisionProbePasses", 0),
+		"nearPropQueue": _near_prop_queue(main),
+		"undergroundCellsScanned": int(perf.call("counter_value", "underground_prop_cells_scanned"))
+			if is_instance_valid(perf) else 0,
 		"terrainStats": terrain_stats,
 		"stepElapsedMs": step.get("elapsedMs", 0.0),
 		"stepMetrics": _compact_step(step.get("metrics", {}))})
+
+func _near_prop_queue(main: Node) -> Array[Dictionary]:
+	var bounds: Rect2i = main.get("visible_world_near_bounds")
+	if not bounds.has_area(): return []
+	var pending: Dictionary = main.get("pending_chunk_prop_spawns")
+	var rows: Array[Dictionary] = []
+	for key_value in pending:
+		if not (key_value is Vector2i): continue
+		var key: Vector2i = key_value
+		if not Rect2i(key * 28, Vector2i.ONE * 28).intersects(bounds): continue
+		var state_value = pending[key]
+		if not (state_value is Dictionary): continue
+		var state: Dictionary = state_value
+		var volume: Dictionary = state.get("undergroundVolumeFloorScan", {}) \
+			if state.get("undergroundVolumeFloorScan", {}) is Dictionary else {}
+		rows.append({"chunk": key, "phase": state.get("phase", ""),
+			"scanColumn": volume.get("columnIndex", 0), "scanY": volume.get("scanY", 0),
+			"scanComplete": state.get("undergroundScanComplete", false),
+			"candidateCount": (state.get("undergroundCandidates", []) as Array).size()})
+	rows.sort_custom(func(a: Dictionary, b: Dictionary):
+		return a.chunk.x < b.chunk.x if a.chunk.x != b.chunk.x else a.chunk.y < b.chunk.y)
+	return rows.slice(0, 12)
 
 func _compact_tasks(tasks: Dictionary) -> Dictionary:
 	var result := {}
@@ -165,7 +190,10 @@ func _compact_step(value: Variant) -> Dictionary:
 	var result := {}
 	for key in ["currentViewDistance", "publishedRetainedGameplayChunks",
 			"retainedGameplayChunks", "retainedRegionViewers", "retainedViewerGroups",
-			"pendingNativeTasks", "quietFrames", "requiredQuietFrames"]:
+			"pendingNativeTasks", "quietFrames", "requiredQuietFrames",
+			"status", "reason", "candidateCount", "representedCount", "pendingCount",
+			"byKind", "coverageGaps", "queue", "coverageLag",
+			"visualDemandRevision", "publication"]:
 		if source.has(key): result[key] = source[key]
 	return result
 
@@ -184,6 +212,27 @@ func _finish(main: Node, stop_reason: String) -> void:
 		"secondRetainedViewerSeenSeconds": _second_retained_seen,
 		"samples": _samples, "events": _events}
 	var report_path := OS.get_environment("VOXEL_TERRAIN_CADENCE_REPORT")
+	if main != null and is_instance_valid(main) and stop_reason == "startup_complete":
+		var runtime = main.get("voxel_terrain_runtime")
+		var controller = main.get("visible_world_demand_controller")
+		if is_instance_valid(runtime) and is_instance_valid(controller):
+			var full: Dictionary = controller.call("full_view_readiness", "player",
+				int((main.get("streaming_requests") as Dictionary).get("player", 0)),
+				String(main.get("seed_text")),
+				String(runtime.call("visible_mesh_world_revision")))
+			report["firstControlFullView"] = {
+				"status": full.get("status", "pending"), "reason": full.get("reason", ""),
+				"candidateCount": full.get("candidateCount", 0),
+				"representedCount": full.get("representedCount", 0),
+				"pendingCount": full.get("pendingCount", 0),
+				"byKind": full.get("byKind", {}), "tiers": full.get("tiers", {}),
+				"coverageGaps": full.get("coverageGaps", []),
+				"viewRevision": full.get("viewRevision", 0),
+				"visualDemandRevision": full.get("visualDemandRevision", 0)}
+		await RenderingServer.frame_post_draw
+		var screenshot_path := report_path.get_base_dir().path_join("first_control.png")
+		var image := root.get_texture().get_image()
+		report["firstControlScreenshot"] = screenshot_path if image.save_png(screenshot_path) == OK else ""
 	var file := FileAccess.open(report_path, FileAccess.WRITE)
 	if file == null:
 		push_error("terrain cadence report write failed")
