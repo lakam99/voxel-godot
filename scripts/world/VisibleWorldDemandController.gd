@@ -311,9 +311,26 @@ func full_view_readiness(owner: String, request_id: int, seed: String,
 			or String(view.get("worldRevision", "")) != world_revision:
 		return {"status": "pending", "reason": "visual_request_revision_changed",
 			"requestId": request_id}
+	# The adopted startup ledger is a retention source while this controller
+	# builds the full all-direction view. It has no controller-owned terrain and
+	# chunk source set, so it cannot be the final startup gate by itself.
+	if not view.has("terrain") or not view.has("chunkKeys"):
+		return {"status": "pending", "reason": "visual_full_view_source_not_started",
+			"requestId": request_id, "visualDemandRevision": int(view.demandRevision)}
 	var ledger: Object = view.ledger
 	var result: Dictionary = ledger.region_readiness(request_id, seed,
 		world_revision, int(view.viewRevision), view.bounds)
+	# The ledger cannot enumerate candidates from a chunk publisher that has
+	# not submitted its manifest yet. A ready receipt count is therefore only
+	# complete after every required chunk source has been scanned.
+	if result.get("status") == "ready" and view.has("chunkKeys") \
+			and not bool(view.get("publicationComplete", false)):
+		result["status"] = "pending"
+		result["reason"] = "visual_source_publication_pending"
+		result["pendingChunkSourceCount"] = maxi(0,
+			(view.chunkKeys as Array).size() - (view.get("propSources", {}) as Dictionary).size()) \
+			+ maxi(0, (view.chunkKeys as Array).size() \
+				- (view.get("structureSources", {}) as Dictionary).size())
 	result["visualDemandRevision"] = int(view.demandRevision)
 	result["visualRequestOwner"] = owner
 	return result

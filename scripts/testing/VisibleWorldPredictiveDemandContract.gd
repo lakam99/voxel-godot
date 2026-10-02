@@ -60,6 +60,7 @@ func _initialize() -> void:
 func _run() -> void:
 	_test_early_all_direction_demand()
 	_test_full_view_promotion()
+	_test_unsubmitted_chunk_sources_do_not_complete_view()
 	_test_stale_native_receipt_without_signal()
 	_test_bounded_chunk_diagnostics()
 	_test_retained_chunk_keys()
@@ -158,6 +159,43 @@ func _test_full_view_promotion() -> void:
 	_check("changed_world_cannot_borrow_old_full_receipts", changed.status == "pending"
 		and changed.reason == "visual_world_revision_changed"
 		and (controller._owners.player.current as Dictionary).is_empty())
+
+
+func _test_unsubmitted_chunk_sources_do_not_complete_view() -> void:
+	var controller = ControllerScript.new()
+	var ledger := Ledger.new()
+	var bounds := Rect2i(-20, -20, 41, 41)
+	var chunk_key := Vector2i.ZERO
+	ledger.full_bounds = bounds
+	ledger.full_ready = true
+	controller.adopt("player", 9, "pinned", "mock-world-1", ledger, 1,
+		Vector2.ZERO, 20.0, bounds, Rect2i(-4, -4, 8, 8))
+	var adopted: Dictionary = controller.full_view_readiness("player", 9,
+		"pinned", "mock-world-1")
+	_check("adopted_startup_ledger_cannot_replace_full_source_scan",
+		adopted.status == "pending"
+		and adopted.reason == "visual_full_view_source_not_started")
+	controller._owners["player"] = {"current": {}, "pending": {
+		"ledger": ledger, "terrain": TerrainWork.new(),
+		"requestId": 9, "seed": "pinned",
+		"worldRevision": "mock-world-1", "viewRevision": 1,
+		"demandRevision": 2, "bounds": bounds,
+		"chunkKeys": [chunk_key], "propSources": {},
+		"structureSources": {chunk_key: true},
+		"publicationComplete": false}}
+	var incomplete: Dictionary = controller.full_view_readiness("player", 9,
+		"pinned", "mock-world-1")
+	_check("unsubmitted_chunk_source_cannot_make_full_view_ready",
+		incomplete.status == "pending"
+		and incomplete.reason == "visual_source_publication_pending"
+		and int(incomplete.get("pendingChunkSourceCount", -1)) == 1)
+	var view: Dictionary = controller._owners.player.pending
+	view.propSources[chunk_key] = true
+	view.publicationComplete = true
+	var complete: Dictionary = controller.full_view_readiness("player", 9,
+		"pinned", "mock-world-1")
+	_check("submitted_chunk_sources_allow_receipt_validation",
+		complete.status == "ready")
 
 func _test_bounded_chunk_diagnostics() -> void:
 	var controller = ControllerScript.new()
