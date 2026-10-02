@@ -18,6 +18,8 @@ const STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD := 256
 const CITADEL_PUBLICATION_BUDGET_USEC := 4000
 const STANDALONE_ADMISSION_SAMPLES_PER_SLICE := 2
 const STANDALONE_ADMISSION_BUDGET_USEC := 1200
+const ORDINARY_VISUAL_SOURCE_MAX_EXPECTED_BLOCKS := 8192
+const ORDINARY_VISUAL_QUERY_MAX_EXPECTED_BLOCKS := 16384
 
 var main
 var loot
@@ -40,6 +42,10 @@ var defer_structure_ops := false
 var deferred_town_home_records := {}
 var town_manifest_publish_states := {}
 var active_structure_town_key := ""
+var active_structure_visual_source_id := ""
+var ordinary_visual_sources := {}
+var removed_generated_structure_blocks := {}
+var ordinary_visual_revision := 0
 var terrain_surface_sample_cache := {}
 var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
@@ -91,6 +97,199 @@ func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
 
 func region_citadel_visual_source(bounds: Rect2i) -> Dictionary:
     return citadel_publication.visual_source_state(bounds)
+
+func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
+    if not is_instance_valid(main) or not CitadelPublicationServiceScript._bounded_region_rectangle(bounds):
+        return {"status":"failed","reason":"invalid_ordinary_visual_source_bounds"}
+    var source_ids: Dictionary = {}
+    var town_size := int(main.TOWN_REGION_CELLS)
+    var structure_size := int(main.STRUCTURE_REGION_CELLS)
+    if town_size <= 0 or structure_size <= 0:
+        return {"status":"failed","reason":"invalid_ordinary_visual_source_grid"}
+    var town_low := Vector2i(floori(float(bounds.position.x)/town_size),floori(float(bounds.position.y)/town_size))-Vector2i.ONE
+    var town_high := Vector2i(floori(float(bounds.end.x-1)/town_size),floori(float(bounds.end.y-1)/town_size))+Vector2i.ONE
+    var standalone_low := Vector2i(floori(float(bounds.position.x)/structure_size),floori(float(bounds.position.y)/structure_size))-Vector2i.ONE
+    var standalone_high := Vector2i(floori(float(bounds.end.x-1)/structure_size),floori(float(bounds.end.y-1)/structure_size))+Vector2i.ONE
+    if (town_high.x-town_low.x+1)*(town_high.y-town_low.y+1)>256 \
+            or (standalone_high.x-standalone_low.x+1)*(standalone_high.y-standalone_low.y+1)>256:
+        return {"status":"failed","reason":"ordinary_visual_source_region_limit"}
+    var cached_towns_value=main.get("town_region_cache")
+    var cached_towns: Dictionary=cached_towns_value if cached_towns_value is Dictionary else {}
+    for z in range(town_low.y,town_high.y+1):
+        for x in range(town_low.x,town_high.x+1):
+            if cached_towns_value is Dictionary and not cached_towns.has(Vector2i(x,z)):
+                return {"status":"pending","reason":"ordinary_visual_town_description_pending",
+                    "retryable":true,"region":Vector2i(x,z)}
+            var town: Dictionary=cached_towns.get(Vector2i(x,z),{}) if cached_towns_value is Dictionary \
+                else main.town_region(x,z)
+            if town.is_empty() or not _regional_town_bounds(town).intersects(bounds): continue
+            var town_key:=town_key_for(town)
+            var source_id: String="town:"+town_key
+            source_ids[source_id]=true
+    for z in range(standalone_low.y,standalone_high.y+1):
+        for x in range(standalone_low.x,standalone_high.x+1):
+            var region:=Vector2i(x,z)
+            var candidate:=StandaloneSourceScript.candidate_for_region(String(main.seed_text),region,structure_size,float(main.STRUCTURE_SPAWN_CHANCE))
+            if candidate.is_empty(): continue
+            var influence:=StandaloneSourceScript.terrain_influence_for_candidate(candidate)
+            if not bool(influence.get("bounded",false)):
+                return {"status":"failed","reason":"standalone_visual_source_bounds_missing"}
+            if not (influence.influenceCells as Rect2i).intersects(bounds): continue
+            var source_id: String="standalone:%d,%d" % [x,z]
+            if generated_structures.get(region,null)==false: continue
+            source_ids[source_id]=true
+    var ids: Array=source_ids.keys()
+    ids.sort()
+    var candidates: Array[Dictionary]=[]
+    var pending_ids: Array[String]=[]
+    var bindings: Array=[]
+    var expected_scanned:=0
+    var live_blocks: Dictionary=main.get("blocks")
+    for source_id_value in ids:
+        var source_id:=String(source_id_value)
+        var source: Dictionary=ordinary_visual_sources.get(source_id,{})
+        if source.is_empty() or not bool(source.get("completed",false)):
+            pending_ids.append(source_id)
+            continue
+        bindings.append([source_id,int(source.get("revision",0))])
+        var expected: Dictionary=source.get("expected",{})
+        if expected.size()>ORDINARY_VISUAL_SOURCE_MAX_EXPECTED_BLOCKS \
+                or expected_scanned+expected.size()>ORDINARY_VISUAL_QUERY_MAX_EXPECTED_BLOCKS:
+            return {"status":"pending","reason":"ordinary_visual_source_capacity","retryable":true,
+                "sourceId":source_id,"expectedCount":expected.size(),"scannedCount":expected_scanned}
+        expected_scanned+=expected.size()
+        # Ordinary accepted sites always emit blocks. Completion with no
+        # producer records is a missing publication, not an empty visual source.
+        var omitted: Dictionary=source.get("omitted",{})
+        var failed: Dictionary=source.get("failed",{})
+        if not failed.is_empty():
+            pending_ids.append(source_id+":unaccepted_block_output")
+        if expected.is_empty() and omitted.is_empty():
+            pending_ids.append(source_id+":no_emitted_blocks")
+            continue
+        var cells: Array=expected.keys()
+        cells.sort_custom(func(a: Vector3i,b: Vector3i): return a.z<b.z if a.z!=b.z else (a.x<b.x if a.x!=b.x else a.y<b.y))
+        for cell_value in cells:
+            var cell: Vector3i=cell_value
+            if not bounds.has_point(Vector2i(cell.x,cell.z)): continue
+            var block_type:=String(expected[cell])
+            var durable_id:=_ordinary_visual_block_key(source_id,cell,block_type)
+            if removed_generated_structure_blocks.has(durable_id): continue
+            var body:=live_blocks.get(cell) as Node3D
+            if not is_instance_valid(body) or not body.is_inside_tree() or body.is_queued_for_deletion() \
+                    or String(body.get_meta("generated_visual_source_id",""))!=source_id \
+                    or String(body.get_meta("block_type",""))!=block_type:
+                body=null
+            var representation:=_ordinary_visible_renderable(body) if is_instance_valid(body) else null
+            var candidate_id: String="ordinary:%s:%d,%d,%d:%s" % [source_id,cell.x,cell.y,cell.z,block_type]
+            candidates.append({"candidateId":candidate_id,"positionXZ":Vector2(float(cell.x)+0.5,float(cell.z)+0.5),
+                "cell":cell,"owner":body,"representation":representation,"installed":is_instance_valid(representation)})
+            bindings.append([candidate_id,body.get_instance_id() if is_instance_valid(body) else 0,
+                representation.get_instance_id() if is_instance_valid(representation) else 0])
+    if candidates.size()>100000:
+        return {"status":"pending","reason":"ordinary_visual_source_capacity","retryable":true,
+            "candidateCount":candidates.size()}
+    var hasher:=HashingContext.new()
+    hasher.start(HashingContext.HASH_SHA256)
+    hasher.update(JSON.stringify([String(main.seed_text),regional_source_generation,ids,bindings]).to_utf8_buffer())
+    var revision:=hasher.finish().hex_encode()
+    return {"status":"pending" if not pending_ids.is_empty() else "described",
+        "reason":"ordinary_visual_sources_pending" if not pending_ids.is_empty() else "",
+        "sourceRevision":revision,"candidates":candidates,"pendingSourceIds":pending_ids,
+        "sourceCount":ids.size(),"candidateCount":candidates.size()}
+
+func _ordinary_visible_renderable(root_node: Node) -> Node3D:
+    if root_node is GeometryInstance3D:
+        var geometry:=root_node as GeometryInstance3D
+        if geometry.visible and geometry.is_visible_in_tree():
+            if geometry is MeshInstance3D and (geometry as MeshInstance3D).mesh!=null: return geometry
+            if geometry is MultiMeshInstance3D and (geometry as MultiMeshInstance3D).multimesh!=null: return geometry
+    for child in root_node.get_children():
+        if child is Node:
+            var found:=_ordinary_visible_renderable(child)
+            if found!=null: return found
+    return null
+
+func _ordinary_visual_block_key(source_id: String, cell: Vector3i, block_type: String) -> String:
+    return "%s|%d,%d,%d|%s" % [source_id,cell.x,cell.y,cell.z,block_type]
+
+func _begin_ordinary_visual_source(source_id: String) -> void:
+    if source_id.is_empty(): return
+    if not ordinary_visual_sources.has(source_id):
+        ordinary_visual_sources[source_id]={"completed":false,"expected":{},"omitted":{},"failed":{},"revision":1}
+        ordinary_visual_revision+=1
+
+func _complete_ordinary_visual_source(source_id: String) -> void:
+    if source_id.is_empty(): return
+    _begin_ordinary_visual_source(source_id)
+    var source: Dictionary=ordinary_visual_sources[source_id]
+    if not bool(source.get("completed",false)):
+        source.completed=true
+        source.revision=int(source.get("revision",0))+1
+        ordinary_visual_revision+=1
+
+func _record_ordinary_visual_block(cell: Vector3i, block_type: String, output: Node3D) -> void:
+    var source_id:=active_structure_visual_source_id
+    if source_id.is_empty(): return
+    _begin_ordinary_visual_source(source_id)
+    var source: Dictionary=ordinary_visual_sources[source_id]
+    var expected: Dictionary=source.expected
+    var omitted: Dictionary=source.omitted
+    var failed: Dictionary=source.failed
+    var key:=_ordinary_visual_block_key(source_id,cell,block_type)
+    var accepted:=is_instance_valid(output) and bool(output.get_meta("generated",false)) \
+        and String(output.get_meta("generated_visual_source_id",""))==source_id
+    if accepted:
+        var actual_type:=String(output.get_meta("block_type",""))
+        if expected.get(cell,"")!=actual_type:
+            expected[cell]=actual_type
+            source.revision=int(source.get("revision",0))+1
+            ordinary_visual_revision+=1
+        omitted.erase(key)
+        failed.erase(key)
+    elif is_instance_valid(output) or removed_generated_structure_blocks.has(key):
+        if not omitted.has(key):
+            omitted[key]=true
+            source.revision=int(source.get("revision",0))+1
+            ordinary_visual_revision+=1
+        failed.erase(key)
+    else:
+        if not failed.has(key):
+            failed[key]=true
+            source.revision=int(source.get("revision",0))+1
+            ordinary_visual_revision+=1
+
+func generated_visual_block_removed(body: Node3D) -> void:
+    if not is_instance_valid(body) or not bool(body.get_meta("generated",false)): return
+    var source_id:=String(body.get_meta("generated_visual_source_id",""))
+    var cell_value=body.get_meta("cell",null)
+    if source_id.is_empty() or not cell_value is Vector3i: return
+    var key:=_ordinary_visual_block_key(source_id,cell_value,String(body.get_meta("block_type","")))
+    if not removed_generated_structure_blocks.has(key):
+        removed_generated_structure_blocks[key]=true
+        if ordinary_visual_sources.has(source_id):
+            var source: Dictionary=ordinary_visual_sources[source_id]
+            source.revision=int(source.get("revision",0))+1
+        ordinary_visual_revision+=1
+
+func generated_visual_block_is_removed(source_id: String, cell: Vector3i, block_type: String) -> bool:
+    return removed_generated_structure_blocks.has(_ordinary_visual_block_key(source_id,cell,block_type))
+
+func snapshot_removed_generated_structure_blocks() -> Array:
+    var result: Array=removed_generated_structure_blocks.keys()
+    result.sort()
+    return result
+
+func restore_removed_generated_structure_blocks(value) -> void:
+    removed_generated_structure_blocks.clear()
+    if value is Array:
+        for item in value:
+            var key:=String(item)
+            if key.begins_with("town:") or key.begins_with("standalone:"):
+                removed_generated_structure_blocks[key]=true
+    for source: Dictionary in ordinary_visual_sources.values():
+        source.revision=int(source.get("revision",0))+1
+    ordinary_visual_revision+=1
 
 func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false, budget_usec := CITADEL_PUBLICATION_BUDGET_USEC) -> Dictionary:
     if budget_usec<=0:
@@ -473,6 +672,10 @@ func reset() -> void:
     deferred_town_home_records.clear()
     town_manifest_publish_states.clear()
     active_structure_town_key = ""
+    active_structure_visual_source_id = ""
+    ordinary_visual_sources.clear()
+    removed_generated_structure_blocks.clear()
+    ordinary_visual_revision += 1
     terrain_surface_sample_cache.clear()
     terrain_footprint_records.clear()
     natural_prop_exclusion_records.clear()
@@ -594,11 +797,15 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
             var level := float(admission.level)
             var rng := Candidate.continuation_rng(candidate)
             generated_structures[key] = true
+            var visual_source_id := "standalone:%d,%d" % [key.x,key.y]
+            _begin_ordinary_visual_source(visual_source_id)
             if defer_builds:
-                enqueue_standalone_structure_build(structure_type, base_x, base_z, level, dimensions, rng)
+                enqueue_standalone_structure_build(structure_type, base_x, base_z, level, dimensions, rng, visual_source_id)
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
+            var previous_visual_source_id:=active_structure_visual_source_id
+            active_structure_visual_source_id=visual_source_id
             if structure_type == "mine":
                 build_mine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
             elif structure_type == "ruin":
@@ -611,11 +818,15 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
                 var wall_type := "woodBlock" if rng.randf() < 0.5 else "stoneBlock"
                 var roof_type := "stoneBlock" if wall_type == "woodBlock" else "woodBlock"
                 build_building(base_x, base_z, level, dimensions.x, dimensions.y, rng.randi_range(4, 5), wall_type, roof_type, rng.randi_range(0, 3), rng, false)
+            active_structure_visual_source_id=previous_visual_source_id
+            _complete_ordinary_visual_source(visual_source_id)
             if max_new_regions > 0 and new_regions >= max_new_regions:
                 return new_regions
     return new_regions
 
-func enqueue_standalone_structure_build(structure_type: String, base_x: int, base_z: int, level: float, dimensions: Vector2i, rng: RandomNumberGenerator) -> void:
+func enqueue_standalone_structure_build(structure_type: String, base_x: int, base_z: int, level: float, dimensions: Vector2i, rng: RandomNumberGenerator, visual_source_id := "") -> void:
+    var previous_visual_source_id:=active_structure_visual_source_id
+    active_structure_visual_source_id=visual_source_id
     if structure_type == "mine":
         enqueue_deferred_build(func() -> void:
             build_mine(base_x, base_z, level, dimensions.x, dimensions.y, rng)
@@ -640,6 +851,8 @@ func enqueue_standalone_structure_build(structure_type: String, base_x: int, bas
         enqueue_deferred_build(func() -> void:
             build_building(base_x, base_z, level, dimensions.x, dimensions.y, wall_height, wall_type, roof_type, door_side, rng, false)
         )
+    enqueue_structure_op({"type":"ordinary_visual_source_complete","visualSourceId":visual_source_id})
+    active_structure_visual_source_id=previous_visual_source_id
 
 func enqueue_deferred_build(build_callable: Callable) -> void:
     var previous := defer_structure_ops
@@ -653,6 +866,7 @@ func enqueue_deferred_town_build(town: Dictionary) -> void:
     var rng := RandomNumberGenerator.new()
     rng.seed = main.hash_string("%s:town-build:%d,%d" % [main.seed_text, int(town["regionX"]), int(town["regionZ"])])
     var town_key := town_key_for(town)
+    _begin_ordinary_visual_source("town:"+town_key)
     var publish_state: Dictionary = town_manifest_publish_states.get(town_key, {}) if town_manifest_publish_states.get(town_key, {}) is Dictionary else {}
     if String(publish_state.get("status", "")) in ["queued", "building", "published"]:
         return
@@ -701,8 +915,10 @@ func process_deferred_town_build_phase(state_value) -> void:
     var complete := false
     var previous := defer_structure_ops
     var previous_town_key := active_structure_town_key
+    var previous_visual_source_id:=active_structure_visual_source_id
     defer_structure_ops = true
     active_structure_town_key = town_key
+    active_structure_visual_source_id="town:"+town_key
     update_town_manifest_publish_state(town_key, {
         "status": "building",
         "builtHomeCount": int(state.get("builtHomeCount", 0)),
@@ -738,6 +954,7 @@ func process_deferred_town_build_phase(state_value) -> void:
         complete = true
     defer_structure_ops = previous
     active_structure_town_key = previous_town_key
+    active_structure_visual_source_id=previous_visual_source_id
     if not complete:
         enqueue_structure_op({
             "type": "town_build_phase",
@@ -794,6 +1011,8 @@ func enqueue_structure_op(op: Dictionary) -> void:
     regional_source_revision += 1
     if active_structure_town_key != "" and String(op.get("townKey", "")) == "":
         op["townKey"] = active_structure_town_key
+    if active_structure_visual_source_id!="" and String(op.get("visualSourceId",""))=="":
+        op["visualSourceId"]=active_structure_visual_source_id
     pending_structure_ops.append(op)
 
 func process_pending_structure_ops(max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME, budget_ms := STREAMING_STRUCTURE_FRAME_BUDGET_MS) -> int:
@@ -842,7 +1061,9 @@ func execute_structure_op(op: Dictionary) -> void:
         return
     regional_source_revision += 1
     var previous := defer_structure_ops
+    var previous_visual_source_id:=active_structure_visual_source_id
     defer_structure_ops = false
+    active_structure_visual_source_id=String(op.get("visualSourceId",""))
     var op_type := String(op.get("type", ""))
     if op_type == "block":
         place_structure_block(int(op.get("cellX", 0)), int(op.get("cellZ", 0)), float(op.get("level", 0.0)), int(op.get("dy", 0)), String(op.get("blockType", "")), op.get("options", {}))
@@ -865,9 +1086,13 @@ func execute_structure_op(op: Dictionary) -> void:
         )
     elif op_type == "publish_town_home_records":
         publish_deferred_town_home_records(String(op.get("townKey", "")))
+        _complete_ordinary_visual_source("town:"+String(op.get("townKey","")))
     elif op_type == "town_build_phase":
         process_deferred_town_build_phase(op.get("state", {}))
+    elif op_type == "ordinary_visual_source_complete":
+        _complete_ordinary_visual_source(active_structure_visual_source_id)
     defer_structure_ops = previous
+    active_structure_visual_source_id=previous_visual_source_id
 
 func publish_deferred_town_home_records(town_key: String) -> void:
     if town_key == "":
@@ -1314,7 +1539,10 @@ func build_town(town: Dictionary) -> void:
     var level := float(town["level"])
     var town_key := town_key_for(town)
     var previous_town_key := active_structure_town_key
+    var previous_visual_source_id:=active_structure_visual_source_id
     active_structure_town_key = town_key
+    active_structure_visual_source_id="town:"+town_key
+    _begin_ordinary_visual_source(active_structure_visual_source_id)
     begin_town_manifest_generation_state(town_key, town)
     if defer_structure_ops:
         deferred_town_home_records[town_key] = []
@@ -1366,7 +1594,9 @@ func build_town(town: Dictionary) -> void:
             "status": "published",
             "builtHomeCount": built_home_count
         })
+        _complete_ordinary_visual_source(active_structure_visual_source_id)
     active_structure_town_key = previous_town_key
+    active_structure_visual_source_id=previous_visual_source_id
 
 func build_town_paths(center_x: int, center_z: int, radius: int, level: float) -> void:
     var path_span: int = max(10, radius - 2)
@@ -2195,7 +2425,10 @@ func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, bloc
     }
     for key in extra_options.keys():
         options[key] = extra_options[key]
-    main.create_block(Vector3i(cell_x, cell_y, cell_z), block_type, options)
+    var cell:=Vector3i(cell_x, cell_y, cell_z)
+    if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
+    var block = main.create_block(cell, block_type, options)
+    _record_ordinary_visual_block(cell,block_type,block)
 
 func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionary = {}) -> void:
     if defer_structure_ops:
@@ -2214,7 +2447,10 @@ func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionar
     }
     for key in extra_options.keys():
         options[key] = extra_options[key]
-    var block = main.create_block(Vector3i(cell_x, cell_y, cell_z), "cobblestonePath", options)
+    var cell:=Vector3i(cell_x, cell_y, cell_z)
+    if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
+    var block = main.create_block(cell, "cobblestonePath", options)
+    _record_ordinary_visual_block(cell,"cobblestonePath",block)
     if block:
         generated_path_count += 1
 
@@ -2237,7 +2473,10 @@ func place_utility(cell_x: int, cell_z: int, level: float, block_type: String, e
     }
     for key in extra_options.keys():
         options[key] = extra_options[key]
-    var block = main.create_block(Vector3i(cell_x, cell_y, cell_z), block_type, options)
+    var cell:=Vector3i(cell_x, cell_y, cell_z)
+    if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
+    var block = main.create_block(cell, block_type, options)
+    _record_ordinary_visual_block(cell,block_type,block)
     if block:
         generated_utility_count += 1
     return block
@@ -2265,8 +2504,10 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
         elif side == 1 or side == 3:
             group_z -= 1
     var group_id := "door-group:%d,%d,%d:%d" % [group_x, cell_y, group_z, side]
-    var block = main.create_block(Vector3i(cell_x, cell_y, cell_z), "door", {
+    var cell:=Vector3i(cell_x, cell_y, cell_z)
+    var block = main.create_block(cell, "door", {
         "generated": true,
+        "generatedVisualSourceId": active_structure_visual_source_id,
         "world_y": world_y,
         "facing": facing,
         "secondary": secondary,
@@ -2280,6 +2521,7 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
         "accentRole": "doorFrame",
         "doorTrimMaterial": "trimWood"
     })
+    _record_ordinary_visual_block(cell,"door",block)
     if block:
         generated_door_count += 1
 

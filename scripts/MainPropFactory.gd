@@ -154,6 +154,8 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         if npc_system and npc_system.has_method("notify_navigation_block_removed"):
             npc_system.notify_navigation_block_removed(block_cell, block_type, collider)
         queue_block_removed_followup(block_cell, block_type, collider, "block_removed")
+        if structure_system!=null and structure_system.has_method("generated_visual_block_removed"):
+            structure_system.generated_visual_block_removed(collider)
         blocks.erase(block_cell)
         invalidate_navigation_marker_cache()
         mark_world_dirty("block_removed")

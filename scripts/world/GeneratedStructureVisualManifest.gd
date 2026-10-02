@@ -12,12 +12,12 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		global_near_bounds: Rect2i = Rect2i()) -> Dictionary:
 	if not is_instance_valid(main) or not is_instance_valid(structure_system) \
 			or not is_instance_valid(readiness) \
-			or not main.has_method("generated_structure_visual_blocks") \
 			or not structure_system.has_method("region_publication_readiness") \
 			or not structure_system.has_method("region_dependency_requirements") \
 			or not structure_system.has_method("region_dependency_revision") \
 			or not structure_system.has_method("region_dependency_scheduling_revision") \
 			or not structure_system.has_method("region_citadel_visual_source") \
+			or not structure_system.has_method("region_ordinary_visual_source") \
 			or not readiness.has_method("expect_source") \
 			or not readiness.has_method("describe_candidate") \
 			or not readiness.has_method("has_candidate") \
@@ -51,35 +51,41 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		return {"status":String(citadel_source.get("status","pending")),
 			"reason":String(citadel_source.get("reason","citadel_visual_description_pending")),
 			"citadelSource":citadel_source}
-	var block_values: Array = main.call("generated_structure_visual_blocks", bounds)
-	if block_values.size() > MAX_BLOCKS:
+	var ordinary_source: Dictionary = structure_system.call("region_ordinary_visual_source", bounds)
+	if ordinary_source.get("status") != "described":
+		return {"status":String(ordinary_source.get("status","pending")),
+			"reason":String(ordinary_source.get("reason","ordinary_visual_description_pending")),
+			"ordinarySource":ordinary_source}
+	var ordinary_values: Array = ordinary_source.get("candidates",[])
+	if ordinary_values.size() > MAX_BLOCKS:
 		return {"status": "pending", "reason": "generated_structure_visual_capacity", "retryable": true}
 	var candidates: Array[Dictionary] = []
 	var candidate_ids: Array[String] = []
 	var candidates_by_id := {}
-	for block_value in block_values:
-		if not block_value is Dictionary:
+	for ordinary_value in ordinary_values:
+		if not ordinary_value is Dictionary:
 			return {"status": "failed", "reason": "generated_structure_block_record_invalid"}
-		var block_record: Dictionary = block_value
-		var body := block_record.get("owner") as Node3D
-		if not is_instance_valid(body) or not body.is_inside_tree() or body.is_queued_for_deletion():
-			return {"status": "pending", "reason": "generated_structure_block_owner_stale", "retryable": true}
-		if not bool(body.get_meta("generated", false)) or bool(body.get_meta("player_placed", false)):
-			return {"status": "failed", "reason": "generated_structure_block_owner_mismatch"}
-		var cell_value_meta: Variant = block_record.get("cell", body.get_meta("cell", Vector3i(-1, -1, -1)))
+		var ordinary: Dictionary = ordinary_value
+		var body := ordinary.get("owner") as Node3D
+		var cell_value_meta: Variant = ordinary.get("cell")
 		if not cell_value_meta is Vector3i:
 			return {"status": "failed", "reason": "generated_structure_block_cell_missing"}
 		var cell: Vector3i = cell_value_meta
-		var position_xz := Vector2(float(cell.x) + 0.5, float(cell.z) + 0.5)
+		var position_xz: Vector2 = ordinary.get("positionXZ", Vector2.INF)
+		var candidate_id := String(ordinary.get("candidateId",""))
+		if candidate_id.is_empty() or candidates_by_id.has(candidate_id) \
+				or position_xz == Vector2.INF:
+			return {"status":"failed","reason":"ordinary_visual_candidate_identity_invalid"}
 		if not bounds.has_point(Vector2i(cell.x, cell.z)):
 			return {"status": "failed", "reason": "generated_structure_block_outside_region"}
+		if is_instance_valid(body) and (not body.is_inside_tree() or body.is_queued_for_deletion() \
+				or not bool(body.get_meta("generated",false)) or bool(body.get_meta("player_placed",false))):
+			return {"status":"failed","reason":"generated_structure_block_owner_mismatch"}
 		# Bounds are a broad-phase rectangle. Only cells whose centers are in
 		# the configured circular view are obligations for this visual demand.
 		if not bool(readiness.call("candidate_in_view", position_xz)):
 			continue
-		var representation := _visible_renderable(body)
-		var candidate_id := "structure-block:%d,%d,%d:%s" % [
-			cell.x, cell.y, cell.z, String(body.get_meta("block_type", ""))]
+		var representation := ordinary.get("representation") as Node3D
 		candidate_ids.append(candidate_id)
 		var candidate := {"candidateId": candidate_id, "positionXZ": position_xz,
 			"owner": body, "representation": representation, "cell": cell}
@@ -110,6 +116,7 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 	hasher.start(HashingContext.HASH_SHA256)
 	_update_hasher(hasher, dependency_revision)
 	_update_hasher(hasher, String(citadel_source.get("sourceRevision","")))
+	_update_hasher(hasher, String(ordinary_source.get("sourceRevision","")))
 	for candidate_id: String in candidate_ids:
 		var candidate: Dictionary = candidates_by_id[candidate_id]
 		_update_hasher(hasher, candidate_id)
@@ -117,7 +124,8 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 			_update_hasher(hasher, str(candidate["publisher"].get_instance_id()) \
 				if is_instance_valid(candidate["publisher"]) else "pending")
 		else:
-			_update_hasher(hasher, str(candidate["owner"].get_instance_id()))
+			_update_hasher(hasher, str(candidate["owner"].get_instance_id()) \
+				if is_instance_valid(candidate["owner"]) else "pending")
 			_update_hasher(hasher, str(candidate["representation"].get_instance_id()) \
 				if is_instance_valid(candidate["representation"]) else "pending")
 	var source_identity := "generated-structure-blocks:%d:%d:%s" % [
@@ -182,10 +190,13 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 			if pending_ids.size() < 64: pending_ids.append(candidate_id)
 	var current_source: Dictionary = structure_system.call(source_method, bounds)
 	var current_citadel: Dictionary = structure_system.call("region_citadel_visual_source", bounds)
+	var current_ordinary: Dictionary = structure_system.call("region_ordinary_visual_source", bounds)
 	var current_dependency_revision := JSON.stringify(structure_system.call(dependency_method, bounds))
 	if current_source.get("status") != required_status or current_dependency_revision != dependency_revision \
 			or current_citadel.get("status") != "described" \
-			or current_citadel.get("sourceRevision") != citadel_source.get("sourceRevision"):
+			or current_citadel.get("sourceRevision") != citadel_source.get("sourceRevision") \
+			or current_ordinary.get("status") != "described" \
+			or current_ordinary.get("sourceRevision") != ordinary_source.get("sourceRevision"):
 		return {"status": "pending", "reason": "generated_structure_source_revision_changed",
 			"sourceRevision": source_revision, "dependencyRevision": dependency_revision,
 			"currentDependencyRevision": current_dependency_revision,
@@ -195,10 +206,6 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		source_identity, source_revision, view_revision)
 	if finished.get("status") != "ready":
 		return finished
-	var ordinary_site_ids: Array[String] = []
-	for source_key: String in source_state.get("sourceRevisions",{}):
-		if source_key.begins_with("town:") or source_key.begins_with("standalone:"):
-			if ordinary_site_ids.size() < 16: ordinary_site_ids.append(source_key)
 	return {"status": "pending" if pending > 0 else "ready",
 		"reason": "structure_visual_publication_pending" if pending > 0 else "",
 		"sourceId": source_id, "sourceIdentity": source_identity,
@@ -206,8 +213,8 @@ static func submit(main: Object, structure_system: Object, readiness: Object,
 		"viewRevision": view_revision, "bounds": bounds,
 		"candidateCount": candidates.size(), "representedCount": represented,
 		"pendingCount": pending, "pendingIds": pending_ids,
-		"ordinaryVisualProofScope":"emitted_blocks_only" if not ordinary_site_ids.is_empty() else "none",
-		"ordinarySiteIdsSample":ordinary_site_ids,
+		"ordinaryVisualProofScope":"producer_emission_ledger",
+		"ordinarySourceCount":int(ordinary_source.get("sourceCount",0)),
 		"sourceDescription": source_state,
 		"physicalPublication": source_state if require_physical else {}}
 

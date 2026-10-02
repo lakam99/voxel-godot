@@ -161,6 +161,8 @@ func create_save_snapshot() -> Dictionary:
     result["sanctuaryEstablished"] = sanctuary_established
     stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_player_blocks") if runtime_perf_monitor != null else 0
     result["blocks"] = snapshot_player_blocks()
+    result["removedGeneratedStructureBlocks"] = structure_system.snapshot_removed_generated_structure_blocks() \
+        if structure_system and structure_system.has_method("snapshot_removed_generated_structure_blocks") else []
     if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_player_blocks", stage_started)
     return result
 
@@ -195,6 +197,7 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if not terrain_volume_snapshot.is_empty():
         restore_terrain_volume(terrain_volume_snapshot)
     restore_removed_props(snapshot.get("removedProps", []))
+    restore_removed_generated_structure_blocks(snapshot.get("removedGeneratedStructureBlocks", []))
     save_load_progress("NPC and player state")
     if npc_system and npc_system.has_method("restore_job_facts"):
         npc_system.restore_job_facts(snapshot.get("npcJobFacts", []))
@@ -483,6 +486,25 @@ func restore_player_blocks(entries) -> void:
                 utility_system.ensure_furnace(block)
         if block_type == "door" and bool(entry.get("open", false)):
             request_door_state(block, true, null, "save", { "authorized": true })
+
+func restore_removed_generated_structure_blocks(entries) -> void:
+    if structure_system==null or not structure_system.has_method("restore_removed_generated_structure_blocks"):
+        return
+    structure_system.restore_removed_generated_structure_blocks(entries)
+    for cell_value in blocks.keys():
+        var cell: Vector3i=cell_value
+        var body:=blocks.get(cell) as Node3D
+        if not is_instance_valid(body) or not bool(body.get_meta("generated",false)):
+            continue
+        var source_id:=String(body.get_meta("generated_visual_source_id",""))
+        var block_type:=String(body.get_meta("block_type",""))
+        if source_id.is_empty() or not structure_system.generated_visual_block_is_removed(source_id,cell,block_type):
+            continue
+        if npc_system and npc_system.has_method("notify_navigation_block_removed"):
+            npc_system.notify_navigation_block_removed(cell,block_type,body)
+        queue_block_removed_followup(cell,block_type,body,"save_generated_block_removed")
+        blocks.erase(cell)
+        body.queue_free()
 
 func clear_player_blocks() -> void:
     var removed_any := false

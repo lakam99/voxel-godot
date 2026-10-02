@@ -769,6 +769,11 @@ func door_portal_id_for_cell(cell: Vector3i, side: int, secondary: bool) -> Stri
 func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) -> StaticBody3D:
     if blocks.has(cell):
         return blocks[cell]
+    var generated_visual_source_id:=String(options.get("generatedVisualSourceId",""))
+    if bool(options.get("generated",false)) and generated_visual_source_id!="" \
+            and structure_system!=null and structure_system.has_method("generated_visual_block_is_removed") \
+            and structure_system.generated_visual_block_is_removed(generated_visual_source_id,cell,block_type):
+        return null
     var instrumentation_metrics: Dictionary = options.get("instrumentationMetrics", {}) if options.get("instrumentationMetrics", {}) is Dictionary else {}
     var instrumentation_prefix := String(options.get("instrumentationMetricPrefix", ""))
     var node_build_started_usec := Time.get_ticks_usec()
@@ -783,6 +788,8 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     body.set_meta("cell", cell)
     body.set_meta("block_type", block_type)
     body.set_meta("generated", bool(options.get("generated", false)))
+    if generated_visual_source_id!="":
+        body.set_meta("generated_visual_source_id",generated_visual_source_id)
     body.set_meta("player_placed", bool(options.get("player_placed", false)))
     if options.has("generatedTier"):
         body.set_meta("generatedTier", String(options.get("generatedTier", "")))
@@ -1124,6 +1131,8 @@ func collapse_structure_component(component: Array) -> int:
         if world_generation_system != null and world_generation_system.has_method("set_cell_light"):
             world_generation_system.call("set_cell_light", block_cell, { "sky": 0, "block": 0 }, "block_collapsed:%s" % block_type)
         clear_block_state_from_terrain(block_cell, block_type, "block_collapsed")
+        if structure_system!=null and structure_system.has_method("generated_visual_block_removed"):
+            structure_system.generated_visual_block_removed(block)
         blocks.erase(block_cell)
         block.queue_free()
         collapsed += 1
@@ -1146,6 +1155,8 @@ func collapse_structure_block_deferred(block: Node3D) -> bool:
     if npc_system and npc_system.has_method("notify_navigation_block_removed"):
         npc_system.notify_navigation_block_removed(block_cell, block_type, block)
     queue_block_removed_followup(block_cell, block_type, block, "block_collapsed")
+    if structure_system!=null and structure_system.has_method("generated_visual_block_removed"):
+        structure_system.generated_visual_block_removed(block)
     blocks.erase(block_cell)
     block.queue_free()
     return true

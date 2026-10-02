@@ -102,6 +102,11 @@ class StructureReadinessFixture extends RefCounted:
 	var citadel_status := "described"
 	var citadel_candidates: Array[Dictionary] = []
 	var citadel_revision := "citadel-source-1"
+	var ordinary_world: Node = null
+	var ordinary_status := "described"
+	var ordinary_revision := "ordinary-source-1"
+	var ordinary_expected: Dictionary = {}
+	var ordinary_removed: Dictionary = {}
 
 	func region_publication_readiness(_bounds: Rect2i) -> Dictionary:
 		return {"status": physical_status, "reason": "physical_fixture_" + physical_status}
@@ -119,6 +124,26 @@ class StructureReadinessFixture extends RefCounted:
 		return {"status":citadel_status,"descriptionComplete":citadel_status == "described",
 			"reason":"citadel_fixture_" + citadel_status,
 			"sourceRevision":citadel_revision,"candidates":citadel_candidates}
+
+	func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
+		if ordinary_status != "described":
+			return {"status":ordinary_status,"reason":"ordinary_fixture_" + ordinary_status}
+		var candidates: Array[Dictionary] = []
+		var world_blocks: Dictionary = ordinary_world.get("blocks") if is_instance_valid(ordinary_world) else {}
+		var expected: Dictionary = ordinary_expected if not ordinary_expected.is_empty() else world_blocks
+		for cell_value in expected:
+			var cell: Vector3i = cell_value
+			if not bounds.has_point(Vector2i(cell.x,cell.z)) or ordinary_removed.has(cell): continue
+			var body := world_blocks.get(cell) as Node3D
+			var representation: Node3D = StructureVisualManifestScript._visible_renderable(body) \
+				if is_instance_valid(body) else null
+			candidates.append({"candidateId":"structure-block:%d,%d,%d:stoneBlock" % [cell.x,cell.y,cell.z],
+				"positionXZ":Vector2(float(cell.x)+0.5,float(cell.z)+0.5),
+				"cell":cell,"owner":body,"representation":representation,
+				"installed":is_instance_valid(representation)})
+		return {"status":"described","reason":"","sourceRevision":ordinary_revision,
+			"sourceCount":1 if not expected.is_empty() else 0,"candidateCount":candidates.size(),
+			"candidates":candidates}
 
 class CitadelVisualPublisherFixture extends RefCounted:
 	var installed := false
@@ -149,6 +174,7 @@ func run() -> void:
 	test_native_terrain_scan_continues_past_pending_block()
 	test_native_terrain_overlap_uses_current_installed_source()
 	await test_generated_structure_visual_manifest()
+	await test_ordinary_structure_visual_completion()
 	await test_citadel_visual_member_source()
 	test_citadel_visual_member_bucket_query()
 	await test_surface_prop_source_completes_before_underground_scan()
@@ -787,6 +813,7 @@ func test_generated_structure_visual_manifest() -> void:
 	world.name = "GeneratedStructureVisualFixture"
 	root.add_child(world)
 	var structure_system := StructureReadinessFixture.new()
+	structure_system.ordinary_world = world
 	var bounds := NEAR_BOUNDS
 	var readiness = VisualReadinessScript.new()
 	var view_revision := int(readiness.begin_view(160, "structure-seed", "structure-world-1",
@@ -824,6 +851,7 @@ func test_generated_structure_visual_manifest() -> void:
 		circular_completed.status == "ready" and circular_completed.candidateCount == 2 \
 		and circular_completed.representedCount == 2, circular_completed)
 	var pending_physical := StructureReadinessFixture.new()
+	pending_physical.ordinary_world = world
 	pending_physical.physical_status = "pending"
 	var withheld_readiness = VisualReadinessScript.new()
 	var withheld_revision := int(withheld_readiness.begin_view(161, "structure-seed",
@@ -853,6 +881,57 @@ func test_generated_structure_visual_manifest() -> void:
 		unknown.status == "pending" and not unknown_readiness.has_candidate(
 			"generated-structure-blocks:%s" % str(BOUNDS),
 			"structure-block:0,0,0:stoneBlock"), unknown)
+	world.queue_free()
+	await process_frame
+
+
+func test_ordinary_structure_visual_completion() -> void:
+	var world := StructureWorldFixture.new()
+	root.add_child(world)
+	var system := StructureReadinessFixture.new()
+	system.ordinary_world = world
+	system.physical_status = "pending"
+	var cell := Vector3i.ZERO
+	var body := _make_structure_visual_block(cell,true)
+	world.add_child(body)
+	world.blocks[cell] = body
+	system.ordinary_expected[cell] = true
+	var readiness = VisualReadinessScript.new()
+	var view_revision := int(readiness.begin_view(165,"ordinary-seed","ordinary-world-1",
+		BOUNDS,NEAR_BOUNDS,VIEW_CENTER,VIEW_RADIUS).viewRevision)
+	system.ordinary_status = "pending"
+	var undisclosed: Dictionary = StructureVisualManifestScript.submit(world,system,readiness,
+		165,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("ordinary_live_block_waits_for_producer_description",
+		undisclosed.status == "pending" and undisclosed.reason == "ordinary_fixture_pending",
+		undisclosed)
+	system.ordinary_status = "described"
+	var live: Dictionary = StructureVisualManifestScript.submit(world,system,readiness,
+		165,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("ordinary_current_live_visual_receipt_is_accepted",
+		live.status == "ready" and live.candidateCount == 1 and live.representedCount == 1,
+		live)
+	world.blocks.erase(cell)
+	system.ordinary_revision = "ordinary-source-2"
+	var absent_owner: Dictionary = StructureVisualManifestScript.submit(world,system,readiness,
+		165,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("ordinary_missing_emitted_owner_cannot_be_empty_success",
+		absent_owner.status == "pending" and absent_owner.candidateCount == 1
+		and absent_owner.pendingCount == 1,absent_owner)
+	system.ordinary_removed[cell] = true
+	system.ordinary_revision = "ordinary-source-3"
+	var edited: Dictionary = StructureVisualManifestScript.submit(world,system,readiness,
+		165,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("ordinary_durable_edit_has_revised_empty_source",
+		edited.status == "ready" and edited.candidateCount == 0
+		and edited.sourceRevision != live.sourceRevision,edited)
+	system.ordinary_removed.clear()
+	system.ordinary_revision = "ordinary-source-4"
+	var restored: Dictionary = StructureVisualManifestScript.submit(world,system,readiness,
+		165,view_revision,NEAR_BOUNDS,NEAR_BOUNDS,false)
+	_check("ordinary_restored_emission_requires_live_owner_again",
+		restored.status == "pending" and restored.candidateCount == 1
+		and restored.sourceRevision != edited.sourceRevision,restored)
 	world.queue_free()
 	await process_frame
 
