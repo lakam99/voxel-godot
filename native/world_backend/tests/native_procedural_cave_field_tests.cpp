@@ -66,12 +66,75 @@ bool same_recipe(const CaveRecipe &a, const CaveRecipe &b) {
     }
     return true;
 }
+
+bool footprint_intersects_recipe_bounds_reference(NativeProceduralCaveField &field,
+    const CaveVector3 position, const double radius,
+    const NativeProceduralCaveField::SurfaceSampler &surface,
+    const NativeProceduralCaveField::ProtectedBounds &protected_bounds) {
+    const float offset = static_cast<float>(radius);
+    const CaveRegionKey low = NativeProceduralCaveField::region_at(
+        {position.x - offset, position.y, position.z - offset});
+    const CaveRegionKey high = NativeProceduralCaveField::region_at(
+        {position.x + offset, position.y, position.z + offset});
+    for (std::int64_t z = low.z; z <= high.z; ++z) {
+        for (std::int64_t x = low.x; x <= high.x; ++x) {
+            const auto recipe = field.recipe_for_region(
+                {static_cast<std::int32_t>(x), static_cast<std::int32_t>(z)},
+                surface, protected_bounds);
+            if (!recipe) continue;
+            const CaveBounds &bounds = recipe->bounds;
+            if (static_cast<double>(position.x) + radius >= bounds.position.x
+                && static_cast<double>(position.x) - radius <= bounds.position.x + bounds.size.x
+                && static_cast<double>(position.z) + radius >= bounds.position.z
+                && static_cast<double>(position.z) - radius <= bounds.position.z + bounds.size.z)
+                return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 VWB_TEST(native_procedural_cave_field_regions_match_script_floor_boundaries) {
     VWB_EXPECT((NativeProceduralCaveField::region_at({-96.0F, 0.0F, -96.0F}) == CaveRegionKey{0, 0}));
     VWB_EXPECT((NativeProceduralCaveField::region_at({-96.01F, 0.0F, -96.01F}) == CaveRegionKey{-1, -1}));
     VWB_EXPECT((NativeProceduralCaveField::region_at({96.0F, 0.0F, 96.0F}) == CaveRegionKey{1, 1}));
+}
+
+VWB_TEST(native_procedural_cave_field_footprint_bounds_match_recipe_reference_at_region_edges) {
+    const NativeProceduralCaveField::SurfaceSampler surface = [](float, float) { return 60.0; };
+    const NativeProceduralCaveField::ProtectedBounds unprotected = [](const CaveBounds &) { return false; };
+    for (const std::string &seed : {"cave-contract-417", "atlas-39460628"}) {
+        NativeProceduralCaveField field(cave_definition(seed));
+        std::vector<CaveVector3> positions = {
+            {-96.01F, 0.0F, -96.01F}, {-96.0F, 0.0F, -96.0F},
+            {95.99F, 0.0F, 95.99F}, {96.0F, 0.0F, 96.0F},
+            {-288.0F, 0.0F, 96.0F}, {288.0F, 0.0F, -96.0F},
+        };
+        for (std::int32_t z = -1; z <= 1; ++z) {
+            for (std::int32_t x = -1; x <= 1; ++x) {
+                const auto recipe = field.recipe_for_region({x, z}, surface, unprotected);
+                if (!recipe) continue;
+                const CaveBounds &bounds = recipe->bounds;
+                positions.push_back(bounds.position);
+                positions.push_back({bounds.position.x + bounds.size.x, 0.0F,
+                    bounds.position.z + bounds.size.z});
+                positions.push_back({bounds.position.x - 0.01F, 0.0F,
+                    bounds.position.z - 0.01F});
+                positions.push_back({bounds.position.x + bounds.size.x + 0.01F, 0.0F,
+                    bounds.position.z + bounds.size.z + 0.01F});
+            }
+        }
+        VWB_EXPECT(positions.size() > 6U);
+        for (const CaveVector3 position : positions) {
+            for (const double radius : {0.0, 0.01, 1.5, 8.0, 32.0, 96.0}) {
+                const bool reference = footprint_intersects_recipe_bounds_reference(
+                    field, position, radius, surface, unprotected);
+                const bool actual = field.recipe_bounds_intersects_xz_footprint(
+                    position, radius, surface, unprotected);
+                VWB_EXPECT_MSG(actual == reference, seed);
+            }
+        }
+    }
 }
 
 VWB_TEST(native_procedural_cave_field_recipes_are_repeatable_order_independent_and_protected) {

@@ -23,6 +23,9 @@ public:
 	godot::Vector2i region_at(const godot::Vector3 &p_position) const;
 	godot::Dictionary recipe_for_region(const godot::Vector2i &p_region,
 		const godot::Callable &p_surface, const godot::Callable &p_protected_bounds);
+	bool recipe_bounds_intersects_xz_footprint(const godot::Vector3 &p_position,
+		double p_radius, const godot::Callable &p_surface,
+		const godot::Callable &p_protected_bounds);
 	godot::Dictionary recipe_build_diagnostics(const godot::Vector2i &p_region) const;
 	godot::Dictionary cache_stats() const;
 	double density(const godot::Vector3 &p_position, double p_depth,

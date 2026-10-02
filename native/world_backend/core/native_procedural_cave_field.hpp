@@ -109,6 +109,9 @@ public:
     std::optional<CaveRecipe> recipe_for_region(
         CaveRegionKey region, const SurfaceSampler &surface,
         const ProtectedBounds &protected_bounds) const;
+    bool recipe_bounds_intersects_xz_footprint(
+        CaveVector3 position, double radius, const SurfaceSampler &surface,
+        const ProtectedBounds &protected_bounds) const;
     std::optional<CaveRecipeBuildDiagnostics> build_diagnostics(CaveRegionKey region) const;
     double density(CaveVector3 position, double depth_meters,
         const SurfaceSampler &surface, const ProtectedBounds &protected_bounds) const;

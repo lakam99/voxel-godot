@@ -116,6 +116,35 @@ std::optional<CaveRecipe> NativeProceduralCaveField::recipe_for_region(
     return recipe ? std::optional<CaveRecipe>(*recipe) : std::nullopt;
 }
 
+bool NativeProceduralCaveField::recipe_bounds_intersects_xz_footprint(
+    const CaveVector3 position, const double radius, const SurfaceSampler &surface,
+    const ProtectedBounds &protected_bounds) const {
+    // Match WorldGenerationSystem's inclusive region and XZ bounds test. The
+    // Vector3 offset is rounded to real_t before region_at, while scalar
+    // radius comparisons retain the script float's double precision.
+    const float vector_radius = static_cast<float>(radius);
+    const CaveRegionKey low = region_at({position.x - vector_radius, position.y,
+        position.z - vector_radius});
+    const CaveRegionKey high = region_at({position.x + vector_radius, position.y,
+        position.z + vector_radius});
+    for (std::int64_t z = low.z; z <= high.z; ++z) {
+        for (std::int64_t x = low.x; x <= high.x; ++x) {
+            const std::shared_ptr<const CaveRecipe> recipe = recipe_snapshot_for_region(
+                {static_cast<std::int32_t>(x), static_cast<std::int32_t>(z)}, surface,
+                protected_bounds);
+            if (!recipe) continue;
+            const CaveBounds &bounds = recipe->bounds;
+            const float end_x = bounds.position.x + bounds.size.x;
+            const float end_z = bounds.position.z + bounds.size.z;
+            if (static_cast<double>(position.x) + radius >= bounds.position.x
+                && static_cast<double>(position.x) - radius <= end_x
+                && static_cast<double>(position.z) + radius >= bounds.position.z
+                && static_cast<double>(position.z) - radius <= end_z) return true;
+        }
+    }
+    return false;
+}
+
 std::optional<CaveRecipeBuildDiagnostics> NativeProceduralCaveField::build_diagnostics(
     const CaveRegionKey region) const {
     const std::lock_guard<std::mutex> lock(cache_mutex_);

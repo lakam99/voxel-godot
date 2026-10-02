@@ -922,17 +922,8 @@ func minimum_overburden_cells_for_position(position: Vector3) -> float:
 	return result
 
 func generated_cave_near_surface_footprint(position: Vector3, radius: float) -> bool:
-	var low: Vector2i = cave_field.region_at(position - Vector3(radius, 0, radius))
-	var high: Vector2i = cave_field.region_at(position + Vector3(radius, 0, radius))
-	for z in range(low.y, high.y + 1):
-		for x in range(low.x, high.x + 1):
-			var recipe: Dictionary = cave_field.recipe_for_region(Vector2i(x, z), cave_surface_callable, cave_protected_bounds_callable)
-			if recipe.is_empty():
-				continue
-			var bounds: AABB = recipe.bounds
-			if position.x + radius >= bounds.position.x and position.x - radius <= bounds.end.x and position.z + radius >= bounds.position.z and position.z - radius <= bounds.end.z:
-				return true
-	return false
+	return cave_field.recipe_bounds_intersects_xz_footprint(
+		position, radius, cave_surface_callable, cave_protected_bounds_callable)
 
 
 func smoothstep_local(value: float, low: float, high: float) -> float:

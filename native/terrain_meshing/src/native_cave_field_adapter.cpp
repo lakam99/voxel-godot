@@ -23,6 +23,8 @@ void NativeCaveField::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("clear"), &NativeCaveField::clear);
 	ClassDB::bind_method(D_METHOD("region_at", "position"), &NativeCaveField::region_at);
 	ClassDB::bind_method(D_METHOD("recipe_for_region", "region", "surface", "protected_bounds"), &NativeCaveField::recipe_for_region);
+	ClassDB::bind_method(D_METHOD("recipe_bounds_intersects_xz_footprint", "position", "radius", "surface", "protected_bounds"),
+		&NativeCaveField::recipe_bounds_intersects_xz_footprint);
 	ClassDB::bind_method(D_METHOD("recipe_build_diagnostics", "region"), &NativeCaveField::recipe_build_diagnostics);
 	ClassDB::bind_method(D_METHOD("cache_stats"), &NativeCaveField::cache_stats);
 	ClassDB::bind_method(D_METHOD("density", "position", "depth", "surface", "protected_bounds"), &NativeCaveField::density);
@@ -141,6 +143,13 @@ Dictionary NativeCaveField::recipe_for_region(const Vector2i &p_region,
 	const auto recipe = field()->recipe_for_region({p_region.x, p_region.y},
 		surface_sampler(p_surface), protection_sampler(p_protected_bounds));
 	return recipe ? recipe_dictionary(*recipe) : Dictionary();
+}
+
+bool NativeCaveField::recipe_bounds_intersects_xz_footprint(const Vector3 &p_position,
+		const double p_radius, const Callable &p_surface,
+		const Callable &p_protected_bounds) {
+	return field()->recipe_bounds_intersects_xz_footprint(to_cave(p_position), p_radius,
+		surface_sampler(p_surface), protection_sampler(p_protected_bounds));
 }
 
 Dictionary NativeCaveField::recipe_build_diagnostics(const Vector2i &p_region) const {

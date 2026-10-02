@@ -909,7 +909,20 @@ async function runStaticTool(toolId, rawArgs) {
     }
     const scons = sconsInvocation();
     if (!scons) throw new Error('Missing SCons. Install it with Homebrew or Python before building the terrain meshing GDExtension.');
-    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${parsed.options.apiVersion ?? '4.6'}`, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
+    const apiVersion = String(parsed.options.apiVersion ?? '4.6');
+    const generatedVersionHeader = await readFile(join(godotCppDirectory,
+      'gen/include/godot_cpp/core/version.hpp'), 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
+    });
+    const generatedMajor = generatedVersionHeader.match(/^#define GODOT_VERSION_MAJOR (\d+)$/m)?.[1];
+    const generatedMinor = generatedVersionHeader.match(/^#define GODOT_VERSION_MINOR (\d+)$/m)?.[1];
+    const generatedApiVersion = generatedMajor && generatedMinor ? `${generatedMajor}.${generatedMinor}` : '';
+    // SCons can reuse bindings from a different Godot API even when
+    // api_version changes. Force regeneration only across that mismatch.
+    const bindingRefresh = generatedApiVersion && generatedApiVersion !== apiVersion
+      ? ['generate_bindings=yes'] : [];
+    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${apiVersion}`, ...bindingRefresh, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
     if (build.code !== 0) throw new Error(`SCons failed while building the terrain meshing GDExtension (exit code ${build.code}).`);
     const outputDirectory = join(projectRoot, 'addons/terrain_meshing_backend/bin');
     await ensureDirectory(outputDirectory);
