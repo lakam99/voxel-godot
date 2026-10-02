@@ -1,2 +1,3 @@
 artifacts/baselines/world-signature/*.json text eol=lf
 native/world_backend/core/thirdparty/fast_noise_lite/FastNoiseLite.h text eol=lf
+native/voxel_tools/patches/*.patch text eol=lf
