@@ -79,6 +79,60 @@ func capture_facts(main: Object, rng: RandomNumberGenerator, chunk_key: Vector2i
 		"height": height, "biome": biome, "heights": heights, "policy": policy,
 		"eligible": eligible}
 
+func native_input_row(facts: Dictionary, ordinal: int) -> Dictionary:
+	return {"ordinal": ordinal,
+		"cell": Vector2i(int(facts.cell[0]), int(facts.cell[1])),
+		"blocked": bool(facts.blocked), "found": bool(facts.found),
+		"height": float(facts.height), "biome": String(facts.biome),
+		"heights": (facts.heights as Array).duplicate(true),
+		"policy": (facts.policy as Dictionary).duplicate(true)}
+
+func compare_native_case(main: Object, chunk_key: Vector2i, facts_rows: Array,
+		direct_rows: Array, final_rng_state: String) -> Dictionary:
+	var backend = ClassDB.instantiate("NativeWorldBackend")
+	if backend == null or not backend.has_method("compose_detail_ordered_plan_shadow"):
+		return {"status": "failed", "failures": ["native detail shadow unavailable"]}
+	var capture := {"schema": "n4-detail-ordered-plan-shadow/v1",
+		"seedText": main.seed_text, "chunk": chunk_key,
+		"quality": {"decorativeDensity": float(main.visual_quality.decorativeDensity),
+			"decorativeDetailCap": int(main.visual_quality.decorativeDetailCap)},
+		"attempts": facts_rows}
+	var native: Dictionary = backend.compose_detail_ordered_plan_shadow(capture)
+	var failures := []
+	if native.get("status") != "ready":
+		return {"status": "failed", "failures": ["native rejected input: " + String(native.get("reason", ""))]}
+	var attempts: Array = native.get("attempts", [])
+	if attempts.size() != direct_rows.size():
+		failures.append("native attempt count")
+	for i in range(mini(attempts.size(), direct_rows.size())):
+		var direct: Dictionary = direct_rows[i]
+		var row: Dictionary = attempts[i]
+		var cell: Vector2i = row.cell
+		if row.ordinal != i or [cell.x, cell.y] != direct.cell:
+			failures.append("attempt %d native coordinate" % i)
+		if String(row.stateBeforeCoordinates) != String(direct.beforeState) \
+				or String(row.stateAfterCoordinates) != String(direct.coordinateState) \
+				or String(row.stateAfterAttempt) != String(direct.afterState):
+			failures.append("attempt %d native RNG state" % i)
+		if String(row.choiceType) != String(direct.choiceType):
+			failures.append("attempt %d native choice" % i)
+		var native_rows := {}
+		for transform in row.transforms:
+			var detail_type := String(transform.detailType)
+			if not native_rows.has(detail_type):
+				native_rows[detail_type] = []
+			var scale := Vector3.ONE * float(transform.scale)
+			var reconstructed := Transform3D(Basis(Vector3.UP, float(transform.yaw)).scaled(scale),
+				transform.origin)
+			(native_rows[detail_type] as Array).append(transform_bits(reconstructed))
+		if JSON.stringify(native_rows) != JSON.stringify(direct.rows):
+			failures.append("attempt %d native transform bits" % i)
+	if String(native.get("finalRngState", "")) != final_rng_state:
+		failures.append("native final RNG state")
+	return {"status": "passed" if failures.is_empty() else "failed",
+		"attemptsCompared": mini(attempts.size(), direct_rows.size()),
+		"failures": failures.slice(0, 30)}
+
 func append_replay(replayed: Dictionary, detail_type: String, origin: Vector3,
 		yaw: float, scale: Vector3) -> void:
 	if not replayed.has(detail_type):
@@ -152,6 +206,7 @@ func run_rejected_branch(main: Object, mode: String) -> Dictionary:
 			"detail-parity-blocked")
 	else:
 		markers[marker] = main.surface_y_at_cell(Vector3i(marker.x, 0, marker.y)) + 20.0
+	var before_state := str(rng.state)
 	var facts: Dictionary = capture_facts(main, rng, CHUNK)
 	var replay: Dictionary = replay_attempt(facts.duplicate(true), replay_rng, CHUNK)
 	var batches := {}
@@ -171,9 +226,39 @@ func run_rejected_branch(main: Object, mode: String) -> Dictionary:
 	if mode == "variation":
 		if not bool(facts.eligible) or float(facts.heights[8]) - float(facts.heights[4]) <= MainScript.CELL * 1.35:
 			failures.append("saved-height marker did not trigger variation rejection")
+	var native_facts := [native_input_row(facts, 0)]
+	var direct_rows := [{"cell": facts.cell, "beforeState": before_state,
+		"coordinateState": coordinate_state, "afterState": str(rng.state),
+		"choiceType": replay.choiceType, "rows": replay.rows}]
+	for ordinal in range(1, EXPECTED_ATTEMPTS):
+		before_state = str(rng.state)
+		facts = capture_facts(main, rng, CHUNK)
+		native_facts.append(native_input_row(facts, ordinal))
+		replay = replay_attempt(facts.duplicate(true), replay_rng, CHUNK)
+		var before_counts := batch_counts(batches)
+		attempt = main.begin_chunk_detail_attempt(state, rng)
+		coordinate_state = str(rng.state)
+		while not main.advance_chunk_detail_attempt(state, attempt, rng, batches):
+			pass
+		if replay.cell != facts.cell or [attempt.x, attempt.z] != facts.cell:
+			failures.append("attempt %d coordinates" % ordinal)
+		if replay.stateAfterCoordinates != coordinate_state or str(replay_rng.state) != str(rng.state):
+			failures.append("attempt %d RNG state" % ordinal)
+		if JSON.stringify(replay.rows) != JSON.stringify(new_rows(batches, before_counts)):
+			failures.append("attempt %d detail type or transform bits" % ordinal)
+		direct_rows.append({"cell": facts.cell, "beforeState": before_state,
+			"coordinateState": coordinate_state, "afterState": str(rng.state),
+			"choiceType": replay.choiceType, "rows": replay.rows})
+	var native_result: Dictionary = compare_native_case(main, CHUNK, native_facts,
+		direct_rows, str(rng.state))
+	for failure in native_result.failures:
+		failures.append("native: " + String(failure))
+	if mode == "variation":
 		markers.erase(marker)
 	(state.chunk as Node3D).free()
-	return {"mode": mode, "cell": facts.cell, "failures": failures}
+	return {"mode": mode, "cell": [cell.x, cell.y],
+		"attemptsCompared": EXPECTED_ATTEMPTS, "nativeStatus": native_result.status,
+		"failures": failures}
 
 func find_flower_chunk(main: Object) -> Vector2i:
 	for radius in [24, 48, 96, 192]:
@@ -197,8 +282,12 @@ func run_flower_case(main: Object, chunk_key: Vector2i) -> Dictionary:
 	var batches := {}
 	var failures := []
 	var flower_count := 0
+	var native_facts := []
+	var direct_rows := []
 	for ordinal in range(EXPECTED_ATTEMPTS):
 		var facts: Dictionary = capture_facts(main, rng, chunk_key)
+		native_facts.append(native_input_row(facts, ordinal))
+		var before_state := str(rng.state)
 		var replay: Dictionary = replay_attempt(facts.duplicate(true), replay_rng, chunk_key)
 		var before_counts := batch_counts(batches)
 		var attempt: Dictionary = main.begin_chunk_detail_attempt(state, rng)
@@ -211,11 +300,19 @@ func run_flower_case(main: Object, chunk_key: Vector2i) -> Dictionary:
 			failures.append("attempt %d conditional RNG state" % ordinal)
 		if JSON.stringify(replay.rows) != JSON.stringify(new_rows(batches, before_counts)):
 			failures.append("attempt %d detail type or transform bits" % ordinal)
+		direct_rows.append({"cell": facts.cell, "beforeState": before_state,
+			"coordinateState": coordinate_state, "afterState": str(rng.state),
+			"choiceType": replay.choiceType, "rows": replay.rows})
 		if replay.choiceType == "flower":
 			flower_count += 1
+	var native_result: Dictionary = compare_native_case(main, chunk_key, native_facts,
+		direct_rows, str(rng.state))
+	for failure in native_result.failures:
+		failures.append("native: " + String(failure))
 	chunk.free()
 	return {"chunk": [chunk_key.x, chunk_key.y], "flowerCount": flower_count,
-		"attemptsCompared": EXPECTED_ATTEMPTS, "failures": failures}
+		"attemptsCompared": EXPECTED_ATTEMPTS, "nativeStatus": native_result.status,
+		"failures": failures}
 
 func run() -> void:
 	var failures := []
@@ -245,6 +342,8 @@ func run() -> void:
 	replay_rng.seed = production_rng.seed
 	var production_batches := {}
 	var replay_batches := {}
+	var native_facts := []
+	var direct_rows := []
 	var branch_counts := {"blocked": 0, "surfaceRejected": 0, "variationRejected": 0,
 		"eligible": 0, "flower": 0}
 	var checked := 0
@@ -253,6 +352,7 @@ func run() -> void:
 		if before_state != str(replay_rng.state):
 			failures.append("attempt %d pre-RNG state" % ordinal)
 		var facts: Dictionary = capture_facts(main, production_rng, CHUNK)
+		native_facts.append(native_input_row(facts, ordinal))
 		var replay: Dictionary = replay_attempt(facts.duplicate(true), replay_rng, CHUNK)
 		var before_counts := batch_counts(production_batches)
 		var attempt: Dictionary = main.begin_chunk_detail_attempt(state, production_rng)
@@ -268,6 +368,9 @@ func run() -> void:
 			failures.append("attempt %d final RNG state" % ordinal)
 		if JSON.stringify(replay.rows) != JSON.stringify(produced):
 			failures.append("attempt %d detail type or transform bits" % ordinal)
+		direct_rows.append({"cell": facts.cell, "beforeState": before_state,
+			"coordinateState": actual_coordinate_state, "afterState": str(production_rng.state),
+			"choiceType": replay.choiceType, "rows": produced})
 		for detail_type in replay.rows.keys():
 			if not replay_batches.has(detail_type):
 				replay_batches[detail_type] = []
@@ -291,6 +394,10 @@ func run() -> void:
 		final_batches[String(key)] = rows
 	if JSON.stringify(replay_batches) != JSON.stringify(final_batches):
 		failures.append("final ordered batch transforms")
+	var native_baseline: Dictionary = compare_native_case(main, CHUNK, native_facts,
+		direct_rows, str(production_rng.state))
+	for failure in native_baseline.failures:
+		failures.append("native baseline: " + String(failure))
 	var variation_case: Dictionary = run_rejected_branch(main, "variation")
 	var blocked_case: Dictionary = run_rejected_branch(main, "blocked")
 	for failure in variation_case.failures:
@@ -312,6 +419,7 @@ func run() -> void:
 		"seed": main.seed_text, "chunk": [CHUNK.x, CHUNK.y],
 		"attemptsExpected": EXPECTED_ATTEMPTS, "attemptsCompared": checked,
 		"branchCounts": branch_counts, "batchTypes": final_batches.keys(),
+		"nativeBaseline": native_baseline,
 		"variationCase": variation_case, "blockedCase": blocked_case, "flowerCase": flower_case,
 		"finalRngState": str(production_rng.state), "failures": failures.slice(0, 30)}
 	var path := OS.get_environment("DETAIL_ORDERED_PARITY_REPORT")

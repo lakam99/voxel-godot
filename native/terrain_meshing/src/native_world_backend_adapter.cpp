@@ -2,6 +2,7 @@
 
 #include "biome_region_field.hpp"
 #include "native_biome_environment_catalog.hpp"
+#include "native_detail_ordered_plan.hpp"
 #include "native_feature_delta.hpp"
 #include "native_effective_voxel_block.hpp"
 #include "native_multi_page_voxel_block.hpp"
@@ -81,6 +82,7 @@ constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-r
 constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
 constexpr const char *STRUCTURE_CHUNK_RECEIPT_SCHEMA = "n4-structure-exclusion-chunk-receipt/v1";
 constexpr const char *SURFACE_ORDERED_SHADOW_SCHEMA = "n4-surface-prop-ordered-shadow/v1";
+constexpr const char *DETAIL_ORDERED_SHADOW_SCHEMA = "n4-detail-ordered-plan-shadow/v1";
 constexpr const char *UNDERGROUND_ORDERED_SHADOW_SCHEMA = "n4-underground-prop-ordered-shadow/v1";
 constexpr const char *TREE_PRESENCE_SHADOW_SCHEMA = "n4-surface-tree-presence-shadow/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
@@ -1816,6 +1818,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
 	ClassDB::bind_method(D_METHOD("compose_surface_prop_ordered_shadow", "page", "exclusions"),
 		&NativeWorldBackend::compose_surface_prop_ordered_shadow);
+	ClassDB::bind_method(D_METHOD("compose_detail_ordered_plan_shadow", "capture"),
+		&NativeWorldBackend::compose_detail_ordered_plan_shadow);
 	ClassDB::bind_method(D_METHOD("compose_underground_prop_ordered_shadow", "page", "chunk"),
 		&NativeWorldBackend::compose_underground_prop_ordered_shadow);
 	ClassDB::bind_method(D_METHOD("compose_surface_tree_presence_shadow", "page", "exclusions", "union_capture"),
@@ -3892,6 +3896,109 @@ Dictionary NativeWorldBackend::compose_underground_prop_ordered_shadow(
 		result["removedPropsMutated"] = false;
 		result["collidersInstalled"] = false;
 		result["routingInfluenced"] = false;
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::compose_detail_ordered_plan_shadow(const Dictionary &p_capture) const {
+	constexpr const char *operation = "compose_detail_ordered_plan_shadow";
+	try {
+		require_exact_keys(p_capture, {"schema", "seedText", "chunk", "quality", "attempts"}, "detail capture");
+		if (require_protocol_string(p_capture["schema"], "detail.schema") != DETAIL_ORDERED_SHADOW_SCHEMA)
+			throw std::invalid_argument("unsupported detail shadow schema");
+		const std::string seed_text = require_bounded_utf8(p_capture["seedText"],
+			"detail.seedText", MAX_SEED_TEXT_BYTES, false);
+		if (p_capture["chunk"].get_type() != Variant::VECTOR2I)
+			throw std::invalid_argument("detail.chunk must be Vector2i");
+		const Vector2i chunk = p_capture["chunk"];
+		const Dictionary quality = require_dictionary(p_capture["quality"], "detail.quality");
+		require_exact_keys(quality, {"decorativeDensity", "decorativeDetailCap"}, "detail.quality");
+		NativeDetailQuality native_quality;
+		native_quality.decorative_density = require_number(quality["decorativeDensity"], "detail.density");
+		native_quality.decorative_detail_cap = require_i32(quality["decorativeDetailCap"], "detail.cap");
+		const Array source_rows = require_array(p_capture["attempts"], "detail.attempts");
+		if (source_rows.size() > static_cast<std::int64_t>(NativeDetailOrderedPlan::MAX_ATTEMPTS))
+			throw std::length_error("detail attempt count exceeds bound");
+		std::vector<NativeDetailAttemptFacts> facts;
+		facts.reserve(static_cast<std::size_t>(source_rows.size()));
+		for (std::int64_t i = 0; i < source_rows.size(); ++i) {
+			const Dictionary entry = require_dictionary(source_rows[i], "detail.attempts[]");
+			require_exact_keys(entry, {"ordinal", "cell", "blocked", "found", "height", "biome",
+				"heights", "policy"}, "detail.attempts[]");
+			if (entry["cell"].get_type() != Variant::VECTOR2I)
+				throw std::invalid_argument("detail attempt cell must be Vector2i");
+			const Vector2i cell = entry["cell"];
+			NativeDetailAttemptFacts fact;
+			const std::int64_t ordinal = require_i64(entry["ordinal"], "detail.ordinal");
+			if (ordinal < 0 || ordinal >= static_cast<std::int64_t>(NativeDetailOrderedPlan::MAX_ATTEMPTS))
+				throw std::out_of_range("detail ordinal exceeds bound");
+			fact.ordinal = static_cast<std::uint32_t>(ordinal);
+			fact.cell_x = cell.x;
+			fact.cell_z = cell.y;
+			fact.blocked = require_bool(entry["blocked"], "detail.blocked");
+			fact.surface_found = require_bool(entry["found"], "detail.found");
+			fact.surface_height = require_number(entry["height"], "detail.height");
+			fact.biome = require_bounded_utf8(entry["biome"], "detail.biome", 32U);
+			const Array heights = require_array(entry["heights"], "detail.heights");
+			if (heights.size() != 0 && heights.size() != 9)
+				throw std::invalid_argument("detail height stencil must contain nine values");
+			fact.has_variation_heights = heights.size() == 9;
+			for (std::int64_t h = 0; h < heights.size(); ++h)
+				fact.variation_heights[static_cast<std::size_t>(h)] = require_number(heights[h], "detail.heights[]");
+			const Dictionary policy = require_dictionary(entry["policy"], "detail.policy");
+			if (!policy.is_empty()) {
+				require_exact_keys(policy, {"maxHeight", "types", "thresholds", "yOffsets",
+					"scaleMins", "scaleMaxs"}, "detail.policy");
+				fact.policy.max_height_above_water = require_number(policy["maxHeight"], "detail.maxHeight");
+				const Array types = require_array(policy["types"], "detail.types");
+				const Array thresholds = require_array(policy["thresholds"], "detail.thresholds");
+				const Array offsets = require_array(policy["yOffsets"], "detail.yOffsets");
+				const Array mins = require_array(policy["scaleMins"], "detail.scaleMins");
+				const Array maxs = require_array(policy["scaleMaxs"], "detail.scaleMaxs");
+				if (types.size() > 64 || thresholds.size() != types.size() || offsets.size() != types.size()
+						|| mins.size() != types.size() || maxs.size() != types.size())
+					throw std::invalid_argument("detail policy arrays have inconsistent bounds");
+				for (std::int64_t p = 0; p < types.size(); ++p) {
+					fact.policy.types.push_back(require_bounded_utf8(types[p], "detail.type", 32U));
+					fact.policy.thresholds.push_back(static_cast<float>(require_number(thresholds[p], "detail.threshold")));
+					fact.policy.y_offsets.push_back(static_cast<float>(require_number(offsets[p], "detail.yOffset")));
+					fact.policy.scale_mins.push_back(static_cast<float>(require_number(mins[p], "detail.scaleMin")));
+					fact.policy.scale_maxs.push_back(static_cast<float>(require_number(maxs[p], "detail.scaleMax")));
+				}
+			}
+			facts.push_back(std::move(fact));
+		}
+		const NativeDetailOrderedPlan plan = NativeDetailOrderedPlan::create(
+			admit_raw_terrain_seed(seed_text), chunk.x, chunk.y, native_quality, std::move(facts));
+		Array attempts;
+		for (const auto &source : plan.attempts()) {
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(source.ordinal);
+			row["cell"] = Vector2i(source.cell_x, source.cell_z);
+			row["stateBeforeCoordinates"] = text(std::to_string(static_cast<std::int64_t>(source.state_before_coordinates)));
+			row["stateAfterCoordinates"] = text(std::to_string(static_cast<std::int64_t>(source.state_after_coordinates)));
+			row["stateAfterAttempt"] = text(std::to_string(static_cast<std::int64_t>(source.state_after_attempt)));
+			row["choiceType"] = text(source.choice_type);
+			Array transforms;
+			for (const auto &intent : source.transforms) {
+				Dictionary transform;
+				transform["detailType"] = text(intent.detail_type);
+				transform["origin"] = Vector3(intent.origin[0], intent.origin[1], intent.origin[2]);
+				transform["yaw"] = intent.yaw;
+				transform["scale"] = intent.uniform_scale;
+				transforms.append(transform);
+			}
+			row["transforms"] = transforms;
+			attempts.append(row);
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["schema"] = DETAIL_ORDERED_SHADOW_SCHEMA;
+		result["attempts"] = attempts;
+		result["rngSeed"] = static_cast<std::int64_t>(plan.rng_seed());
+		result["finalRngState"] = text(std::to_string(static_cast<std::int64_t>(plan.final_rng_state())));
+		result["productionCutover"] = false;
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

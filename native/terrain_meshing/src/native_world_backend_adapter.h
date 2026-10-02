@@ -128,6 +128,8 @@ public:
 	godot::Dictionary compose_surface_prop_ordered_shadow(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions) const;
+	// Diagnostic pure-value shadow. It neither samples terrain nor publishes details.
+	godot::Dictionary compose_detail_ordered_plan_shadow(const godot::Dictionary &p_capture) const;
 	godot::Dictionary compose_underground_prop_ordered_shadow(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Vector2i &p_chunk) const;
