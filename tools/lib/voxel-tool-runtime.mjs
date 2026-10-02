@@ -341,6 +341,7 @@ const headedTools = {
   'run-canopy-release-playtest': ['res://scenes/testing/CanopyReleasePlaytest.tscn', 'VOXEL_CANOPY_RELEASE_REPORT', 'VOXEL_CANOPY_RELEASE_PROGRESS', 'VOXEL_CANOPY_RELEASE_SCREENSHOT_DIR', 'artifacts/vegetation/canopy-release/report.json', 'artifacts/vegetation/canopy-release/progress.txt', 'artifacts/vegetation/canopy-release/screenshots'],
   'run-runtime-performance-observation': ['res://scenes/testing/RuntimePerformanceObservation.tscn', 'VOXEL_RUNTIME_PERF_REPORT', 'VOXEL_RUNTIME_PERF_PROGRESS', '', 'artifacts/performance/runtime-observation.json', 'artifacts/performance/runtime-observation-progress.txt', ''],
   'run-normal-runtime-performance-pass': ['res://scenes/testing/NormalRuntimePerformancePass.tscn', 'VOXEL_NORMAL_RUNTIME_PERF_REPORT', 'VOXEL_NORMAL_RUNTIME_PERF_PROGRESS', '', 'artifacts/performance/normal-runtime-performance-pass.json', 'artifacts/performance/normal-runtime-performance-pass-progress.txt', ''],
+  'run-visible-world-fast-turn-sprint': ['res://scenes/testing/VisibleWorldFastTurnSprint.tscn', 'VOXEL_VISIBLE_WORLD_FAST_TURN_REPORT', 'VOXEL_VISIBLE_WORLD_FAST_TURN_PROGRESS', 'VOXEL_VISIBLE_WORLD_FAST_TURN_SCREENSHOT_DIR', 'artifacts/visible-world/fast-turn-sprint/report.json', 'artifacts/visible-world/fast-turn-sprint/progress.txt', 'artifacts/visible-world/fast-turn-sprint/screenshots'],
   'story/run-story-playtest': ['res://scenes/story_testing/StoryPlaytest.tscn', 'VOXEL_STORY_PLAYTEST_REPORT', 'VOXEL_STORY_PLAYTEST_PROGRESS', '', 'artifacts/story/story-playtest-report.json', 'artifacts/story/story-playtest-progress.txt', ''],
   'npc/run-actual-gameplay-mira-porch-regression': ['res://scenes/testing/npc/NpcActualGameplayMiraPorchRegressionTest.tscn', 'VOXEL_ACTUAL_GAMEPLAY_MIRA_REPORT', 'VOXEL_ACTUAL_GAMEPLAY_MIRA_PROGRESS', 'VOXEL_ACTUAL_GAMEPLAY_MIRA_SCREENSHOT_DIR', 'artifacts/npc/reports/actual-gameplay-mira-porch.json', 'artifacts/npc/progress/actual-gameplay-mira-porch.txt', 'artifacts/npc/screenshots/actual-gameplay-mira-porch'],
   'npc/run-npc-go-home-visual-playtest': ['res://scenes/testing/npc/NpcGoHomeVisualPlaytest.tscn', 'VOXEL_NPC_GO_HOME_VISUAL_REPORT', 'VOXEL_NPC_GO_HOME_VISUAL_PROGRESS', 'VOXEL_NPC_GO_HOME_VISUAL_SCREENSHOT_DIR', 'artifacts/npc/reports/npc-go-home-visual-playtest.json', 'artifacts/npc/progress/npc-go-home-visual-playtest.txt', 'artifacts/npc/screenshots/npc-go-home-visual-playtest'],
@@ -516,7 +517,7 @@ export function runtimePerformanceOwnedLifecycle(summary = {}) {
 
 async function runHeadedTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
-  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.seed !== undefined)
+  if (['run-normal-runtime-performance-pass', 'run-visible-world-fast-turn-sprint'].includes(toolId) && parsed.options.seed !== undefined)
     throw new Error('Normal runtime performance chooses its seed through New Game; omit -Seed.');
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
@@ -568,7 +569,7 @@ async function runHeadedTool(toolId, rawArgs) {
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
   if (traceDir) environment.VOXEL_NPC_OBSERVATION_TRACE_DIR = traceDir;
   // Normal-runtime measurement must use ordinary startup and frame timing.
-  if (toolId === 'run-normal-runtime-performance-pass') {
+  if (['run-normal-runtime-performance-pass', 'run-visible-world-fast-turn-sprint'].includes(toolId)) {
     delete environment.VOXEL_PLAYTEST;
     delete environment.VOXEL_TEST_SEED;
   }
@@ -608,9 +609,9 @@ async function runHeadedTool(toolId, rawArgs) {
   const godot = await findGodot(parsed.options.godotExe);
   const godotArguments = runtimePerformanceObservation
     ? runtimePerformanceObservationArguments(projectRoot, scene, parsed.options)
-    : toolId === 'run-normal-runtime-performance-pass'
+    : ['run-normal-runtime-performance-pass', 'run-visible-world-fast-turn-sprint'].includes(toolId)
       ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
-  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.resolution !== undefined) {
+  if (['run-normal-runtime-performance-pass', 'run-visible-world-fast-turn-sprint'].includes(toolId) && parsed.options.resolution !== undefined) {
     const resolution = String(parsed.options.resolution);
     if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
     godotArguments.push('--resolution', resolution);
