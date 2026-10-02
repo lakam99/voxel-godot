@@ -2,6 +2,7 @@ extends SceneTree
 
 const ControllerScript := preload("res://scripts/world/VisibleWorldDemandController.gd")
 const TerrainManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
+const ReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_PREDICTIVE_DEMAND_REPORT"
 
 class TerrainRuntime extends RefCounted:
@@ -44,6 +45,13 @@ class Ledger extends RefCounted:
 		return [{"kind": "terrain", "sourceId": "terrain-mesh:4,1,0",
 			"candidateId": "terrain:4,1,0"}]
 
+class HorizonPublisher extends RefCounted:
+	var installed := true
+	func visual_receipt_installed(_source_identity: String, _source_revision: String,
+			_world_revision: String, _view_revision: int, _candidate_id: String,
+			_metadata: Dictionary, _representation_id: String, _tier: String) -> bool:
+		return installed
+
 var checks: Array = []
 
 func _initialize() -> void:
@@ -55,6 +63,7 @@ func _run() -> void:
 	_test_stale_native_receipt_without_signal()
 	_test_bounded_chunk_diagnostics()
 	_test_retained_chunk_keys()
+	await _test_tree_receipt_handoff_across_views()
 	var passed := true
 	for check: Dictionary in checks:
 		passed = passed and bool(check.passed)
@@ -233,6 +242,105 @@ func _test_stale_native_receipt_without_signal() -> void:
 	var result: Dictionary = controller.advance(main, runtime, structures, "player", 4)
 	_check("controller_requeues_exact_stale_terrain_receipt", result.status == "pending"
 		and work.revisit_count > 0 and is_same(controller._owners.player.current.ledger, ledger))
+
+func _test_tree_receipt_handoff_across_views() -> void:
+	var source_id := "chunk-props:pinned:-3,0:trees_foliage"
+	var candidate_id := "pinned:-59,3:1"
+	var bounds := Rect2i(-61, 1, 5, 5)
+	var source_bounds := Rect2i(-84, 0, 28, 28)
+	var publisher := HorizonPublisher.new()
+	var chunk := Node3D.new()
+	root.add_child(chunk)
+	var body := StaticBody3D.new()
+	body.set_meta("prop_id", candidate_id)
+	body.set_meta("tree_visual_state", "queued")
+	body.set_meta("tree_render_lod_tier", "far")
+	chunk.add_child(body)
+	var visual := MeshInstance3D.new()
+	visual.mesh = BoxMesh.new()
+	body.add_child(visual)
+	await process_frame
+	var current = _tree_handoff_ledger(source_id, candidate_id, bounds,
+		source_bounds, publisher, body)
+	var pending = _tree_handoff_ledger(source_id, candidate_id, bounds,
+		source_bounds, publisher, body)
+	var before_current: Dictionary = current.region_readiness(21, "pinned",
+		"mock-world-1", 1, bounds)
+	var before_pending: Dictionary = pending.region_readiness(21, "pinned",
+		"mock-world-1", 1, bounds)
+	_check("tree_horizon_receipt_previously_represented_in_both_views",
+		before_current.status == "ready" and before_pending.status == "ready"
+		and int(before_current.representedCount) == 1
+		and int(before_pending.representedCount) == 1)
+	body.set_meta("tree_visual_state", "published")
+	publisher.installed = false
+	var stale: Dictionary = current.region_readiness(21, "pinned",
+		"mock-world-1", 1, bounds)
+	_check("retired_horizon_slot_invalidates_old_receipt",
+		stale.status == "pending" and int(stale.pendingCount) == 1
+		and int(stale.representedCount) == 0)
+	var controller = ControllerScript.new()
+	var keys: Array[Vector2i] = [Vector2i(-3, 0)]
+	controller._owners["player"] = {"current": {"ledger": current,
+		"requestId": 21, "seed": "pinned", "worldRevision": "mock-world-1",
+		"viewRevision": 1, "demandRevision": 1, "bounds": bounds,
+		"nearBounds": bounds}, "pending": {"ledger": pending,
+		"requestId": 21, "seed": "pinned", "worldRevision": "mock-world-1",
+		"viewRevision": 1, "demandRevision": 2, "bounds": bounds,
+		"nearBounds": bounds, "chunkKeys": keys, "dirtyChunkKeys": []}}
+	var replacement := StaticBody3D.new()
+	replacement.set_meta("prop_id", candidate_id)
+	replacement.set_meta("tree_visual_state", "published")
+	replacement.set_meta("tree_render_lod_tier", "far")
+	chunk.add_child(replacement)
+	var replacement_visual := MeshInstance3D.new()
+	replacement_visual.mesh = BoxMesh.new()
+	replacement.add_child(replacement_visual)
+	var rejected: Dictionary = controller.handoff_published_tree("player",
+		Vector2i(-3, 0), replacement)
+	_check("tree_handoff_rejects_same_id_replacement_owner",
+		rejected.status == "pending" and int(rejected.acceptedViews) == 0
+		and current.region_readiness(21, "pinned", "mock-world-1", 1, bounds).status == "pending")
+	var handoff: Dictionary = controller.handoff_published_tree("player",
+		Vector2i(-3, 0), body)
+	var after_current: Dictionary = current.region_readiness(21, "pinned",
+		"mock-world-1", 1, bounds)
+	var after_pending: Dictionary = pending.region_readiness(21, "pinned",
+		"mock-world-1", 1, bounds)
+	_check("published_tree_handoff_updates_adopted_and_pending_receipts",
+		handoff.status == "ready" and int(handoff.acceptedViews) == 2
+		and after_current.status == "ready" and after_pending.status == "ready"
+		and int(after_current.representedCount) == 1
+		and int(after_pending.representedCount) == 1)
+	_check("published_tree_handoff_uses_exact_installed_representation",
+		String(current._sources[source_id].candidates[candidate_id].receipt.representationId)
+			== "%s:installed" % candidate_id
+		and String(pending._sources[source_id].candidates[candidate_id].receipt.representationId)
+			== "%s:installed" % candidate_id
+		and controller._owners.player.pending.dirtyChunkKeys == keys)
+	chunk.queue_free()
+	await process_frame
+
+func _tree_handoff_ledger(source_id: String, candidate_id: String, bounds: Rect2i,
+		source_bounds: Rect2i, publisher: HorizonPublisher, body: StaticBody3D) -> Object:
+	var ledger = ReadinessScript.new()
+	ledger.begin_view(21, "pinned", "mock-world-1", bounds, Rect2i(-61, 1, 1, 1),
+		Vector2(-59.0, 3.0), 2.0)
+	ledger.declare_terrain_mesh_source_set({"terrain:test": bounds}, 1)
+	for kind: String in ReadinessScript.CONTENT_KINDS:
+		var id := source_id if kind == "trees_foliage" else "%s:test" % kind
+		var footprint := source_bounds if kind == "trees_foliage" else bounds
+		ledger.expect_source(id, kind, id, "rev:1", footprint, 1)
+		if kind == "trees_foliage":
+			ledger.describe_candidate(id, candidate_id, "horizon",
+				{"positionXZ": Vector2(-59.0, 3.0),
+				"horizonBodyInstanceId": body.get_instance_id(),
+				"horizonChunkInstanceId": body.get_parent().get_instance_id()})
+			ledger.accept_publisher_receipt(id, candidate_id,
+				"%s:horizon" % candidate_id, "horizon", id, "rev:1", 1,
+				publisher, &"visual_receipt_installed")
+		ledger.finish_source(id, id, "rev:1", 1)
+	return ledger
 
 func _check(name: String, passed: bool) -> void:
 	checks.append({"name": name, "passed": passed})

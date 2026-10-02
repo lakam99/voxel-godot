@@ -4424,8 +4424,8 @@ func ensure_tree_publication_queue():
 
 func _on_visible_world_tree_visual_published(body: StaticBody3D, _recipe: Dictionary) -> void:
     if body == null or not is_instance_valid(body): return
-    visible_world_demand_controller.mark_chunk_dirty("player",
-        world_to_chunk(body.global_position.x, body.global_position.z))
+    visible_world_demand_controller.handoff_published_tree("player",
+        world_to_chunk(body.global_position.x, body.global_position.z), body)
 
 func player_position_overlaps_generated_tree(position: Vector3, tree: Node3D) -> bool:
     if tree == null or not is_instance_valid(tree):

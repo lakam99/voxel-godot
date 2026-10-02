@@ -379,15 +379,40 @@ func pending_chunk_source_keys(owner: String, limit := MAX_MISSING_CHUNK_DIAGNOS
 func mark_chunk_dirty(owner: String, chunk_key: Vector2i) -> void:
 	if not _owners.has(owner): return
 	var state: Dictionary = _owners[owner]
-	var current: Dictionary = state.get("current", {})
-	if current.is_empty() or not current.has("terrain") \
-			or not (current.get("chunkKeys", []) as Array).has(chunk_key):
-		return
-	var dirty: Array = current.get("dirtyChunkKeys", [])
-	if not dirty.has(chunk_key): dirty.append(chunk_key)
-	current.dirtyChunkKeys = dirty
-	state.current = current
+	for view_name: String in ["current", "pending"]:
+		var view: Dictionary = state.get(view_name, {})
+		if view.is_empty() or not (view.get("chunkKeys", []) as Array).has(chunk_key):
+			continue
+		var dirty: Array = view.get("dirtyChunkKeys", [])
+		if not dirty.has(chunk_key): dirty.append(chunk_key)
+		view.dirtyChunkKeys = dirty
+		state[view_name] = view
 	_owners[owner] = state
+
+
+func handoff_published_tree(owner: String, chunk_key: Vector2i,
+		body: StaticBody3D) -> Dictionary:
+	if not _owners.has(owner) or not is_instance_valid(body):
+		return {"status": "pending", "reason": "visual_tree_view_not_active"}
+	var candidate_id := String(body.get_meta("prop_id", ""))
+	if candidate_id.is_empty():
+		return {"status": "pending", "reason": "visual_tree_candidate_id_missing"}
+	var state: Dictionary = _owners[owner]
+	var accepted := 0
+	for view_name: String in ["current", "pending"]:
+		var view: Dictionary = state.get(view_name, {})
+		var ledger: Object = view.get("ledger") as Object
+		if view.is_empty() or not is_instance_valid(ledger) \
+				or not ledger.has_method("handoff_published_tree_receipt"):
+			continue
+		var source_id := "chunk-props:%s:%d,%d:trees_foliage" % [
+			String(view.get("seed", "")), chunk_key.x, chunk_key.y]
+		var handoff: Dictionary = ledger.call("handoff_published_tree_receipt",
+			source_id, candidate_id, body)
+		if handoff.get("status") == "ready": accepted += 1
+	mark_chunk_dirty(owner, chunk_key)
+	return {"status": "ready" if accepted > 0 else "pending",
+		"acceptedViews": accepted}
 
 
 func _refresh_current_chunk(main: Object, state: Dictionary,

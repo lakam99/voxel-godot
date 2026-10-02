@@ -432,6 +432,42 @@ func accept_receipt(source_id: String, candidate_id: String, representation_id: 
 		"viewRevision": view_revision}
 
 
+## The tree publisher emits after installing its final visual and retiring its
+## horizon slot. Transfer that one live candidate before the next view query.
+func handoff_published_tree_receipt(source_id: String, candidate_id: String,
+		body: StaticBody3D) -> Dictionary:
+	if not _sources.has(source_id):
+		return {"status": "pending", "reason": "visual_tree_source_not_described"}
+	var source: Dictionary = _sources[source_id]
+	if String(source.kind) != "trees_foliage" or not source.candidates.has(candidate_id):
+		return {"status": "pending", "reason": "visual_tree_candidate_not_described"}
+	if not is_instance_valid(body) or String(body.get_meta("prop_id", "")) != candidate_id \
+			or String(body.get_meta("tree_visual_state", "")) != "published":
+		return {"status": "pending", "reason": "visual_tree_installation_not_published"}
+	var candidate: Dictionary = source.candidates[candidate_id]
+	var metadata: Dictionary = candidate.get("metadata", {})
+	var old_receipt: Dictionary = candidate.get("receipt", {})
+	if int(metadata.get("horizonBodyInstanceId", 0)) != body.get_instance_id() \
+			or not is_instance_valid(body.get_parent()) \
+			or int(metadata.get("horizonChunkInstanceId", 0)) != body.get_parent().get_instance_id() \
+			or String(old_receipt.get("representationId", "")) != "%s:horizon" % candidate_id \
+			or String(old_receipt.get("sourceIdentity", "")) != String(source.identity) \
+			or String(old_receipt.get("sourceRevision", "")) != String(source.revision) \
+			or String(old_receipt.get("worldRevision", "")) != _world_revision \
+			or int(old_receipt.get("viewRevision", -1)) != _view_revision:
+		return {"status": "pending", "reason": "visual_tree_horizon_owner_changed"}
+	if not _tree_lod_satisfies_tier(String(body.get_meta("tree_render_lod_tier", "")),
+			String(candidate.requiredTier)):
+		return {"status": "pending", "reason": "visual_tree_lod_tier_insufficient"}
+	var receipt := accept_receipt(source_id, candidate_id, "%s:installed" % candidate_id,
+		String(candidate.requiredTier), String(source.identity), String(source.revision),
+		_view_revision, body, body)
+	if receipt.get("status") != "ready" or not _candidate_receipt_current(
+			source, candidate, _view_revision):
+		return {"status": "pending", "reason": "visual_tree_handoff_not_current"}
+	return receipt
+
+
 ## Native render owners such as VoxelTerrain do not expose a MeshInstance3D
 ## child. They may receipt through their own source-of-truth validator, which
 ## is called both here and on every readiness query to reject stale installs.
