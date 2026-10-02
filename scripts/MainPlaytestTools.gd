@@ -4,6 +4,7 @@ const TreePublicationQueueScript := preload("res://scripts/environment/TreePubli
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
 const ChunkPropVisualManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const HorizonChunkPropManifestCacheScript := preload("res://scripts/world/HorizonChunkPropManifestCache.gd")
 const DetailBatchVisualReceiptPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
@@ -56,6 +57,7 @@ var underground_focus_cache_result := false
 var underground_chunk_exposure_cache := {}
 var tree_publication_queue = null
 var tree_runtime_request_builder = null
+var horizon_chunk_prop_manifest_cache = HorizonChunkPropManifestCacheScript.new()
 
 func generated_volume_exposure_cache_metadata(start_x: int, start_z: int) -> Dictionary:
     var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
@@ -3127,8 +3129,9 @@ func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false) -> 
         else bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
     var source_revision := String(chunk.get_meta("chunk_surface_candidate_source_revision", "")) if surface_only \
         else String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
-    return ChunkPropVisualManifestScript.capture(
-        chunk, chunk_key, seed_text, source_revision, complete, CELL, surface_only
+    return horizon_chunk_prop_manifest_cache.capture_or_refresh(
+        self, chunk, chunk_key, seed_text, source_revision, complete, CELL,
+        CHUNK_SIZE, surface_only
     )
 
 
@@ -3142,8 +3145,14 @@ func publish_chunk_prop_visual_readiness(readiness: Object, view_revision: int,
     if manifest.get("status") == "failed" or not bool(manifest.get("scanComplete", false)):
         return manifest
     var visual_observer := observer_position if observer_position.is_finite() else player.global_position
-    return ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision,
+    var submitted: Dictionary = ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision,
         near_bounds, visual_observer)
+    if manifest.has("candidateSnapshotCacheHit"):
+        submitted["candidateSnapshotCacheHit"] = manifest.candidateSnapshotCacheHit
+        submitted["candidateSnapshotValidationUsec"] = manifest.get("candidateSnapshotValidationUsec", 0)
+        submitted["candidateSnapshotRefreshUsec"] = manifest.get("candidateSnapshotRefreshUsec", 0)
+        submitted["candidateSnapshotCaptureUsec"] = manifest.get("candidateSnapshotCaptureUsec", 0)
+    return submitted
 
 func chunk_prop_spawn_budget_elapsed(start_usec: int, time_budget_ms: float) -> bool:
     if time_budget_ms <= 0.0:

@@ -2,6 +2,7 @@ extends SceneTree
 
 const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
+const HorizonPropCacheScript := preload("res://scripts/world/HorizonChunkPropManifestCache.gd")
 const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologySource.gd")
 const DetailBatchPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
@@ -36,6 +37,17 @@ class BenchmarkPublisher extends RefCounted:
 			_metadata: Dictionary, _representation_id: String, _tier: String) -> bool:
 		validation_count += 1
 		return installed
+
+class HorizonPropCacheWorldFixture extends RefCounted:
+	var revision := 1
+	func terrain_volume_chunk_revision(_key: Vector2i, _chunk_size: int) -> int:
+		return revision
+
+class HorizonPropCacheMainFixture extends Node:
+	var world_generation_system: Object = HorizonPropCacheWorldFixture.new()
+	var removed_props := {}
+	var removed_props_revision := 0
+	var visual_quality := {"decorativeDensity": 0.74, "decorativeDetailCap": 72}
 
 class ScanMain extends "res://scripts/Main.gd":
 	func hash01(_text: String) -> float:
@@ -214,6 +226,7 @@ func run() -> void:
 	test_incomplete_discovery_never_reports_empty_ready()
 	test_candidate_must_belong_to_declared_source_footprint()
 	await test_native_terrain_visual_manifest()
+	test_native_viewer_mesh_box_covers_required_world_sphere()
 	test_native_terrain_scan_continues_past_pending_block()
 	test_native_terrain_overlap_uses_current_installed_source()
 	await test_generated_structure_visual_manifest()
@@ -224,6 +237,7 @@ func run() -> void:
 	test_underground_floor_scan_revision_restart()
 	await test_installed_detail_batch_receipts()
 	await test_production_chunk_prop_manifest()
+	await test_horizon_prop_candidate_snapshot_cache()
 	test_horizon_ecology_owner_lifetime()
 	test_horizon_ordinary_visual_range_receipt()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
@@ -320,6 +334,142 @@ func test_coverage_cache_tracks_source_lifecycle() -> void:
 		and recovered.get("status") == "ready",
 		{"failedGaps": failed.get("coverageGaps", []),
 			"replacedGaps": replaced.get("coverageGaps", [])})
+
+
+func test_horizon_prop_candidate_snapshot_cache() -> void:
+	var main := HorizonPropCacheMainFixture.new()
+	root.add_child(main)
+	var chunk := Node3D.new()
+	chunk.set_meta("horizon_visual_only", true)
+	chunk.set_meta("horizon_chunk_revision", 1)
+	chunk.set_meta("chunk_surface_candidate_scan_complete", true)
+	chunk.set_meta("chunk_surface_candidate_source_revision", "cache-scan-1")
+	main.add_child(chunk)
+	for index in 12:
+		var body := StaticBody3D.new()
+		body.set_meta("prop_id", "cache-seed:rock:%d" % index)
+		body.set_meta("kind", "prop")
+		body.position = Vector3(float(index), 0.0, 1.0)
+		chunk.add_child(body)
+		var mesh := MeshInstance3D.new()
+		mesh.mesh = BoxMesh.new()
+		body.add_child(mesh)
+	var decor_root := Node3D.new()
+	decor_root.set_meta("kind", "decor")
+	chunk.add_child(decor_root)
+	var batch := MultiMeshInstance3D.new()
+	batch.set_meta("detail_type", "grass")
+	batch.visibility_range_end = 58.0
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.use_colors = true
+	multimesh.use_custom_data = true
+	multimesh.mesh = BoxMesh.new()
+	multimesh.instance_count = 8
+	for index in 8:
+		multimesh.set_instance_transform(index,
+			Transform3D(Basis.IDENTITY, Vector3(float(index), 0.0, 2.0)))
+		multimesh.set_instance_color(index, Color(0.2, 0.8, 0.2))
+		multimesh.set_instance_custom_data(index, Color(0.1, 0.0, 0.0))
+	batch.multimesh = multimesh
+	decor_root.add_child(batch)
+	var publisher = DetailBatchPublisherScript.new()
+	publisher.configure(batch, "grass")
+	batch.set_meta("visual_detail_receipt_publisher", publisher)
+	chunk.set_meta("visual_detail_expected_batches", [{"detailType": "grass",
+		"batchInstanceId": batch.get_instance_id(), "instanceCount": 8}])
+	await process_frame
+	var cache = HorizonPropCacheScript.new()
+	var first: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	var second: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("horizon_candidate_cache_reuses_exact_seeded_source",
+		first.get("candidateSnapshotCacheHit") == false
+		and second.get("candidateSnapshotCacheHit") == true
+		and first.get("sourceRevision") == second.get("sourceRevision")
+		and int(second.get("candidateCount", 0)) == 20,
+		{"first": first.get("candidateCount"), "second": second.get("candidateCount"),
+			"validationUsec": second.get("candidateSnapshotValidationUsec"),
+			"refreshUsec": second.get("candidateSnapshotRefreshUsec"),
+			"captureUsec": first.get("candidateSnapshotCaptureUsec")})
+	var full_started := Time.get_ticks_usec()
+	for _index in 32:
+		ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+			"cache-seed", "cache-scan-1", true, 1.0, true)
+	var full_usec := maxi(0, Time.get_ticks_usec() - full_started)
+	var cached_started := Time.get_ticks_usec()
+	var cache_hits := 0
+	for _index in 32:
+		var hit: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+			"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+		if bool(hit.get("candidateSnapshotCacheHit", false)):
+			cache_hits += 1
+	var cached_usec := maxi(0, Time.get_ticks_usec() - cached_started)
+	_check("horizon_candidate_cache_reports_focused_cost_and_hits",
+		cache_hits == 32 and full_usec > 0 and cached_usec > 0,
+		{"fullCapture32Usec": full_usec, "cached32Usec": cached_usec,
+			"cacheHits": cache_hits})
+	var view_bounds := Rect2i(-2, -2, 32, 32)
+	var included = VisualReadinessScript.new()
+	var included_revision := int(included.begin_view(181, "cache-seed", "cache-world",
+		view_bounds, view_bounds, Vector2(7.0, 7.0), 100.0).viewRevision)
+	var near_submit: Dictionary = ChunkPropManifestScript.submit(second, included,
+		included_revision, view_bounds, Vector3.ZERO)
+	var excluded = VisualReadinessScript.new()
+	var excluded_revision := int(excluded.begin_view(182, "cache-seed", "cache-world",
+		view_bounds, view_bounds, Vector2(7.0, 7.0), 100.0).viewRevision)
+	var far_submit: Dictionary = ChunkPropManifestScript.submit(second, excluded,
+		excluded_revision, view_bounds, Vector3(90.0, 0.0, 0.0))
+	_check("cached_detail_candidates_recompute_observer_visibility",
+		int(near_submit.get("candidateCount", 0)) == 20
+		and int(far_submit.get("candidateCount", 0)) == 12,
+		{"near": near_submit.get("candidateCount"), "far": far_submit.get("candidateCount")})
+	var body := chunk.get_child(0) as Node3D
+	body.position.x += 1.0
+	var moved: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("cached_horizon_source_recaptures_moved_candidate",
+		moved.get("candidateSnapshotCacheHit") == false
+		and moved.get("sourceRevision") != first.get("sourceRevision"),
+		{"firstRevision": first.get("sourceRevision"),
+			"movedRevision": moved.get("sourceRevision")})
+	batch.position.x += 1.0
+	var moved_batch: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("cached_horizon_source_recaptures_moved_detail_batch",
+		moved_batch.get("candidateSnapshotCacheHit") == false
+		and moved_batch.get("sourceRevision") != moved.get("sourceRevision"),
+		{"before": moved.get("sourceRevision"),
+			"after": moved_batch.get("sourceRevision")})
+	var mismatched_snapshot: Array = publisher.candidate_snapshot()
+	mismatched_snapshot[0]["instanceTransform"] = Transform3D(
+		Basis.IDENTITY, Vector3(13.0, 0.0, 2.0))
+	publisher.set("_instances", mismatched_snapshot)
+	var changed_detail: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("cached_horizon_source_rejects_detail_publisher_data_mismatch",
+		changed_detail.get("status") == "pending"
+		and changed_detail.get("reason") == "detail_batch_instance_data_changed",
+		{"status": changed_detail.get("status"), "reason": changed_detail.get("reason")})
+	(main.world_generation_system as HorizonPropCacheWorldFixture).revision = 2
+	var edited_terrain: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("cached_horizon_source_waits_for_terrain_edit_regeneration",
+		edited_terrain.get("status") == "pending"
+		and edited_terrain.get("reason") == "horizon_terrain_source_revision_changed",
+		edited_terrain)
+	(main.world_generation_system as HorizonPropCacheWorldFixture).revision = 1
+	main.removed_props["cache-seed:rock:0"] = true
+	main.removed_props_revision += 1
+	var removed_candidate: Dictionary = cache.capture_or_refresh(main, chunk, Vector2i.ZERO,
+		"cache-seed", "cache-scan-1", true, 1.0, 28, true)
+	_check("cached_horizon_source_waits_for_removed_candidate_regeneration",
+		removed_candidate.get("status") == "pending"
+		and removed_candidate.get("reason") == "horizon_removed_candidate_pending",
+		removed_candidate)
+	main.queue_free()
+	await process_frame
 
 
 func test_horizon_ecology_owner_lifetime() -> void:
@@ -715,6 +865,7 @@ func test_production_chunk_prop_manifest() -> void:
 	wildlife.position = chunk_center_offset
 	tree.set_meta("tree_visual_state", "queued")
 	wildlife.set_meta("wildlife_variant", "deer")
+	wildlife.set_meta("wildlife_home", wildlife.global_position)
 	var queued: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
 		"seed-props", "source-rev-1", true, 1.35)
 	_check("candidate_set_is_bound_into_chunk_source_revision",
@@ -852,6 +1003,21 @@ func test_production_chunk_prop_manifest() -> void:
 	rock.position.x -= 1.35
 	_check("candidate_position_change_advances_prop_source_revision",
 		before_position_change.sourceRevision != after_position_change.sourceRevision)
+	var stable_wildlife_source: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-wildlife", true, 1.35)
+	wildlife.position.x += 2.7
+	var moved_wildlife_source: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-wildlife", true, 1.35)
+	wildlife.position.x -= 2.7
+	_check("wildlife_motion_keeps_seeded_candidate_source_revision",
+		stable_wildlife_source.sourceRevision == moved_wildlife_source.sourceRevision)
+	var wildlife_home: Vector3 = wildlife.get_meta("wildlife_home")
+	wildlife.set_meta("wildlife_home", wildlife_home + Vector3(2.7, 0.0, 0.0))
+	var changed_wildlife_source: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i(-1, 2),
+		"seed-props", "source-rev-wildlife", true, 1.35)
+	wildlife.set_meta("wildlife_home", wildlife_home)
+	_check("wildlife_generated_home_change_advances_candidate_source_revision",
+		stable_wildlife_source.sourceRevision != changed_wildlife_source.sourceRevision)
 	for index in range(128):
 		var item := Node3D.new()
 		item.set_meta("prop_id", "stable-prop-candidate-%04d" % index)
@@ -895,6 +1061,70 @@ func test_production_chunk_prop_manifest() -> void:
 	overfull_chunk.queue_free()
 	chunk.queue_free()
 	await process_frame
+
+
+func test_native_viewer_mesh_box_covers_required_world_sphere() -> void:
+	# Synthetic geometry contract for Voxel Tools v1.6x VoxelTerrain::process_viewers.
+	# VoxelViewer.view_distance is in world units. Native terrain scales it by
+	# the inverse terrain transform, truncates to voxels, then takes ceildiv by
+	# mesh_block_size. The resulting Box3i has an exclusive upper bound.
+	var fixture := TerrainPublisherFixture.new()
+	fixture.vertical_bounds = Vector2i(-512, 512)
+	var manifest := TerrainVisualManifestScript.new()
+	var centers: Array[Vector3] = [
+		Vector3.ZERO, Vector3(8.0, 8.0, 8.0), Vector3(0.001, 0.001, 0.001),
+		Vector3(15.999, 15.999, 15.999), Vector3(16.0, 16.0, 16.0),
+		Vector3(-0.001, -0.001, -0.001), Vector3(-16.0, -16.0, -16.0),
+		Vector3(56.44, 8.5, -37.2), Vector3(-92.3, -40.25, 74.9),
+		Vector3(15.999, -79.999, -16.001), Vector3(80.0, 96.0, 80.0)
+	]
+	var coverage_failures: Array[String] = []
+	var required_total := 0
+	var native_radius_voxels := int(96.0 / 1.35)
+	var native_extent_blocks := ceili(float(native_radius_voxels) / 16.0)
+	for center in centers:
+		var required: Array[Vector3i] = manifest.call("_required_blocks", fixture,
+			center, 96.0 / 1.35)
+		required_total += required.size()
+		var viewer_block := Vector3i(floori(center.x / 16.0),
+			floori(center.y / 16.0), floori(center.z / 16.0))
+		for block in required:
+			if not _native_mesh_box_contains(viewer_block, native_extent_blocks, block):
+				if coverage_failures.size() < 8:
+					coverage_failures.append("center=%s block=%s" % [center, block])
+	_check("native_96_world_unit_viewer_covers_manifest_sphere_in_all_three_axes",
+		coverage_failures.is_empty() and required_total > 0 and native_extent_blocks == 5,
+		{"centers": centers.size(), "requiredBlocksChecked": required_total,
+		"nativeRadiusVoxels": native_radius_voxels,
+		"nativeExtentBlocks": native_extent_blocks,
+		"firstFailures": coverage_failures})
+	var offset_required: Array[Vector3i] = manifest.call("_required_blocks", fixture,
+		Vector3(8.0, 8.0, 8.0), 96.0 / 1.35)
+	var origin_required: Array[Vector3i] = manifest.call("_required_blocks", fixture,
+		Vector3.ZERO, 96.0 / 1.35)
+	var reduced_extent := ceili(float(int(80.0 / 1.35)) / 16.0)
+	var reduced_witnesses: Array[Vector3i] = []
+	var displaced_witnesses: Array[Vector3i] = []
+	for block in offset_required:
+		if not _native_mesh_box_contains(Vector3i.ZERO, reduced_extent, block):
+			if reduced_witnesses.size() < 4: reduced_witnesses.append(block)
+	for block in origin_required:
+		if not _native_mesh_box_contains(Vector3i(2, 0, 0), native_extent_blocks, block):
+			if displaced_witnesses.size() < 4: displaced_witnesses.append(block)
+	_check("native_80_world_unit_viewer_has_missing_96_world_unit_sphere_blocks",
+		reduced_extent == 4 and not reduced_witnesses.is_empty(),
+		{"nativeExtentBlocks": reduced_extent, "firstMissingBlocks": reduced_witnesses})
+	_check("native_viewer_position_offset_can_break_manifest_sphere_coverage",
+		not displaced_witnesses.is_empty(),
+		{"viewerBlockOffset": Vector3i(2, 0, 0),
+		"firstMissingBlocks": displaced_witnesses})
+
+
+static func _native_mesh_box_contains(viewer_block: Vector3i, extent: int,
+		block: Vector3i) -> bool:
+	return block.x >= viewer_block.x - extent and block.x < viewer_block.x + extent \
+		and block.y >= viewer_block.y - extent and block.y < viewer_block.y + extent \
+		and block.z >= viewer_block.z - extent and block.z < viewer_block.z + extent
 
 
 func test_native_terrain_visual_manifest() -> void:
@@ -961,11 +1191,19 @@ func test_native_terrain_scan_continues_past_pending_block() -> void:
 		first.status == "pending" and int(first.processedBlocks) == 1 \
 		and int(first.pendingBlocks) == 1 \
 		and readiness.has_candidate("terrain-mesh:1,0,0", "terrain:1,0,0"), first)
+	_check("terrain_frontier_diagnostics_partition_pending_blocks",
+		int(first.unvisitedBlocks) == 0 and int(first.nativeUnmeshedBlocks) == 1 \
+		and int(first.publisherPendingBlocks) == 0 \
+		and int(first.pendingBlocks) == int(first.unvisitedBlocks) \
+			+ int(first.nativeUnmeshedBlocks) + int(first.publisherPendingBlocks), first)
 	terrain_owner.block_complete[Vector3i(0, 0, 0)] = true
 	terrain_owner.block_geometry[Vector3i(0, 0, 0)] = true
 	var finished: Dictionary = manifest.advance(1)
 	_check("terrain_scan_retries_frontier_and_completes_without_restart",
-		finished.status == "ready" and int(finished.processedBlocks) == 2, finished)
+		finished.status == "ready" and int(finished.processedBlocks) == 2 \
+		and int(finished.unvisitedBlocks) == 0 \
+		and int(finished.nativeUnmeshedBlocks) == 0 \
+		and int(finished.publisherPendingBlocks) == 0, finished)
 
 
 func test_native_terrain_overlap_uses_current_installed_source() -> void:

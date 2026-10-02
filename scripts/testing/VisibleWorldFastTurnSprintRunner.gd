@@ -5,6 +5,9 @@ const RUN_SECONDS := 4.5
 const TURN_RADIANS := PI * 0.85
 const MIN_NEW_AREA_DISTANCE := 45.0
 const DATA_PREFETCH_DISTANCE := 112
+const MESH_PREP_DISTANCE := 32
+const MESH_PREP_LEAD_DISTANCE := 96.0
+const MESH_PREP_MAX_MOVE_REQUESTS := 2
 const DATA_PREFETCH_WARMUP_SECONDS := 5.0
 const DATA_PREFETCH_CHUNK_CELLS := 28
 const DATA_PREFETCH_ID := "diagnostic-visible-world-data-prefetch"
@@ -19,6 +22,8 @@ var data_prefetch_attached := false
 var data_prefetch_attach_ms := -1.0
 var data_prefetch_move_attempts := 0
 var data_prefetch_move_admitted := 0
+var data_prefetch_move_deferred := 0
+var data_prefetch_requested_target := Vector3.INF
 var data_prefetch_last_cell := Vector2i(2147483000, 2147483000)
 var data_prefetch_samples: Array[Dictionary] = []
 var terrain_manifest_step_usec: Array[int] = []
@@ -109,6 +114,7 @@ func run() -> void:
             "testSeedOverride": OS.get_environment("VOXEL_TEST_SEED"), "fixedFps": false,
             "diagnosticReplaySeed": diagnostic_replay_seed,
             "dataPrefetchProbe": data_prefetch_probe_mode,
+            "movementAcceptanceExcluded": data_prefetch_probe_mode == "mesh",
             "skipTutorial": bool(main.launch_options.get("skipTutorial", false)) if main != null and is_instance_valid(main) else false,
             "forceDaytime": bool(main.launch_options.get("forceDaytime", false)) if main != null and is_instance_valid(main) else false,
             "forceClearWeather": bool(main.launch_options.get("forceClearWeather", false)) if main != null and is_instance_valid(main) else false,
@@ -185,14 +191,21 @@ func _prepare_data_prefetch_probe() -> void:
     var runtime = main.get("voxel_terrain_runtime") if is_instance_valid(main) else null
     var player_body = main.get("player") as CharacterBody3D if is_instance_valid(main) else null
     var started_usec := Time.get_ticks_usec()
-    if data_prefetch_probe_mode == "data" and is_instance_valid(runtime) and is_instance_valid(player_body):
+    if data_prefetch_probe_mode in ["data", "mesh"] and is_instance_valid(runtime) and is_instance_valid(player_body):
+        var probe_distance := MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh" else DATA_PREFETCH_DISTANCE
+        var probe_position := _data_prefetch_target(player_body.global_position)
+        data_prefetch_requested_target = probe_position
         data_prefetch_viewer = VoxelViewer.new()
-        data_prefetch_viewer.name = "DiagnosticDataOnlyPrefetch"
+        data_prefetch_viewer.name = "DiagnosticHiddenMeshPrep" if data_prefetch_probe_mode == "mesh" \
+            else "DiagnosticDataOnlyPrefetch"
         data_prefetch_viewer.requires_visuals = false
-        data_prefetch_viewer.requires_collisions = false
-        data_prefetch_viewer.view_distance = DATA_PREFETCH_DISTANCE
+        # Voxel Tools v1.6x accepts collision demand for mesh preparation, then
+        # hides the block when no visual viewer owns it. This diagnostic also
+        # creates native far colliders, so its movement result is not acceptance.
+        data_prefetch_viewer.requires_collisions = data_prefetch_probe_mode == "mesh"
+        data_prefetch_viewer.view_distance = probe_distance
         runtime.call("_stage_secondary_viewer", DATA_PREFETCH_ID, "prefetch",
-            data_prefetch_viewer, player_body.global_position, DATA_PREFETCH_DISTANCE, [], 2)
+            data_prefetch_viewer, probe_position, probe_distance, [], 2)
         data_prefetch_last_cell = _data_prefetch_coarse_cell(player_body.global_position)
     write_progress("data_prefetch_%s_warmup" % data_prefetch_probe_mode)
     while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < DATA_PREFETCH_WARMUP_SECONDS:
@@ -209,19 +222,35 @@ func _data_prefetch_coarse_cell(position: Vector3) -> Vector2i:
     return Vector2i(floori(position.x / span), floori(position.z / span))
 
 
+func _data_prefetch_target(position: Vector3) -> Vector3:
+    return position + Vector3(MESH_PREP_LEAD_DISTANCE, 0.0, 0.0) \
+        if data_prefetch_probe_mode == "mesh" else position
+
+
 func _advance_data_prefetch_position(position: Vector3) -> void:
-    if data_prefetch_probe_mode != "data" or not data_prefetch_attached \
+    if data_prefetch_probe_mode not in ["data", "mesh"] or not data_prefetch_attached \
             or not is_instance_valid(data_prefetch_viewer) or not position.is_finite():
         return
     var next_cell := _data_prefetch_coarse_cell(position)
     if next_cell == data_prefetch_last_cell: return
     var runtime = main.get("voxel_terrain_runtime") if is_instance_valid(main) else null
-    if not is_instance_valid(runtime) or int(runtime.call("voxel_engine_pending_task_count")) > 8:
+    if not is_instance_valid(runtime): return
+    if data_prefetch_probe_mode == "mesh":
+        # Diagnostic-only cap: make at most two extra small native requests even
+        # if the production background lane is busy, then observe actual lag.
+        if data_prefetch_move_attempts >= MESH_PREP_MAX_MOVE_REQUESTS:
+            data_prefetch_move_deferred += 1
+            return
+    elif int(runtime.call("voxel_engine_pending_task_count")) > 8:
+        data_prefetch_move_deferred += 1
         return
     var gate = runtime.get("site_gate")
     if not is_instance_valid(gate): return
     data_prefetch_move_attempts += 1
-    if bool(gate.call("request_viewer", data_prefetch_viewer, position, DATA_PREFETCH_DISTANCE)):
+    var probe_distance := MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh" else DATA_PREFETCH_DISTANCE
+    data_prefetch_requested_target = _data_prefetch_target(position)
+    if bool(gate.call("request_viewer", data_prefetch_viewer,
+            data_prefetch_requested_target, probe_distance)):
         data_prefetch_move_admitted += 1
     # SiteGate retains pending requests and retries them. Coalescing here avoids
     # submitting the same broad native footprint on each sampled process frame.
@@ -241,6 +270,19 @@ func _data_prefetch_snapshot(label: String, sample_shell: bool) -> Dictionary:
         "viewerAttached": data_prefetch_attached,
         "viewerPosition": vec3(data_prefetch_viewer.global_position)
             if data_prefetch_attached and is_instance_valid(data_prefetch_viewer) else [],
+        "requestedTarget": vec3(data_prefetch_requested_target)
+            if data_prefetch_requested_target.is_finite() else [],
+        "viewerTargetLagWorld": data_prefetch_viewer.global_position.distance_to(data_prefetch_requested_target)
+            if data_prefetch_attached and is_instance_valid(data_prefetch_viewer)
+            and data_prefetch_requested_target.is_finite() else -1.0,
+        "viewerRequiresVisuals": data_prefetch_viewer.requires_visuals
+            if is_instance_valid(data_prefetch_viewer) else null,
+        "viewerRequiresCollisions": data_prefetch_viewer.requires_collisions
+            if is_instance_valid(data_prefetch_viewer) else null,
+        "primaryViewDistanceWorld": int((runtime.get("viewer") as VoxelViewer).view_distance)
+            if is_instance_valid(runtime.get("viewer")) else -1,
+        "nativeTerrainGeneratesCollisions": bool(terrain.generate_collisions)
+            if is_instance_valid(terrain) else null,
         "nativeTasks": task_stats.get("tasks", {}),
         "remainingMainThreadBlocks": terrain_stats.get("remaining_main_thread_blocks", -1),
         "droppedBlockLoads": terrain_stats.get("dropped_block_loads", -1),
@@ -251,7 +293,7 @@ func _data_prefetch_snapshot(label: String, sample_shell: bool) -> Dictionary:
     var vertical: Vector2i = runtime.call("visible_mesh_vertical_bounds")
     var shell := {}
     for radius_m in [88.0, 104.0, 112.0]:
-        var counts := {"sampled": 0, "dataResident": 0, "meshComplete": 0,
+        var counts := {"sampled": 0, "dataResident": 0, "nativeAreaProcessed": 0,
             "outsideVerticalBounds": 0}
         for offset in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
             for y_offset_cells in [-8, 0, 8]:
@@ -270,22 +312,50 @@ func _data_prefetch_snapshot(label: String, sample_shell: bool) -> Dictionary:
                 counts.sampled += 1
                 if bool(terrain.has_data_block(data_block)): counts.dataResident += 1
                 if bool(runtime.call("visible_mesh_area_complete", mesh_block)):
-                    counts.meshComplete += 1
+                    counts.nativeAreaProcessed += 1
         shell[str(radius_m)] = counts
     row["shell"] = shell
+    var ahead_shell := {}
+    for radius_m in [64.0, 96.0, 112.0, 128.0]:
+        var counts := {"sampled": 0, "nativeAreaProcessed": 0, "nativeBlockEntered": 0,
+            "outsideVerticalBounds": 0}
+        for y_offset_cells in [-8, 0, 8]:
+            var sample_world: Vector3 = player_body.global_position + Vector3(
+                radius_m, float(y_offset_cells) * 1.35, 0.0)
+            var sample_cell: Vector3 = sample_world / 1.35
+            if sample_cell.y < float(vertical.x) or sample_cell.y > float(vertical.y):
+                counts.outsideVerticalBounds += 1
+                continue
+            var mesh_block := Vector3i(floori(sample_cell.x / 16.0),
+                floori(sample_cell.y / 16.0), floori(sample_cell.z / 16.0))
+            counts.sampled += 1
+            if bool(runtime.call("visible_mesh_area_complete", mesh_block)):
+                counts.nativeAreaProcessed += 1
+            if bool(runtime.call("visible_mesh_block_has_geometry", mesh_block)):
+                counts.nativeBlockEntered += 1
+        ahead_shell[str(radius_m)] = counts
+    row["aheadShell"] = ahead_shell
     return row
 
 
 func _data_prefetch_report() -> Dictionary:
     if data_prefetch_probe_mode.is_empty(): return {}
     return {"mode": data_prefetch_probe_mode,
-        "scope": "fixture-only data loading probe; data residency never counts as visual readiness",
-        "distanceWorldUnits": DATA_PREFETCH_DISTANCE,
+        "scope": "fixture-only collision-demand probe; native area/entry counters do not prove rendering mesh preparation; native far colliders may be added; movement result excluded from acceptance"
+            if data_prefetch_probe_mode == "mesh" else
+            "fixture-only data loading probe; data residency never counts as visual readiness",
+        "distanceWorldUnits": MESH_PREP_DISTANCE if data_prefetch_probe_mode == "mesh"
+            else DATA_PREFETCH_DISTANCE,
+        "leadDistanceWorldUnits": MESH_PREP_LEAD_DISTANCE if data_prefetch_probe_mode == "mesh" else 0.0,
+        "nominalAheadAnnulusWorldUnits": [MESH_PREP_LEAD_DISTANCE - MESH_PREP_DISTANCE,
+            MESH_PREP_LEAD_DISTANCE + MESH_PREP_DISTANCE] if data_prefetch_probe_mode == "mesh" else [],
         "warmupSeconds": DATA_PREFETCH_WARMUP_SECONDS,
         "viewerAttached": data_prefetch_attached,
         "viewerAttachMs": data_prefetch_attach_ms,
         "moveAttempts": data_prefetch_move_attempts,
         "moveAdmissions": data_prefetch_move_admitted,
+        "moveDeferred": data_prefetch_move_deferred,
+        "maxMoveRequests": MESH_PREP_MAX_MOVE_REQUESTS if data_prefetch_probe_mode == "mesh" else -1,
         "samples": data_prefetch_samples.duplicate(true)}
 
 
@@ -307,8 +377,16 @@ func _run_visual_act(failures: Array[String]) -> void:
     main.call("set_game_mouse_mode", Input.MOUSE_MODE_CAPTURED)
     if not data_prefetch_probe_mode.is_empty():
         await _prepare_data_prefetch_probe()
-        if data_prefetch_probe_mode == "data" and not data_prefetch_attached:
-            failures.append("diagnostic data prefetch viewer was not admitted during warmup")
+        if data_prefetch_probe_mode in ["data", "mesh"] and not data_prefetch_attached:
+            failures.append("diagnostic prefetch viewer was not admitted during warmup")
+        if data_prefetch_probe_mode == "mesh" and data_prefetch_attached:
+            var runtime = main.get("voxel_terrain_runtime")
+            var native_terrain = runtime.get("terrain") if is_instance_valid(runtime) else null
+            var primary_viewer = runtime.get("viewer") if is_instance_valid(runtime) else null
+            if data_prefetch_viewer.requires_visuals or not data_prefetch_viewer.requires_collisions \
+                    or not is_instance_valid(native_terrain) or not native_terrain.generate_collisions \
+                    or not is_instance_valid(primary_viewer) or primary_viewer.view_distance != 96:
+                failures.append("hidden mesh prep probe changed the configured visual or collision policy")
     await _checkpoint("first_outdoor_control")
     var first_position := player_body.global_position
     var initial_yaw := player_body.global_rotation.y
@@ -430,6 +508,7 @@ func _native_terrain_frontier_diagnostics(checkpoint: Dictionary) -> Dictionary:
         "primaryRequestCell": str(runtime.get("primary_viewer_request_cell")),
         "startupAuxiliaryViewers": (runtime.get("startup_auxiliary_viewers") as Array).size(),
         "retainedViewers": (runtime.get("retained_chunk_viewers") as Dictionary).size(),
+        "nativeWork": _bounded_native_terrain_work(runtime),
         "blocks": []}
     var source_ids: Array[String] = []
     for pending_value in checkpoint.get("pendingRepresentations", []):
@@ -455,6 +534,36 @@ func _native_terrain_frontier_diagnostics(checkpoint: Dictionary) -> Dictionary:
         diagnostics["sourceId"] = source_id
         diagnostics["sourceRevision"] = String(runtime.call("visible_mesh_source_revision", block))
         (result["blocks"] as Array).append(diagnostics)
+    return result
+
+
+func _bounded_native_terrain_work(runtime: Object) -> Dictionary:
+    var result := {"tasks": {}, "terrain": {}, "recentViewerRequests": []}
+    var engine_stats: Dictionary = runtime.call("voxel_engine_task_stats") \
+        if runtime.has_method("voxel_engine_task_stats") else {}
+    var tasks: Dictionary = engine_stats.get("tasks", {}) \
+        if engine_stats.get("tasks", {}) is Dictionary else {}
+    for key in ["streaming", "meshing", "generation", "main_thread", "gpu"]:
+        (result["tasks"] as Dictionary)[key] = int(tasks.get(key, 0))
+    var native_terrain = runtime.get("terrain")
+    var terrain_stats: Dictionary = native_terrain.get_statistics() \
+        if is_instance_valid(native_terrain) and native_terrain.has_method("get_statistics") else {}
+    for key in ["remaining_main_thread_blocks", "dropped_block_loads",
+            "dropped_block_meshs", "updated_blocks", "time_detect_required_blocks",
+            "time_request_blocks_to_load", "time_process_load_responses",
+            "time_request_blocks_to_update", "time_process_update_responses"]:
+        (result["terrain"] as Dictionary)[key] = int(terrain_stats.get(key, 0))
+    var requests: Array = runtime.get("native_viewer_workloads")
+    for index in range(maxi(0, requests.size() - 3), requests.size()):
+        var request: Dictionary = requests[index]
+        (result["recentViewerRequests"] as Array).append({
+            "kind": String(request.get("kind", "")),
+            "position": vec3(request.get("position", Vector3.ZERO)),
+            "viewDistance": int(request.get("viewDistance", 0)),
+            "peakPendingTasks": int(request.get("peakPendingTasks", 0)),
+            "settled": bool(request.get("settled", false)),
+            "superseded": bool(request.get("superseded", false)),
+            "drainMs": int(request.get("drainMs", 0))})
     return result
 
 
@@ -543,6 +652,9 @@ func _view_demand_diagnostics(controller: Object) -> Dictionary:
             "terrainRequiredBlocks": int(terrain.get("requiredBlocks", 0)),
             "terrainProcessedBlocks": int(terrain.get("processedBlocks", 0)),
             "terrainPendingBlocks": int(terrain.get("pendingBlocks", 0)),
+            "terrainUnvisitedBlocks": int(terrain.get("unvisitedBlocks", 0)),
+            "terrainNativeUnmeshedBlocks": int(terrain.get("nativeUnmeshedBlocks", 0)),
+            "terrainPublisherPendingBlocks": int(terrain.get("publisherPendingBlocks", 0)),
             "terrainReason": String(terrain.get("reason", "")),
             "chunkSourcesExpected": chunk_keys.size(),
             "propSourcesComplete": prop_sources.size(),

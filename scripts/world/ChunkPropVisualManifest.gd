@@ -95,6 +95,92 @@ static func capture(chunk: Node3D, chunk_key: Vector2i, seed: String,
 		"surfaceOnly": surface_only}
 
 
+## Re-evaluate only live presentation for a producer-validated candidate
+## snapshot. Candidate IDs, positions and source revision remain the seeded
+## capture; submit still decides view inclusion, required tier and receipts.
+static func refresh_cached(snapshot: Dictionary, chunk: Node3D) -> Dictionary:
+	if not bool(snapshot.get("scanComplete", false)) or not is_instance_valid(chunk) \
+			or not chunk.is_inside_tree() or chunk.is_queued_for_deletion() \
+			or int(snapshot.get("chunkInstanceId", 0)) != chunk.get_instance_id():
+		return {"status": "pending", "reason": "cached_chunk_prop_source_changed"}
+	var candidates: Array[Dictionary] = []
+	var by_kind := {}
+	for kind: String in CONTENT_KINDS:
+		by_kind[kind] = {"candidateCount": 0, "representedCount": 0,
+			"pendingCount": 0, "candidateIds": [], "pendingIds": []}
+	for candidate_value in snapshot.get("candidates", []):
+		if not candidate_value is Dictionary:
+			return {"status": "pending", "reason": "cached_chunk_prop_candidate_invalid"}
+		var candidate: Dictionary = candidate_value.duplicate()
+		var candidate_id := String(candidate.get("candidateId", ""))
+		var kind := String(candidate.get("kind", ""))
+		var body := candidate.get("owner") as Node3D
+		if candidate_id.is_empty() or not by_kind.has(kind) or not is_instance_valid(body) \
+				or body.is_queued_for_deletion() or not body.is_inside_tree():
+			return {"status": "pending", "reason": "cached_chunk_prop_candidate_owner_changed"}
+		if candidate.has("detailType"):
+			var batch := body as MultiMeshInstance3D
+			if batch == null or not batch.has_meta(DETAIL_RECEIPT_PUBLISHER_META):
+				return {"status": "pending", "reason": "cached_chunk_detail_publisher_missing"}
+			var detail_publisher := batch.get_meta(DETAIL_RECEIPT_PUBLISHER_META) as Object
+			if not is_instance_valid(detail_publisher):
+				return {"status": "pending", "reason": "cached_chunk_detail_publisher_missing"}
+			candidate.detailPublisher = detail_publisher
+			candidate.renderable = _has_visible_renderable(batch)
+			candidate.representation = batch if bool(candidate.renderable) else null
+		else:
+			var is_tree := body.has_meta("tree_visual_state")
+			var tree_published := is_tree \
+				and String(body.get_meta("tree_visual_state", "")) == "published"
+			var renderable := _has_visible_renderable(body)
+			var horizon_ordinary := body.get_parent() == chunk \
+				and bool(chunk.get_meta("horizon_visual_only", false)) \
+				and kind != "trees_foliage"
+			if horizon_ordinary and not body.has_meta("horizon_ordinary_visual_publisher"):
+				renderable = false
+			if is_tree and not tree_published:
+				renderable = false
+			candidate.erase("horizonPublisher")
+			candidate.erase("horizonSnapshot")
+			if is_tree and not tree_published and body.has_meta("horizon_visual_publisher"):
+				var horizon_publisher := body.get_meta("horizon_visual_publisher") as Object
+				if is_instance_valid(horizon_publisher) \
+						and horizon_publisher.has_method("installed_snapshot"):
+					var horizon_snapshot: Dictionary = horizon_publisher.call("installed_snapshot", body)
+					if horizon_snapshot.get("status") == "ready" \
+							and String(horizon_snapshot.get("propId", "")) == candidate_id \
+							and int(horizon_snapshot.get("chunkInstanceId", 0)) == chunk.get_instance_id():
+						renderable = true
+						candidate.horizonPublisher = horizon_publisher
+						candidate.horizonSnapshot = horizon_snapshot
+			candidate.erase("horizonOrdinaryPublisher")
+			if horizon_ordinary and body.has_meta("horizon_ordinary_visual_publisher"):
+				candidate.horizonOrdinaryPublisher = body.get_meta("horizon_ordinary_visual_publisher")
+				candidate.horizonOrdinaryBodyId = body.get_instance_id()
+				candidate.horizonOrdinaryRootId = chunk.get_instance_id()
+			candidate.renderable = renderable
+			candidate.representation = body if renderable else null
+			candidate.treeVisualState = String(body.get_meta("tree_visual_state", ""))
+			candidate.treeRenderLodTier = String(body.get_meta("tree_render_lod_tier", ""))
+			candidate.treeRecipeSignature = String(body.get_meta("tree_recipe_signature", ""))
+		candidates.append(candidate)
+		var counts: Dictionary = by_kind[kind]
+		counts.candidateCount = int(counts.candidateCount) + 1
+		counts.candidateIds.append(candidate_id)
+		if bool(candidate.renderable):
+			counts.representedCount = int(counts.representedCount) + 1
+		else:
+			counts.pendingCount = int(counts.pendingCount) + 1
+			counts.pendingIds.append(candidate_id)
+	var refreshed := snapshot.duplicate()
+	refreshed.candidates = candidates
+	refreshed.byKind = by_kind
+	refreshed.status = "ready" if _all_represented(by_kind) else "pending"
+	refreshed.reason = "" if refreshed.status == "ready" \
+		else "chunk_prop_visual_publication_pending"
+	return refreshed
+
+
 static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 		near_bounds: Rect2i, viewer_world_position: Vector3) -> Dictionary:
 	if not manifest.get("scanComplete", false):
@@ -345,6 +431,15 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 			# their existing systems and are not silently misclassified.
 			kind = "props"
 		var body := current as Node3D
+		var candidate_world_position := body.global_position
+		if kind == "wildlife":
+			# The existing movement home is recorded at seeded spawn. Current
+			# body position can change without changing the generated candidate.
+			candidate_world_position = current.get_meta("wildlife_home", Vector3.INF)
+			if not candidate_world_position.is_finite():
+				source_issue[0] = "chunk_wildlife_spawn_position_missing"
+				source_issue[1] = prop_id
+				return
 		var is_tree := current.has_meta("tree_visual_state")
 		var tree_published := is_tree and String(current.get_meta("tree_visual_state", "")) == "published"
 		var renderable := _has_visible_renderable(current)
@@ -367,7 +462,8 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 				else:
 					horizon_snapshot = {}
 		var candidate := {"candidateId": prop_id, "kind": kind,
-			"positionXZ": Vector2(body.global_position.x / cell_scale, body.global_position.z / cell_scale),
+			"positionXZ": Vector2(candidate_world_position.x / cell_scale,
+				candidate_world_position.z / cell_scale),
 			"owner": current, "representation": current if renderable else null,
 			"renderable": renderable, "treeVisualState": String(current.get_meta("tree_visual_state", "")),
 			"treeRenderLodTier": String(current.get_meta("tree_render_lod_tier", "")),

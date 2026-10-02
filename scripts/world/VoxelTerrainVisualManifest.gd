@@ -21,6 +21,8 @@ var _blocks: Array[Vector3i] = []
 var _block_indices: Dictionary = {}
 var _cursor := 0
 var _completed_blocks: Dictionary = {}
+var _visited_blocks: Dictionary = {}
+var _native_unmeshed_blocks: Dictionary = {}
 var _revisit_blocks: Array[Vector3i] = []
 var _previous_ledgers: Array = []
 var _pending_block := Vector3i(-2147483648, -2147483648, -2147483648)
@@ -100,6 +102,8 @@ func begin(runtime: Object, readiness: Object, request_id: int, seed: String,
 	for index in range(_blocks.size()): _block_indices[_blocks[index]] = index
 	_cursor = 0
 	_completed_blocks.clear()
+	_visited_blocks.clear()
+	_native_unmeshed_blocks.clear()
 	_revisit_blocks.clear()
 	_previous_ledgers.clear()
 	for previous_value in previous_ledgers:
@@ -148,11 +152,13 @@ func advance(block_budget: int = 24) -> Dictionary:
 			_revisit_blocks.erase(block)
 			continue
 		processed += 1
+		_visited_blocks[block] = true
 		var source_id := "terrain-mesh:%d,%d,%d" % [block.x, block.y, block.z]
 		var source_revision := String(runtime.call("visible_mesh_source_revision", block))
 		var source_bounds := Rect2i(Vector2i(block.x, block.z) * NATIVE_BLOCK_CELLS,
 			Vector2i.ONE * NATIVE_BLOCK_CELLS)
 		if not bool(runtime.call("visible_mesh_area_complete", block)):
+			_native_unmeshed_blocks[block] = true
 			# A changed native revision must retire its old receipt even while
 			# the replacement mesh is still pending.
 			var invalidated: Dictionary = _readiness.call("expect_source", source_id,
@@ -163,6 +169,7 @@ func advance(block_budget: int = 24) -> Dictionary:
 				_pending_block = block
 				first_pending_reason = "native_terrain_mesh_block_pending"
 			continue
+		_native_unmeshed_blocks.erase(block)
 		var has_geometry := bool(runtime.call("visible_mesh_block_has_geometry", block))
 		if _transfer_complete_block(block, source_id, source_revision, has_geometry):
 			_completed_blocks[block] = "represented" if has_geometry else "empty"
@@ -271,6 +278,9 @@ func _progress(status: String, reason: String, pending_block := Vector3i(-214748
 		"viewRevision": _view_revision, "sourceIdentity": _source_identity,
 		"sourceRevision": _source_world_revision, "requiredBlocks": _blocks.size(),
 		"processedBlocks": _completed_blocks.size(), "pendingBlocks": _blocks.size() - _completed_blocks.size(),
+		"unvisitedBlocks": _blocks.size() - _visited_blocks.size(),
+		"nativeUnmeshedBlocks": _native_unmeshed_blocks.size(),
+		"publisherPendingBlocks": _visited_blocks.size() - _completed_blocks.size() - _native_unmeshed_blocks.size(),
 		"representedMeshBlocks": _represented_blocks, "completedEmptyBlocks": _empty_blocks,
 		"transferredBlocks": _transferred_blocks,
 		"pendingBlock": pending_block if pending_block.x != -2147483648 else null}
@@ -320,6 +330,8 @@ func revisit_candidate(source_id: String, candidate_id: String) -> bool:
 
 func revisit_block(block_position: Vector3i) -> bool:
 	if not _active or not _block_indices.has(block_position): return false
+	_visited_blocks.erase(block_position)
+	_native_unmeshed_blocks.erase(block_position)
 	if _completed_blocks.has(block_position):
 		if String(_completed_blocks[block_position]) == "represented": _represented_blocks -= 1
 		else: _empty_blocks -= 1

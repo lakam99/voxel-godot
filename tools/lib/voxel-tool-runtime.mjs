@@ -525,9 +525,9 @@ async function runHeadedTool(toolId, rawArgs) {
       throw new Error('Diagnostic replay requires a simple seed and --skip-tutorial.');
   }
   if (toolId === 'run-visible-world-fast-turn-sprint' && parsed.options.dataPrefetchProbe !== undefined) {
-    if (!['control', 'data'].includes(String(parsed.options.dataPrefetchProbe))
+    if (!['control', 'data', 'mesh'].includes(String(parsed.options.dataPrefetchProbe))
         || parsed.options.diagnosticReplaySeed === undefined)
-      throw new Error('Data prefetch probe requires control or data mode and --diagnostic-replay-seed.');
+      throw new Error('Prefetch probe requires control, data, or mesh mode and --diagnostic-replay-seed.');
   }
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);

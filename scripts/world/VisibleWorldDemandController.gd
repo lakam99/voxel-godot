@@ -11,7 +11,7 @@ const ViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPri
 ## This only schedules existing owners; it does not enlarge the rendered view.
 const REFRESH_DISTANCE_CELLS := 12.0
 const PENDING_REBASE_DISTANCE_CELLS := 24.0
-const TERRAIN_BLOCKS_PER_STEP := 6
+const TERRAIN_BLOCKS_PER_STEP := 12
 const CHUNK_SOURCE_STEPS_PER_STEP := 1
 const MAX_CHUNK_SOURCES_PER_VIEW := 256
 const MAX_MISSING_CHUNK_DIAGNOSTICS := 8
