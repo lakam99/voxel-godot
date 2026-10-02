@@ -348,6 +348,93 @@ func _tree_timeout_producer(row: Dictionary, seed: String) -> Dictionary:
             "queued": int(metrics.get("queued", 0)),
             "published": int(metrics.get("published", 0)),
             "failed": int(metrics.get("failed", 0))}
+        var priority_value = metrics.get("priorityScheduling", {})
+        var priority: Dictionary = priority_value if priority_value is Dictionary else {}
+        result["publicationPriority"] = {"selectionCount": int(priority.get("selectionCount", 0)),
+            "maxSelectionCandidates": int(priority.get("maxSelectionCandidates", 0)),
+            "fullFallbackSelections": int(priority.get("fullFallbackSelections", 0)),
+            "viewlessFifoSelections": int(priority.get("viewlessFifoSelections", 0)),
+            "directionalPublicationSelections": int(priority.get("directionalPublicationSelections", 0)),
+            "directionalPreemptions": int(priority.get("directionalPreemptions", 0))}
+        var worker_value = metrics.get("workerPriorityScheduling", {})
+        var worker: Dictionary = worker_value if worker_value is Dictionary else {}
+        result["workerPriority"] = {"selectionCount": int(worker.get("selectionCount", 0)),
+            "maxSelectionCandidates": int(worker.get("maxSelectionCandidates", 0)),
+            "fullFallbackSelections": int(worker.get("fullFallbackSelections", 0))}
+        var body_id := int(result["physical"].get("bodyInstanceId", 0))
+        if body_id <= 0: body_id = int(result["horizon"].get("bodyInstanceId", 0))
+        result["exactQueueTask"] = _tree_timeout_queue_task(queue, body_id)
+    return result
+
+
+func _tree_timeout_queue_task(queue: Object, body_id: int) -> Dictionary:
+    # The completed array can retain tombstones. Cap all four container scans
+    # together and report truncation so absence is never mistaken for proof.
+    const LIMIT := 1024
+    var result := {"bodyInstanceId": body_id, "scanLimit": LIMIT,
+        "inspectedEntries": 0, "found": false}
+    var viewer_ref = queue.get("viewer") as WeakRef
+    var viewer_node := viewer_ref.get_ref() as Node3D if viewer_ref != null else null
+    var viewer_live := is_instance_valid(viewer_node) and viewer_node.is_inside_tree() \
+        and not viewer_node.is_queued_for_deletion()
+    result["viewer"] = {"bound": viewer_ref != null,
+        "live": viewer_live,
+        "instanceId": viewer_node.get_instance_id() if viewer_live else 0,
+        "position": viewer_node.global_position if viewer_live else Vector3.INF}
+    if body_id <= 0:
+        result["reason"] = "tree_body_not_found_in_bounded_source_search"
+        return result
+    var pending_value = queue.get("pending_tasks")
+    var pending: Dictionary = pending_value if pending_value is Dictionary else {}
+    var active_value = queue.get("active")
+    var active_tasks: Array = active_value if active_value is Array else []
+    var completed_value = queue.get("completed")
+    var completed_tasks: Array = completed_value if completed_value is Array else []
+    var staged_value = queue.get("staged_publication_task")
+    var staged: Dictionary = staged_value if staged_value is Dictionary else {}
+    result["containerCounts"] = {"pending": pending.size(), "active": active_tasks.size(),
+        "completedSlots": completed_tasks.size(), "staged": 0 if staged.is_empty() else 1}
+    var inspected := 0
+    for stage in ["staged", "active", "pending", "completed"]:
+        var entries: Array = []
+        match stage:
+            "staged":
+                if not staged.is_empty(): entries.append(staged)
+            "active": entries = active_tasks
+            "pending":
+                for sequence in pending:
+                    if entries.size() >= LIMIT - inspected: break
+                    entries.append(pending[sequence])
+            "completed": entries = completed_tasks
+        for value in entries:
+            if inspected >= LIMIT: break
+            inspected += 1
+            if not value is Dictionary: continue
+            var task: Dictionary = value
+            var body_ref = task.get("body") as WeakRef
+            var body = body_ref.get_ref() as Node if body_ref != null else null
+            if not is_instance_valid(body) or body.get_instance_id() != body_id: continue
+            var position = task.get("publicationPosition", Vector3.INF)
+            var request: Dictionary = task.get("request", {}) if task.get("request", {}) is Dictionary else {}
+            result["found"] = true
+            result["container"] = stage
+            result["renderStage"] = String(task.get("renderStage", "root"))
+            result["publicationPosition"] = position
+            result["positionDistanceToViewer"] = (position as Vector3).distance_to(viewer_node.global_position) \
+                if position is Vector3 and viewer_live else -1.0
+            result["ageMs"] = float(maxi(0, Time.get_ticks_usec() - int(task.get("enqueuedUsec", 0)))) / 1000.0
+            result["publicationPriority"] = float(task.get("publicationPriority", INF))
+            result["enqueueSequence"] = int(task.get("enqueueSequence", 0))
+            result["renderLodTier"] = String(request.get("renderLodTier", ""))
+            result["recipePrepared"] = task.has("recipe")
+            result["lodDerivationQueued"] = task.has("lodSourceRecipe")
+            result["inspectedEntries"] = inspected
+            return result
+        if inspected >= LIMIT: break
+    result["inspectedEntries"] = inspected
+    result["scanTruncated"] = inspected >= LIMIT \
+        and inspected < (pending.size() + active_tasks.size() + completed_tasks.size()
+            + (0 if staged.is_empty() else 1))
     return result
 
 
