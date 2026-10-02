@@ -1,6 +1,7 @@
 extends "res://scripts/testing/NormalRuntimePerformancePassRunner.gd"
 
 const MAIN_SCENE := preload("res://scenes/Main.tscn")
+const CHUNK_PROP_PRIORITY := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
 const RUN_SECONDS := 4.5
 const TURN_RADIANS := PI * 0.85
 const MIN_NEW_AREA_DISTANCE := 45.0
@@ -72,6 +73,7 @@ func normal_runtime_environment_failure() -> String:
 func run() -> void:
     write_progress("menu_new_game")
     var failures: Array[String] = []
+    var startup_prop_timeout := {}
     if normal_runtime_environment_failure() != "":
         failures.append(normal_runtime_environment_failure())
     else:
@@ -82,6 +84,7 @@ func run() -> void:
             launched = await _launch_seeded_main_diagnostic()
         if not launched:
             failures.append(startup_loading_failure if not startup_loading_failure.is_empty() else "New Game did not reach gameplay readiness")
+            startup_prop_timeout = _initial_region_prop_timeout_diagnostics()
         else:
             playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "fast_turn_sprint_observer")
             if not bool(playtest_survival_policy.get("enabled", false)):
@@ -145,6 +148,8 @@ func run() -> void:
         "passed": failures.is_empty(),
         "results": [{"id": "fast_turn_and_continuous_sprint", "passed": failures.is_empty(), "failures": failures}]
     }
+    if not startup_prop_timeout.is_empty():
+        report["startup"]["propSourceTimeout"] = startup_prop_timeout
     write_report(report)
     finish(0 if failures.is_empty() else 1)
 
@@ -182,6 +187,142 @@ func _launch_seeded_main_diagnostic() -> bool:
             write_progress("diagnostic_seeded_main_waiting frame=%d" % frame)
     startup_loading_failure = "Diagnostic seeded Main loading timed out"
     return false
+
+
+func _initial_region_prop_timeout_diagnostics() -> Dictionary:
+    # Read only after the production initial-region deadline fails. Keep the
+    # report to one exact source; never advance its seeded producer here.
+    if not is_instance_valid(main): return {}
+    var failure_value = main.get("startup_loading_failure_result")
+    var failure: Dictionary = failure_value if failure_value is Dictionary else {}
+    if startup_loading_failure != "initial_region_readiness_timeout" \
+            and String(failure.get("reason", "")) != "initial_region_readiness_timeout":
+        return {}
+    var pending_value = main.get("visible_world_prop_pending_reasons")
+    var pending: Dictionary = pending_value if pending_value is Dictionary else {}
+    var pending_keys: Array[Vector2i] = []
+    for key_value in pending.keys():
+        if key_value is Vector2i: pending_keys.append(key_value)
+    pending_keys.sort_custom(func(a: Vector2i, b: Vector2i):
+        return a.x < b.x or (a.x == b.x and a.y < b.y))
+    if pending_keys.is_empty():
+        return {"evidenceLevel": "failure_only_read_only_producer_snapshot",
+            "pendingSourceCount": 0, "reason": "no_pending_prop_source_at_timeout"}
+    var key := pending_keys[0]
+    var pending_reason: Dictionary = pending.get(key, {}) if pending.get(key, {}) is Dictionary else {}
+    var queue_value = main.get("pending_chunk_prop_spawns")
+    var queue: Dictionary = queue_value if queue_value is Dictionary else {}
+    var chunks_value = main.get("chunks")
+    var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
+    var physical_root := chunks.get(key) as Node3D if is_instance_valid(chunks.get(key)) else null
+    var physical_state: Dictionary = queue.get(key, {}) if queue.get(key, {}) is Dictionary else {}
+    var horizon = main.get("horizon_ecology_source") as Object
+    var horizon_states_value = horizon.get("states") if is_instance_valid(horizon) else {}
+    var horizon_states: Dictionary = horizon_states_value if horizon_states_value is Dictionary else {}
+    var horizon_state: Dictionary = horizon_states.get(key, {}) \
+        if horizon_states.get(key, {}) is Dictionary else {}
+    var horizon_root := horizon.call("source_for", key) as Node3D \
+        if is_instance_valid(horizon) and horizon.has_method("source_for") else null
+    var startup_priority: Array[Vector2i] = main.call("prioritized_startup_prop_chunk_keys")
+    var visible_priority: Array[Vector2i] = main.get("visible_world_prop_chunk_keys")
+    var next_underground_turn := (int(main.get("chunk_prop_spawn_queue_turn")) + 1) % 4 == 0
+    var surface_order: Array[Vector2i] = CHUNK_PROP_PRIORITY.ordered_keys(
+        queue, visible_priority, next_underground_turn)
+    var near_bounds: Rect2i = main.get("visible_world_near_bounds")
+    var chunk_size := DATA_PREFETCH_CHUNK_CELLS
+    var surface_only := not Rect2i(key * chunk_size, Vector2i.ONE * chunk_size).intersects(near_bounds)
+    var world = main.get("world_generation_system") as Object
+    var global_volume_revision := int(world.call("terrain_volume_revision")) \
+        if is_instance_valid(world) and world.has_method("terrain_volume_revision") else -1
+    var chunk_volume_revision := int(world.call("terrain_volume_chunk_revision", key, chunk_size)) \
+        if is_instance_valid(world) and world.has_method("terrain_volume_chunk_revision") else -1
+    return {"evidenceLevel": "failure_only_read_only_producer_snapshot",
+        "chunk": key, "pendingSourceCount": pending_keys.size(),
+        "seed": String(main.get("seed_text")),
+        "globalVolumeRevision": global_volume_revision,
+        "chunkVolumeRevision": chunk_volume_revision,
+        "pendingReason": {"status": String(pending_reason.get("status", "")),
+            "reason": String(pending_reason.get("reason", "")),
+            "candidateCount": int(pending_reason.get("candidateCount", 0)),
+            "candidateId": String(pending_reason.get("candidateId", ""))},
+        "manifestSurfaceOnly": surface_only,
+        "selectedProducer": "horizon" if surface_only and is_instance_valid(horizon_root)
+            and (not is_instance_valid(physical_root) or not bool(physical_root.get_meta(
+                "chunk_surface_candidate_scan_complete", false))) else "physical",
+        "physical": _chunk_prop_timeout_producer(physical_root, physical_state),
+        "horizon": _chunk_prop_timeout_producer(horizon_root, horizon_state),
+        "queuePriority": {"pendingStateCount": queue.size(),
+            "physicalQueueIndex": queue.keys().find(key),
+            "startupPriorityIndex": startup_priority.find(key),
+            "visiblePriorityIndex": visible_priority.find(key),
+            "surfaceFirstNextUndergroundTurn": next_underground_turn,
+            "surfaceFirstNextQueueIndex": surface_order.find(key),
+            "surfaceFirstNextHead": surface_order[0] if not surface_order.is_empty() else null,
+            "horizonStateCount": horizon_states.size(),
+            "horizonPromotionCursor": int(horizon.get("promotion_cursor")) if is_instance_valid(horizon) else -1},
+        "lastManifestAttempt": _chunk_prop_timeout_last_attempt(main.get("visible_world_prop_last_attempt"))}
+
+
+func _chunk_prop_timeout_producer(root: Node3D, state: Dictionary) -> Dictionary:
+    var scan_value = state.get("undergroundVolumeFloorScan", {})
+    var scan: Dictionary = scan_value if scan_value is Dictionary else {}
+    var candidates_value = state.get("undergroundCandidates", [])
+    var candidates: Array = candidates_value if candidates_value is Array else []
+    var active_value = state.get("detailActiveAttempt", {})
+    var active: Dictionary = active_value if active_value is Dictionary else {}
+    var direct_candidates := 0
+    var inspected := 0
+    if is_instance_valid(root):
+        for child in root.get_children():
+            if inspected >= 256: break
+            inspected += 1
+            if child is Node and child.has_meta("prop_id"): direct_candidates += 1
+    return {"rootPresent": is_instance_valid(root), "statePresent": not state.is_empty(),
+        "rootInstanceId": root.get_instance_id() if is_instance_valid(root) else 0,
+        "rootInsideTree": root.is_inside_tree() if is_instance_valid(root) else false,
+        "surfaceScanComplete": bool(root.get_meta("chunk_surface_candidate_scan_complete", false))
+            if is_instance_valid(root) else false,
+        "fullScanComplete": bool(root.get_meta("chunk_prop_candidate_scan_complete", false))
+            if is_instance_valid(root) else false,
+        "surfaceSourceRevision": String(root.get_meta("chunk_surface_candidate_source_revision", ""))
+            if is_instance_valid(root) else "",
+        "fullSourceRevision": String(root.get_meta("chunk_prop_candidate_source_revision", ""))
+            if is_instance_valid(root) else "",
+        "horizonTerrainRevision": int(root.get_meta("horizon_chunk_revision", -1))
+            if is_instance_valid(root) else -1,
+        "directChildCount": root.get_child_count() if is_instance_valid(root) else 0,
+        "directCandidateNodesInFirst256": direct_candidates,
+        "phase": String(state.get("phase", "")),
+        "propIndex": int(state.get("propIndex", -1)),
+        "detailIndex": int(state.get("detailIndex", -1)),
+        "detailAttempts": int(state.get("detailAttempts", -1)),
+        "detailBatchIndex": int(state.get("detailBatchIndex", -1)),
+        "detailBatchCount": (state.get("detailBatchKeys", []) as Array).size(),
+        "activeDetail": {"phase": String(active.get("phase", "")),
+            "x": int(active.get("x", -1)), "z": int(active.get("z", -1)),
+            "variationIndex": int(active.get("variationIndex", -1))},
+        "undergroundIndex": int(state.get("undergroundIndex", -1)),
+        "undergroundCandidateCount": candidates.size(),
+        "undergroundScanComplete": bool(state.get("undergroundScanComplete", false)),
+        "undergroundScanColumn": int(state.get("undergroundScanColumn", -1)),
+        "undergroundScanY": int(state.get("undergroundScanY", -1)),
+        "volumeScan": {"phase": String(scan.get("phase", "")),
+            "columnIndex": int(scan.get("columnIndex", -1)),
+            "scanY": int(scan.get("scanY", -1)),
+            "columnStarted": bool(scan.get("columnStarted", false)),
+            "complete": bool(scan.get("complete", false)),
+            "revision": int(scan.get("revision", -1)),
+            "chunkSize": int(scan.get("chunkSize", 0))},
+        "naturalPropAdmission": _chunk_prop_timeout_last_attempt(state.get("naturalPropAdmission", {}))}
+
+
+func _chunk_prop_timeout_last_attempt(value) -> Dictionary:
+    var row: Dictionary = value if value is Dictionary else {}
+    var result := {}
+    for field in ["status", "reason", "chunk", "sourceIdentity", "cursor", "chunkCount",
+            "spawnQueueDepth", "candidateCount", "candidateId", "revision"]:
+        if row.has(field): result[field] = row[field]
+    return result
 
 
 func _prepare_data_prefetch_probe() -> void:
