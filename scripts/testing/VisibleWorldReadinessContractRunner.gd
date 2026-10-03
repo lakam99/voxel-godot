@@ -2033,21 +2033,51 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 		final_readiness)
 	var changed_recipe := recipe.duplicate(true)
 	changed_recipe.signature = "replacement-recipe-signature"
-	var replacement_pending: Dictionary = backend.call("publish_tree_impostor", body,
+	changed_recipe.canopyRadius = 13.0
+	changed_recipe.renderPolicy.visibilityRange = 95.0
+	var replacement_published: Dictionary = backend.call("publish_tree_impostor", body,
 		request, changed_recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
-	var retained_installation: Dictionary = backend.call("installed_snapshot", body)
-	_check("changed_native_recipe_retains_last_accepted_slot_until_replacement",
-		replacement_pending.get("status") == "pending"
-		and retained_installation.get("status") == "ready"
-		and retained_installation.get("recipeSignature") == "native-recipe-signature",
-		{"replacement": replacement_pending, "retained": retained_installation})
+	var replacement_snapshot: Dictionary = backend.call("installed_snapshot", body)
+	var readiness_after_replacement: Dictionary = book.region_readiness(602,
+		"native-tree-seed", "native-tree-world", revision, view_bounds)
+	_check("changed_native_recipe_atomically_replaces_old_slot",
+		replacement_published.get("status") == "ready"
+		and replacement_snapshot.get("status") == "ready"
+		and replacement_snapshot.get("recipeSignature") == "replacement-recipe-signature"
+		and replacement_snapshot.get("groupKey") != native_snapshot.get("groupKey")
+		and replacement_snapshot.get("instanceTransforms", [])[1]
+			!= native_snapshot.get("instanceTransforms", [])[1]
+		and int(backend.call("metrics").trees) == 1,
+		{"replacement": replacement_published, "installed": replacement_snapshot,
+			"previousGroupKey": native_snapshot.get("groupKey"),
+			"metrics": backend.call("metrics")})
+	_check("native_recipe_replacement_invalidates_old_readiness_receipt",
+		readiness_after_replacement.get("status") == "pending"
+		and int(readiness_after_replacement.get("pendingCount", 0)) == 1,
+		readiness_after_replacement)
+	body.set_meta("tree_recipe_signature", changed_recipe.signature)
+	var fresh_replacement_candidate := candidate.duplicate()
+	fresh_replacement_candidate.treeRecipeSignature = changed_recipe.signature
+	fresh_replacement_candidate.renderable = true
+	fresh_replacement_candidate.representation = body
+	fresh_replacement_candidate.horizonPublisher = backend
+	fresh_replacement_candidate.horizonSnapshot = backend.call("installed_snapshot", body)
+	manifest["candidates"] = [fresh_replacement_candidate]
+	var replacement_receipt: Dictionary = ChunkPropManifestScript.submit(manifest,
+		book, revision, near_bounds, Vector3(4.0, 0.0, 4.0))
+	var replacement_readiness: Dictionary = book.region_readiness(602,
+		"native-tree-seed", "native-tree-world", revision, view_bounds)
+	_check("native_recipe_replacement_accepts_fresh_recipe_receipt",
+		replacement_receipt.get("status") == "ready"
+		and replacement_readiness.get("status") == "ready",
+		{"submit": replacement_receipt, "readiness": replacement_readiness})
 	var second_body := StaticBody3D.new()
 	second_body.position = Vector3(6.0, 0.0, 4.0)
 	second_body.set_meta("prop_id", "tree:native-swap-removal")
 	chunk.add_child(second_body)
 	await process_frame
 	var second_published: Dictionary = backend.call("publish_tree_impostor", second_body,
-		request, recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
+		request, changed_recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
 	var second_snapshot: Dictionary = backend.call("installed_snapshot", second_body)
 	backend.call("release_tree", body)
 	var compacted_second_snapshot: Dictionary = backend.call("installed_snapshot", second_body)
@@ -2062,7 +2092,7 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 			"afterRemoval": compacted_second_snapshot,
 			"removedCandidateReadiness": removed_first_readiness})
 	var first_republished: Dictionary = backend.call("publish_tree_impostor", body,
-		request, recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
+		request, changed_recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
 	var first_after_republish: Dictionary = backend.call("installed_snapshot", body)
 	_check("native_tree_republication_recovers_after_compaction",
 		first_republished.get("status") == "ready"

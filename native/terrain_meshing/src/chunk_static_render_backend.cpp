@@ -223,29 +223,28 @@ Dictionary ChunkStaticRenderBackend::publish_tree_impostor(StaticBody3D *p_body,
 	Group *group = _get_or_create_group(key, "impostor", architecture, biome, visibility_range, p_branch_mesh, p_crown_mesh, p_branch_material, p_foliage_material);
 	const int64_t body_id = static_cast<int64_t>(p_body->get_instance_id());
 	auto old = _trees.find(body_id);
+	bool replacing = false;
+	TreeRecord old_record;
 	if (old != _trees.end()) {
-		const TreeRecord &record = old->second;
+		old_record = old->second;
+		replacing = true;
 		Transform3D transforms[3];
 		const Transform3D body_to_batch = get_global_transform().affine_inverse() * p_body->get_global_transform();
 		_tree_transforms(body_to_batch, height, crown_radius, trunk_radius, transforms);
-		const bool same_installation = record.group_key == key &&
-			record.recipe_signature == String(p_recipe.get("signature", "")) &&
-			record.body_transform.is_equal_approx(p_body->get_global_transform()) &&
-			record.batch_transform.is_equal_approx(get_global_transform()) &&
-			record.transforms[0].is_equal_approx(transforms[0]) &&
-			record.transforms[1].is_equal_approx(transforms[1]) &&
-			record.transforms[2].is_equal_approx(transforms[2]);
+		const bool same_installation = old_record.group_key == key &&
+			old_record.recipe_signature == String(p_recipe.get("signature", "")) &&
+			old_record.body_transform.is_equal_approx(p_body->get_global_transform()) &&
+			old_record.batch_transform.is_equal_approx(get_global_transform()) &&
+			old_record.transforms[0].is_equal_approx(transforms[0]) &&
+			old_record.transforms[1].is_equal_approx(transforms[1]) &&
+			old_record.transforms[2].is_equal_approx(transforms[2]);
 		if (same_installation) {
-			Dictionary current = _snapshot(record, p_body);
+			Dictionary current = _snapshot(old_record, p_body);
 			if (String(current.get("status", "")) == "ready") return current;
 		}
-		// Keep the last installed slot visible until the caller has prepared and
-		// installed its replacement. The queue owns that handoff and will release
-		// this native slot only after the replacement is committed.
-		Dictionary pending;
-		pending["status"] = "pending";
-		pending["reason"] = "existing_chunk_tree_installation_differs";
-		return pending;
+		// Keep the accepted slot live while the replacement is prepared below.
+		// Once the new transforms are installed, swap the record and compact the
+		// old slot in this same call so no frame can observe a missing tree.
 	}
 	int32_t page_index = -1;
 	for (int32_t i = 0; i < static_cast<int32_t>(group->pages.size()); ++i) if (group->pages[i].live_count < PAGE_CAPACITY) { page_index = i; break; }
@@ -263,7 +262,9 @@ Dictionary ChunkStaticRenderBackend::publish_tree_impostor(StaticBody3D *p_body,
 	record.prop_id = p_body->get_meta("prop_id", ""); record.recipe_signature = p_recipe.get("signature", "");
 	record.group_key = key; record.page_index = page_index; record.slot = slot; record.body_transform = p_body->get_global_transform();
 	record.batch_transform = get_global_transform(); for (int i = 0; i < 3; ++i) record.transforms[i] = transforms[i];
-	record.visibility_range = page.cull_range_end; _trees[body_id] = record;
+	record.visibility_range = page.cull_range_end;
+	_trees[body_id] = record;
+	if (replacing) _remove_record_slot(old_record);
 	p_body->set_meta(PUBLISHER_META, this);
 	Callable exiting = callable_mp(this, &ChunkStaticRenderBackend::_on_body_exiting).bind(body_id);
 	if (!p_body->is_connected("tree_exiting", exiting)) p_body->connect("tree_exiting", exiting, Object::CONNECT_ONE_SHOT);
@@ -274,17 +275,21 @@ void ChunkStaticRenderBackend::_remove_body_id(int64_t p_body_id) {
 	auto record_it = _trees.find(p_body_id);
 	if (record_it == _trees.end()) return;
 	TreeRecord record = record_it->second;
-	auto group_it = _groups.find(record.group_key.utf8().get_data());
-	if (group_it != _groups.end() && record.page_index >= 0 && record.page_index < static_cast<int32_t>(group_it->second.pages.size())) {
-		Page &page = group_it->second.pages[record.page_index];
+	_remove_record_slot(record);
+	_trees.erase(record_it);
+}
+
+void ChunkStaticRenderBackend::_remove_record_slot(const TreeRecord &p_record) {
+	auto group_it = _groups.find(p_record.group_key.utf8().get_data());
+	if (group_it != _groups.end() && p_record.page_index >= 0 && p_record.page_index < static_cast<int32_t>(group_it->second.pages.size())) {
+		Page &page = group_it->second.pages[p_record.page_index];
 		const int32_t last = page.live_count - 1;
-		if (record.slot >= 0 && record.slot <= last && record.slot != last) {
-			for (int role = 0; role < 3; ++role) page.meshes[role]->set_instance_transform(record.slot, page.meshes[role]->get_instance_transform(last));
-			for (auto &entry : _trees) if (entry.second.group_key == record.group_key && entry.second.page_index == record.page_index && entry.second.slot == last) { entry.second.slot = record.slot; break; }
+		if (p_record.slot >= 0 && p_record.slot <= last && p_record.slot != last) {
+			for (int role = 0; role < 3; ++role) page.meshes[role]->set_instance_transform(p_record.slot, page.meshes[role]->get_instance_transform(last));
+			for (auto &entry : _trees) if (entry.second.group_key == p_record.group_key && entry.second.page_index == p_record.page_index && entry.second.slot == last) { entry.second.slot = p_record.slot; break; }
 		}
 		if (last >= 0) { for (int role = 0; role < 3; ++role) page.meshes[role]->set_visible_instance_count(last); page.live_count = last; }
 	}
-	_trees.erase(record_it);
 }
 
 void ChunkStaticRenderBackend::_on_body_exiting(int64_t p_body_id) { _remove_body_id(p_body_id); }

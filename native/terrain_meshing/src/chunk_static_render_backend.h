@@ -76,6 +76,7 @@ class ChunkStaticRenderBackend : public Node3D {
 		const Ref<Material> &p_foliage_material);
 	bool _create_page(Group &r_group);
 	void _remove_body_id(int64_t p_body_id);
+	void _remove_record_slot(const TreeRecord &p_record);
 	void _on_body_exiting(int64_t p_body_id);
 	bool _valid_body(const StaticBody3D *p_body) const;
 	bool _record_installed(const TreeRecord &p_record,
