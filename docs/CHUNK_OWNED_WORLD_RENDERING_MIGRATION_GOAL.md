@@ -55,7 +55,17 @@ camera-facing coarse horizon band gate startup; the surrounding render cache
 continues in the background. This goal does not add a fixed kilometre startup
 gate or require uploading off-screen high-detail geometry.
 
-## Category cutovers
+## Category scope and ordered cutovers
+
+The list below defines the content domains and their ownership invariants; it
+does not override implementation order. Follow the canonical ordered sequence
+in `migrations/world-streaming/world-streaming-architecture-plan.md`: measured
+baselines, worker-prepared building geometry, regional dependency readiness,
+source-derived building LOD/shared tree batching, then native kernels where
+measurements justify them. The approved plan lives in the separate
+`voxel-godot-docs` repository. Keep its readiness constraints reconciled with
+this game's current startup contract (near field plus camera-facing coarse
+horizon; progressive background streaming).
 
 1. **Terrain and coordinator boundary.** Inventory current native terrain
    chunk/LOD publication and define how its accepted render artifact participates
@@ -102,7 +112,7 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
 | Mobs and NPCs | Existing actor systems create and render actors independently. | This is the intended boundary and must remain independent. |
 | Coordinator | `VisibleWorldDemandController` schedules terrain, prop, and structure producers and collects revision-bound receipts in `VisibleWorldReadiness`. | It is a readiness/source coordinator, not a unified static render compiler, immutable geometry packet, or shared chunk upload owner. |
 
-### Current stage charter: close the native far-tree readiness contract
+### Current stage charter: native far-tree readiness and traversal evidence
 
 - **Outcome:** a native far-tree impostor becomes a current, revision-checked
   readiness receipt only when the exact canonical tree candidate is installed
@@ -119,12 +129,9 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
   bodies, change tree RNG/recipes, change terrain authority, or retire the
   per-tree fallback.
 - **Baseline:** current branch is
-  `codex/chunk-owned-world-rendering-migration` at `ad63bd80`, based on local
-  `master` `b2646788`, with a clean tracked tree before this charter update. A
-  diagnostic manual cave launch on 2026-10-03 reported `manualReady: true` while
-  collision publication was still pending; acceptance was not evaluated, and
-  its temporary worktree/report was later deleted. That run is not tree or
-  startup acceptance evidence.
+  `codex/chunk-owned-world-rendering-migration` at `4b2d7556` (2026-10-03),
+  with a clean tracked tree. The earlier cave diagnostic is not tree or startup
+  acceptance evidence.
 - **Resolved defect:** the native validator compared `String` arguments directly
   with `Variant` values returned from its snapshot dictionary. The values were
   identical, but the comparison rejected every valid receipt. Explicitly cast
@@ -164,6 +171,15 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
   startup, or traversal performance. The run also exposed an absent metadata
   lookup in `TreePublicationQueue.body_is_collision_visible`; the production
   path now checks `has_meta` before reading publisher metadata.
+- **Seeded headed traversal evidence (2026-10-03):** the normal MainMenu/New
+  Game sprint runner reached a fully represented first outdoor view and moved
+  58.57m using the shared obstacle-aware player navigator with sprint enabled.
+  Its final run still failed the full-view gate after movement: terrain mesh
+  coverage and six chunk prop-source manifests were pending at the new center.
+  The captures show populated world content, but do not prove a continuous
+  tree LOD transition, page-boundary replacement, native page/draw bounds, or
+  a passing frame-cadence gate. See
+  `artifacts/citadel-runtime-integration/visible-world-fast-turn-sprint-tree-migration-20261003-e/report.json`.
 - **Atomic recipe replacement (2026-10-03):** the native publisher previously
   returned `pending` indefinitely whenever an installed tree's recipe changed.
   It now installs the prepared replacement slot before compacting out the old
@@ -217,14 +233,37 @@ while retaining the old accepted representation until replacement
 acknowledgement. Trees remain a candidate only when their recipe, transform,
 collision, prop ID, and removal contracts can be preserved inside that ordering.
 
-The checked-in branch does not contain the referenced
-`WORLD_STREAMING_ARCHITECTURE_PLAN.md`,
-`WORLD_STREAMING_MATURITY_MIGRATION_PLAN_2026-09-14.md`,
-`vegetation/VOX_134_PROCEDURAL_TREE_RENDERER_DECISION.md`, or
-`Minecraft-Equivalent Terrain Migr.md`. Their historical decisions cannot be
-revalidated from this checkout; use this goal's architecture and acceptance
-contracts as the current task scope, and recover/reconcile those documents if
-they become available before their specific gates are needed.
+The current building path already prepares immutable masonry, paving, and roof
+instance segments on an owned worker and uploads completed `MultiMesh` batches
+in bounded main-thread slices. It still merges by material and render tier under
+the site scene root. The first chunk-owned building slice should therefore use
+one packet-eligible, single-owner-cell masonry group, admitted through the
+existing physical-group dependency closure. Carry its source binding, member
+bindings, canonical material ID/version, render tier, owner cell, deterministic
+instance order, bounds, and explicit empty/non-empty batch counts through packet
+installation and its revision-bound receipt. Resolve Godot material resources on
+the main thread. Keep collision, doors, interactions, furnishings, and navigation
+under their current site/actor owners.
+
+The canonical static owner grid is 32 terrain cells (43.2m) in XZ. Resolve a
+member's unique owner from its world-space anchor with negative-safe floor
+division, while retaining that packet as a dependency of every intersecting
+visible cell. Do not duplicate the full visual or gameplay member across cells.
+Install beneath the actual `Chunk_x_z` owner through a chunk registry, not by
+reparenting a completed site batch: the current site job validates its root and
+publication witnesses. On replacement, retain the accepted old packet until the
+new owner confirms installation; on chunk unload, retire its packet while
+preserving source demand needed by still-visible intersecting cells.
+
+The approved ordered architecture plan and maturity plan are maintained in the
+separate `voxel-godot-docs` repository at
+`migrations/world-streaming/world-streaming-architecture-plan.md` and
+`migrations/world-streaming/world-streaming-maturity-migration-plan-2026-09-14.md`.
+The prior tree-renderer decision is
+`systems/procedural-ecology/history/vox-134-procedural-tree-renderer-decision.md`.
+These are planning/evidence constraints, not substitutes for this goal's
+end-to-end chunk-owned static publication requirement. Preserve the existing
+hybrid tree renderer until its replacement passes the stated evidence gates.
 
 ## Required evidence and acceptance
 
@@ -252,12 +291,10 @@ they become available before their specific gates are needed.
 ## Planning relationships and limits
 
 This goal extends, but does not silently replace, the ordered cutovers and
-acceptance contracts in `WORLD_STREAMING_ARCHITECTURE_PLAN.md`. Reconcile it with
-`WORLD_STREAMING_MATURITY_MIGRATION_PLAN_2026-09-14.md` before implementation and
-follow that plan's checkout, baseline, and gate requirements. Preserve the
-procedural tree decision in `vegetation/VOX_134_PROCEDURAL_TREE_RENDERER_DECISION.md`;
-the current production hybrid renderer remains authoritative until a replacement
-passes its evidence gates.
+acceptance contracts in the canonical `voxel-godot-docs` plans named above.
+Reconcile checkout, baseline, and gate requirements before each cutover. The
+canonical order is authoritative when this goal's category list could be read as
+a different implementation sequence.
 
 Minecraft is a reference for chunk/section ownership, asynchronous prioritization,
 and shared static geometry publication. Its block-state representation is not a
