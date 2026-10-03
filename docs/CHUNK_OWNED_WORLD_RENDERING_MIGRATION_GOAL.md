@@ -221,10 +221,12 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
 
 ### Next production cutover
 
-After the far-tree receipt gate passes, reconcile the next category against the
-approved ordered world-streaming plan before implementation. That plan first
-extends worker-prepared building geometry, then regional readiness, then source-
-derived building LOD and shared tree batching. For each broader cutover, define a
+The far-tree receipt and live-traversal gate above remains open evidence for the
+existing native tree-impostor path; it must pass before claiming tree publication
+acceptance. It does not change the canonical implementation order. The next
+production cutover extends worker-prepared building geometry, followed by
+regional readiness, then source-derived building LOD and shared tree batching.
+For each broader cutover, define a
 revision-bound, owned-value static-visual packet for one spatial chunk, with
 explicit material/LOD batches, source identity, deterministic candidate order,
 and cancellation-safe replacement. Migrate one real category end to end through
