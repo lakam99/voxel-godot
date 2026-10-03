@@ -68,6 +68,21 @@ func add_tree(body: StaticBody3D, request: Dictionary) -> bool:
 		(meshes[index] as MultiMesh).visible_instance_count = maxi(
 			(meshes[index] as MultiMesh).visible_instance_count, slot + 1)
 		(page.instances[index] as MultiMeshInstance3D).visible = true
+	# Visibility ranges are evaluated at the batch node's origin, not per
+	# MultiMesh instance. Expand by the farthest represented tree so a tree whose
+	# own origin is inside its biome range cannot disappear at a chunk edge.
+	var batch_cull_range := visibility_range + body.global_position.distance_to(global_position)
+	if batch_cull_range > float(page.get("cullRangeEnd", visibility_range)):
+		page.cullRangeEnd = batch_cull_range
+		for instance_value in page.instances:
+			(instance_value as MultiMeshInstance3D).visibility_range_end = batch_cull_range
+		for record_id_value in _records.keys():
+			var record_id := int(record_id_value)
+			var prior_record: Dictionary = _records[record_id]
+			if String(prior_record.groupKey) == group_key \
+					and int(prior_record.pageIndex) == page_index:
+				prior_record.visibilityRange = batch_cull_range
+				_records[record_id] = prior_record
 	page.nextSlot = maxi(int(page.nextSlot), slot + 1)
 	page.liveCount = int(page.liveCount) + 1
 	pages[page_index] = page
@@ -77,14 +92,16 @@ func add_tree(body: StaticBody3D, request: Dictionary) -> bool:
 		"groupKey": group_key, "pageIndex": page_index, "slot": slot,
 		"bodyGlobalTransform": body.global_transform,
 		"batchGlobalTransform": global_transform,
-		"visibilityRange": visibility_range,
+		"visibilityRange": float(page.get("cullRangeEnd", visibility_range)),
 		"transforms": transforms, "batchInstanceId": get_instance_id(),
 		"meshInstanceIds": _instance_ids(page.instances),
 		"multimeshIds": _instance_ids(meshes),
 		"meshResourceIds": _mesh_ids(meshes),
 		"materialIds": _material_ids(page.instances)}
 	body.set_meta(PUBLISHER_META, self)
-	body.tree_exiting.connect(_body_exiting.bind(body_id), CONNECT_ONE_SHOT)
+	var exiting := Callable(self, "_body_exiting").bind(body_id)
+	if not body.tree_exiting.is_connected(exiting):
+		body.tree_exiting.connect(exiting, CONNECT_ONE_SHOT)
 	return true
 
 
@@ -249,7 +266,8 @@ func _create_page(architecture: String, biome: String,
 		meshes.append(multimesh)
 		instances.append(instance)
 	return {"meshes": meshes, "instances": instances,
-		"nextSlot": 0, "freeSlots": [], "liveCount": 0}
+		"nextSlot": 0, "freeSlots": [], "liveCount": 0,
+		"cullRangeEnd": visibility_range}
 
 
 static func _tree_transforms(body_to_batch: Transform3D, architecture: String,

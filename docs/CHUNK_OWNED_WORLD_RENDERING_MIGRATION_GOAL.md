@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; initial chunk-priority and static-source/readiness cutovers are present in the master worktree. Full migration remains incomplete.**
+Status: **Active; chunk-priority and static-source/readiness cutovers are present, and canonical far-LOD tree impostors now publish through the native chunk-owned renderer. Full migration remains incomplete and the new visual path still needs runtime evidence.**
 
 ## Goal
 
@@ -85,6 +85,47 @@ gate or require uploading off-screen high-detail geometry.
    category has production parity, headed evidence, safe cancellation/unload,
    and no lost demand. There must remain one source of truth for every visible
    result.
+
+## Current architecture audit
+
+The first migration commit established chunk priority, source manifests, and
+revision-aware readiness. Those pieces prove that required source content has
+an accepted visible representation; they do not yet make every representation
+part of one chunk render artifact. Current ownership at the checked-in baseline:
+
+| Category | Current publication path | Remaining migration gap |
+| --- | --- | --- |
+| Terrain | `VoxelTerrainRuntime` owns native terrain chunk mesh and collision publication. `VoxelTerrainVisualManifest` participates in visible-world demand. | Terrain is chunk-owned already, but static content is still published through separate producers and is joined at readiness time. |
+| Trees | `TreePublicationQueue` keeps recipe authority and passes canonical shared meshes/materials to the registered C++ `ChunkStaticRenderBackend` GDExtension class. It batches far impostors in chunk-owned MultiMesh pages keyed by recipe family, biome, range, and resource identity. Gameplay bodies retain collision and identity; `HorizonEcologyTreeBatch` remains only the temporary waiting silhouette publisher. | Near/mid recipe geometry remains per-tree, and far impostors fall back to the per-tree renderer if the native class or resource installation is unavailable. Native page culling, transitions, invalidation, removal, and headed traversal need runtime verification before extending batching. `TreeChunkBatchRenderer` remains an isolated prototype. |
+| Ground flora and natural props | Chunk prop state produces ordinary prop nodes and grouped detail `MultiMesh` children. `HorizonEcologySource` retains visual-only roots for view chunks without gameplay chunks. | Candidate selection is chunk-scoped, but ordinary object visuals are not compiled into immutable chunk geometry, and publication remains a separate prop state machine. Existing detail batches are a partial batching precedent, not proof of full category cutover. |
+| Generated structures | `GeneratedStructureVisualManifest` and `OrdinaryStructureVisualSourceCapture` capture and validate installed structure visuals for readiness. | Capturing installed structure nodes is not chunk-owned structure geometry publication. Cross-chunk ownership and revisioned visual fragments still need a production contract. |
+| Mobs and NPCs | Existing actor systems create and render actors independently. | This is the intended boundary and must remain independent. |
+| Coordinator | `VisibleWorldDemandController` schedules terrain, prop, and structure producers and collects revision-bound receipts in `VisibleWorldReadiness`. | It is a readiness/source coordinator, not a unified static render compiler, immutable geometry packet, or shared chunk upload owner. |
+
+### Next production cutover
+
+The far-tree impostor is the first narrow native production slice, using the
+existing Godot 4.6 terrain-meshing GDExtension and the exact shared
+mesh/material transforms from its former per-tree publisher. Its native DLL
+compiles, but runtime parity and culling behavior still need headed evidence.
+For broader category work, first define a revision-bound, owned-value static-visual packet for one spatial chunk, with
+explicit material/LOD batches, source identity, deterministic candidate order,
+and cancellation-safe replacement. Then migrate one real category end to end
+through packet capture, preparation, bounded upload, install, invalidation, and
+unload while retaining the old accepted representation until replacement
+acknowledgement. Trees remain the first category candidate because their current
+per-tree publication path and prototype provide a measurable baseline; the
+cutover must consume canonical recipes and must preserve the continuous trunk,
+foliage appearance, collision, prop IDs, removal, and tree recipe authority.
+
+The checked-in branch does not contain the referenced
+`WORLD_STREAMING_ARCHITECTURE_PLAN.md`,
+`WORLD_STREAMING_MATURITY_MIGRATION_PLAN_2026-09-14.md`,
+`vegetation/VOX_134_PROCEDURAL_TREE_RENDERER_DECISION.md`, or
+`Minecraft-Equivalent Terrain Migr.md`. Their historical decisions cannot be
+revalidated from this checkout; use this goal's architecture and acceptance
+contracts as the current task scope, and recover/reconcile those documents if
+they become available before their specific gates are needed.
 
 ## Required evidence and acceptance
 

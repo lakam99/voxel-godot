@@ -545,10 +545,13 @@ static func refresh_cached(snapshot: Dictionary, chunk: Node3D) -> Dictionary:
 				renderable = false
 			candidate.erase("horizonPublisher")
 			candidate.erase("horizonSnapshot")
-			if is_tree and not tree_published and body.has_meta("horizon_visual_publisher"):
-				var horizon_publisher := body.get_meta("horizon_visual_publisher") as Object
-				if is_instance_valid(horizon_publisher) \
-						and horizon_publisher.has_method("installed_snapshot"):
+			# A far-LOD tree can be published by a chunk-owned batch after its
+			# recipe completes. Validate that external installation even though the
+			# gameplay body is already in the published state.
+			var external_publisher_key := "static_chunk_render_publisher" if body.has_meta("static_chunk_render_publisher") else "horizon_visual_publisher"
+			if is_tree and body.has_meta(external_publisher_key):
+				var horizon_publisher := body.get_meta(external_publisher_key) as Object
+				if is_instance_valid(horizon_publisher) and horizon_publisher.has_method("installed_snapshot"):
 					var horizon_snapshot: Dictionary = horizon_publisher.call("installed_snapshot", body)
 					if horizon_snapshot.get("status") == "ready" \
 							and String(horizon_snapshot.get("propId", "")) == candidate_id \
@@ -846,8 +849,9 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 			renderable = false
 		var horizon_publisher: Object = null
 		var horizon_snapshot := {}
-		if is_tree and not tree_published and current.has_meta("horizon_visual_publisher"):
-			horizon_publisher = current.get_meta("horizon_visual_publisher") as Object
+		var external_publisher_key := "static_chunk_render_publisher" if current.has_meta("static_chunk_render_publisher") else "horizon_visual_publisher"
+		if is_tree and current.has_meta(external_publisher_key):
+			horizon_publisher = current.get_meta(external_publisher_key) as Object
 			if is_instance_valid(horizon_publisher) and horizon_publisher.has_method("installed_snapshot"):
 				horizon_snapshot = horizon_publisher.call("installed_snapshot", current)
 				if horizon_snapshot.get("status") == "ready" \

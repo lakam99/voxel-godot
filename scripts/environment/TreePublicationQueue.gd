@@ -367,7 +367,15 @@ func current_viewer_position() -> Vector3:
 func body_is_collision_visible(body: StaticBody3D) -> bool:
 	if not _is_live_node(body):
 		return false
-	return body.get_node_or_null("GeneratedTreeVisual") != null or body.get_node_or_null("TreeVisibilityProxy") != null
+	if body.get_node_or_null("GeneratedTreeVisual") != null \
+			or body.get_node_or_null("TreeVisibilityProxy") != null:
+		return true
+	for key in [HorizonEcologyTreeBatchScript.PUBLISHER_META, "static_chunk_render_publisher"]:
+		var publisher := body.get_meta(key, null) as Object
+		if is_instance_valid(publisher) and publisher.has_method("installed_snapshot") \
+				and String((publisher.call("installed_snapshot", body) as Dictionary).get("status", "")) == "ready":
+			return true
+	return false
 
 ## The horizon silhouette is installed on the same generated candidate through
 ## a chunk-owned MultiMesh slot. It does not change collision, recipe, or LOD
@@ -392,12 +400,51 @@ func ensure_horizon_visible_representation(body: StaticBody3D, request: Dictiona
 		return false
 	return bool(batch.call("add_tree", body, request))
 
+
+func publish_chunk_owned_impostor(body: StaticBody3D, request: Dictionary,
+		recipe: Dictionary) -> bool:
+	if not _is_live_node(body):
+		return false
+	var parent := body.get_parent() as Node3D
+	if parent == null or not _is_live_node(parent):
+		return false
+	var visual_factory: ProceduralTreeVisualFactory = publication_service.get_visual_factory()
+	if visual_factory.is_headless_renderer():
+		return false
+	if not ClassDB.class_exists("ChunkStaticRenderBackend"):
+		return false
+	var backend := parent.get_node_or_null("ChunkStaticRenderBackend") as Node3D
+	if backend == null:
+		backend = ClassDB.instantiate("ChunkStaticRenderBackend") as Node3D
+		if backend == null:
+			return false
+		backend.name = "ChunkStaticRenderBackend"
+		parent.add_child(backend)
+	var architecture := String(request.get("architecture", "broadleaf"))
+	var biome := String(request.get("biome", "forest"))
+	var result: Dictionary = backend.call("publish_tree_impostor", body, request, recipe,
+		visual_factory.runtime_shared_branch_mesh(), visual_factory.runtime_shared_impostor_crown_mesh(),
+		visual_factory.branch_material(architecture, biome), visual_factory.foliage_material(architecture, biome))
+	if String(result.get("status", "")) != "ready":
+		return false
+	# Retire the temporary GDScript horizon placeholder only after the native
+	# chunk page has a validated slot for this exact gameplay body.
+	release_horizon_visible_representation(body)
+	return true
+
 func release_horizon_visible_representation(body: StaticBody3D) -> void:
 	if not is_instance_valid(body) or not body.has_meta(HorizonEcologyTreeBatchScript.PUBLISHER_META):
 		return
 	var batch := body.get_meta(HorizonEcologyTreeBatchScript.PUBLISHER_META) as Node3D
 	if is_instance_valid(batch) and batch.has_method("release_tree"):
 		batch.call("release_tree", body)
+
+func release_chunk_static_visual(body: StaticBody3D) -> void:
+	if not is_instance_valid(body) or not body.has_meta("static_chunk_render_publisher"):
+		return
+	var publisher := body.get_meta("static_chunk_render_publisher") as Object
+	if is_instance_valid(publisher) and publisher.has_method("release_tree"):
+		publisher.call("release_tree", body)
 
 func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
 	if not _is_live_node(body) or bool(body.get_meta("tree_publication_cancelled", false)):
@@ -1349,6 +1396,13 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 	var stage := String(task.get("renderStage", "root"))
 	if stage == "root":
 		var visual_factory = publication_service.get_visual_factory()
+		if bool(recipe.get("runtimeImpostor", false)):
+			if publish_chunk_owned_impostor(body, request, recipe):
+				commit_published_visual(task, body, null, request, recipe, true)
+				publication_stage_counts["root"] = int(publication_stage_counts.get("root", 0)) + 1
+				publication_stage_counts["impostor"] = int(publication_stage_counts.get("impostor", 0)) + 1
+				publication_stage_counts["chunkImpostor"] = int(publication_stage_counts.get("chunkImpostor", 0)) + 1
+				return
 		var root: Node3D = visual_factory.create_recipe_root(
 			recipe,
 			String(request.get("biome", "forest")),
@@ -1366,10 +1420,9 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		wood_root.name = "ProceduralTreeWood"
 		wood_root.set_meta("tree_wood_topology", "continuous_structural_wood_with_instanced_supported_twigs")
 		root.add_child(wood_root)
-		# An impostor has no graph, continuous bole, distal branches, or foliage
-		# batches to stage. Publish its shared low-cost silhouette atomically so a
-		# sprinting player does not accumulate a horizon backlog three slices at a
-		# time. Near/mid/far recipes retain the normal atomic multi-stage path.
+		# If a chunk batch is unavailable (for example, a headless renderer), keep
+		# the established per-tree impostor fallback. Near/mid/far recipes retain
+		# the normal atomic multi-stage path.
 		if bool(recipe.get("runtimeImpostor", false)):
 			var impostor: Node3D = visual_factory.instantiate_runtime_impostor(recipe, String(request.get("biome", "forest"))) as Node3D
 			if impostor != null:
@@ -1549,18 +1602,23 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		return
 	commit_published_visual(task, body, visual, request, recipe)
 
-func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3D, request: Dictionary, recipe: Dictionary) -> void:
+func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3D,
+		request: Dictionary, recipe: Dictionary, keep_chunk_batch := false) -> void:
 	var prior_visual := body.get_node_or_null("GeneratedTreeVisual") as Node3D
 	if prior_visual != null and is_instance_valid(prior_visual):
 		body.remove_child(prior_visual)
 		prior_visual.queue_free()
-	body.add_child(visual)
-	# Attach the final root before removing the temporary silhouette so the
-	# renderer never observes a collision-owning body with no tree visual.
-	record_first_collision_visible(body, "procedural_tree_recipe")
+	if visual != null:
+		body.add_child(visual)
+	# The replacement chunk slot is installed before this method is called. Keep
+	# it through commit for the impostor tier; all other tiers retire the waiting
+	# silhouette after their per-tree visual is attached.
+	record_first_collision_visible(body, "chunk_tree_impostor" if keep_chunk_batch else "procedural_tree_recipe")
 	release_collision_visibility_proxy(body)
-	release_horizon_visible_representation(body)
-	body.set_meta("visual_source", "procedural_tree_recipe")
+	if not keep_chunk_batch:
+		release_horizon_visible_representation(body)
+		release_chunk_static_visual(body)
+	body.set_meta("visual_source", "chunk_tree_impostor" if keep_chunk_batch else "procedural_tree_recipe")
 	body.set_meta("visual_asset_id", "procedural:%s" % String(request.get("speciesGrammar", "tree")))
 	body.set_meta("tree_recipe_signature", String(recipe.get("signature", "")))
 	body.set_meta("tree_branch_count", int(recipe.get("branchCount", 0)))
