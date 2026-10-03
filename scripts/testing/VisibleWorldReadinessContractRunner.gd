@@ -2071,6 +2071,28 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 		replacement_receipt.get("status") == "ready"
 		and replacement_readiness.get("status") == "ready",
 		{"submit": replacement_receipt, "readiness": replacement_readiness})
+	var previous_view_revision := revision
+	var revised_view: Dictionary = book.begin_view(602, "native-tree-seed",
+		"native-tree-world-2", view_bounds, near_bounds, Vector2(4.0, 4.0), 96.0)
+	revision = int(revised_view.get("viewRevision", 0))
+	_declare_sources(book, revision, view_bounds)
+	manifest.sourceRevision = "native-rev-2"
+	var revised_submit: Dictionary = ChunkPropManifestScript.submit(manifest,
+		book, revision, near_bounds, Vector3(4.0, 0.0, 4.0))
+	var old_revision_readiness: Dictionary = book.region_readiness(602,
+		"native-tree-seed", "native-tree-world", previous_view_revision, view_bounds)
+	var revised_readiness: Dictionary = book.region_readiness(602,
+		"native-tree-seed", "native-tree-world-2", revision, view_bounds)
+	_check("native_publisher_reaccepts_after_source_world_and_view_revision_change",
+		revised_view.get("status") == "ready"
+		and revision > previous_view_revision
+		and revised_submit.get("status") == "ready"
+		and revised_readiness.get("status") == "ready"
+		and old_revision_readiness.get("status") == "pending",
+		{"view": revised_view, "submit": revised_submit,
+			"oldReadiness": old_revision_readiness,
+			"newReadiness": revised_readiness,
+			"nativeSnapshot": backend.call("installed_snapshot", body)})
 	var second_body := StaticBody3D.new()
 	second_body.position = Vector3(6.0, 0.0, 4.0)
 	second_body.set_meta("prop_id", "tree:native-swap-removal")
@@ -2082,7 +2104,7 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 	backend.call("release_tree", body)
 	var compacted_second_snapshot: Dictionary = backend.call("installed_snapshot", second_body)
 	var removed_first_readiness: Dictionary = book.region_readiness(602, "native-tree-seed",
-		"native-tree-world", revision, view_bounds)
+		"native-tree-world-2", revision, view_bounds)
 	_check("native_swap_removal_compacts_slot_and_invalidates_removed_candidate",
 		second_published.get("status") == "ready" and int(second_snapshot.get("slot", -1)) == 1
 		and compacted_second_snapshot.get("status") == "ready"
@@ -2103,7 +2125,7 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 	await process_frame
 	var first_after_body_exit: Dictionary = backend.call("installed_snapshot", body)
 	var readiness_after_body_exit: Dictionary = book.region_readiness(602,
-		"native-tree-seed", "native-tree-world", revision, view_bounds)
+		"native-tree-seed", "native-tree-world-2", revision, view_bounds)
 	_check("native_body_exit_removes_slot_without_invalidating_survivor",
 		first_after_body_exit.get("status") == "ready"
 		and int(backend.call("metrics").trees) == 1
