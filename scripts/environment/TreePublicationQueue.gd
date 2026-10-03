@@ -371,7 +371,9 @@ func body_is_collision_visible(body: StaticBody3D) -> bool:
 			or body.get_node_or_null("TreeVisibilityProxy") != null:
 		return true
 	for key in [HorizonEcologyTreeBatchScript.PUBLISHER_META, "static_chunk_render_publisher"]:
-		var publisher := body.get_meta(key, null) as Object
+		if not body.has_meta(key):
+			continue
+		var publisher := body.get_meta(key) as Object
 		if is_instance_valid(publisher) and publisher.has_method("installed_snapshot") \
 				and String((publisher.call("installed_snapshot", body) as Dictionary).get("status", "")) == "ready":
 			return true

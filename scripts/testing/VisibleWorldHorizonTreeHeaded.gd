@@ -39,8 +39,9 @@ func run_fixture() -> void:
 	sun.light_energy = 1.7
 	world.add_child(sun)
 	var camera := Camera3D.new()
-	camera.position = Vector3(0.0, 17.0, 72.0)
+	camera.position = Vector3(0.0, 42.0, 430.0)
 	camera.fov = 58.0
+	camera.far = 700.0
 	world.add_child(camera)
 	camera.look_at(Vector3(0.0, 9.0, 0.0))
 	camera.current = true
@@ -58,7 +59,7 @@ func run_fixture() -> void:
 	queue.name = "TreePublicationQueue"
 	world.add_child(queue)
 	var viewer := Node3D.new()
-	viewer.position = Vector3(0.0, 0.0, 270.0)
+	viewer.position = Vector3(0.0, 0.0, 400.0)
 	world.add_child(viewer)
 	queue.set_viewer(viewer)
 	queue.set_process(false)
@@ -127,20 +128,36 @@ func run_fixture() -> void:
 	queue.set_process(true)
 	var far_committed := await wait_for_tree(first, "published", "", MAX_PHASE_SECONDS)
 	var far_tier := String(first.get_meta("tree_render_lod_tier", ""))
-	observe("queued_tree_commits_its_distant_recipe", far_committed \
-		and far_tier != "near" and first.get_node_or_null("GeneratedTreeVisual") != null,
+	var native_backend := chunk.get_node_or_null("ChunkStaticRenderBackend") as Object
+	var far_native_snapshot: Dictionary = native_backend.call("installed_snapshot", first) \
+		if is_instance_valid(native_backend) else {}
+	observe("queued_tree_publishes_impostor_into_native_chunk_slot",
+		far_committed and far_tier == "impostor"
+		and String(first.get_meta("visual_source", "")) == "chunk_tree_impostor"
+		and String(far_native_snapshot.get("status", "")) == "ready"
+		and first.get_node_or_null("GeneratedTreeVisual") == null,
 		{"tier": far_tier, "state": first.get_meta("tree_visual_state", ""),
+		"visualSource": first.get_meta("visual_source", ""),
+		"nativeSnapshot": snapshot_summary(far_native_snapshot),
 		"metrics": queue.metrics()})
 	if far_committed:
-		await capture("distant_recipe_published")
+		await capture("distant_native_impostor_published")
 	viewer.position = Vector3(0.0, 0.0, 15.0)
+	camera.position = Vector3(0.0, 17.0, 60.0)
+	camera.look_at(Vector3(0.0, 9.0, 0.0))
 	var near_committed := await wait_for_tree(first, "published", "near", MAX_PHASE_SECONDS)
 	var old_horizon_released := batch == null or String((batch.call("installed_snapshot", first) as Dictionary).get("status", "")) != "ready"
-	observe("approach_promotes_through_queue_to_near_recipe_without_horizon_slot",
-		near_committed and old_horizon_released and first.get_node_or_null("GeneratedTreeVisual") != null,
+	var near_native_snapshot: Dictionary = native_backend.call("installed_snapshot", first) \
+		if is_instance_valid(native_backend) else {}
+	observe("approach_promotes_to_near_recipe_and_retires_native_impostor_slot",
+		near_committed and old_horizon_released
+		and String(near_native_snapshot.get("status", "")) != "ready"
+		and first.get_node_or_null("GeneratedTreeVisual") != null,
 		{"tier": first.get_meta("tree_render_lod_tier", ""),
 		"state": first.get_meta("tree_visual_state", ""),
 		"horizonSlot": snapshot_summary(batch.call("installed_snapshot", first) if batch != null else {}),
+		"nativeSlot": snapshot_summary(near_native_snapshot),
+		"nativeSlotReleased": String(near_native_snapshot.get("status", "")) != "ready",
 		"metrics": queue.metrics()})
 	if near_committed:
 		await capture("near_recipe_published")
@@ -150,7 +167,7 @@ func run_fixture() -> void:
 			passed = false
 	var report := {"schema": "visible-world-horizon-tree-headed/v1", "finished": true,
 		"passed": passed, "evidenceLevel": "headed_production_queue_fixture",
-		"scope": "Real TreePublicationQueue, recipe worker, chunk-owned HorizonEcologyTreeBatch, renderer frames and screenshots. Does not prove seeded chunk enumeration, normal gameplay startup, traversal, or full-view readiness.",
+		"scope": "Real TreePublicationQueue, canonical recipe worker, temporary HorizonEcologyTreeBatch, native chunk-owned far-impostor MultiMesh publication, LOD promotion/release, renderer frames and screenshots. Does not prove seeded chunk enumeration, normal gameplay startup, traversal, or full-view readiness.",
 		"checks": observations, "captures": captures,
 		"queueSourceSha256": FileAccess.get_sha256("res://scripts/environment/TreePublicationQueue.gd"),
 		"batchSourceSha256": FileAccess.get_sha256("res://scripts/world/HorizonEcologyTreeBatch.gd"),
@@ -195,7 +212,7 @@ func tree_request(body: StaticBody3D, architecture := "broadleaf") -> Dictionary
 		"growthStage": 0.80, "visualHeight": 20.0, "trunkRadius": 0.88,
 		"canopyRadius": 8.0, "canopyDensity": 0.82,
 		"treeWorldPosition": body.global_position,
-		"publicationPriority": body.global_position.distance_squared_to(Vector3(0.0, 0.0, 270.0)),
+		"publicationPriority": body.global_position.distance_squared_to(Vector3(0.0, 0.0, 400.0)),
 		"biomeParameters": {"visibilityRange": 440.0}, "presentation": "runtime"}
 
 

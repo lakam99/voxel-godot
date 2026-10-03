@@ -13,8 +13,14 @@ cli(async () => {
     'scripts/testing/VisibleWorldHorizonTreeHeaded.gd',
     'scripts/environment/TreePublicationQueue.gd',
     'scripts/environment/TreeSpawnService.gd',
+    'scripts/environment/TreeRecipeCache.gd',
+    'scripts/environment/ProceduralTreeRecipeBuilder.gd',
     'scripts/world/HorizonEcologyTreeBatch.gd',
     'scripts/visual/ProceduralTreeVisualFactory.gd',
+    'native/terrain_meshing/src/chunk_static_render_backend.h',
+    'native/terrain_meshing/src/chunk_static_render_backend.cpp',
+    'addons/terrain_meshing_backend/terrain_meshing_backend.gdextension',
+    'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll',
     'tools/visible-world/run-horizon-tree-headed.mjs',
     'tools/lib/building-runner.mjs'
   ], {
