@@ -2082,6 +2082,9 @@ func test_native_chunk_tree_receipt_handoff() -> void:
 			"readiness": readiness_after_body_exit})
 	chunk.queue_free()
 	await process_frame
+	_check("native_chunk_unload_retires_chunk_owned_tree_publisher",
+		not is_instance_valid(chunk) and not is_instance_valid(backend)
+		and not is_instance_valid(body))
 
 
 func test_installed_renderable_leaf_receipt_revalidation() -> void:

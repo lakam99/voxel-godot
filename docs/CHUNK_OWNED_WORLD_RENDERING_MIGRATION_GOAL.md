@@ -96,7 +96,7 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
 | Category | Current publication path | Remaining migration gap |
 | --- | --- | --- |
 | Terrain | `VoxelTerrainRuntime` owns native terrain chunk mesh and collision publication. `VoxelTerrainVisualManifest` participates in visible-world demand. | Terrain is chunk-owned already, but static content is still published through separate producers and is joined at readiness time. |
-| Trees | `TreePublicationQueue` keeps recipe authority and passes canonical shared meshes/materials to the registered C++ `ChunkStaticRenderBackend` GDExtension class. It batches far impostors in chunk-owned MultiMesh pages keyed by recipe family, biome, range, and resource identity. Gameplay bodies retain collision and identity; `HorizonEcologyTreeBatch` remains only the temporary waiting silhouette publisher. | Near/mid recipe geometry remains per-tree. The far-impostor receipt uses fresh, value-only candidate metadata and validates live body/chunk IDs, prop ID, canonical recipe signature, and all installed MultiMesh slot transforms; repeat publication verifies the incoming recipe and transform and retains the previous slot when replacement is pending. A headed synthetic contract proves receipt handoff, rejection of wrong candidate/recipe/owner, slot mutation invalidation/recovery, body-move invalidation/recovery, swap-removal compaction, and body-exit cleanup. Chunk unload, revision transitions, successful recipe replacement, LOD visual parity, page bounds, and live traversal remain unverified. `TreeChunkBatchRenderer` remains an isolated prototype. |
+| Trees | `TreePublicationQueue` keeps recipe authority and passes canonical shared meshes/materials to the registered C++ `ChunkStaticRenderBackend` GDExtension class. It batches far impostors in chunk-owned MultiMesh pages keyed by recipe family, biome, range, and resource identity. Gameplay bodies retain collision and identity; `HorizonEcologyTreeBatch` remains only the temporary waiting silhouette publisher. | Near/mid recipe geometry remains per-tree. The far-impostor receipt uses fresh, value-only candidate metadata and validates live body/chunk IDs, prop ID, canonical recipe signature, and all installed MultiMesh slot transforms; repeat publication verifies the incoming recipe and transform and retains the previous slot when replacement is pending. A headed synthetic contract proves receipt handoff, rejection of wrong candidate/recipe/owner, slot mutation invalidation/recovery, body-move invalidation/recovery, swap-removal compaction, body-exit cleanup, and chunk-publisher retirement on unload. Revision transitions, successful recipe replacement, LOD visual parity, page bounds, and live traversal remain unverified. `TreeChunkBatchRenderer` remains an isolated prototype. |
 | Ground flora and natural props | Chunk prop state produces ordinary prop nodes and grouped detail `MultiMesh` children. `HorizonEcologySource` retains visual-only roots for view chunks without gameplay chunks. | Candidate selection is chunk-scoped, but ordinary object visuals are not compiled into immutable chunk geometry, and publication remains a separate prop state machine. Existing detail batches are a partial batching precedent, not proof of full category cutover. |
 | Generated structures | `GeneratedStructureVisualManifest` and `OrdinaryStructureVisualSourceCapture` capture and validate installed structure visuals for readiness. | Capturing installed structure nodes is not chunk-owned structure geometry publication. Cross-chunk ownership and revisioned visual fragments still need a production contract. |
 | Mobs and NPCs | Existing actor systems create and render actors independently. | This is the intended boundary and must remain independent. |
@@ -134,13 +134,14 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
   queries reuse that accepted metadata and revalidate the native installation.
 - **Verification (2026-10-03):** `node tools/build-native-terrain-meshing.mjs`
   completed successfully. The reproducible headed command
-  `node tools/run-visible-world-readiness-contract.mjs -Headed -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-headed-lifecycle`
-  passed all 228 checks. Its report proves native publication, current receipt
+  `node tools/run-visible-world-readiness-contract.mjs -Headed -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-headed-chunk-unload`
+  passed all 229 checks. Its report proves native publication, current receipt
   handoff, rejection of wrong candidate, recipe, body/chunk owner, tier, and
   representation, actual three-role slot transforms, mutation invalidation and
   recovery, body-move invalidation and recovery, swap-removal compaction, and
-  body-exit cleanup with a surviving receipt. A changed recipe remains pending
-  while the accepted old slot stays installed. The watchdog reported
+  body-exit cleanup with a surviving receipt, and chunk-owned publisher
+  retirement on unload. A changed recipe remains pending while the accepted old
+  slot stays installed. The watchdog reported
   `functionalExitCode: 0`, `cleanupPassed: true`, and
   `authoritativeZeroProven: true`. The headless command using
   `artifacts/citadel-runtime-integration/visible-world-readiness-headless-lifecycle`
@@ -149,8 +150,8 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
   Both reports are synthetic owner/receipt contracts, not live-gameplay proof.
 - **Remaining risks:** current focused coverage does not yet prove source/view/
   world revision transitions invalidate native publisher receipts, nor that a
-  changed recipe completes an atomic replacement. It does not cover chunk
-  unload or actual LOD transition visuals. The
+  changed recipe completes an atomic replacement. It does not cover actual LOD
+  transition visuals. The
   diagnostic manual cave launch from 2026-10-03 is not
   tree or startup acceptance evidence. A real headed traversal with screenshots
   and frame/page observations is still required.
