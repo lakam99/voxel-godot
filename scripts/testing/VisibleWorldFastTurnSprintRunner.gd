@@ -839,9 +839,11 @@ func _run_visual_act(failures: Array[String]) -> void:
     sprint_route_turn_dispatched = false
     write_progress("continuous_sprint")
     var sprint_result: Dictionary = {}
+    var sprint_attempts: Array[Dictionary] = []
     var sprint_directions: Array[Vector3] = [Vector3.RIGHT, Vector3.LEFT, Vector3.FORWARD, Vector3.BACK]
     for direction in sprint_directions:
-        var sprint_target := first_position + direction * (MIN_NEW_AREA_DISTANCE + 18.0)
+        var attempt_origin := player_body.global_position
+        var sprint_target := attempt_origin + direction * (MIN_NEW_AREA_DISTANCE + 18.0)
         sprint_route_started_msec = 0
         sprint_route_observed_frames = 0
         sprint_route_sprinting_frames = 0
@@ -852,12 +854,35 @@ func _run_visual_act(failures: Array[String]) -> void:
                 "planTimeout": 12.0, "stopDistance": 1.0, "allowOutside": true,
                 "acceptRouteGoal": true}, true)
         sprint_route_active = false
+        var attempt_end := player_body.global_position
+        var attempt_distance := Vector2(attempt_end.x - attempt_origin.x,
+            attempt_end.z - attempt_origin.z).length()
+        var distance_from_spawn := Vector2(attempt_end.x - first_position.x,
+            attempt_end.z - first_position.z).length()
         trace.append({"event": "sprint_route_attempt", "target": vec3(sprint_target),
             "status": String(sprint_result.get("status", "")),
             "reason": String(sprint_result.get("reason", "")),
+            "attemptOrigin": vec3(attempt_origin), "attemptEnd": vec3(attempt_end),
+            "attemptDistanceMeters": attempt_distance,
+            "distanceFromSpawnMeters": distance_from_spawn,
             "sprintStarted": sprint_route_started_msec > 0})
-        if bool(sprint_result.get("ok", false)) or sprint_route_started_msec > 0:
+        sprint_attempts.append({"status": String(sprint_result.get("status", "")),
+            "reason": String(sprint_result.get("reason", "")),
+            "attemptOrigin": vec3(attempt_origin), "attemptEnd": vec3(attempt_end),
+            "attemptDistanceMeters": attempt_distance,
+            "distanceFromSpawnMeters": distance_from_spawn,
+            "observedSprintFrames": sprint_route_sprinting_frames,
+            "observedProcessFrames": sprint_route_observed_frames})
+        if bool(sprint_result.get("ok", false)) and distance_from_spawn >= MIN_NEW_AREA_DISTANCE:
             break
+        # A failed route can still have made real progress before meeting a
+        # door or collision obstacle. The shared navigator stops its motor on
+        # movement failure; clear its inputs before asking it for a fresh route
+        # from the player's actual position in another direction.
+        player_body.set("automated_move", Vector3.ZERO)
+        player_body.set("automated_sprint", false)
+        await get_tree().physics_frame
+        await get_tree().physics_frame
     var sprint_elapsed := float(Time.get_ticks_msec() - sprint_route_started_msec) / 1000.0 \
         if sprint_route_started_msec > 0 else 0.0
     player_body.set("automated_move", Vector3.ZERO)
@@ -876,6 +901,7 @@ func _run_visual_act(failures: Array[String]) -> void:
     trace.append({"event": "act_complete", "distanceFromFirstOutdoorMeters": distance,
         "observedSprintFrames": sprint_route_sprinting_frames,
         "observedProcessFrames": sprint_route_observed_frames,
+        "sprintAttempts": sprint_attempts,
         "sprintFrameFraction": sprint_fraction, "elapsedSeconds": sprint_elapsed,
         "routeStatus": String(sprint_result.get("status", "")),
         "routeReason": String(sprint_result.get("reason", "")),
