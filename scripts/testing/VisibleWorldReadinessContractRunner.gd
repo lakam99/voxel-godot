@@ -265,6 +265,7 @@ func run() -> void:
 	test_physical_prop_ring_priority()
 	test_horizon_ordinary_visual_range_receipt()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
+	await test_native_chunk_tree_receipt_handoff()
 	await test_installed_renderable_leaf_receipt_revalidation()
 	await test_bounded_overlap_transfer_revalidates_receipts()
 	test_candidate_accounting_and_explicit_failure()
@@ -1811,6 +1812,278 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	await process_frame
 
 
+func test_native_chunk_tree_receipt_handoff() -> void:
+	if not ClassDB.class_exists("ChunkStaticRenderBackend"):
+		_check("native_chunk_tree_receipt_requires_registered_backend", false)
+		return
+	if DisplayServer.get_name() == "headless":
+		_check("native_chunk_tree_receipt_requires_real_rendering_server", true,
+			{"skipped": true, "reason": "headless RenderingServer does not retain MultiMesh instance transforms",
+				"displayServer": DisplayServer.get_name(),
+				"rerun": "node tools/run-visible-world-readiness-contract.mjs -Headed"})
+		return
+	var round_trip := MultiMesh.new()
+	round_trip.transform_format = MultiMesh.TRANSFORM_3D
+	round_trip.mesh = BoxMesh.new()
+	round_trip.instance_count = 1
+	var round_trip_transform := Transform3D(Basis().scaled(Vector3(0.3, 3.78, 0.3)),
+		Vector3(5.0, 1.89, 4.0))
+	round_trip.set_instance_transform(0, round_trip_transform)
+	var immediate_round_trip := round_trip.get_instance_transform(0)
+	await process_frame
+	_check("godot_multimesh_transform_round_trip",
+		round_trip.get_instance_transform(0).is_equal_approx(round_trip_transform),
+		{"count": round_trip.instance_count, "format": round_trip.transform_format,
+			"visible": round_trip.visible_instance_count,
+			"immediate": str(immediate_round_trip),
+			"actual": str(round_trip.get_instance_transform(0))})
+	var view_bounds := Rect2i(0, 0, 8, 8)
+	var near_bounds := Rect2i(0, 0, 4, 8)
+	var chunk_bounds := Rect2i(0, 0, ChunkPropManifestScript.GAME_CHUNK_SIZE,
+		ChunkPropManifestScript.GAME_CHUNK_SIZE)
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(602, "native-tree-seed", "native-tree-world",
+		view_bounds, near_bounds, Vector2(4.0, 4.0), 4.0).viewRevision)
+	book.declare_terrain_mesh_source_set({"native:terrain": view_bounds}, revision)
+	book.expect_source("native:terrain", "terrain", "native-terrain", "native-rev-1",
+		view_bounds, revision)
+	book.finish_source("native:terrain", "native-terrain", "native-rev-1", revision)
+	book.expect_source("native:structures", "structures", "native-structures",
+		"native-rev-1", chunk_bounds, revision)
+	book.finish_source("native:structures", "native-structures", "native-rev-1", revision)
+	var chunk := Node3D.new()
+	root.add_child(chunk)
+	var body := StaticBody3D.new()
+	body.position = Vector3(5.0, 0.0, 4.0)
+	body.set_meta("prop_id", "tree:native-receipt")
+	body.set_meta("tree_visual_state", "published")
+	body.set_meta("tree_render_lod_tier", "impostor")
+	body.set_meta("tree_recipe_signature", "native-recipe-signature")
+	chunk.add_child(body)
+	var backend := ClassDB.instantiate("ChunkStaticRenderBackend") as Node3D
+	if backend == null:
+		_check("native_chunk_tree_backend_instantiates", false)
+		chunk.queue_free()
+		await process_frame
+		return
+	backend.name = "ChunkStaticRenderBackend"
+	chunk.add_child(backend)
+	await process_frame
+	var source_identity := "native-chunk-props"
+	var source_revision := "native-rev-1"
+	var candidate_id := "tree:native-receipt"
+	var candidate := {"candidateId": candidate_id, "kind": "trees_foliage",
+		"positionXZ": Vector2(5.0, 4.0), "owner": body, "representation": null,
+		"renderable": false, "treeVisualState": "published",
+		"treeRenderLodTier": "impostor",
+		"treeRecipeSignature": "native-recipe-signature", "chunk": Vector2i.ZERO}
+	var manifest := {"scanComplete": true, "sourceIdentity": source_identity,
+		"sourceRevision": source_revision, "chunk": Vector2i.ZERO,
+		"chunkInstanceId": chunk.get_instance_id(), "candidates": [candidate]}
+	var first: Dictionary = ChunkPropManifestScript.submit(manifest, book, revision,
+		near_bounds, Vector3(4.0, 0.0, 4.0))
+	var initial_readiness: Dictionary = book.region_readiness(602, "native-tree-seed",
+		"native-tree-world", revision, view_bounds)
+	_check("queued_tree_first_submit_remains_pending",
+		first.status == "pending" and initial_readiness.status == "pending",
+		{"submit": first.status, "readiness": initial_readiness.status})
+	var request := {"architecture": "broadleaf", "biome": "forest",
+		"biomeParameters": {"visibilityRange": 80.0}, "visualHeight": 7.0,
+		"canopyRadius": 2.2, "trunkRadius": 0.3}
+	var recipe := {"runtimeImpostor": true, "height": 7.0, "canopyRadius": 2.2,
+		"trunkRadius": 0.3, "signature": "native-recipe-signature",
+		"renderPolicy": {"visibilityRange": 80.0}}
+	var branch_mesh := BoxMesh.new()
+	var crown_mesh := BoxMesh.new()
+	var branch_material := StandardMaterial3D.new()
+	var foliage_material := StandardMaterial3D.new()
+	var published: Dictionary = backend.call("publish_tree_impostor", body, request, recipe,
+		branch_mesh, crown_mesh, branch_material, foliage_material)
+	var immediate_snapshot: Dictionary = backend.call("installed_snapshot", body)
+	await process_frame
+	var native_snapshot: Dictionary = backend.call("installed_snapshot", body)
+	var probe_multimesh_node := backend.get_child(0) as MultiMeshInstance3D
+	var probe_multimesh: MultiMesh = probe_multimesh_node.multimesh if probe_multimesh_node != null else null
+	var expected_body_to_backend := backend.global_transform.affine_inverse() * body.global_transform
+	var expected_trunk := Transform3D(Basis().scaled(Vector3(0.3, 7.0 * 0.54, 0.3)),
+		Vector3(0.0, 7.0 * 0.27, 0.0))
+	var expected_crown_scale := Vector3(2.2 * 2.0, maxf(2.2 * 1.25, 7.0 * 0.46), 1.0)
+	var expected_crown_a := Transform3D(Basis().scaled(expected_crown_scale),
+		Vector3(0.0, 7.0 * 0.68, 0.0))
+	var expected_crown_b := Transform3D(Basis(Vector3(0.0, 1.0, 0.0), PI * 0.5)
+		.scaled(expected_crown_scale), Vector3(0.0, 7.0 * 0.68, 0.0))
+	var expected_slot_transforms := [expected_body_to_backend * expected_trunk,
+		expected_body_to_backend * expected_crown_a,
+		expected_body_to_backend * expected_crown_b]
+	var direct_receipt_metadata := {"candidateBodyInstanceId": body.get_instance_id(),
+		"candidateChunkInstanceId": chunk.get_instance_id(),
+		"treeRecipeSignature": "native-recipe-signature"}
+	var direct_receipt_valid: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		direct_receipt_metadata, "%s:horizon" % candidate_id, "horizon")
+	var wrong_candidate_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, "tree:other",
+		direct_receipt_metadata, "tree:other:horizon", "horizon")
+	var wrong_signature_metadata := direct_receipt_metadata.duplicate()
+	wrong_signature_metadata.treeRecipeSignature = "different-recipe-signature"
+	var wrong_signature_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		wrong_signature_metadata, "%s:horizon" % candidate_id, "horizon")
+	var wrong_owner_metadata := direct_receipt_metadata.duplicate()
+	wrong_owner_metadata.candidateBodyInstanceId = body.get_instance_id() + 1
+	var wrong_owner_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		wrong_owner_metadata, "%s:horizon" % candidate_id, "horizon")
+	var wrong_chunk_metadata := direct_receipt_metadata.duplicate()
+	wrong_chunk_metadata.candidateChunkInstanceId = chunk.get_instance_id() + 1
+	var wrong_chunk_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		wrong_chunk_metadata, "%s:horizon" % candidate_id, "horizon")
+	var wrong_tier_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		direct_receipt_metadata, "%s:horizon" % candidate_id, "near")
+	var wrong_representation_receipt: bool = backend.call("visual_receipt_installed",
+		source_identity, source_revision, "native-tree-world", revision, candidate_id,
+		direct_receipt_metadata, "%s:wrong" % candidate_id, "horizon")
+	_check("native_tree_receipt_rejects_wrong_candidate", not wrong_candidate_receipt)
+	_check("native_tree_receipt_rejects_wrong_recipe", not wrong_signature_receipt)
+	_check("native_tree_receipt_rejects_wrong_body_owner", not wrong_owner_receipt)
+	_check("native_tree_receipt_rejects_wrong_chunk_owner", not wrong_chunk_receipt)
+	_check("native_tree_receipt_rejects_wrong_tier", not wrong_tier_receipt)
+	_check("native_tree_receipt_rejects_wrong_representation", not wrong_representation_receipt)
+	var slot_transform_matches: Array[bool] = []
+	for role in 3:
+		var role_node := backend.get_child(role) as MultiMeshInstance3D
+		var role_multimesh: MultiMesh = role_node.multimesh if role_node != null else null
+		slot_transform_matches.append(role_multimesh != null \
+			and role_multimesh.get_instance_transform(0).is_equal_approx(expected_slot_transforms[role]))
+	var second_candidate := candidate.duplicate()
+	second_candidate.renderable = true
+	second_candidate.representation = body
+	second_candidate["horizonPublisher"] = backend
+	second_candidate["horizonSnapshot"] = native_snapshot
+	manifest["candidates"] = [second_candidate]
+	var second: Dictionary = ChunkPropManifestScript.submit(manifest, book, revision,
+		near_bounds, Vector3(4.0, 0.0, 4.0))
+	var current_readiness: Dictionary = book.region_readiness(602, "native-tree-seed",
+		"native-tree-world", revision, view_bounds)
+	_check("native_tree_two_pass_manifest_handoff_is_ready",
+		published.get("status") == "ready" and native_snapshot.get("status") == "ready"
+		and second.get("status") == "ready" and current_readiness.get("status") == "ready",
+		{"publish": published.get("status"), "snapshot": native_snapshot.get("status"),
+			"immediateSnapshot": immediate_snapshot.get("status"),
+			"submit": second.get("status"), "submitReason": second.get("reason", ""),
+			"readiness": current_readiness.get("status"),
+			"readinessReason": current_readiness.get("reason", ""),
+			"directReceiptValid": direct_receipt_valid,
+			"directReceiptMetadata": direct_receipt_metadata,
+			"nativeSnapshotIdentity": {"bodyInstanceId": native_snapshot.get("bodyInstanceId", 0),
+				"chunkInstanceId": native_snapshot.get("chunkInstanceId", 0),
+				"propId": native_snapshot.get("propId", ""),
+				"recipeSignature": native_snapshot.get("recipeSignature", "")},
+			"publishReason": published.get("reason", ""),
+			"metrics": backend.call("metrics"), "backendChildren": backend.get_child_count(),
+			"bodyInsideTree": body.is_inside_tree(), "backendInsideTree": backend.is_inside_tree(),
+			"bodyParentMatchesChunk": body.get_parent() == chunk,
+			"backendParentMatchesChunk": backend.get_parent() == chunk,
+			"publisherMetaMatches": body.get_meta("static_chunk_render_publisher", null) == backend,
+			"slotTransformMatches": slot_transform_matches,
+			"probeInstanceCount": probe_multimesh.instance_count if probe_multimesh != null else -1,
+			"probeTransformFormat": probe_multimesh.transform_format if probe_multimesh != null else -1,
+			"probeVisibleInstanceCount": probe_multimesh.visible_instance_count if probe_multimesh != null else -1,
+			"bodyTransform": str(body.global_transform),
+			"backendTransform": str(backend.global_transform),
+			"expectedBodyToBackendOrigin": str(expected_body_to_backend.origin),
+			"actualFirstSlotTransform": str(probe_multimesh.get_instance_transform(0)) \
+				if probe_multimesh != null else "unavailable"})
+	var page_node := backend.get_child(0) as MultiMeshInstance3D
+	var multimesh: MultiMesh = page_node.multimesh if page_node != null else null
+	var slot := int(native_snapshot.get("slot", -1))
+	if multimesh == null or slot < 0:
+		_check("native_tree_receipt_fixture_exposes_installed_slot", false,
+			{"childCount": backend.get_child_count(),
+				"firstChildClass": backend.get_child(0).get_class() if backend.get_child_count() > 0 else "",
+				"snapshot": native_snapshot})
+	else:
+		var original_slot_transform := multimesh.get_instance_transform(slot)
+		var changed_slot_transform := original_slot_transform
+		changed_slot_transform.origin.x += 0.5
+		multimesh.set_instance_transform(slot, changed_slot_transform)
+		var altered_slot: Dictionary = book.region_readiness(602, "native-tree-seed",
+			"native-tree-world", revision, view_bounds)
+		_check("mutated_native_slot_invalidates_receipt",
+			altered_slot.status == "pending" and int(altered_slot.pendingCount) == 1,
+			{"status": altered_slot.status, "pendingCount": altered_slot.pendingCount})
+		multimesh.set_instance_transform(slot, original_slot_transform)
+		var restored_slot: Dictionary = book.region_readiness(602, "native-tree-seed",
+			"native-tree-world", revision, view_bounds)
+		_check("restored_native_slot_revalidates_receipt", restored_slot.status == "ready",
+			restored_slot)
+		var original_body_transform := body.global_transform
+		body.global_position += Vector3(0.5, 0.0, 0.0)
+		var moved_body: Dictionary = book.region_readiness(602, "native-tree-seed",
+			"native-tree-world", revision, view_bounds)
+		_check("moved_native_tree_invalidates_receipt",
+			moved_body.status == "pending" and int(moved_body.pendingCount) == 1,
+			{"status": moved_body.status, "pendingCount": moved_body.pendingCount})
+		body.global_transform = original_body_transform
+	var final_readiness: Dictionary = book.region_readiness(602, "native-tree-seed",
+		"native-tree-world", revision, view_bounds)
+	_check("restored_native_tree_revalidates_receipt", final_readiness.status == "ready",
+		final_readiness)
+	var changed_recipe := recipe.duplicate(true)
+	changed_recipe.signature = "replacement-recipe-signature"
+	var replacement_pending: Dictionary = backend.call("publish_tree_impostor", body,
+		request, changed_recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
+	var retained_installation: Dictionary = backend.call("installed_snapshot", body)
+	_check("changed_native_recipe_retains_last_accepted_slot_until_replacement",
+		replacement_pending.get("status") == "pending"
+		and retained_installation.get("status") == "ready"
+		and retained_installation.get("recipeSignature") == "native-recipe-signature",
+		{"replacement": replacement_pending, "retained": retained_installation})
+	var second_body := StaticBody3D.new()
+	second_body.position = Vector3(6.0, 0.0, 4.0)
+	second_body.set_meta("prop_id", "tree:native-swap-removal")
+	chunk.add_child(second_body)
+	await process_frame
+	var second_published: Dictionary = backend.call("publish_tree_impostor", second_body,
+		request, recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
+	var second_snapshot: Dictionary = backend.call("installed_snapshot", second_body)
+	backend.call("release_tree", body)
+	var compacted_second_snapshot: Dictionary = backend.call("installed_snapshot", second_body)
+	var removed_first_readiness: Dictionary = book.region_readiness(602, "native-tree-seed",
+		"native-tree-world", revision, view_bounds)
+	_check("native_swap_removal_compacts_slot_and_invalidates_removed_candidate",
+		second_published.get("status") == "ready" and int(second_snapshot.get("slot", -1)) == 1
+		and compacted_second_snapshot.get("status") == "ready"
+		and int(compacted_second_snapshot.get("slot", -1)) == 0
+		and removed_first_readiness.get("status") == "pending",
+		{"secondPublish": second_published, "beforeRemoval": second_snapshot,
+			"afterRemoval": compacted_second_snapshot,
+			"removedCandidateReadiness": removed_first_readiness})
+	var first_republished: Dictionary = backend.call("publish_tree_impostor", body,
+		request, recipe, branch_mesh, crown_mesh, branch_material, foliage_material)
+	var first_after_republish: Dictionary = backend.call("installed_snapshot", body)
+	_check("native_tree_republication_recovers_after_compaction",
+		first_republished.get("status") == "ready"
+		and first_after_republish.get("status") == "ready"
+		and int(first_after_republish.get("slot", -1)) == 1,
+		{"publish": first_republished, "snapshot": first_after_republish})
+	second_body.queue_free()
+	await process_frame
+	var first_after_body_exit: Dictionary = backend.call("installed_snapshot", body)
+	var readiness_after_body_exit: Dictionary = book.region_readiness(602,
+		"native-tree-seed", "native-tree-world", revision, view_bounds)
+	_check("native_body_exit_removes_slot_without_invalidating_survivor",
+		first_after_body_exit.get("status") == "ready"
+		and int(backend.call("metrics").trees) == 1
+		and readiness_after_body_exit.get("status") == "ready",
+		{"snapshot": first_after_body_exit, "metrics": backend.call("metrics"),
+			"readiness": readiness_after_body_exit})
+	chunk.queue_free()
+	await process_frame
+
+
 func test_installed_renderable_leaf_receipt_revalidation() -> void:
 	var book = VisualReadinessScript.new()
 	var revision := int(book.begin_view(199, "leaf-seed", "leaf-world", BOUNDS,
@@ -2040,5 +2313,5 @@ func write_report() -> void:
 		"complete": true, "passed": _passed and not _checks.is_empty(), "checkCount": _checks.size(),
 		"failureCount": _checks.filter(func(row: Dictionary): return not bool(row.passed)).size(),
 		"checks": _checks, "evidenceLevel": "synthetic_owner_receipt_contract",
-		"scope": "Request, manifest coverage, tier, installation, revision, and candidate-accounting contracts; no live world visual acceptance."}, "\t"))
+		"scope": "Request, manifest coverage, tier, installation, revision, and candidate-accounting contracts; native MultiMesh slot/readiness checks require -Headed; no live world visual acceptance."}, "\t"))
 	file.close()

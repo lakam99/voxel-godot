@@ -501,7 +501,8 @@ func handoff_published_tree_receipt(source_id: String, candidate_id: String,
 ## is called both here and on every readiness query to reject stale installs.
 func accept_publisher_receipt(source_id: String, candidate_id: String, representation_id: String,
 		tier: String, source_identity: String, source_revision: String, view_revision: int,
-		publisher: Object, validator_method: StringName) -> Dictionary:
+		publisher: Object, validator_method: StringName,
+		publisher_metadata: Dictionary = {}) -> Dictionary:
 	if not _sources.has(source_id) or not _sources[source_id].candidates.has(candidate_id):
 		return {"status": "failed", "reason": "visual_receipt_candidate_missing"}
 	var source: Dictionary = _sources[source_id]
@@ -509,16 +510,23 @@ func accept_publisher_receipt(source_id: String, candidate_id: String, represent
 	if view_revision != _view_revision or int(source.viewRevision) != view_revision \
 			or String(source.identity) != source_identity or String(source.revision) != source_revision:
 		return {"status": "pending", "reason": "visual_receipt_revision_stale"}
+	if not publisher_metadata.is_empty() \
+			and not _is_value_only_publisher_metadata(publisher_metadata):
+		return {"status": "failed", "reason": "visual_publisher_metadata_not_value_only"}
+	var proof_metadata := _publisher_metadata_copy(
+		publisher_metadata if not publisher_metadata.is_empty() else candidate.get("metadata", {}),
+		bool(candidate.get("valueOnlyDetailMetadata", false)))
 	if not is_instance_valid(publisher) or not publisher.has_method(validator_method) \
 			or not _valid_publisher_tier(candidate, tier) \
 			or not _publisher_installation_valid(publisher, validator_method, source, candidate,
-				representation_id, tier, view_revision):
+				representation_id, tier, view_revision, proof_metadata):
 		return {"status": "pending", "reason": "visual_publisher_receipt_not_current"}
 	candidate.receipt = {"representationId": representation_id, "tier": tier,
 		"sourceIdentity": source_identity, "sourceRevision": source_revision,
 		"worldRevision": _world_revision, "viewRevision": view_revision,
 		"publisherInstanceId": publisher.get_instance_id(), "publisher": weakref(publisher),
-		"validatorMethod": validator_method}
+		"validatorMethod": validator_method,
+		"publisherMetadata": proof_metadata}
 	candidate.failed = false
 	candidate.failureReason = ""
 	return {"status": "ready", "candidateId": candidate_id, "tier": tier,
@@ -748,7 +756,8 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 		return is_instance_valid(publisher) \
 			and publisher.get_instance_id() == int(receipt.get("publisherInstanceId", 0)) \
 			and _publisher_installation_valid(publisher, StringName(receipt.validatorMethod), source,
-				candidate, String(receipt.representationId), String(receipt.tier), view_revision)
+				candidate, String(receipt.representationId), String(receipt.tier), view_revision,
+				receipt.get("publisherMetadata", candidate.get("metadata", {})))
 	var owner_ref: WeakRef = receipt.get("owner") as WeakRef
 	var representation_ref: WeakRef = receipt.get("representation") as WeakRef
 	var renderable_ref: WeakRef = receipt.get("renderable") as WeakRef
@@ -784,16 +793,43 @@ static func _tree_lod_satisfies_tier(lod_tier: String, required_tier: String) ->
 
 func _publisher_installation_valid(publisher: Object, validator_method: StringName,
 		source: Dictionary, candidate: Dictionary, representation_id: String, tier: String,
-		view_revision: int) -> bool:
+		view_revision: int, metadata_override: Variant = null) -> bool:
 	if not is_instance_valid(publisher) or not publisher.has_method(validator_method) \
 			or not _valid_publisher_tier(candidate, tier):
 		return false
 	var proof: Variant = publisher.call(validator_method, String(source.identity), String(source.revision),
 		_world_revision, view_revision, String(candidate.candidateId),
-		_publisher_metadata_copy(candidate.get("metadata", {}),
-			bool(candidate.get("valueOnlyDetailMetadata", false))),
+		_publisher_metadata_copy(metadata_override if metadata_override is Dictionary
+			else candidate.get("metadata", {}), bool(candidate.get("valueOnlyDetailMetadata", false))),
 		representation_id, tier)
 	return proof is bool and proof
+
+
+static func _is_value_only_publisher_metadata(metadata: Dictionary) -> bool:
+	for key in metadata:
+		if not _is_value_only_publisher_variant(key) \
+				or not _is_value_only_publisher_variant(metadata[key]):
+			return false
+	return true
+
+
+static func _is_value_only_publisher_variant(value: Variant) -> bool:
+	match typeof(value):
+		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING, TYPE_STRING_NAME, \
+		TYPE_VECTOR2, TYPE_VECTOR2I, TYPE_VECTOR3, TYPE_VECTOR3I, TYPE_VECTOR4, TYPE_VECTOR4I, \
+		TYPE_RECT2, TYPE_RECT2I, TYPE_TRANSFORM2D, TYPE_TRANSFORM3D, TYPE_PLANE, TYPE_QUATERNION, \
+		TYPE_AABB, TYPE_BASIS, TYPE_PROJECTION, TYPE_COLOR:
+			return true
+		TYPE_ARRAY:
+			for item in value:
+				if not _is_value_only_publisher_variant(item): return false
+			return true
+		TYPE_DICTIONARY:
+			for key in value:
+				if not _is_value_only_publisher_variant(key) \
+						or not _is_value_only_publisher_variant(value[key]): return false
+			return true
+	return false
 
 
 static func _is_value_only_detail_metadata(metadata: Dictionary) -> bool:

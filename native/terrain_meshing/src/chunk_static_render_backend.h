@@ -79,7 +79,9 @@ class ChunkStaticRenderBackend : public Node3D {
 	void _on_body_exiting(int64_t p_body_id);
 	bool _valid_body(const StaticBody3D *p_body) const;
 	bool _record_installed(const TreeRecord &p_record,
-		const StaticBody3D *p_body) const;
+		const StaticBody3D *p_body, String &r_stale_reason,
+		int32_t &r_failed_role, Transform3D &r_expected_transform,
+		Transform3D &r_actual_transform) const;
 	void _expand_page_cull_range(Group &r_group, int32_t p_page_index,
 		double p_cull_range_end);
 	static void _tree_transforms(const Transform3D &p_body_to_batch,

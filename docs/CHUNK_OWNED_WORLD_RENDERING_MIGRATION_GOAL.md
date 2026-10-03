@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority and static-source/readiness cutovers are present, and canonical far-LOD tree impostors now publish through the native chunk-owned renderer. Full migration remains incomplete and the new visual path still needs runtime evidence.**
+Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors now have a native chunk-owned publication path with headed contract evidence for current receipts and slot/body invalidation. Lifecycle coverage and live-game visual acceptance remain open; unified revisioned static render packets remain unimplemented.**
 
 ## Goal
 
@@ -96,27 +96,85 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
 | Category | Current publication path | Remaining migration gap |
 | --- | --- | --- |
 | Terrain | `VoxelTerrainRuntime` owns native terrain chunk mesh and collision publication. `VoxelTerrainVisualManifest` participates in visible-world demand. | Terrain is chunk-owned already, but static content is still published through separate producers and is joined at readiness time. |
-| Trees | `TreePublicationQueue` keeps recipe authority and passes canonical shared meshes/materials to the registered C++ `ChunkStaticRenderBackend` GDExtension class. It batches far impostors in chunk-owned MultiMesh pages keyed by recipe family, biome, range, and resource identity. Gameplay bodies retain collision and identity; `HorizonEcologyTreeBatch` remains only the temporary waiting silhouette publisher. | Near/mid recipe geometry remains per-tree, and far impostors fall back to the per-tree renderer if the native class or resource installation is unavailable. Native page culling, transitions, invalidation, removal, and headed traversal need runtime verification before extending batching. `TreeChunkBatchRenderer` remains an isolated prototype. |
+| Trees | `TreePublicationQueue` keeps recipe authority and passes canonical shared meshes/materials to the registered C++ `ChunkStaticRenderBackend` GDExtension class. It batches far impostors in chunk-owned MultiMesh pages keyed by recipe family, biome, range, and resource identity. Gameplay bodies retain collision and identity; `HorizonEcologyTreeBatch` remains only the temporary waiting silhouette publisher. | Near/mid recipe geometry remains per-tree. The far-impostor receipt uses fresh, value-only candidate metadata and validates live body/chunk IDs, prop ID, canonical recipe signature, and all installed MultiMesh slot transforms; repeat publication verifies the incoming recipe and transform and retains the previous slot when replacement is pending. A headed synthetic contract proves receipt handoff, rejection of wrong candidate/recipe/owner, slot mutation invalidation/recovery, body-move invalidation/recovery, swap-removal compaction, and body-exit cleanup. Chunk unload, revision transitions, successful recipe replacement, LOD visual parity, page bounds, and live traversal remain unverified. `TreeChunkBatchRenderer` remains an isolated prototype. |
 | Ground flora and natural props | Chunk prop state produces ordinary prop nodes and grouped detail `MultiMesh` children. `HorizonEcologySource` retains visual-only roots for view chunks without gameplay chunks. | Candidate selection is chunk-scoped, but ordinary object visuals are not compiled into immutable chunk geometry, and publication remains a separate prop state machine. Existing detail batches are a partial batching precedent, not proof of full category cutover. |
 | Generated structures | `GeneratedStructureVisualManifest` and `OrdinaryStructureVisualSourceCapture` capture and validate installed structure visuals for readiness. | Capturing installed structure nodes is not chunk-owned structure geometry publication. Cross-chunk ownership and revisioned visual fragments still need a production contract. |
 | Mobs and NPCs | Existing actor systems create and render actors independently. | This is the intended boundary and must remain independent. |
 | Coordinator | `VisibleWorldDemandController` schedules terrain, prop, and structure producers and collects revision-bound receipts in `VisibleWorldReadiness`. | It is a readiness/source coordinator, not a unified static render compiler, immutable geometry packet, or shared chunk upload owner. |
 
+### Current stage charter: close the native far-tree readiness contract
+
+- **Outcome:** a native far-tree impostor becomes a current, revision-checked
+  readiness receipt only when the exact canonical tree candidate is installed
+  under its current chunk publisher. Replaced, stale, removed, or unloaded
+  installations become pending immediately.
+- **Authorities:** `TreeSpawnService` and the canonical recipe builder continue
+  to own tree identity and geometry inputs; the `StaticBody3D` continues to own
+  trunk collision and mutable gameplay identity. `TreePublicationQueue` owns
+  publication scheduling, `ChunkStaticRenderBackend` owns the native page,
+  `ChunkPropVisualManifest` captures candidates, and `VisibleWorldReadiness`
+  owns revision-bound receipts. `VisibleWorldDemandController` remains only the
+  scheduler/coordinator.
+- **Non-goals:** this stage does not batch near/mid tree geometry, move gameplay
+  bodies, change tree RNG/recipes, change terrain authority, or retire the
+  per-tree fallback.
+- **Baseline:** current branch is
+  `codex/chunk-owned-world-rendering-migration` at `ad63bd80`, based on local
+  `master` `b2646788`, with a clean tracked tree before this charter update. A
+  diagnostic manual cave launch on 2026-10-03 reported `manualReady: true` while
+  collision publication was still pending; acceptance was not evaluated, and
+  its temporary worktree/report was later deleted. That run is not tree or
+  startup acceptance evidence.
+- **Resolved defect:** the native validator compared `String` arguments directly
+  with `Variant` values returned from its snapshot dictionary. The values were
+  identical, but the comparison rejected every valid receipt. Explicitly cast
+  the installed prop ID and recipe signature to `String` before comparing.
+  Fresh value-only publisher metadata now carries the live candidate body,
+  parent chunk, and recipe signature on every manifest submit; future readiness
+  queries reuse that accepted metadata and revalidate the native installation.
+- **Verification (2026-10-03):** `node tools/build-native-terrain-meshing.mjs`
+  completed successfully. The reproducible headed command
+  `node tools/run-visible-world-readiness-contract.mjs -Headed -OutputDirectory artifacts/citadel-runtime-integration/visible-world-readiness-headed-lifecycle`
+  passed all 228 checks. Its report proves native publication, current receipt
+  handoff, rejection of wrong candidate, recipe, body/chunk owner, tier, and
+  representation, actual three-role slot transforms, mutation invalidation and
+  recovery, body-move invalidation and recovery, swap-removal compaction, and
+  body-exit cleanup with a surviving receipt. A changed recipe remains pending
+  while the accepted old slot stays installed. The watchdog reported
+  `functionalExitCode: 0`, `cleanupPassed: true`, and
+  `authoritativeZeroProven: true`. The headless command using
+  `artifacts/citadel-runtime-integration/visible-world-readiness-headless-lifecycle`
+  passed 212 non-rendering checks and explicitly skipped the MultiMesh slot
+  check because Godot's headless rendering server returns identity transforms.
+  Both reports are synthetic owner/receipt contracts, not live-gameplay proof.
+- **Remaining risks:** current focused coverage does not yet prove source/view/
+  world revision transitions invalidate native publisher receipts, nor that a
+  changed recipe completes an atomic replacement. It does not cover chunk
+  unload or actual LOD transition visuals. The
+  diagnostic manual cave launch from 2026-10-03 is not
+  tree or startup acceptance evidence. A real headed traversal with screenshots
+  and frame/page observations is still required.
+- **Exit evidence:** focused contracts must prove native publication replaces
+  the horizon placeholder and accepts a current publisher receipt; reject
+  wrong candidate, recipe, owner, source/view/world revision and stale slot;
+  preserve receipt correctness through swap-removal, body exit, chunk unload,
+  and re-publication. A headed traversal must then verify silhouette/material
+  parity, no transition pop, draw/page bounds, and frame cadence. The current
+  contract evidence closes only the receipt-value/type defect, not this stage.
+
 ### Next production cutover
 
-The far-tree impostor is the first narrow native production slice, using the
-existing Godot 4.6 terrain-meshing GDExtension and the exact shared
-mesh/material transforms from its former per-tree publisher. Its native DLL
-compiles, but runtime parity and culling behavior still need headed evidence.
-For broader category work, first define a revision-bound, owned-value static-visual packet for one spatial chunk, with
+After the far-tree receipt gate passes, reconcile the next category against the
+approved ordered world-streaming plan before implementation. That plan first
+extends worker-prepared building geometry, then regional readiness, then source-
+derived building LOD and shared tree batching. For each broader cutover, define a
+revision-bound, owned-value static-visual packet for one spatial chunk, with
 explicit material/LOD batches, source identity, deterministic candidate order,
-and cancellation-safe replacement. Then migrate one real category end to end
-through packet capture, preparation, bounded upload, install, invalidation, and
-unload while retaining the old accepted representation until replacement
-acknowledgement. Trees remain the first category candidate because their current
-per-tree publication path and prototype provide a measurable baseline; the
-cutover must consume canonical recipes and must preserve the continuous trunk,
-foliage appearance, collision, prop IDs, removal, and tree recipe authority.
+and cancellation-safe replacement. Migrate one real category end to end through
+packet capture, preparation, bounded upload, install, invalidation, and unload
+while retaining the old accepted representation until replacement
+acknowledgement. Trees remain a candidate only when their recipe, transform,
+collision, prop ID, and removal contracts can be preserved inside that ordering.
 
 The checked-in branch does not contain the referenced
 `WORLD_STREAMING_ARCHITECTURE_PLAN.md`,

@@ -105,19 +105,83 @@ void ChunkStaticRenderBackend::_expand_page_cull_range(Group &r_group, int32_t p
 	}
 }
 
-bool ChunkStaticRenderBackend::_record_installed(const TreeRecord &p_record, const StaticBody3D *p_body) const {
-	if (!_valid_body(p_body) || p_record.body_id != static_cast<int64_t>(p_body->get_instance_id())) return false;
+
+bool ChunkStaticRenderBackend::_record_installed(const TreeRecord &p_record,
+		const StaticBody3D *p_body, String &r_stale_reason, int32_t &r_failed_role,
+		Transform3D &r_expected_transform, Transform3D &r_actual_transform) const {
+	r_stale_reason = "";
+	r_failed_role = -1;
+	if (!_valid_body(p_body) || p_record.body_id != static_cast<int64_t>(p_body->get_instance_id())) {
+		r_stale_reason = "invalid_ownership";
+		return false;
+	}
 	auto group_it = _groups.find(p_record.group_key.utf8().get_data());
-	if (group_it == _groups.end() || p_record.page_index < 0 || p_record.page_index >= static_cast<int32_t>(group_it->second.pages.size())) return false;
+	if (group_it == _groups.end()) {
+		r_stale_reason = "group_missing";
+		return false;
+	}
+	if (p_record.page_index < 0 || p_record.page_index >= static_cast<int32_t>(group_it->second.pages.size())) {
+		r_stale_reason = "page_missing";
+		return false;
+	}
 	const Page &page = group_it->second.pages[p_record.page_index];
-	return p_record.slot >= 0 && p_record.slot < page.live_count && page.instances[0] != nullptr &&
-		page.instances[0] != nullptr && p_body->has_meta(PUBLISHER_META) &&
-		p_body->get_meta(PUBLISHER_META) == Variant(const_cast<ChunkStaticRenderBackend *>(this));
+	if (p_record.slot < 0 || p_record.slot >= page.live_count) {
+		r_stale_reason = "slot_invalid";
+		return false;
+	}
+	for (int role = 0; role < 3; ++role) {
+		if (page.instances[role] == nullptr) {
+			r_stale_reason = "page_node_missing";
+			return false;
+		}
+	}
+	if (!p_body->get_global_transform().is_equal_approx(p_record.body_transform)) {
+		r_stale_reason = "body_transform_mismatch";
+		return false;
+	}
+	if (!get_global_transform().is_equal_approx(p_record.batch_transform)) {
+		r_stale_reason = "backend_transform_mismatch";
+		return false;
+	}
+	if (!p_body->has_meta(PUBLISHER_META) ||
+			p_body->get_meta(PUBLISHER_META) != Variant(const_cast<ChunkStaticRenderBackend *>(this))) {
+		r_stale_reason = "publisher_metadata_mismatch";
+		return false;
+	}
+	for (int role = 0; role < 3; ++role) {
+		if (page.meshes[role].is_null()) {
+			r_stale_reason = "page_resource_missing";
+			return false;
+		}
+		const Transform3D actual_transform = page.meshes[role]->get_instance_transform(p_record.slot);
+		if (!actual_transform.is_equal_approx(p_record.transforms[role])) {
+			r_stale_reason = "role_transform_mismatch";
+			r_failed_role = role;
+			r_expected_transform = p_record.transforms[role];
+			r_actual_transform = actual_transform;
+			return false;
+		}
+	}
+	return true;
 }
 
 Dictionary ChunkStaticRenderBackend::_snapshot(const TreeRecord &p_record, const StaticBody3D *p_body) const {
 	Dictionary result;
-	if (!_record_installed(p_record, p_body)) { result["status"] = "stale"; return result; }
+	String stale_reason;
+	int32_t failed_role = -1;
+	Transform3D expected_transform;
+	Transform3D actual_transform;
+	if (!_record_installed(p_record, p_body, stale_reason, failed_role,
+			expected_transform, actual_transform)) {
+		result["status"] = "stale";
+		result["staleReason"] = stale_reason;
+		if (failed_role >= 0) {
+			result["staleRole"] = failed_role;
+			result["expectedTransform"] = expected_transform;
+			result["actualTransform"] = actual_transform;
+		}
+		return result;
+	}
 	const Group &group = _groups.find(p_record.group_key.utf8().get_data())->second;
 	const Page &page = group.pages[p_record.page_index];
 	Array transforms, node_ids, mesh_ids, resource_ids, material_ids;
@@ -160,9 +224,28 @@ Dictionary ChunkStaticRenderBackend::publish_tree_impostor(StaticBody3D *p_body,
 	const int64_t body_id = static_cast<int64_t>(p_body->get_instance_id());
 	auto old = _trees.find(body_id);
 	if (old != _trees.end()) {
-		Dictionary current = _snapshot(old->second, p_body);
-		if (String(current.get("status", "")) == "ready") return current;
-		_remove_body_id(body_id);
+		const TreeRecord &record = old->second;
+		Transform3D transforms[3];
+		const Transform3D body_to_batch = get_global_transform().affine_inverse() * p_body->get_global_transform();
+		_tree_transforms(body_to_batch, height, crown_radius, trunk_radius, transforms);
+		const bool same_installation = record.group_key == key &&
+			record.recipe_signature == String(p_recipe.get("signature", "")) &&
+			record.body_transform.is_equal_approx(p_body->get_global_transform()) &&
+			record.batch_transform.is_equal_approx(get_global_transform()) &&
+			record.transforms[0].is_equal_approx(transforms[0]) &&
+			record.transforms[1].is_equal_approx(transforms[1]) &&
+			record.transforms[2].is_equal_approx(transforms[2]);
+		if (same_installation) {
+			Dictionary current = _snapshot(record, p_body);
+			if (String(current.get("status", "")) == "ready") return current;
+		}
+		// Keep the last installed slot visible until the caller has prepared and
+		// installed its replacement. The queue owns that handoff and will release
+		// this native slot only after the replacement is committed.
+		Dictionary pending;
+		pending["status"] = "pending";
+		pending["reason"] = "existing_chunk_tree_installation_differs";
+		return pending;
 	}
 	int32_t page_index = -1;
 	for (int32_t i = 0; i < static_cast<int32_t>(group->pages.size()); ++i) if (group->pages[i].live_count < PAGE_CAPACITY) { page_index = i; break; }
@@ -220,9 +303,17 @@ Dictionary ChunkStaticRenderBackend::installed_snapshot(StaticBody3D *p_body) co
 	return found == _trees.end() ? result : _snapshot(found->second, p_body);
 }
 
-bool ChunkStaticRenderBackend::visual_receipt_installed(const String &, const String &, const String &, int64_t,
-		const String &, const Dictionary &p_metadata, const String &, const String &) const {
-	const int64_t body_id = p_metadata.get("horizonBodyInstanceId", 0);
+bool ChunkStaticRenderBackend::visual_receipt_installed(const String &p_source_identity,
+		const String &p_source_revision, const String &p_world_revision, int64_t p_view_revision,
+		const String &p_candidate_id, const Dictionary &p_metadata,
+		const String &p_representation_id, const String &p_tier) const {
+	if (p_source_identity.strip_edges().is_empty() || p_source_revision.strip_edges().is_empty() ||
+			p_world_revision.strip_edges().is_empty() || p_view_revision <= 0 ||
+			p_candidate_id.strip_edges().is_empty() || p_tier != "horizon" ||
+			p_representation_id != p_candidate_id + String(":horizon")) {
+		return false;
+	}
+	const int64_t body_id = p_metadata.get("candidateBodyInstanceId", 0);
 	auto found = _trees.find(body_id);
 	if (found == _trees.end() || !found->second.body_weak.is_valid()) return false;
 	Variant weak_target = found->second.body_weak->get_ref();
@@ -231,18 +322,16 @@ bool ChunkStaticRenderBackend::visual_receipt_installed(const String &, const St
 	if (body == nullptr) return false;
 	Dictionary snapshot = installed_snapshot(body);
 	if (String(snapshot.get("status", "")) != "ready") return false;
-	return snapshot.get("chunkInstanceId", 0) == p_metadata.get("horizonChunkInstanceId", -1) &&
-		snapshot.get("batchInstanceId", 0) == p_metadata.get("horizonBatchInstanceId", -1) &&
-		snapshot.get("groupKey", "") == p_metadata.get("horizonGroupKey", "") &&
-		snapshot.get("pageIndex", -1) == p_metadata.get("horizonPageIndex", -2) &&
-		snapshot.get("slot", -1) == p_metadata.get("horizonSlot", -2) &&
-		snapshot.get("bodyGlobalTransform", Transform3D()) == p_metadata.get("horizonBodyGlobalTransform", Transform3D()) &&
-		snapshot.get("batchGlobalTransform", Transform3D()) == p_metadata.get("horizonBatchGlobalTransform", Transform3D()) &&
-		snapshot.get("instanceTransforms", Array()) == p_metadata.get("horizonInstanceTransforms", Array()) &&
-		snapshot.get("meshInstanceIds", Array()) == p_metadata.get("horizonMeshInstanceIds", Array()) &&
-		snapshot.get("multimeshIds", Array()) == p_metadata.get("horizonMultimeshIds", Array()) &&
-		snapshot.get("meshResourceIds", Array()) == p_metadata.get("horizonMeshResourceIds", Array()) &&
-		snapshot.get("materialIds", Array()) == p_metadata.get("horizonMaterialIds", Array());
+	const int64_t expected_body_id = p_metadata.get("candidateBodyInstanceId", 0);
+	const int64_t expected_chunk_id = p_metadata.get("candidateChunkInstanceId", 0);
+	const String expected_signature = p_metadata.get("treeRecipeSignature", "");
+	const String installed_prop_id = snapshot.get("propId", String());
+	const String installed_signature = snapshot.get("recipeSignature", String());
+	return expected_body_id > 0 && expected_chunk_id > 0 && !expected_signature.strip_edges().is_empty() &&
+		p_candidate_id == installed_prop_id &&
+		expected_body_id == static_cast<int64_t>(snapshot.get("bodyInstanceId", 0)) &&
+		expected_chunk_id == static_cast<int64_t>(snapshot.get("chunkInstanceId", 0)) &&
+		expected_signature == installed_signature;
 }
 
 Dictionary ChunkStaticRenderBackend::metrics() const {

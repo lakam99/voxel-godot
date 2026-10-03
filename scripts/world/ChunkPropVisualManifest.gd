@@ -649,42 +649,52 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 		submitted_candidate_count += 1
 		counts.candidateIds.append(candidate_id)
 		var required_tier := "near" if near_bounds.has_point(Vector2i(floori(position_xz.x), floori(position_xz.y))) else "horizon"
+		# Keep admission metadata stable for a source revision, but build publisher
+		# proof from the current manifest observation on every submit. A native
+		# chunk-owned tree page is a sibling of its gameplay body, so the body and
+		# its current parent/signature identify the installation without retaining
+		# Nodes or stale horizon-page placeholders in the readiness ledger.
+		var metadata := {"positionXZ": position_xz,
+			"sourceCandidateRenderable": bool(candidate.get("renderable", false)),
+			"sourceCandidateTreeVisualState": String(candidate.get("treeVisualState", "")),
+			"sourceCandidateTreeLodTier": String(candidate.get("treeRenderLodTier", ""))}
+		if candidate.has("horizonSnapshot"):
+			var horizon: Dictionary = candidate.horizonSnapshot
+			metadata.merge({"horizonBodyInstanceId": horizon.get("bodyInstanceId", 0),
+				"horizonChunkInstanceId": horizon.get("chunkInstanceId", 0),
+				"horizonBatchInstanceId": horizon.get("batchInstanceId", 0),
+				"horizonGroupKey": horizon.get("groupKey", ""),
+				"horizonPageIndex": horizon.get("pageIndex", -1),
+				"horizonSlot": horizon.get("slot", -1),
+				"horizonBodyGlobalTransform": horizon.get("bodyGlobalTransform", Transform3D.IDENTITY),
+				"horizonBatchGlobalTransform": horizon.get("batchGlobalTransform", Transform3D.IDENTITY),
+				"horizonVisibilityRange": horizon.get("visibilityRange", 0.0),
+				"horizonInstanceTransforms": horizon.get("instanceTransforms", []),
+				"horizonMeshInstanceIds": horizon.get("meshInstanceIds", []),
+				"horizonMultimeshIds": horizon.get("multimeshIds", []),
+				"horizonMeshResourceIds": horizon.get("meshResourceIds", []),
+				"horizonMaterialIds": horizon.get("materialIds", [])})
+			var candidate_owner := candidate.get("owner") as Node3D
+			var chunk_owner := candidate_owner.get_parent() as Node3D if is_instance_valid(candidate_owner) else null
+			metadata.merge({"candidateBodyInstanceId": candidate_owner.get_instance_id() if is_instance_valid(candidate_owner) else 0,
+				"candidateChunkInstanceId": chunk_owner.get_instance_id() if is_instance_valid(chunk_owner) else 0,
+				"treeRecipeSignature": String(candidate.get("treeRecipeSignature", ""))})
+		if candidate.has("detailType"):
+			metadata.merge({"detailType": candidate.detailType,
+				"batchInstanceId": candidate.detailBatchInstanceId,
+				"batchGlobalTransform": candidate.detailBatchGlobalTransform,
+				"multimeshInstanceId": candidate.detailMultimeshInstanceId,
+				"meshInstanceId": candidate.detailMeshInstanceId,
+				"chunkInstanceId": manifest.chunkInstanceId,
+				"instanceIndex": candidate.detailInstanceIndex,
+				"instanceTransform": candidate.detailInstanceTransform,
+				"instanceColor": candidate.detailInstanceColor,
+				"instanceCustomData": candidate.detailInstanceCustomData,
+				"detailVisibilityEnd": candidate.detailVisibilityEnd})
+		if candidate.has("horizonOrdinaryPublisher"):
+			metadata.merge({"horizonOrdinaryBodyId": candidate.horizonOrdinaryBodyId,
+				"horizonOrdinaryRootId": candidate.horizonOrdinaryRootId})
 		if not bool(readiness.call("has_candidate", source_id, candidate_id)):
-			var metadata := {"positionXZ": position_xz,
-				"sourceCandidateRenderable": bool(candidate.get("renderable", false)),
-				"sourceCandidateTreeVisualState": String(candidate.get("treeVisualState", "")),
-				"sourceCandidateTreeLodTier": String(candidate.get("treeRenderLodTier", ""))}
-			if candidate.has("horizonSnapshot"):
-				var horizon: Dictionary = candidate.horizonSnapshot
-				metadata.merge({"horizonBodyInstanceId": horizon.bodyInstanceId,
-					"horizonChunkInstanceId": horizon.chunkInstanceId,
-					"horizonBatchInstanceId": horizon.batchInstanceId,
-					"horizonGroupKey": horizon.groupKey,
-					"horizonPageIndex": horizon.pageIndex,
-					"horizonSlot": horizon.slot,
-					"horizonBodyGlobalTransform": horizon.bodyGlobalTransform,
-					"horizonBatchGlobalTransform": horizon.batchGlobalTransform,
-					"horizonVisibilityRange": horizon.visibilityRange,
-					"horizonInstanceTransforms": horizon.instanceTransforms,
-					"horizonMeshInstanceIds": horizon.meshInstanceIds,
-					"horizonMultimeshIds": horizon.multimeshIds,
-					"horizonMeshResourceIds": horizon.meshResourceIds,
-					"horizonMaterialIds": horizon.materialIds})
-			if candidate.has("detailType"):
-				metadata.merge({"detailType": candidate.detailType,
-					"batchInstanceId": candidate.detailBatchInstanceId,
-					"batchGlobalTransform": candidate.detailBatchGlobalTransform,
-					"multimeshInstanceId": candidate.detailMultimeshInstanceId,
-					"meshInstanceId": candidate.detailMeshInstanceId,
-					"chunkInstanceId": manifest.chunkInstanceId,
-					"instanceIndex": candidate.detailInstanceIndex,
-					"instanceTransform": candidate.detailInstanceTransform,
-					"instanceColor": candidate.detailInstanceColor,
-					"instanceCustomData": candidate.detailInstanceCustomData,
-					"detailVisibilityEnd": candidate.detailVisibilityEnd})
-			if candidate.has("horizonOrdinaryPublisher"):
-				metadata.merge({"horizonOrdinaryBodyId": candidate.horizonOrdinaryBodyId,
-					"horizonOrdinaryRootId": candidate.horizonOrdinaryRootId})
 			var described: Dictionary = readiness.call("describe_candidate", source_id, candidate_id,
 				required_tier, metadata)
 			if described.get("status") != "ready": return described
@@ -715,7 +725,7 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
 					"%s:horizon" % candidate_id, required_tier,
 					source_identity, source_revision, view_revision, publisher,
-					&"visual_receipt_installed")
+					&"visual_receipt_installed", metadata)
 			elif required_tier == "horizon" and candidate.has("horizonOrdinaryPublisher"):
 				var publisher := candidate.get("horizonOrdinaryPublisher") as Object
 				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
