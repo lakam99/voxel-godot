@@ -347,7 +347,7 @@ func _write_report() -> void:
 		"scope": "isolated staged restore parity/cancellation contract; no Main or live-service integration; synchronous decoded-snapshot input only",
 		"inputLease": "caller must transfer exclusive mutation ownership of parsed terrainVolume until cursor terminal; nested Dictionary/Array aliases are not mechanically immutable",
 		"limitations": [
-			"Does not make SaveSystem whole-file read or JSON.parse_string asynchronous.",
+			"Does not make SaveSystem whole-file read or binary decode asynchronous.",
 			"Input item and skylight Y-count caps are not CPU-time bounds for normalization or complex metadata.",
 			"No active-service install, Main/Continue wiring, N5 physical readiness, or Gate5/no-lag acceptance is claimed."
 		]

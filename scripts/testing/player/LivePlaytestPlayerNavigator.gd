@@ -40,7 +40,7 @@ func setup(main_node: Node3D, player_node: CharacterBody3D, camera_node: Camera3
 func route_authority_available() -> bool:
 	return route_authority_v2 != null and route_authority_v2.available()
 
-func go_to_position(target: Vector3, options := {}) -> Dictionary:
+func go_to_position(target: Vector3, options := {}, sprint := false) -> Dictionary:
 	var label := String(options.get("label", "player_route"))
 	var stop_distance := float(options.get("stopDistance", options.get("stop_distance", CELL * 0.75)))
 	var timeout_seconds := float(options.get("timeout", options.get("timeoutSeconds", 20.0)))
@@ -135,7 +135,9 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 		var waypoint_stop := completion_stop_distance if index == waypoints.size() - 1 else CELL * 0.75
 		var distance := _flat_distance(player.global_position, waypoint)
 		var step_timeout := minf(remaining, clampf(distance / (CELL * 2.4) + 3.0, 3.0, 14.0))
-		var reached := await _drive_to_point(waypoint, waypoint_stop, step_timeout, "%s_authority_%02d" % [label, index])
+		var reached := await _drive_to_point(waypoint, waypoint_stop, step_timeout,
+			"%s_authority_%02d" % [label, index], sprint,
+			not sprint or index == waypoints.size() - 1)
 		if not reached:
 			route_authority_v2.report_stuck("waypoint_not_reached", {
 				"waypointIndex": index,
@@ -162,8 +164,8 @@ func go_to_position(target: Vector3, options := {}) -> Dictionary:
 	})
 	return _result(false, "route_arrival_miss", "route_completed_outside_target", label, target, plan)
 
-func drive_to_point_for_home_exit(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
-	return await _drive_to_point(target, stop_distance, timeout_seconds, label)
+func drive_to_point_for_home_exit(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, sprint := false) -> bool:
+	return await _drive_to_point(target, stop_distance, timeout_seconds, label, sprint)
 
 func plan_route_to_position(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, options := {}) -> Dictionary:
 	if route_authority_v2 == null or not route_authority_v2.available():
@@ -754,7 +756,7 @@ func _route_semantic_kind(target: Vector3, options := {}) -> String:
 		return "home_exterior"
 	return "interaction_target"
 
-func _drive_to_point(target: Vector3, stop_distance: float, timeout_seconds: float, label: String) -> bool:
+func _drive_to_point(target: Vector3, stop_distance: float, timeout_seconds: float, label: String, sprint := false, stop_on_arrival := true) -> bool:
 	if player == null:
 		return false
 	var started_at := _elapsed()
@@ -766,7 +768,8 @@ func _drive_to_point(target: Vector3, stop_distance: float, timeout_seconds: flo
 		var offset := Vector3(target.x - player.global_position.x, 0.0, target.z - player.global_position.z)
 		var distance := offset.length()
 		if distance <= stop_distance:
-			_stop_player()
+			if stop_on_arrival:
+				_stop_player()
 			return true
 		var horizontal_speed := Vector2(player.velocity.x, player.velocity.z).length()
 		if distance < best_distance - STUCK_PROGRESS_EPSILON:
@@ -790,7 +793,7 @@ func _drive_to_point(target: Vector3, stop_distance: float, timeout_seconds: flo
 			})
 			return false
 		player.set("automated_move", offset.normalized())
-		player.set("automated_sprint", false)
+		player.set("automated_sprint", sprint)
 		await _physics_frame()
 		movement_frames += 1
 		if movement_frames % 30 == 0:

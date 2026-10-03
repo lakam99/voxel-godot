@@ -9,6 +9,7 @@ class FixtureWorld extends Node:
 	var STRUCTURE_SPAWN_CHANCE := 0.0
 	var TOWN_RADIUS_CELLS := 12
 	var blocks: Dictionary = {}
+	var town_region_cache: Dictionary = {}
 	var include_town := true
 
 	func town_region(x: int, z: int) -> Dictionary:
@@ -25,6 +26,9 @@ func _initialize() -> void:
 func run() -> void:
 	var world := FixtureWorld.new()
 	root.add_child(world)
+	for z in range(-2, 2):
+		for x in range(-2, 2):
+			world.town_region_cache[Vector2i(x, z)] = world.town_region(x, z)
 	var source = StructureScript.new()
 	source.main = world
 	source.town_manifest_publish_states["0,0"] = {"status": "published", "generationAttempts": 1}
@@ -56,6 +60,53 @@ func run() -> void:
 	var repeated: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("unchanged_source_revision_is_stable",
 		complete.sourceRevision == repeated.sourceRevision, repeated)
+	var capture := source.begin_region_ordinary_visual_source_capture(bounds)
+	var captured: Dictionary = {}
+	var budget_slices := 0
+	for step in 256:
+		captured = capture.advance(1, 3000)
+		if captured.get("reason") == "ordinary_visual_capture_budget":
+			budget_slices += 1
+		if captured.get("status") != "pending" \
+				or captured.get("reason") != "ordinary_visual_capture_budget":
+			break
+	check("bounded_producer_matches_synchronous_source",
+		captured.get("status") == "described" and budget_slices > 0
+		and captured.get("sourceRevision") == complete.sourceRevision
+		and int(captured.get("candidateCount", -1)) == 1
+		and captured.candidates[0].candidateId == complete.candidates[0].candidateId
+		and (captured.candidates[0].owner as WeakRef).get_ref() == body
+		and (captured.candidates[0].representation as WeakRef).get_ref() == mesh, captured)
+	var changed_capture := source.begin_region_ordinary_visual_source_capture(bounds)
+	changed_capture.advance(1, 3000)
+	source.ordinary_visual_revision += 1
+	var changed: Dictionary = changed_capture.advance(1, 3000)
+	check("bounded_producer_restarts_after_source_revision_change",
+		changed.get("status") == "pending"
+		and changed.get("reason") == "ordinary_visual_capture_source_changed", changed)
+	source.ordinary_visual_revision -= 1
+	var owner_capture := source.begin_region_ordinary_visual_source_capture(bounds)
+	var validating := false
+	for step in 256:
+		var slice: Dictionary = owner_capture.advance(1, 3000)
+		if slice.get("stage") == "validate":
+			validating = true
+			break
+		if slice.get("reason") != "ordinary_visual_capture_budget": break
+	var replacement := StaticBody3D.new()
+	replacement.set_meta("generated_visual_source_id", source_id)
+	replacement.set_meta("block_type", "stoneBlock")
+	var replacement_mesh := MeshInstance3D.new()
+	replacement_mesh.mesh = BoxMesh.new()
+	replacement.add_child(replacement_mesh)
+	world.add_child(replacement)
+	world.blocks[cell] = replacement
+	var stale_owner: Dictionary = owner_capture.advance(1, 3000)
+	check("bounded_producer_rejects_replaced_live_block",
+		validating and stale_owner.get("status") == "pending"
+		and stale_owner.get("reason") == "ordinary_visual_capture_owner_changed", stale_owner)
+	world.blocks[cell] = body
+	replacement.queue_free()
 	world.blocks.erase(cell)
 	var missing: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("missing_emitted_owner_cannot_become_empty",
@@ -111,6 +162,8 @@ func run() -> void:
 		occupied_result.status == "described" and occupied_result.candidateCount == 0,
 		occupied_result)
 	world.include_town = false
+	for key in world.town_region_cache:
+		world.town_region_cache[key] = {}
 	var absent: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("deterministic_absence_is_authoritative_empty",
 		absent.status == "described" and absent.sourceCount == 0 and absent.candidateCount == 0, absent)

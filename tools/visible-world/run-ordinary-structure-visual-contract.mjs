@@ -8,6 +8,7 @@ cli(async () => {
   launchRecord(c, [
     'scripts/testing/OrdinaryStructureVisualSourceContract.gd',
     'scripts/StructureSystem.gd',
+    'scripts/world/OrdinaryStructureVisualSourceCapture.gd',
     'scripts/MainChunkTerrain.gd',
     'scripts/MainPropFactory.gd',
     'scripts/MainSaveState.gd',

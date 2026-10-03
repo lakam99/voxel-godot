@@ -108,40 +108,54 @@ func test_current_save_format_is_the_only_authority() -> void:
 	var save_path := "user://biome_region_field_authority_contract.json"
 	var stem := save_path.substr(0, save_path.length() - 5)
 	var legacy_slot_path := "%s_slot_legacy.json" % stem
+	var binary_slot_path := "%s_slot_fresh.bin" % stem
 	var active_seed_path := "%s_active_seed.txt" % stem
-	for target_path in [save_path, legacy_slot_path, active_seed_path, "%s_slot_fresh.json" % stem]:
+	for target_path in [save_path, legacy_slot_path, binary_slot_path, active_seed_path, "%s_slot_fresh.json" % stem]:
 		remove_test_file(target_path)
 	write_test_text(legacy_slot_path, JSON.stringify({"version": 1, "seed": "legacy", "marker": "obsolete"}))
 	write_test_text(save_path, JSON.stringify({"legacy": {"version": 1, "seed": "legacy"}, SaveSystemScript.ACTIVE_SEED_KEY: "legacy"}))
 	write_test_text(active_seed_path, "legacy")
 	var save_system = SaveSystemScript.new(save_path)
-	var legacy_purged := not FileAccess.file_exists(legacy_slot_path) and not FileAccess.file_exists(active_seed_path) and save_system.read_all().is_empty()
+	var legacy_files_remaining := {
+		"save": FileAccess.file_exists(save_path),
+		"legacySlot": FileAccess.file_exists(legacy_slot_path),
+		"activeSeed": FileAccess.file_exists(active_seed_path)
+	}
+	var legacy_purged: bool = not bool(legacy_files_remaining.get("save", true)) \
+		and not bool(legacy_files_remaining.get("legacySlot", true)) \
+		and not bool(legacy_files_remaining.get("activeSeed", true))
 	var fresh_saved := save_system.save("fresh", {"marker": "current"})
 	var fresh: Dictionary = save_system.load("fresh")
-	var current_format_written := fresh_saved and int(fresh.get("version", 0)) == SaveSystemScript.SAVE_VERSION and int(fresh.get("version", 0)) == 2
+	var binary_file := FileAccess.open(binary_slot_path, FileAccess.READ)
+	var binary_header := binary_file.get_buffer(4) if binary_file != null else PackedByteArray()
+	if binary_file != null: binary_file.close()
+	var current_format_written := fresh_saved and FileAccess.file_exists(binary_slot_path) \
+		and binary_header.get_string_from_ascii() == "VBW2" \
+		and int(fresh.get("version", 0)) == SaveSystemScript.SAVE_VERSION and int(fresh.get("version", 0)) == 2
 	var read_stats: Dictionary = save_system.stats()
 	var read_file_ms := float(read_stats.get("lastReadFileMs", -1.0))
-	var decode_ms := float(read_stats.get("lastJsonDecodeMs", -1.0))
+	var decode_ms := float(read_stats.get("lastBinaryDecodeMs", -1.0))
 	var total_ms := float(read_stats.get("lastReadParseMs", -1.0))
 	var read_bytes := int(read_stats.get("lastReadBytes", 0))
-	var read_metrics_present := read_stats.has("lastReadFileMs") and read_stats.has("lastJsonDecodeMs") \
+	var read_metrics_present := read_stats.has("lastReadFileMs") and read_stats.has("lastBinaryDecodeMs") \
 		and read_stats.has("lastReadParseMs") and read_stats.has("lastReadBytes") \
 		and read_file_ms >= 0.0 and decode_ms >= 0.0 and total_ms >= read_file_ms \
 		and total_ms >= decode_ms and read_bytes > 0
 	add_result("incompatible_saves_are_purged_current_format_loads_and_read_phases_are_reported", legacy_purged and current_format_written and read_metrics_present, {
 		"legacyPurged": legacy_purged,
+		"legacyFilesRemaining": legacy_files_remaining,
 		"currentFormatWritten": current_format_written,
 		"saveVersion": SaveSystemScript.SAVE_VERSION,
 		"loadedMarker": fresh.get("marker", ""),
 		"readMetrics": {
 			"fileReadMs": read_file_ms,
-			"jsonDecodeMs": decode_ms,
+			"binaryDecodeMs": decode_ms,
 			"compatibleTotalMs": total_ms,
 			"bytes": read_bytes,
 			"present": read_metrics_present
 		}
 	})
-	for target_path in [save_path, legacy_slot_path, active_seed_path, "%s_slot_fresh.json" % stem]:
+	for target_path in [save_path, legacy_slot_path, binary_slot_path, active_seed_path, "%s_slot_fresh.json" % stem]:
 		remove_test_file(target_path)
 
 func write_test_text(target_path: String, value: String) -> void:

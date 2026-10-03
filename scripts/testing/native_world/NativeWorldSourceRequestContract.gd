@@ -112,7 +112,7 @@ func run() -> void:
 		"seed":main.seed_text, "terrain":[], "terrainVolume":current_volume}))
 	var decoded_request: Dictionary = REQUEST.from_main_with_v2_save_snapshot(main, decoded_v2)
 	check(decoded_request.get("status") == "ready",
-		"JSON decoded v2 save acquires an immutable native import lease: %s revisionType=%s" % [
+		"Binary decoded v2 save acquires an immutable native import lease: %s revisionType=%s" % [
 			String(decoded_request.get("reason", "")), type_string(typeof(decoded_v2.terrainVolume.revision))])
 	check(SAVE_LEASE.valid_json_revision(0.0)
 		and SAVE_LEASE.valid_json_revision(9007199254740992.0)

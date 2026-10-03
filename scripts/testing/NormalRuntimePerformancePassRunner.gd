@@ -196,8 +196,8 @@ func run_normal_runtime_scenario() -> Dictionary:
         return failed_result(environment_failure)
     if not await launch_main_via_menu_new_game_input():
         return failed_result(startup_loading_failure if startup_loading_failure != "" else "Main Menu New Game did not reach gameplay readiness")
-    # New Game opens in the tutorial night. Protect only the observer/player so
-    # long performance observations cannot terminate before their measured act.
+    # Protect the observer/player so long performance observations cannot
+    # terminate before their measured act.
     playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "normal_runtime_night_safe_observer")
     if not bool(playtest_survival_policy.get("enabled", false)):
         return failed_result("normal runtime night-safe player godmode was not enabled")
@@ -209,12 +209,15 @@ func run_normal_runtime_scenario() -> Dictionary:
         return failed_result("player could not be configured for normal runtime traversal")
     if screenshot_path != "":
         await capture_screenshot(screenshot_path.get_base_dir().path_join("startup_spawn.png"))
-    if not await leave_starter_house():
+    var tutorial_skipped := bool(main.get("launch_options").get("skipTutorial", false))
+    if not tutorial_skipped and not await leave_starter_house():
         if screenshot_path != "":
             await capture_screenshot()
         var failure := failed_result("traversal setup could not leave the starter house through the real door")
         failure["traversalEntry"] = traversal_entry
         return failure
+    if tutorial_skipped:
+        traversal_entry = {"reason": "tutorial_skipped_spawn_is_outdoors", "spawn": vec3(traversal_spawn), "exited": true}
     await warmup()
     capture_player_collision_hold_baseline()
     reset_runtime_performance_monitor()
@@ -287,6 +290,7 @@ func run_normal_runtime_scenario() -> Dictionary:
     return {
         "id": "normal_runtime_mixed_traversal",
         "scenario": scenario,
+        "skipTutorial": bool(main.get("launch_options").get("skipTutorial", false)) if main != null else false,
         "passed": passed,
         "details": result_details(metrics, failures),
         "failures": failures,

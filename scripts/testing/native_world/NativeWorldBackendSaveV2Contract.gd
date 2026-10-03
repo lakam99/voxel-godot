@@ -218,25 +218,25 @@ func test_empty_export() -> Dictionary:
 
 
 func save_system_round_trip(terrain_volume: Dictionary, report_path: String) -> Dictionary:
-	var save_path := "user://n3_native_world_backend_save_v2_contract.json"
+	var save_path := "user://n3_native_world_backend_save_v2_contract.bin"
 	if report_path != "":
-		save_path = report_path.get_base_dir().path_join("n3-save-v2-actual-save-system.json")
+		save_path = report_path.get_base_dir().path_join("n3-save-v2-actual-save-system.bin")
 	var save_system = SaveSystemScript.new(save_path)
 	save_system.delete(SEED)
 	var wrote: bool = save_system.save(SEED, {
 		"terrainVolume": terrain_volume,
-		"contractMarker": {"negative": [-17, -1, -1], "kind": "actual_json_round_trip"},
+		"contractMarker": {"negative": [-17, -1, -1], "kind": "actual_binary_round_trip"},
 	})
 	var loaded: Dictionary = save_system.load(SEED)
-	check(wrote, "SaveSystem actual JSON write")
+	check(wrote, "SaveSystem actual binary write")
 	check(int(loaded.get("version", 0)) == SaveSystemScript.SAVE_VERSION, "SaveSystem v2 envelope")
 	check(loaded.get("seed") == SEED, "SaveSystem seed")
 	var loaded_volume: Dictionary = loaded.get("terrainVolume", {}) if loaded.get("terrainVolume", {}) is Dictionary else {}
 	check(json_semantic_value(loaded_volume) == json_semantic_value(terrain_volume),
-		"SaveSystem terrainVolume JSON roundtrip")
+		"SaveSystem terrainVolume binary roundtrip")
 	var marker: Dictionary = loaded.get("contractMarker", {}) if loaded.get("contractMarker", {}) is Dictionary else {}
 	var marker_negative: Array = marker.get("negative", []) if marker.get("negative", []) is Array else []
-	check(marker.get("kind") == "actual_json_round_trip" and marker_negative.size() == 3
+	check(marker.get("kind") == "actual_binary_round_trip" and marker_negative.size() == 3
 		and int(marker_negative[0]) == -17 and int(marker_negative[1]) == -1 and int(marker_negative[2]) == -1,
 		"SaveSystem adjacent domain preserved")
 	var cleaned: bool = save_system.delete(SEED)
@@ -541,12 +541,12 @@ func test_json_integer_and_metadata_semantics() -> Dictionary:
 	var numeric_zero := snapshot.duplicate(true)
 	numeric_zero.sections[0].cells[0].state.metadata.saveDelta = 0.0
 	var numeric_zero_restore := restore_owner(numeric_zero)
-	failed(numeric_zero_restore.receipt, "terrain volume", "numeric zero saveDelta rejection")
+	failed(numeric_zero_restore.receipt, "zero saveDelta", "numeric zero saveDelta rejection")
 
 	var nonconvertible := snapshot.duplicate(true)
 	nonconvertible.sections[0].cells[0].state.metadata.saveDelta = "true"
 	var nonconvertible_restore := restore_owner(nonconvertible)
-	failed(nonconvertible_restore.receipt, "terrain volume", "non-convertible saveDelta rejection")
+	failed(nonconvertible_restore.receipt, "non-convertible saveDelta", "non-convertible saveDelta rejection")
 
 	var fractional_revision := snapshot.duplicate(true)
 	fractional_revision.revision = 1.5

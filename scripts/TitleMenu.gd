@@ -12,6 +12,7 @@ var quit_button: Button
 var status_label: Label
 var loading_overlay: Control
 var loading_label: Label
+var loading_progress_bar: ProgressBar
 var launching := false
 var saved_seed := ""
 var loading_elapsed := 0.0
@@ -102,7 +103,8 @@ func _process(delta: float) -> void:
     loading_elapsed += maxf(delta, 0.0)
     var dots := int(floor(loading_elapsed * 2.0)) % 4
     var base_text := status_label.text if status_label != null and is_instance_valid(status_label) and status_label.text != "" else "Loading"
-    loading_label.text = "%s%s" % [base_text, ".".repeat(dots)]
+    var seconds := int(loading_elapsed)
+    loading_label.text = "%s%s · %02d:%02d" % [base_text, ".".repeat(dots), seconds / 60, seconds % 60]
 
 func build_menu() -> void:
     ui_layer = CanvasLayer.new()
@@ -211,6 +213,18 @@ func build_menu() -> void:
     loading_label.set_anchors_preset(Control.PRESET_FULL_RECT)
     loading_overlay.add_child(loading_label)
 
+    loading_progress_bar = ProgressBar.new()
+    loading_progress_bar.name = "LoadingProgress"
+    loading_progress_bar.min_value = 0.0
+    loading_progress_bar.max_value = 1.0
+    loading_progress_bar.show_percentage = true
+    loading_progress_bar.visible = false
+    loading_progress_bar.anchor_left = 0.20
+    loading_progress_bar.anchor_right = 0.80
+    loading_progress_bar.anchor_top = 0.62
+    loading_progress_bar.anchor_bottom = 0.66
+    loading_overlay.add_child(loading_progress_bar)
+
 func refresh_save_state() -> void:
     saved_seed = active_saved_seed()
     var has_save := saved_seed != ""
@@ -235,8 +249,8 @@ func gameplay_save_path() -> String:
     if save_path_override != "":
         return save_path_override
     if OS.get_environment("VOXEL_PLAYTEST") != "":
-        return "user://voxel_biome_world_playtest_saves.json"
-    return "user://voxel_biome_world_saves.json"
+        return "user://voxel_biome_world_playtest_saves.bin"
+    return "user://voxel_biome_world_saves.bin"
 
 func _on_new_game_pressed() -> void:
     launch_game("new_game")
@@ -276,6 +290,8 @@ func launch_game(mode: String) -> void:
     quit_button.disabled = true
     status_label.text = "Preparing world"
     loading_overlay.visible = true
+    loading_progress_bar.visible = false
+    loading_progress_bar.value = 0.0
     call_deferred("_deferred_launch_game", mode)
 
 func _deferred_launch_game(mode: String) -> void:
@@ -297,6 +313,8 @@ func _deferred_launch_game(mode: String) -> void:
     active_main = main
     if main.has_signal("startup_loading_step"):
         main.connect("startup_loading_step", Callable(self, "_on_game_loading_step"))
+    if main.has_signal("startup_loading_progress"):
+        main.connect("startup_loading_progress", Callable(self, "_on_game_loading_progress"))
     if main.has_signal("startup_loading_completed"):
         main.connect("startup_loading_completed", Callable(self, "_on_game_loading_completed"))
     if main.has_signal("startup_loading_failed"):
@@ -339,7 +357,13 @@ func _on_game_loading_step(message: String) -> void:
     if status_label == null or not is_instance_valid(status_label):
         return
     status_label.text = message if message != "" else "Loading"
-    loading_elapsed = 0.0
+
+func _on_game_loading_progress(message: String, completed: int, total: int) -> void:
+    _on_game_loading_step(message)
+    if loading_progress_bar == null or not is_instance_valid(loading_progress_bar):
+        return
+    loading_progress_bar.visible = total > 0
+    loading_progress_bar.value = clampf(float(completed) / float(maxi(1, total)), 0.0, 1.0)
 
 func _on_game_loading_completed() -> void:
     launching = false
@@ -365,10 +389,13 @@ func disconnect_game_loading_signals() -> void:
         active_main = null
         return
     var step_callable := Callable(self, "_on_game_loading_step")
+    var progress_callable := Callable(self, "_on_game_loading_progress")
     var completed_callable := Callable(self, "_on_game_loading_completed")
     var failed_callable := Callable(self, "_on_game_loading_failed")
     if active_main.has_signal("startup_loading_step") and active_main.is_connected("startup_loading_step", step_callable):
         active_main.disconnect("startup_loading_step", step_callable)
+    if active_main.has_signal("startup_loading_progress") and active_main.is_connected("startup_loading_progress", progress_callable):
+        active_main.disconnect("startup_loading_progress", progress_callable)
     if active_main.has_signal("startup_loading_completed") and active_main.is_connected("startup_loading_completed", completed_callable):
         active_main.disconnect("startup_loading_completed", completed_callable)
     if active_main.has_signal("startup_loading_failed") and active_main.is_connected("startup_loading_failed", failed_callable):

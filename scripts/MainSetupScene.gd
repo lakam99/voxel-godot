@@ -281,6 +281,9 @@ func setup_player() -> void:
     player.main = self
     player.survival = survival_system
     player.position = find_spawn_position()
+    # Keep the staged player hidden until the all-direction visible view has
+    # accepted its current terrain and surface visual sources.
+    player.visible = false
     add_child(player)
 
 func setup_hostiles() -> void:

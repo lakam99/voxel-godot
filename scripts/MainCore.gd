@@ -1,6 +1,7 @@
 ﻿extends "res://scripts/MainInterface.gd"
 
 signal startup_loading_step(message)
+signal startup_loading_progress(message, completed, total)
 signal startup_loading_completed
 signal startup_loading_failed(message)
 
@@ -69,6 +70,8 @@ var visible_world_prop_chunk_keys: Array[Vector2i] = []
 var startup_prop_priority_chunk_keys: Array[Vector2i] = []
 var visible_world_prop_chunk_cursor := 0
 var visible_world_prop_manifest_sources: Dictionary = {}
+var visible_world_prop_capture_jobs: Dictionary = {}
+var visible_world_prop_capture_streak := 0
 var visible_world_prop_last_attempt: Dictionary = {}
 var visible_world_prop_pending_reasons: Dictionary = {}
 var visible_world_demand_last_advance: Dictionary = {}
@@ -708,6 +711,7 @@ func _run_deferred_startup_boot() -> void:
         if not startup_result_is_ready(visible_result):
             await stop_startup_loading(visible_result, "initial_visible_world_not_ready")
             return
+        spawn_player_after_visible_world_ready(visible_result)
         await startup_loading_yield(
             "Gameplay prerequisites ready",
             "gameplay",
@@ -754,7 +758,8 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
     var radius_int := ceili(radius_cells)
     var view_bounds := Rect2i(Vector2i(floori(center.x) - radius_int,
         floori(center.z) - radius_int), Vector2i.ONE * (radius_int * 2 + 1))
-    startup_prop_priority_chunk_keys = visible_prop_chunk_keys_for_bounds(view_bounds, center)
+    startup_prop_priority_chunk_keys = visible_prop_chunk_keys_for_bounds(
+        view_bounds, center, radius_cells)
     var started_usec := Time.get_ticks_usec()
     var state: Dictionary = {}
     while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS:
@@ -816,10 +821,13 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
     visible_world_view_revision = int(view_result.viewRevision)
     visible_world_view_center_cells = Vector2(center.x, center.z)
     visible_world_near_bounds = near_bounds
-    visible_world_prop_chunk_keys = visible_prop_chunk_keys_for_bounds(view_bounds, center)
+    visible_world_prop_chunk_keys = visible_prop_chunk_keys_for_bounds(
+        view_bounds, center, radius_cells)
     startup_prop_priority_chunk_keys.clear()
     visible_world_prop_chunk_cursor = 0
     visible_world_prop_manifest_sources.clear()
+    visible_world_prop_capture_jobs.clear()
+    visible_world_prop_capture_streak = 0
     visible_world_prop_pending_reasons.clear()
     var manifest = VoxelTerrainVisualManifestScript.new()
     var begin_result: Dictionary = manifest.begin(runtime, readiness, request_id, seed_text,
@@ -847,37 +855,10 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
     return StartupReadinessResultScript.failed("initial_visible_terrain_mesh_coverage_timeout", {}, [],
         state.merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true))
 
-func visible_prop_chunk_keys_for_bounds(bounds: Rect2i, center: Vector3) -> Array[Vector2i]:
-    var result: Array[Vector2i] = []
-    if bounds.size.x <= 0 or bounds.size.y <= 0:
-        return result
-    var min_x := floori(float(bounds.position.x) / float(CHUNK_SIZE))
-    var max_x := floori(float(bounds.end.x - 1) / float(CHUNK_SIZE))
-    var min_z := floori(float(bounds.position.y) / float(CHUNK_SIZE))
-    var max_z := floori(float(bounds.end.y - 1) / float(CHUNK_SIZE))
-    for z in range(min_z, max_z + 1):
-        for x in range(min_x, max_x + 1):
-            result.append(Vector2i(x, z))
-    # Scheduling-only order: preserve each chunk's owned seeded RNG sequence,
-    # but feed visible and predicted-corridor chunks to the existing bounded
-    # prop/tree publishers before equally distant background chunks.
-    var groups: Dictionary = {}
-    var keys_by_id: Dictionary = {}
-    for key: Vector2i in result:
-        var id := "%d,%d" % [key.x, key.y]
-        var low := Vector3(float(key.x * CHUNK_SIZE) * CELL, 0.0,
-            float(key.y * CHUNK_SIZE) * CELL)
-        groups[id] = {"bounds": AABB(low, Vector3(float(CHUNK_SIZE) * CELL, 1.0,
-            float(CHUNK_SIZE) * CELL)), "doorPartIds": []}
-        keys_by_id[id] = key
-    var view := player_streaming_view_intent(player.global_position) if player != null \
-        and is_instance_valid(player) else {}
-    var ranked: Array[Dictionary] = GeneratedContentViewPriorityScript.ranked_groups(groups, view)
-    result.clear()
-    for row: Dictionary in ranked:
-        var id := String(row.get("id", ""))
-        if keys_by_id.has(id): result.append(keys_by_id[id])
-    return result
+func visible_prop_chunk_keys_for_bounds(bounds: Rect2i, center: Vector3,
+        radius_cells: float) -> Array[Vector2i]:
+    return VisibleWorldDemandControllerScript._ranked_chunk_keys(bounds,
+        center * CELL, CELL, CHUNK_SIZE, radius_cells)
 
 func prioritized_startup_prop_chunk_keys() -> Array[Vector2i]:
     var priority: Array[Vector2i] = []
@@ -925,12 +906,24 @@ func advance_visible_world_prop_manifest() -> Dictionary:
             or not is_instance_valid(visible_world_readiness) or visible_world_view_revision <= 0:
         return {"status": "pending", "reason": "visible_prop_manifest_not_started"}
     var key := visible_world_prop_chunk_keys[visible_world_prop_chunk_cursor]
-    visible_world_prop_chunk_cursor = (visible_world_prop_chunk_cursor + 1) % visible_world_prop_chunk_keys.size()
     if not has_method("publish_chunk_prop_visual_readiness"):
         visible_world_prop_last_attempt = {"status": "failed", "reason": "chunk_prop_visual_publisher_missing", "chunk": key}
         return visible_world_prop_last_attempt
     visible_world_prop_last_attempt = call("publish_chunk_prop_visual_readiness", visible_world_readiness,
-        visible_world_view_revision, visible_world_near_bounds, key)
+        visible_world_view_revision, visible_world_near_bounds, key, Vector3.INF,
+        visible_world_prop_capture_jobs.get(key))
+    var capture_job: Object = visible_world_prop_last_attempt.get("captureJob") as Object
+    if is_instance_valid(capture_job):
+        visible_world_prop_capture_jobs[key] = capture_job
+    else:
+        visible_world_prop_capture_jobs.erase(key)
+    visible_world_prop_last_attempt.erase("captureJob")
+    if String(visible_world_prop_last_attempt.get("reason", "")) == "chunk_prop_bounded_capture_budget" \
+            and visible_world_prop_capture_streak < 2:
+        visible_world_prop_capture_streak += 1
+    else:
+        visible_world_prop_chunk_cursor = (visible_world_prop_chunk_cursor + 1) % visible_world_prop_chunk_keys.size()
+        visible_world_prop_capture_streak = 0
     visible_world_prop_last_attempt["chunk"] = key
     visible_world_prop_last_attempt["cursor"] = visible_world_prop_chunk_cursor
     visible_world_prop_last_attempt["chunkCount"] = visible_world_prop_chunk_keys.size()
@@ -1045,11 +1038,61 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
         startup_loading_timeline.pop_front()
     startup_loading_last_step_usec = now_usec
     startup_loading_step.emit(message)
+    var progress_counts := startup_loading_progress_counts(normalized_domain, normalized_metrics)
+    var completed := int(progress_counts.get("completed", 0))
+    var total := int(progress_counts.get("total", 0))
+    startup_loading_progress.emit(message, completed, total)
     if startup_overlay != null:
-        startup_overlay.set_message(message)
-    if hud != null and hud.has_method("set_loading_message"):
-        hud.set_loading_message(message)
+        if startup_overlay.has_method("set_progress"):
+            startup_overlay.call("set_progress", message, completed, total)
+        else:
+            startup_overlay.set_message(message)
+    if hud != null:
+        if total > 0 and hud.has_method("set_loading_progress"):
+            hud.call("set_loading_progress", message, completed, total)
+        elif hud.has_method("set_loading_progress"):
+            hud.call("set_loading_progress", message, 0, 0)
+        elif hud.has_method("set_loading_message"):
+            hud.set_loading_message(message)
     await get_tree().process_frame
+
+func startup_loading_progress_counts(domain: String, metrics: Dictionary) -> Dictionary:
+    var pairs := {
+        "terrain_chunks": ["loadedChunkCount", "requiredChunkCount"],
+        "terrain_collision": ["publishedChunkCount", "requiredChunkCount"],
+        "visible_terrain_meshes": ["processedBlocks", "requiredBlocks"],
+        "navigation_changes": ["processedEventCount", "remainingEventCount"],
+        "navigation_tiles": ["publishedTileCount", "requiredTileCount"]
+    }
+    if domain == "visible_world":
+        pairs[domain] = ["representedCount", "candidateCount"]
+    elif domain in ["initial_region", "initial_region_physical"]:
+        var domains: Dictionary = metrics.get("domains", {})
+        if not domains.is_empty():
+            var completed_domains := 0
+            for owner_value in domains.values():
+                if owner_value is Dictionary and String(owner_value.get("status", "")) == "ready":
+                    completed_domains += 1
+            return {"completed": completed_domains, "total": domains.size()}
+    elif domain == "scene":
+        var audio: Dictionary = metrics.get("audio", {})
+        if audio.has("completedJobs") and audio.has("totalJobs"):
+            return {"completed": int(audio.completedJobs), "total": int(audio.totalJobs)}
+        if metrics.has("warmedAssetCount") and metrics.has("requiredAssetCount"):
+            return {"completed": int(metrics.warmedAssetCount), "total": int(metrics.requiredAssetCount)}
+    elif domain == "town_manifest" and metrics.get("publishedKeys") is Array \
+            and metrics.get("requiredKeys") is Array:
+        return {"completed": metrics.publishedKeys.size(), "total": metrics.requiredKeys.size()}
+    if not pairs.has(domain):
+        return {}
+    var keys: Array = pairs[domain]
+    if not metrics.has(keys[0]) or not metrics.has(keys[1]):
+        return {}
+    var completed := int(metrics.get(keys[0], 0))
+    var total := int(metrics.get(keys[1], 0))
+    if domain == "navigation_changes":
+        total += completed
+    return {"completed": completed, "total": total}
 
 func normalized_startup_result(value, fallback_reason: String) -> Dictionary:
     if shutdown_requested and (startup_loading_active or runtime_loading_active):
@@ -1670,7 +1713,8 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
         return
     var demand_advance_started_usec := Time.get_ticks_usec()
     var demand_advance: Dictionary = visible_world_demand_controller.advance(
-        self, runtime, structure_system, "player", CHUNK_SIZE)
+        self, runtime, structure_system, "player", CHUNK_SIZE,
+        gameplay_publication_deadline_usec)
     var demand_advance_total_usec := maxi(0, Time.get_ticks_usec() - demand_advance_started_usec)
     visible_world_demand_last_advance = {
         "status": demand_advance.get("status", "pending"),
@@ -1681,7 +1725,11 @@ func advance_player_visible_world_demand(center_world: Vector3, view_intent: Dic
         "queueDepth": demand_advance.get("queueDepth", 0),
         "terrainAdvanceUsec": demand_advance.get("terrainAdvanceUsec", 0),
         "propAdvanceUsec": demand_advance.get("propAdvanceUsec", 0),
+        "propPhaseUsec": demand_advance.get("propPhaseUsec", {}),
         "structureAdvanceUsec": demand_advance.get("structureAdvanceUsec", 0),
+        "structureStartAudit": demand_advance.get("structureStartAudit", {}),
+        "structurePrefetch": demand_advance.get("structurePrefetch", {}),
+        "sourceAtomsAttempted": demand_advance.get("sourceAtomsAttempted", 0),
         "structurePhaseUsec": demand_advance.get("structurePhaseUsec", {}),
         "coverageAdvanceUsec": demand_advance.get("coverageAdvanceUsec", 0),
         "coverageGeometryUsec": demand_advance.get("coverageGeometryUsec", 0),
@@ -1741,6 +1789,8 @@ func reset_streaming_region_demand() -> void:
     startup_prop_priority_chunk_keys.clear()
     visible_world_prop_chunk_cursor = 0
     visible_world_prop_manifest_sources.clear()
+    visible_world_prop_capture_jobs.clear()
+    visible_world_prop_capture_streak = 0
     visible_world_prop_pending_reasons.clear()
     visible_world_demand_last_advance.clear()
     var runtime = get("voxel_terrain_runtime")
@@ -1823,9 +1873,12 @@ func wait_for_initial_visible_world_readiness() -> Dictionary:
     var request_id := int(streaming_requests.get("player", 0))
     if request_id <= 0:
         return StartupReadinessResultScript.failed("initial_visible_world_request_missing")
-    var started_usec := Time.get_ticks_usec()
     var state: Dictionary = {"status": "pending", "reason": "visual_demand_not_started"}
-    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+    var wait_started_usec := Time.get_ticks_usec()
+    # This is the spawn event gate: keep the loading screen active and let the
+    # real terrain/prop/structure publishers progress until this exact spawn
+    # position's full all-direction view has current accepted receipts.
+    while true:
         if shutdown_requested:
             return StartupReadinessResultScript.failed("startup_cancelled")
         process_pending_chunk_loads(world_to_chunk(player.position.x, player.position.z))
@@ -1862,10 +1915,25 @@ func wait_for_initial_visible_world_readiness() -> Dictionary:
             "startupPropPending": visible_world_prop_pending_reasons.values().slice(0, 6),
             "startupLastPropAttempt": visible_world_prop_last_attempt.duplicate(),
             "pendingChunkLoads": pending_chunk_loads.size(),
-            "pendingNativeTerrainTasks": int(runtime.call("voxel_engine_pending_task_count"))}
-        await startup_loading_yield("Finishing visible world", "visible_world", "pending", progress)
-    return StartupReadinessResultScript.failed("initial_visible_world_timeout", {}, [],
-        state.merged({"timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS}, true))
+            "pendingNativeTerrainTasks": int(runtime.call("voxel_engine_pending_task_count")),
+            "elapsedSeconds": float(Time.get_ticks_usec() - wait_started_usec) / 1000000.0}
+        var candidates := int(state.get("candidateCount", 0))
+        var represented := int(state.get("representedCount", 0))
+        var pending := int(state.get("pendingCount", 0))
+        var loading_message := "Scanning 360° view · %d/%d prop sources" % [
+            int(progress.startupPropSourcesComplete), int(progress.startupPropSourcesExpected)]
+        if candidates > 0:
+            loading_message = "Preparing 360° view · %d/%d visuals ready · %d waiting" % [
+                represented, candidates, pending]
+        await startup_loading_yield(loading_message, "visible_world", "pending", progress)
+    return StartupReadinessResultScript.failed("startup_cancelled", {}, [], state)
+
+func spawn_player_after_visible_world_ready(readiness: Dictionary) -> void:
+    if player == null or not is_instance_valid(player):
+        return
+    if not startup_result_is_ready(readiness):
+        return
+    player.visible = true
 
 func submit_initial_structure_visual_readiness() -> Dictionary:
     if visible_world_readiness == null or not is_instance_valid(visible_world_readiness) \
@@ -2435,7 +2503,7 @@ func prime_navigation_tiles_for_entry(navigation_world, npc_entry: Dictionary, t
 
 func setup_save_system() -> void:
     autosave_enabled = OS.get_environment("VOXEL_PLAYTEST") == ""
-    var save_path := "user://voxel_biome_world_saves.json" if autosave_enabled else "user://voxel_biome_world_playtest_saves.json"
+    var save_path := "user://voxel_biome_world_saves.bin" if autosave_enabled else "user://voxel_biome_world_playtest_saves.bin"
     var save_path_override := OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges()
     if save_path_override != "":
         save_path = save_path_override
@@ -2487,7 +2555,7 @@ func process_autosave(delta: float) -> void:
                 autosave_jobs_failed += 1
                 mark_world_dirty("autosave_retry")
             if runtime_perf_monitor != null:
-                runtime_perf_monitor.observe_external_duration("autosave_json_stringify_write", float(async_result.get("stringifyWriteMs", 0.0)))
+                runtime_perf_monitor.observe_external_duration("autosave_binary_encode_write", float(async_result.get("encodeWriteMs", 0.0)))
     if not autosave_enabled or save_system == null:
         perf_autosave_ms = runtime_perf_monitor.end_section("autosave", section_start) if runtime_perf_monitor != null else float(Time.get_ticks_usec() - section_start) / 1000.0
         return
@@ -3324,6 +3392,7 @@ func quiesce_runtime_world_for_loading(message: String) -> Dictionary:
         "process": is_processing(), "input": is_processing_unhandled_input(),
         "physics": is_physics_processing(),
         "playerPhysics": player != null and player.is_physics_processing(),
+        "playerVisible": player != null and player.visible,
         "npcPhysics": [],
         "npcExecutionOwner": autonomy,
         "npcExecutionEnabled": autonomy is Node and is_instance_valid(autonomy) and autonomy.is_physics_processing()
@@ -3342,6 +3411,7 @@ func quiesce_runtime_world_for_loading(message: String) -> Dictionary:
     if player != null:
         player.set_physics_process(false)
         player.velocity = Vector3.ZERO
+        player.visible = false
     if hud != null and hud.has_method("show_loading_overlay"):
         hud.show_loading_overlay(message)
     return previous
@@ -3522,6 +3592,7 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
         set_physics_process(bool(previous_processing.physics))
         if player != null:
             player.set_physics_process(bool(previous_processing.playerPhysics))
+            player.visible = bool(previous_processing.get("playerVisible", true))
         for entry: Dictionary in previous_processing.npcPhysics:
             if is_instance_valid(entry.body): entry.body.set_physics_process(bool(entry.enabled))
         var autonomy = previous_processing.get("npcExecutionOwner")
@@ -3786,15 +3857,21 @@ func complete_runtime_world_loading_staged(tutorial_result: Dictionary, publicat
     if not startup_result_is_ready(region_result):
         await stop_startup_loading(region_result, "initial_region_not_ready")
         return false
+    var visible_result := await wait_for_initial_visible_world_readiness()
+    if not startup_result_is_ready(visible_result):
+        await stop_startup_loading(visible_result, "initial_visible_world_not_ready")
+        return false
     physics_gate_result = normalized_startup_result(startup_physics_gate_readiness(), "gameplay_physics_gate_failed")
     if not startup_result_is_ready(physics_gate_result):
         await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
         return false
+    spawn_player_after_visible_world_ready(visible_result)
     var gameplay_metrics: Dictionary = physics_gate_result.get("metrics", {}).duplicate(true)
     gameplay_metrics["tutorial"] = tutorial_result.get("metrics", {})
     gameplay_metrics.merge(publication_result.get("metrics", {}), true)
     gameplay_metrics["presentation"] = presentation_result.get("metrics", {})
     gameplay_metrics["region"] = region_result.get("metrics", {})
+    gameplay_metrics["visibleWorld"] = visible_result.get("metrics", {})
     await startup_loading_yield("Gameplay prerequisites ready", "gameplay", "ready", gameplay_metrics)
     if shutdown_requested:
         await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))

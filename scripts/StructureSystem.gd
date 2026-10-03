@@ -10,6 +10,7 @@ const CitadelSiteFieldScript := preload("res://scripts/world/CitadelSiteField.gd
 const CitadelPublicationServiceScript := preload("res://scripts/world/CitadelPublicationService.gd")
 const GeneratedStructureRuntimeBindingsScript := preload("res://scripts/world/GeneratedStructureRuntimeBindings.gd")
 const StandaloneSourceScript := preload("res://scripts/world/StandaloneStructureCandidate.gd")
+const OrdinaryVisualCaptureScript := preload("res://scripts/world/OrdinaryStructureVisualSourceCapture.gd")
 const NavigationConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
@@ -98,7 +99,13 @@ func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
 func region_citadel_visual_source(bounds: Rect2i) -> Dictionary:
     return citadel_publication.visual_source_state(bounds)
 
+func begin_region_ordinary_visual_source_capture(bounds: Rect2i) -> Object:
+    var capture = OrdinaryVisualCaptureScript.new()
+    capture.begin(self, bounds)
+    return capture
+
 func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
+    var source_started_usec := Time.get_ticks_usec()
     if not is_instance_valid(main) or not CitadelPublicationServiceScript._bounded_region_rectangle(bounds):
         return {"status":"failed","reason":"invalid_ordinary_visual_source_bounds"}
     var source_ids: Dictionary = {}
@@ -138,12 +145,14 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
             var source_id: String="standalone:%d,%d" % [x,z]
             if generated_structures.get(region,null)==false: continue
             source_ids[source_id]=true
+    var discovery_usec := Time.get_ticks_usec()-source_started_usec
     var ids: Array=source_ids.keys()
     ids.sort()
     var candidates: Array[Dictionary]=[]
     var pending_ids: Array[String]=[]
     var bindings: Array=[]
     var expected_scanned:=0
+    var renderable_usec:=0
     var live_blocks: Dictionary=main.get("blocks")
     for source_id_value in ids:
         var source_id:=String(source_id_value)
@@ -186,7 +195,9 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
                     or String(body.get_meta("generated_visual_source_id",""))!=source_id \
                     or String(body.get_meta("block_type",""))!=block_type:
                 body=null
+            var renderable_started_usec:=Time.get_ticks_usec()
             var representation:=_ordinary_visible_renderable(body) if is_instance_valid(body) else null
+            renderable_usec+=Time.get_ticks_usec()-renderable_started_usec
             var candidate_id: String="ordinary:%s:%d,%d,%d:%s" % [source_id,cell.x,cell.y,cell.z,block_type]
             candidates.append({"candidateId":candidate_id,"positionXZ":Vector2(float(cell.x)+0.5,float(cell.z)+0.5),
                 "cell":cell,"owner":body,"representation":representation,"installed":is_instance_valid(representation)})
@@ -195,14 +206,54 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
     if candidates.size()>100000:
         return {"status":"pending","reason":"ordinary_visual_source_capacity","retryable":true,
             "candidateCount":candidates.size()}
+    var enumeration_usec:=Time.get_ticks_usec()-source_started_usec-discovery_usec
     var hasher:=HashingContext.new()
     hasher.start(HashingContext.HASH_SHA256)
     hasher.update(JSON.stringify([String(main.seed_text),regional_source_generation,ids,bindings]).to_utf8_buffer())
     var revision:=hasher.finish().hex_encode()
+    var hash_usec:=Time.get_ticks_usec()-source_started_usec-discovery_usec-enumeration_usec
     return {"status":"pending" if not pending_ids.is_empty() else "described",
         "reason":"ordinary_visual_sources_pending" if not pending_ids.is_empty() else "",
         "sourceRevision":revision,"candidates":candidates,"pendingSourceIds":pending_ids,
-        "sourceCount":ids.size(),"candidateCount":candidates.size()}
+        "sourceCount":ids.size(),"candidateCount":candidates.size(),
+        "phaseUsec":{"sourceDiscovery":discovery_usec,"expectedEnumeration":enumeration_usec,
+            "renderableLookup":renderable_usec,"revisionHash":hash_usec}}
+
+func visual_structure_candidate_is_current(candidate_id: String,
+        metadata: Dictionary, receipt: Dictionary) -> bool:
+    # Citadel members carry an independently revisioned publisher receipt. Ordinary
+    # generated blocks also need their live main.blocks slot checked because a
+    # direct slot replacement does not necessarily advance the producer epoch.
+    if not metadata.has("cell"): return true
+    var cell_value: Variant = metadata.get("cell")
+    var source_id := String(metadata.get("ordinaryVisualSourceId", ""))
+    var block_type := String(metadata.get("ordinaryBlockType", ""))
+    if not cell_value is Vector3i or source_id.is_empty() or block_type.is_empty():
+        return false
+    var cell: Vector3i = cell_value
+    var source: Dictionary = ordinary_visual_sources.get(source_id, {})
+    if not bool(source.get("completed", false)) \
+            or String((source.get("expected", {}) as Dictionary).get(cell, "")) != block_type:
+        return false
+    var durable_id := _ordinary_visual_block_key(source_id, cell, block_type)
+    if removed_generated_structure_blocks.has(durable_id): return false
+    var live_blocks: Variant = main.get("blocks") if is_instance_valid(main) else null
+    if not live_blocks is Dictionary: return false
+    var body := (live_blocks as Dictionary).get(cell) as Node3D
+    if not is_instance_valid(body) or not body.is_inside_tree() \
+            or body.is_queued_for_deletion() \
+            or String(body.get_meta("generated_visual_source_id", "")) != source_id \
+            or String(body.get_meta("block_type", "")) != block_type:
+        return false
+    var representation := _ordinary_visible_renderable(body)
+    var owner_ref: WeakRef = receipt.get("owner") as WeakRef
+    var representation_ref: WeakRef = receipt.get("representation") as WeakRef
+    var receipt_owner: Object = owner_ref.get_ref() if owner_ref != null else null
+    var receipt_representation: Object = representation_ref.get_ref() \
+        if representation_ref != null else null
+    return is_instance_valid(representation) and receipt_owner == body \
+        and receipt_representation == representation
+
 
 func _ordinary_visible_renderable(root_node: Node) -> Node3D:
     if root_node is GeometryInstance3D:

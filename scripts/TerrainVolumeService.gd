@@ -2994,6 +2994,44 @@ func begin_exposed_underground_floor_scan(chunk_key: Vector2i, chunk_size := SEC
 		"revision": chunk_revision(chunk_key, size)
 	}
 
+func generated_underground_floor_source_proven_empty(chunk_key: Vector2i,
+		chunk_size: int) -> bool:
+	var generation = active_generator()
+	if generation == null or not generation.has_method("generated_cave_near_surface_footprint"):
+		return false
+	var size := maxi(1, int(chunk_size))
+	var start_x := chunk_key.x * size
+	var start_z := chunk_key.y * size
+	var end_x := start_x + size
+	var end_z := start_z + size
+	# Only an explicit underground-air edit can create a candidate outside a
+	# cave recipe. Solid town blocks in the same XZ footprint cannot do so.
+	for cell_value in edited_cells.keys():
+		var cell: Vector3i = cell_value
+		if cell.x >= start_x and cell.x < end_x and cell.z >= start_z and cell.z < end_z \
+				and _cell_may_add_underground_air(edited_cells[cell]):
+			return false
+	for cell_value in scene_block_cells.keys():
+		var cell: Vector3i = cell_value
+		if cell.x >= start_x and cell.x < end_x and cell.z >= start_z and cell.z < end_z \
+				and _cell_may_add_underground_air(scene_block_cells[cell]):
+			return false
+	var half_extent := float(size) * cell_size() * 0.5
+	var center := Vector3((float(start_x) + float(size) * 0.5) * cell_size(),
+		0.0, (float(start_z) + float(size) * 0.5) * cell_size())
+	var radius := half_extent * sqrt(2.0) + cell_size()
+	return not bool(generation.call("generated_cave_near_surface_footprint",
+		center, radius))
+
+
+func _cell_may_add_underground_air(state_value: Variant) -> bool:
+	if not state_value is Dictionary:
+		return true
+	var state: Dictionary = state_value
+	return not bool(state.get("solid", true)) \
+		and String(state.get("biome", "")) == UNDERGROUND_AIR_BIOME
+
+
 func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, time_budget_ms := -1.0, budget_start_usec := 0) -> Dictionary:
 	var state: Dictionary = state_value if state_value is Dictionary else {}
 	if state.is_empty():
@@ -3009,6 +3047,15 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 	var restarted := int(state.get("revision", source_revision)) != source_revision
 	if restarted:
 		state = begin_exposed_underground_floor_scan(chunk_key, size)
+	if int(state.get("columnIndex", 0)) == 0 \
+			and not bool(state.get("columnStarted", false)) \
+			and generated_underground_floor_source_proven_empty(chunk_key, size):
+		state["columnIndex"] = size * size
+		state["complete"] = true
+		state["revision"] = source_revision
+		return {"state": state, "complete": true, "newCandidates": [],
+			"processed": 0, "restarted": restarted,
+			"emptyProof": "no_cave_recipe_or_local_edits"}
 	var start_x := chunk_key.x * size
 	var start_z := chunk_key.y * size
 	var total_columns := size * size

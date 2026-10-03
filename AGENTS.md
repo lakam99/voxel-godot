@@ -85,9 +85,10 @@ individual symptom:
 - `scripts/environment/` and `scripts/visual/` own procedural ecology and
   rendering. `scripts/perf/RuntimePerformanceMonitor.gd` owns runtime
   performance observations. Do not put their work into a `Main*.gd` layer.
-- `scripts/SaveSystem.gd` owns the save envelope and `MainSaveState.gd` owns
-  the gameplay snapshot. The current intentional format is `SAVE_VERSION = 2`;
-  version-1 local saves were retired, not migrated.
+- `scripts/SaveSystem.gd` owns binary `.bin` save slots and the v2 envelope;
+  `MainSaveState.gd` owns the gameplay snapshot. Legacy JSON saves are discarded
+  on startup; version-1 local saves were retired, not migrated. The binary
+  migration charter belongs in the documentation repository.
 - `scripts/tutorial/`, `scripts/Tutorial*.gd`, `scripts/story/`, and
   `scripts/missions/` own scenario and story composition. Dialogue presents
   state; it does not become the state authority.
@@ -130,9 +131,10 @@ individual symptom:
 - Keep changes focused. Avoid broad refactors while fixing gameplay bugs.
 - Do not discard, reset, clean, or rewrite branches unless the user explicitly asks.
 - Do not weaken tests to make a change pass.
-- Save changes are normally additive. The current format is deliberately v2:
-  do not reintroduce legacy biome/save compatibility, a version selector, or a
-  second world-generation authority without an explicit product decision.
+- Save changes are normally additive. The current binary save data format is
+  deliberately v2: do not reintroduce legacy biome/save compatibility, a
+  version selector, or a second world-generation authority without an explicit
+  product decision.
 - Preserve deterministic world generation. Story or visual additions may derive stable IDs from the seed, but must not reorder terrain/town/prop RNG.
 - Visual assets, Blender generators, generated GLBs, and registries are first-class project assets. Do not replace them with a parallel pipeline.
 - Keep Godot `.uid` sidecars under version control. They preserve stable resource identities across file moves; do not blanket-ignore or delete them as generated noise. When Godot creates a sidecar for a retained source file, commit it with that source; when moving or removing a source, move or remove its sidecar in the same change. Keep temporary scripts and their sidecars under ignored artifacts with a `.gdignore` file.

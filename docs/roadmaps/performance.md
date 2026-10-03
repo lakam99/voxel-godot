@@ -48,9 +48,9 @@ Add counters/timers for:
 
 \- autosave snapshot
 
-\- autosave JSON read/parse
+\- autosave binary read/decode
 
-\- autosave JSON stringify/write
+\- autosave binary encode/write
 
 
 
@@ -88,7 +88,7 @@ Acceptance:
 
 Problem:
 
-`MainSetupScene.gd` autosaves every 5s and `SaveSystem.gd` synchronously reads/parses/writes the full save JSON on the main thread.
+`MainSetupScene.gd` autosaves every 5s. Save slots use Godot binary Variant data; snapshot capture and synchronous file I/O still run on the main thread.
 
 
 
@@ -100,11 +100,11 @@ Required changes:
 
 \- Never call full read/parse/write during gameplay frame.
 
-\- Replace `read\_all -> mutate -> write\_all` for autosave with active-slot save write.
+\- Write the active binary slot directly for autosave.
 
 \- Write to temp file, then atomic rename.
 
-\- Move JSON stringify/file write to a background `Thread` where safe.
+\- Move binary encode/file write to a background `Thread` where safe.
 
 \- Main thread may create snapshot, but snapshot creation must be time-budgeted or deferred across frames if large.
 

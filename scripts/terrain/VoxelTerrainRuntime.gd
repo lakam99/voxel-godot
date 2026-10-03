@@ -32,6 +32,9 @@ const SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS := RETAINED_MAX_PENDING_NATIVE_T
 # generation bursts. Gameplay chunks are the existing semantic collision
 # publication unit; coverage below still forces an immediate move at an edge.
 const PRIMARY_VIEWER_REQUEST_CELL_SIZE := GAME_CHUNK_SIZE
+const MESH_PREPARATION_VIEW_DISTANCE := 112
+const MESH_PREPARATION_REBASE_CELLS := 8
+const MESH_PREPARATION_MAX_PENDING_NATIVE_TASKS := SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS
 const VIEW_DISTANCE_EXPANSION_STEP := 16
 const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
 const FINAL_EXPANSION_REQUIRED_QUIET_FRAMES := 4
@@ -119,6 +122,15 @@ var secondary_viewer_terminal_failure: Dictionary = {}
 var primary_viewer_request_cell := Vector2i(2147483000,2147483000)
 var primary_viewer_request_distance := -1
 var primary_unpublished_collision_request_key := ""
+var mesh_preparation_viewer: VoxelViewer
+var mesh_preparation_extension_checked := false
+var mesh_preparation_extension_available := false
+var mesh_preparation_request_cell := Vector3i(2147483000,2147483000,2147483000)
+var mesh_preparation_admission_reason := "inactive"
+var mesh_preparation_last_pending_native_tasks := 0
+var mesh_preparation_admission_attempts := 0
+var mesh_preparation_admission_accepts := 0
+var mesh_preparation_backpressure_deferrals := 0
 ## Main's retained predicted-traversal request is scheduling input only. The
 ## primary viewer remains the sole native terrain authority; it may lead only
 ## while its same admitted footprint still covers the current player chunk.
@@ -718,6 +730,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var terrain_instance_id := terrain.get_instance_id()
 	var previous_mesh_blocks := published_mesh_blocks.size()
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
+	_retire_mesh_preparation_viewer()
 	clear_retained_gameplay_chunks()
 	var invalidated_chunks := invalidate_gameplay_publication()
 	if site_gate != null: site_gate.stop()
@@ -1389,6 +1402,7 @@ func _process(delta: float) -> void:
 	if authority_ready:
 		if not generation_context_current():
 			terrain.automatic_loading_enabled = false
+			_retire_mesh_preparation_viewer()
 			return
 		if site_gate != null: site_gate.advance()
 		observe_native_viewer_workload()
@@ -1396,6 +1410,7 @@ func _process(delta: float) -> void:
 		update_viewer_distance(delta)
 		advance_retained_viewers(delta)
 		advance_secondary_viewer_admissions()
+		advance_mesh_preparation_viewer()
 		# Discover and apply durable edits while the temporary startup viewers
 		# that make their native sections editable are still attached. Retirement
 		# below also checks pending intersections, so an unloaded tutorial-town
@@ -1413,6 +1428,7 @@ func _physics_process(_delta: float) -> void:
 func _exit_tree() -> void:
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
+	_retire_mesh_preparation_viewer()
 	if site_gate != null: site_gate.stop()
 	if viewer != null and is_instance_valid(viewer) and viewer.get_parent() != self:
 		viewer.queue_free()
@@ -1422,6 +1438,7 @@ func begin_shutdown() -> void:
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	clear_foreground_collision_demand()
+	_retire_mesh_preparation_viewer()
 	if site_gate != null: site_gate.stop()
 	set_process(false)
 	set_physics_process(false)
@@ -1631,6 +1648,77 @@ func update_viewer_position() -> void:
 		if _request_primary_viewer(target_position, int(viewer.view_distance), not request_changed):
 			primary_unpublished_collision_request_key = unpublished_request_key \
 				if not player_collision_published or not foreground_collision_published else ""
+
+
+## A single optional native viewer prepares the next all-direction 3D shell.
+## It is never a collision or visual receipt owner and never participates in
+## startup readiness. Admission remains owned by the same SiteGate as primary.
+func advance_mesh_preparation_viewer() -> void:
+	if main == null or not authority_ready or site_gate == null or not is_instance_valid(viewer) \
+			or not viewer.is_inside_tree() or int(viewer.view_distance) < FINAL_VIEW_DISTANCE \
+			or bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active")) \
+			or bool(main.get("shutdown_requested")):
+		_retire_mesh_preparation_viewer()
+		mesh_preparation_admission_reason = "not_playable"
+		return
+	var player_value = main.get("player")
+	if not (player_value is Node3D) or not is_instance_valid(player_value) \
+			or not (player_value as Node3D).is_inside_tree():
+		_retire_mesh_preparation_viewer()
+		mesh_preparation_admission_reason = "player_unavailable"
+		return
+	if not mesh_preparation_extension_checked:
+		mesh_preparation_extension_checked = true
+		var candidate := VoxelViewer.new()
+		for property_value in candidate.get_property_list():
+			if property_value is Dictionary and String(property_value.get("name", "")) == "requires_mesh_preparation":
+				mesh_preparation_extension_available = true
+				break
+		candidate.queue_free()
+	if not mesh_preparation_extension_available or not site_gate.has_method("request_optional_viewer"):
+		mesh_preparation_admission_reason = "native_mesh_preparation_unavailable"
+		return
+	var player_position: Vector3 = (player_value as Node3D).global_position
+	var target := foreground_viewer_target(player_position,foreground_collision_target,
+		int(viewer.view_distance)) if foreground_collision_target.is_finite() else player_position
+	var span := CELL * float(MESH_PREPARATION_REBASE_CELLS)
+	var cell := Vector3i(roundi(target.x/span),roundi(target.y/span),roundi(target.z/span))
+	var position := Vector3(float(cell.x)*span,float(cell.y)*span,float(cell.z)*span)
+	if is_instance_valid(mesh_preparation_viewer) and mesh_preparation_viewer.is_inside_tree() \
+			and cell == mesh_preparation_request_cell:
+		mesh_preparation_admission_reason = "attached"
+		return
+	mesh_preparation_last_pending_native_tasks = voxel_engine_pending_task_count()
+	if mesh_preparation_last_pending_native_tasks > MESH_PREPARATION_MAX_PENDING_NATIVE_TASKS \
+			or not secondary_viewer_admissions.is_empty() or _secondary_viewer_collision_coverage_pending():
+		mesh_preparation_backpressure_deferrals += 1
+		mesh_preparation_admission_reason = "native_or_collision_backpressure"
+		return
+	if not is_instance_valid(mesh_preparation_viewer):
+		mesh_preparation_viewer = VoxelViewer.new()
+		mesh_preparation_viewer.name = "OptionalMeshPreparationViewer"
+		mesh_preparation_viewer.view_distance = MESH_PREPARATION_VIEW_DISTANCE
+		mesh_preparation_viewer.view_distance_vertical_ratio = 1.0
+		mesh_preparation_viewer.requires_visuals = false
+		mesh_preparation_viewer.requires_collisions = false
+		mesh_preparation_viewer.set("requires_mesh_preparation",true)
+	mesh_preparation_admission_attempts += 1
+	var admission: Dictionary = site_gate.request_optional_viewer(mesh_preparation_viewer,
+		position,MESH_PREPARATION_VIEW_DISTANCE)
+	mesh_preparation_admission_reason = String(admission.get("reason", admission.get("status", "pending")))
+	if admission.get("status") == "ready":
+		mesh_preparation_request_cell = cell
+		mesh_preparation_admission_accepts += 1
+		mesh_preparation_admission_reason = "attached"
+		_record_native_viewer_request("mesh_preparation",MESH_PREPARATION_VIEW_DISTANCE,position)
+
+func _retire_mesh_preparation_viewer() -> void:
+	if is_instance_valid(mesh_preparation_viewer):
+		mesh_preparation_viewer.set("requires_mesh_preparation",false)
+		if site_gate != null: site_gate.remove_viewer(mesh_preparation_viewer)
+		mesh_preparation_viewer.queue_free()
+	mesh_preparation_viewer = null
+	mesh_preparation_request_cell = Vector3i(2147483000,2147483000,2147483000)
 
 
 ## An unchanged quantized request is complete only when the existing primary
@@ -1895,6 +1983,17 @@ func stats() -> Dictionary:
 		"secondaryViewerRuntimePeakPendingNativeTasks":secondary_viewer_runtime_peak_pending_tasks,
 		"secondaryViewerRuntimeAttachCounts":secondary_viewer_runtime_attach_counts.duplicate(),
 		"secondaryViewerAdmissionFailure":secondary_viewer_terminal_failure.duplicate(true),
+		"meshPreparationAvailable":mesh_preparation_extension_available,
+		"meshPreparationAttached":is_instance_valid(mesh_preparation_viewer) and mesh_preparation_viewer.is_inside_tree(),
+		"meshPreparationViewDistance":MESH_PREPARATION_VIEW_DISTANCE,
+		"meshPreparationRebaseCells":MESH_PREPARATION_REBASE_CELLS,
+		"meshPreparationRequestCell":mesh_preparation_request_cell,
+		"meshPreparationAdmissionReason":mesh_preparation_admission_reason,
+		"meshPreparationLastPendingNativeTasks":mesh_preparation_last_pending_native_tasks,
+		"meshPreparationNativeTaskCap":MESH_PREPARATION_MAX_PENDING_NATIVE_TASKS,
+		"meshPreparationAdmissionAttempts":mesh_preparation_admission_attempts,
+		"meshPreparationAdmissionAccepts":mesh_preparation_admission_accepts,
+		"meshPreparationBackpressureDeferrals":mesh_preparation_backpressure_deferrals,
 		"retainedActivationIntervalSeconds":RETAINED_ACTIVATION_INTERVAL_SECONDS,
 		"retainedViewDistance":RETAINED_VIEW_DISTANCE,
 		"citadelAdmission":main.structure_system.citadel_terrain_admission.stats() if main != null and main.structure_system != null else {},

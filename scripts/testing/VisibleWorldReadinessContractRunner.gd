@@ -4,6 +4,7 @@ const VisualReadinessScript := preload("res://scripts/world/VisibleWorldReadines
 const ChunkPropManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
 const HorizonPropCacheScript := preload("res://scripts/world/HorizonChunkPropManifestCache.gd")
 const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologySource.gd")
+const MainRuntimeToolsScript := preload("res://scripts/MainRuntimeTools.gd")
 const DetailBatchPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const TerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
@@ -37,6 +38,13 @@ class BenchmarkPublisher extends RefCounted:
 			_metadata: Dictionary, _representation_id: String, _tier: String) -> bool:
 		validation_count += 1
 		return installed
+
+class OverlapProducerValidator extends RefCounted:
+	var current := true
+
+	func visual_structure_candidate_is_current(_candidate_id: String,
+			_metadata: Dictionary, _receipt: Dictionary) -> bool:
+		return current
 
 class HorizonPropCacheWorldFixture extends RefCounted:
 	var revision := 1
@@ -254,8 +262,10 @@ func run() -> void:
 	await test_production_chunk_prop_manifest()
 	await test_horizon_prop_candidate_snapshot_cache()
 	test_horizon_ecology_owner_lifetime()
+	test_physical_prop_ring_priority()
 	test_horizon_ordinary_visual_range_receipt()
 	await test_receipts_are_request_revision_tier_and_installation_bound()
+	await test_installed_renderable_leaf_receipt_revalidation()
 	await test_bounded_overlap_transfer_revalidates_receipts()
 	test_candidate_accounting_and_explicit_failure()
 	write_report()
@@ -511,6 +521,50 @@ func test_horizon_ecology_owner_lifetime() -> void:
 	main.queue_free()
 
 
+func test_physical_prop_ring_priority() -> void:
+	var current := Vector2i(1, 0)
+	var ring_left := Vector2i(-3, 2)
+	var ring_right := Vector2i(2, 2)
+	var outside := Vector2i(3, 3)
+	var pending := {}
+	var physical := {}
+	for key in [current, ring_left, ring_right, outside]:
+		var chunk := Node3D.new()
+		root.add_child(chunk)
+		physical[key] = chunk
+		pending[key] = {"chunk": chunk}
+	var ranked: Array[Vector2i] = [current]
+	var visible: Array[Vector2i] = MainRuntimeToolsScript.physical_prop_visible_pending_keys(
+		pending, physical, ranked, Rect2i(-1, -1, 3, 3), 28)
+	var ring: Dictionary = MainRuntimeToolsScript.physical_prop_ring_priority(
+		pending, physical, ranked, Vector3.ZERO, 1.35, 28, 96.0, 112.0, 1)
+	var ring_keys: Array[Vector2i] = ring["keys"]
+	_check("physical_prop_ring_keeps_current_visible_first", visible == [current]
+		and not ring_keys.has(current))
+	_check("physical_prop_ring_waits_for_current_producer_slices",
+		MainRuntimeToolsScript.physical_prop_work_lane(1, 0, 2, 1) == "current_physical"
+		and MainRuntimeToolsScript.physical_prop_work_lane(0, 1, 2, 1) == "horizon"
+		and MainRuntimeToolsScript.physical_prop_work_lane(1, 1, 2, 3) == "horizon"
+		and MainRuntimeToolsScript.physical_prop_work_lane(0, 0, 2, 1) == "ring"
+		and MainRuntimeToolsScript.physical_prop_work_lane(1, 1, 0, 4) == "current_physical")
+	_check("physical_prop_ring_is_bounded_and_deterministic",
+		int(ring.eligibleCount) == 2 and ring_keys == [ring_left])
+	physical[ring_left] = Node3D.new()
+	var stale: Dictionary = MainRuntimeToolsScript.physical_prop_ring_priority(
+		pending, physical, ranked, Vector3.ZERO, 1.35, 28, 96.0, 112.0, 1)
+	_check("physical_prop_ring_requires_current_chunk_owner",
+		int(stale.eligibleCount) == 1 and stale["keys"] == [ring_right])
+	var right_chunk: Node3D = physical[ring_right]
+	right_chunk.set_meta("chunk_surface_candidate_scan_complete", true)
+	var completed: Dictionary = MainRuntimeToolsScript.physical_prop_ring_priority(
+		pending, physical, ranked, Vector3.ZERO, 1.35, 28, 96.0, 112.0, 1)
+	_check("physical_prop_ring_stops_after_surface_source_completion",
+		int(completed.eligibleCount) == 0 and completed["keys"].is_empty())
+	for chunk in pending.values():
+		(chunk["chunk"] as Node3D).queue_free()
+	(physical[ring_left] as Node3D).queue_free()
+
+
 func test_horizon_ordinary_visual_range_receipt() -> void:
 	var main := HorizonMainFixture.new()
 	main.chunk_root = Node3D.new()
@@ -706,6 +760,11 @@ func test_candidate_must_belong_to_declared_source_footprint() -> void:
 
 
 func test_surface_prop_source_completes_before_underground_scan() -> void:
+	_check("underground_visuals_require_player_below_generated_surface",
+		ChunkPropManifestScript.underground_visuals_required(5.0, 6.0, 1.35) \
+		and not ChunkPropManifestScript.underground_visuals_required(6.0, 6.0, 1.35) \
+		and not ChunkPropManifestScript.underground_visuals_required(8.0, 6.0, 1.35) \
+		and not ChunkPropManifestScript.underground_visuals_required(NAN, 6.0, 1.35))
 	var chunk := Node3D.new()
 	chunk.name = "SurfaceSourceFixture"
 	root.add_child(chunk)
@@ -729,7 +788,8 @@ func test_surface_prop_source_completes_before_underground_scan() -> void:
 		"surface-seed", "full-rev-1", true, 1.35)
 	_check("later_underground_publication_does_not_change_surface_manifest",
 		unchanged_surface.sourceRevision == completed_surface.sourceRevision \
-		and unchanged_surface.candidateCount == 1 and completed_full.candidateCount == 2,
+		and unchanged_surface.candidateCount == 1 and completed_full.candidateCount == 2 \
+		and completed_full.sourceRevision != completed_surface.sourceRevision,
 		{"surfaceCandidates": unchanged_surface.candidateCount,
 			"fullCandidates": completed_full.candidateCount})
 	chunk.queue_free()
@@ -872,6 +932,26 @@ func test_installed_detail_batch_receipts() -> void:
 		distant_revision, bounds, Vector3(80.0, 0.0, 0.0))
 	_check("detail_outside_existing_visibility_range_is_not_a_horizon_obligation",
 		culled.status == "ready" and culled.candidateCount == 0)
+	# The renderer culls a MultiMesh by its GeometryInstance3D origin, even when
+	# one transformed instance lies inside the distance. That instance must not
+	# hold scene readiness open while its owning batch is culled.
+	batch.position = Vector3(80.0, 0.0, 0.0)
+	instances.set_instance_transform(0,
+		Transform3D(Basis.IDENTITY, Vector3(-80.0, 0.0, 0.0)))
+	instances.set_instance_transform(1,
+		Transform3D(Basis.IDENTITY, Vector3(-77.3, 0.0, 0.0)))
+	publisher.configure(batch, "grass")
+	var offset_manifest: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
+		"detail-seed", "detail-scan-2", true, 1.35, true)
+	var offset_book = VisualReadinessScript.new()
+	var offset_revision := int(offset_book.begin_view(99, "detail-seed", "detail-world-1",
+		bounds, bounds, Vector2.ZERO, 5.0).viewRevision)
+	var batch_culled: Dictionary = ChunkPropManifestScript.submit(offset_manifest,
+		offset_book, offset_revision, bounds, Vector3.ZERO)
+	_check("detail_inside_instance_in_culled_batch_is_not_a_readiness_obligation",
+		offset_manifest.status == "ready" and batch_culled.status == "ready"
+		and batch_culled.candidateCount == 0,
+		{"manifest": offset_manifest, "submit": batch_culled})
 	batch.queue_free()
 	await process_frame
 	var missing_batch: Dictionary = ChunkPropManifestScript.capture(chunk, Vector2i.ZERO,
@@ -1189,7 +1269,7 @@ func test_production_chunk_prop_manifest() -> void:
 		"seed-props", "source-rev-1", true, 1.35)
 	_check("large_chunk_candidate_revision_is_bounded_and_deterministic",
 		bounded_revision_a.sourceRevision == bounded_revision_b.sourceRevision \
-		and String(bounded_revision_a.sourceRevision).length() == "source-rev-1:sha256:".length() + 64 \
+		and String(bounded_revision_a.sourceRevision).length() == "source-rev-1:full:sha256:".length() + 64 \
 		and int(bounded_revision_a.candidateCount) == 132,
 		{"revisionLength": String(bounded_revision_a.sourceRevision).length(),
 		"candidateCount": bounded_revision_a.candidateCount})
@@ -1731,6 +1811,73 @@ func test_receipts_are_request_revision_tier_and_installation_bound() -> void:
 	await process_frame
 
 
+func test_installed_renderable_leaf_receipt_revalidation() -> void:
+	var book = VisualReadinessScript.new()
+	var revision := int(book.begin_view(199, "leaf-seed", "leaf-world", BOUNDS,
+		NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	_declare_sources(book, revision, BOUNDS)
+	# The source was already completed by the empty helper; use a separate
+	# revision-bound source that owns the candidate and its representation.
+	book.expect_source("leaf:props", "props", "leaf-owner", "leaf-rev-1",
+		Rect2i(2, 0, 2, 2), revision)
+	book.describe_candidate("leaf:props", "leaf:rock", "horizon",
+		{"positionXZ": Vector2(2.5, 0.5)})
+	book.finish_source("leaf:props", "leaf-owner", "leaf-rev-1", revision)
+	var owner := Node3D.new()
+	root.add_child(owner)
+	var representation := Node3D.new()
+	owner.add_child(representation)
+	for index in 128:
+		var empty := Node3D.new()
+		empty.name = "Empty%d" % index
+		representation.add_child(empty)
+	var leaf := MeshInstance3D.new()
+	leaf.mesh = BoxMesh.new()
+	representation.add_child(leaf)
+	await process_frame
+	var receipt: Dictionary = book.accept_receipt("leaf:props", "leaf:rock",
+		"leaf:rock:installed", "horizon", "leaf-owner", "leaf-rev-1",
+		revision, owner, representation)
+	var ready: Dictionary = book.region_readiness(199, "leaf-seed", "leaf-world",
+		revision, BOUNDS)
+	_check("concrete_installed_renderable_leaf_is_accepted",
+		receipt.status == "ready" and ready.status == "ready", ready)
+	leaf.visible = false
+	var hidden: Dictionary = book.region_readiness(199, "leaf-seed", "leaf-world",
+		revision, BOUNDS)
+	_check("hidden_receipted_leaf_invalidates_immediately",
+		hidden.status == "pending" and int(hidden.pendingCount) == 1, hidden)
+	leaf.visible = true
+	leaf.mesh = null
+	var mesh_removed: Dictionary = book.region_readiness(199, "leaf-seed", "leaf-world",
+		revision, BOUNDS)
+	_check("cleared_receipted_mesh_invalidates_immediately",
+		mesh_removed.status == "pending" and int(mesh_removed.pendingCount) == 1,
+		mesh_removed)
+	leaf.mesh = BoxMesh.new()
+	var restored: Dictionary = book.region_readiness(199, "leaf-seed", "leaf-world",
+		revision, BOUNDS)
+	_check("same_live_leaf_recovers_without_source_rebuild", restored.status == "ready",
+		restored)
+	var replacement := MeshInstance3D.new()
+	replacement.mesh = BoxMesh.new()
+	representation.add_child(replacement)
+	leaf.queue_free()
+	await process_frame
+	var replaced: Dictionary = book.region_readiness(199, "leaf-seed", "leaf-world",
+		revision, BOUNDS)
+	_check("different_renderable_does_not_borrow_retired_leaf_receipt",
+		replaced.status == "pending" and int(replaced.pendingCount) == 1, replaced)
+	var refreshed: Dictionary = book.accept_receipt("leaf:props", "leaf:rock",
+		"leaf:rock:installed", "horizon", "leaf-owner", "leaf-rev-1",
+		revision, owner, representation)
+	_check("same_source_can_acknowledge_replacement_leaf",
+		refreshed.status == "ready" and book.region_readiness(199, "leaf-seed",
+			"leaf-world", revision, BOUNDS).status == "ready", refreshed)
+	owner.queue_free()
+	await process_frame
+
+
 func test_bounded_overlap_transfer_revalidates_receipts() -> void:
 	var source_bounds := Rect2i(2, 0, 2, 2)
 	var old = VisualReadinessScript.new()
@@ -1769,6 +1916,18 @@ func test_bounded_overlap_transfer_revalidates_receipts() -> void:
 		completed.status == "ready" and completed.copiedCandidates == 2 \
 		and completed.viewRevision == shifted_revision and shifted_revision > old_revision \
 		and shifted.has_candidate("overlap:props", "overlap-prop:1"), completed)
+	var changed_owner_view = VisualReadinessScript.new()
+	var changed_owner_revision := int(changed_owner_view.begin_view(200, "overlap-seed",
+		"overlap-world", shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)
+	var producer_validator := OverlapProducerValidator.new()
+	producer_validator.current = false
+	var changed_owner: Dictionary = changed_owner_view.transfer_complete_overlap_source(old,
+		"overlap:props", "overlap-owner", "overlap-rev-1", changed_owner_revision,
+		64, producer_validator)
+	_check("producer_owner_slot_change_rejects_overlap_receipt_transfer",
+		changed_owner.status == "pending"
+		and changed_owner.reason == "visual_overlap_producer_candidate_changed"
+		and not changed_owner_view.has_candidate("overlap:props", "overlap-prop:0"), changed_owner)
 	var wrong_request = VisualReadinessScript.new()
 	var wrong_revision := int(wrong_request.begin_view(201, "overlap-seed", "overlap-world",
 		shifted_bounds, NEAR_BOUNDS, shifted_center, VIEW_RADIUS).viewRevision)

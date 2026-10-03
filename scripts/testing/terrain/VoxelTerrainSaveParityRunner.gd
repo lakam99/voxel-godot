@@ -1,4 +1,4 @@
-extends SceneTree
+extends Node3D
 
 const MAIN_SCENE: PackedScene = preload("res://scenes/Main.tscn")
 const CELL := 1.35
@@ -10,7 +10,7 @@ var results: Array[Dictionary] = []
 var target_cell := Vector3i.ZERO
 var owned_main: Node3D = null
 
-func _init() -> void:
+func _ready() -> void:
 	call_deferred("run")
 
 func run() -> void:
@@ -19,6 +19,13 @@ func run() -> void:
 	if seed == "":
 		seed = "atlas-31684266"
 	var stage := OS.get_environment("VOXEL_TERRAIN_SAVE_PARITY_STAGE")
+	var renderer_name := DisplayServer.get_name()
+	if renderer_name.to_lower() == "headless":
+		add_result("visible_renderer_available", false,
+			"A headless renderer omits tree meshes; visual readiness requires a scene runner.")
+		finish(stage)
+		return
+	add_result("visible_renderer_available", true, renderer_name)
 	if stage == "read":
 		await run_read_stage()
 	else:
@@ -62,16 +69,52 @@ func boot_main(mode: String) -> Node3D:
 	var main := MAIN_SCENE.instantiate() as Node3D
 	owned_main = main
 	main.set("startup_mode", mode)
-	root.add_child(main)
+	var launch_options: Dictionary = main.get("launch_options").duplicate(true)
+	launch_options["skipTutorial"] = true
+	main.set("launch_options", launch_options)
+	add_child(main)
 	if not await main.wait_for_startup_loading_complete():
-		add_result("startup_loading_complete", false, JSON.stringify({"mode": mode, "startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+		var timeline: Array = main.get("startup_loading_timeline") if main.get("startup_loading_timeline") is Array else []
+		var last_step: Dictionary = timeline.back() if not timeline.is_empty() else {}
+		add_result("startup_loading_complete", false, JSON.stringify({
+			"mode": mode,
+			"startup_loading_failure_result": main.get("startup_loading_failure_result"),
+			"startupLoadingActive": bool(main.get("startup_loading_active")),
+			"lastStartupStep": last_step,
+			"pendingVisualDiagnostics": _pending_visual_diagnostics(main)
+		}))
 		return null
+	add_result("startup_loading_complete", true, JSON.stringify({
+		"mode": mode,
+		"renderer": DisplayServer.get_name()
+	}))
 	if not bool(main.call("ensure_voxel_terrain_authority")):
 		return null
 	var cell := find_surface_solid_cell(main)
 	var chunk_key: Vector2i = main.call("cell_to_chunk", cell.x, cell.z)
 	main.call("create_chunk", chunk_key.x, chunk_key.y, true)
 	return main
+
+func _pending_visual_diagnostics(main: Node) -> Dictionary:
+	var result := {"startupLedger": [], "demandController": []}
+	var runtime: Object = main.get("voxel_terrain_runtime")
+	var world_revision := String(runtime.call("visible_mesh_world_revision")) \
+		if is_instance_valid(runtime) and runtime.has_method("visible_mesh_world_revision") else ""
+	var requests: Dictionary = main.get("streaming_requests")	
+	var request_id := int(requests.get("player", 0))
+	var seed_text := String(main.get("seed_text"))
+	var ledger: Object = main.get("visible_world_readiness")
+	var bounds_by_owner: Dictionary = main.get("streaming_request_foreground_bounds")
+	var bounds: Rect2i = bounds_by_owner.get("player", Rect2i())
+	var view_revision := int(main.get("visible_world_view_revision"))
+	if is_instance_valid(ledger) and ledger.has_method("pending_candidate_diagnostics"):
+		result.startupLedger = ledger.call("pending_candidate_diagnostics", request_id,
+			seed_text, world_revision, view_revision, bounds, 20)
+	var controller: Object = main.get("visible_world_demand_controller")
+	if is_instance_valid(controller) and controller.has_method("pending_representation_diagnostics"):
+		result.demandController = controller.call("pending_representation_diagnostics",
+			"player", request_id, seed_text, world_revision, 20)
+	return result
 
 func find_surface_solid_cell(main: Node3D) -> Vector3i:
 	var world_generation = main.get("world_generation_system")
@@ -124,7 +167,7 @@ func wait_for_voxel_state(main: Node3D, cell: Vector3i, expected_solid: bool) ->
 					"materialIndex": material_index,
 					"pendingEditSections": int(runtime_stats.get("pendingEditSections", 0))
 				}
-		await process_frame
+		await get_tree().process_frame
 	return {
 		"passed": false,
 		"reason": "voxel_state_timeout",
@@ -176,7 +219,7 @@ func finish(stage := "") -> void:
 	if is_instance_valid(owned_main):
 		owned_main.call("request_graceful_quit", 0 if passed else 1)
 	else:
-		quit(0 if passed else 1)
+		get_tree().quit(0 if passed else 1)
 
 func vec3i(value: Vector3i) -> Dictionary:
 	return {"x": value.x, "y": value.y, "z": value.z}

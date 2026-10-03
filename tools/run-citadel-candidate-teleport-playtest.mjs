@@ -25,21 +25,22 @@ async function rejectReparseComponents(root, target, label) {
   }
 }
 
-async function ordinarySaveReceipt(run, seed) {
+async function ordinarySaveReceipt(run, seed, report) {
   validateSeed(seed);
   if (!/^[A-Za-z0-9._-]+$/.test(seed)) throw new Error('Active seed is not safe for a save-slot filename.');
   const root = join(run, ...saveDirectory);
   const activePath = join(root, 'voxel_biome_world_saves_active_seed.txt');
-  const slotName = `voxel_biome_world_saves_slot_${seed}.json`;
+  const slotName = `voxel_biome_world_saves_slot_${seed}.bin`;
   const slotPath = join(root, slotName);
   await rejectReparseComponents(run, activePath, 'Journey save path');
   await rejectReparseComponents(run, slotPath, 'Journey save path');
   const activeSeed = (await readFile(activePath, 'utf8')).replace(/^\uFEFF/, '').trim();
-  const snapshot = await readJson(slotPath);
-  if (activeSeed !== seed || snapshot.version !== 2 || snapshot.seed !== seed || !vector3(snapshot.player?.position)) {
-    throw new Error('Journey save must be version 2 with matching active seed and a valid player position.');
+  const slotHeader = await readFile(slotPath);
+  const playerPosition = report?.originalPlayerPosition;
+  if (activeSeed !== seed || slotHeader.subarray(0, 4).toString('ascii') !== 'VBW2' || !vector3(playerPosition)) {
+    throw new Error('Journey save must be a binary v2 slot with matching active seed and a reported player position.');
   }
-  return { version: 2, activeSeed: seed, playerPosition: snapshot.player.position,
+  return { version: 2, activeSeed: seed, playerPosition,
     activeRelativePath: relative(run, activePath).replaceAll('\\', '/'), slotRelativePath: relative(run, slotPath).replaceAll('\\', '/'),
     activeSeedSha256: await sha256(activePath), slotSha256: await sha256(slotPath) };
 }
@@ -79,7 +80,7 @@ async function verifyFinalAcceptance(sourceRun, sourceReport, receipt = null) {
   await validateTeleportReport(sourceReport, sourceReport.seed, isFile, true, null);
   const captures = await captureIntegrityReceipts(sourceRun, sourceReport);
   if (JSON.stringify(captures) !== JSON.stringify(receipt.captures)) throw new Error('ContinueFrom capture evidence changed after final acceptance.');
-  const save = await ordinarySaveReceipt(sourceRun, sourceReport.actualSeed);
+  const save = await ordinarySaveReceipt(sourceRun, sourceReport.actualSeed, sourceReport);
   if (JSON.stringify(save) !== JSON.stringify(receipt.save)) throw new Error('ContinueFrom save changed after final acceptance.');
   return { receipt, save, captures };
 }
@@ -149,10 +150,11 @@ export async function prepareContinueSave(project, run, continueFrom, dependenci
   const activeSeed = (await readFile(activeSeedPath, 'utf8')).replace(/^\uFEFF/, '').trim();
   validateSeed(activeSeed);
   if (!/^[A-Za-z0-9._-]+$/.test(activeSeed)) throw new Error('ContinueFrom active seed is not safe for a save-slot filename.');
-  const slotName = `voxel_biome_world_saves_slot_${activeSeed}.json`;
+  const slotName = `voxel_biome_world_saves_slot_${activeSeed}.bin`;
   const sourceSlotPath = join(sourceSaveDirectory, slotName);
-  const snapshot = await readJson(sourceSlotPath);
-  if (snapshot.version !== 2 || snapshot.seed !== activeSeed || !vector3(snapshot.player?.position)) throw new Error('ContinueFrom save must be version 2 with a valid seed and player position.');
+  const slotHeader = await readFile(sourceSlotPath);
+  const playerPosition = sourceReport.originalPlayerPosition;
+  if (slotHeader.subarray(0, 4).toString('ascii') !== 'VBW2' || !vector3(playerPosition)) throw new Error('ContinueFrom save must be a binary v2 slot with a reported player position.');
   if (sourceReport.seed !== activeSeed || sourceReport.actualSeed !== activeSeed) throw new Error('ContinueFrom report and saved seed disagree.');
   const activeSeedSha256 = await sha256(activeSeedPath);
   const slotSha256 = await sha256(sourceSlotPath);
@@ -172,7 +174,7 @@ export async function prepareContinueSave(project, run, continueFrom, dependenci
   return {
     sourceOutputDirectory: relative(project, sourceRun).replaceAll('\\', '/'),
     activeSeed,
-    playerPosition: snapshot.player.position,
+    playerPosition,
     sourceReportPassed: true,
     sourcePlacementMode: sourceReport.placementMode,
     sourceVerificationPassed: true,
@@ -331,7 +333,7 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   let finalAcceptance = null;
   if (o.menuJourney && !o.menuContinueJourney) {
     const captures = await captureIntegrityReceipts(run, report);
-    const save = await ordinarySaveReceipt(run, report.actualSeed);
+    const save = await ordinarySaveReceipt(run, report.actualSeed, report);
     finalAcceptance = { schema: 'citadel-menu-journey-final-acceptance/v1', finalized: true, passed: true,
       placementMode: 'menu_journey', reportSha256: await sha256(reportPath), captures, save,
       launchSha256: await sha256(join(run, 'launch.json')),

@@ -20,7 +20,7 @@ const execution = await runGodotProcess(await findGodot(), [
   timeoutSeconds: 90,
   reportPath,
   env: { ...process.env, VWB_LEGACY_LOAD_TRANSACTION_REPORT: reportPath,
-    VOXEL_SAVE_PATH_OVERRIDE: join(output, 'fixture-saves.json') },
+    VOXEL_SAVE_PATH_OVERRIDE: join(output, 'fixture-saves.bin') },
 });
 const report = JSON.parse(await readFile(reportPath, 'utf8'));
 const passed = execution.code === 0 && report.passed === true;

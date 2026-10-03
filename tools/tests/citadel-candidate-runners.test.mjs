@@ -40,9 +40,9 @@ async function createContinueSource(project, name, overrides = {}) {
   await writeJson(join(source, 'launch.json'), { placementMode: 'menu_journey', binaries: fixtureBinaries(), ...(sourceHashes ? { sourceHashes } : {}), ...overrides.launch });
   if (overrides.audit !== false) await writeJson(join(source, 'source-hash-audit.json'), { unchanged: true, changedSources: [], readErrors: [], finalSourceHashes: sourceHashes ?? {}, ...overrides.audit });
   await writeFile(join(saveRoot, 'voxel_biome_world_saves_active_seed.txt'), 'atlas-123\n');
-  await writeJson(join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.json'), { version: 2, seed: 'atlas-123', player: { position: [1, 2, 3] }, durable: { unchanged: true }, ...overrides.save });
+  await writeFile(join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin'), overrides.slotBytes ?? Buffer.concat([Buffer.from('VBW2'), Buffer.from([0, 0, 0, 0])]));
   if (overrides.acceptance !== false) {
-    const slotPath = join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.json');
+    const slotPath = join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin');
     const activePath = join(saveRoot, 'voxel_biome_world_saves_active_seed.txt');
     await writeJson(join(source, 'final-acceptance.json'), {
       schema: 'citadel-menu-journey-final-acceptance/v1', finalized: true, passed: true, placementMode: 'menu_journey',
@@ -50,7 +50,7 @@ async function createContinueSource(project, name, overrides = {}) {
       captures: [{ relativePath: 'capture.png', bytes: (await readFile(capturePath)).length, sha256: await sha256(capturePath) }],
       save: { version: 2, activeSeed: 'atlas-123', playerPosition: [1, 2, 3],
         activeRelativePath: 'userdata/Godot/app_userdata/Voxel Biome World Godot/voxel_biome_world_saves_active_seed.txt',
-        slotRelativePath: 'userdata/Godot/app_userdata/Voxel Biome World Godot/voxel_biome_world_saves_slot_atlas-123.json',
+        slotRelativePath: 'userdata/Godot/app_userdata/Voxel Biome World Godot/voxel_biome_world_saves_slot_atlas-123.bin',
         activeSeedSha256: await sha256(activePath), slotSha256: await sha256(slotPath) },
       launchSha256: await sha256(join(source, 'launch.json')),
       verificationSha256: await sha256(join(source, 'verification.json')),
@@ -178,7 +178,8 @@ test('continue preparation copies only the active ordinary save with immutable p
   assert.equal(receipt.currentSourceParityChecked, true);
   const copiedRoot = join(destination, 'userdata/Godot/app_userdata/Voxel Biome World Godot');
   assert.equal((await readFile(join(copiedRoot, 'voxel_biome_world_saves_active_seed.txt'), 'utf8')).trim(), 'atlas-123');
-  assert.deepEqual(await readJson(join(copiedRoot, 'voxel_biome_world_saves_slot_atlas-123.json')), { version: 2, seed: 'atlas-123', player: { position: [1, 2, 3] }, durable: { unchanged: true } });
+  assert.deepEqual(await readFile(join(copiedRoot, 'voxel_biome_world_saves_slot_atlas-123.bin')),
+    await readFile(join(source.saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin')));
   assert.equal(receipt.saveVersion, 2);
   await assert.rejects(readFile(join(copiedRoot, 'unrelated-cache.bin')));
   await assert.rejects(prepareContinueSave(project, destination, '../menu-journey-escape'));
@@ -220,10 +221,10 @@ test('continue preparation fails closed without source parity, clean audit, exac
   const missingAuditDestination = join(project, 'artifacts/citadel-runtime-integration/menu-journey-destination-missing-audit');
   await mkdir(missingAuditDestination, { recursive: true });
   await assert.rejects(prepareFixtureContinue(project, missingAuditDestination, 'artifacts/citadel-runtime-integration/menu-journey-missing-audit', missingAudit.sourceHashes), /audit is missing/);
-  const v1 = await createContinueSource(project, 'menu-journey-v1', { save: { version: 1 } });
+  const v1 = await createContinueSource(project, 'menu-journey-invalid-binary', { slotBytes: Buffer.from('invalid') });
   const v1Destination = join(project, 'artifacts/citadel-runtime-integration/menu-journey-destination-v1');
   await mkdir(v1Destination, { recursive: true });
-  await assert.rejects(prepareFixtureContinue(project, v1Destination, 'artifacts/citadel-runtime-integration/menu-journey-v1', v1.sourceHashes), /version 2/);
+  await assert.rejects(prepareFixtureContinue(project, v1Destination, 'artifacts/citadel-runtime-integration/menu-journey-invalid-binary', v1.sourceHashes), /binary v2 slot/);
   const mismatch = await createContinueSource(project, 'menu-journey-inventory-mismatch');
   const mismatchDestination = join(project, 'artifacts/citadel-runtime-integration/menu-journey-destination-inventory-mismatch');
   await mkdir(mismatchDestination, { recursive: true });
@@ -240,7 +241,7 @@ test('continue source acceptance is final-only and rejects post-run report, capt
     const source = await createContinueSource(project, `menu-journey-mutated-${mutation}`);
     if (mutation === 'report') await writeFile(join(source.source, 'report.json'), '{}');
     if (mutation === 'capture') await writeFile(source.capturePath, 'changed capture');
-    if (mutation === 'save') await writeFile(join(source.saveRoot, 'voxel_biome_world_saves_slot_atlas-123.json'), '{}');
+    if (mutation === 'save') await writeFile(join(source.saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin'), 'invalid');
     if (mutation === 'verification') await writeFile(join(source.source, 'verification.json'), '{}');
     if (mutation === 'audit') await writeFile(join(source.source, 'source-hash-audit.json'), '{}');
     const destination = join(project, `artifacts/citadel-runtime-integration/menu-journey-destination-mutated-${mutation}`);
@@ -566,7 +567,7 @@ test('menu New Game writes final acceptance only after outer validation and free
         await writeJson(join(run, 'report.json'), report);
         const saveRoot = join(run, 'userdata/Godot/app_userdata/Voxel Biome World Godot'); await mkdir(saveRoot, { recursive: true });
         await writeFile(join(saveRoot, 'voxel_biome_world_saves_active_seed.txt'), 'atlas-123\n');
-        await writeJson(join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.json'), { version: 2, seed: 'atlas-123', player: { position: [1, 2, 3] } });
+        await writeFile(join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin'), Buffer.concat([Buffer.from('VBW2'), Buffer.from([0, 0, 0, 0])]));
         return { ...goodOwned, rootExited: true, forcedCleanup: false, timedOut: false, functionalExitCode: 0 };
       },
     });

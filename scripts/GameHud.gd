@@ -116,6 +116,9 @@ var sleep_fade_overlay: ColorRect
 var sleep_fade_tween: Tween
 var loading_overlay: Control
 var loading_label: Label
+var loading_progress_bar: ProgressBar
+var loading_elapsed := 0.0
+var loading_base_message := "Loading"
 var icon_cache := {}
 var icon_factory
 var hotbar_slot_buttons: Array[Button] = []
@@ -163,7 +166,11 @@ func is_sleep_fading() -> bool:
 func show_loading_overlay(message := "Loading") -> void:
     if loading_overlay == null or loading_label == null:
         return
+    loading_elapsed = 0.0
+    loading_base_message = message
     loading_label.text = message
+    if loading_progress_bar != null:
+        loading_progress_bar.visible = false
     loading_overlay.visible = true
 
 func hide_loading_overlay() -> void:
@@ -171,8 +178,16 @@ func hide_loading_overlay() -> void:
         loading_overlay.visible = false
 
 func set_loading_message(message: String) -> void:
+    loading_base_message = message
     if loading_label != null:
         loading_label.text = message
+
+func set_loading_progress(message: String, completed: int, total: int) -> void:
+    set_loading_message(message)
+    if loading_progress_bar == null or not is_instance_valid(loading_progress_bar):
+        return
+    loading_progress_bar.visible = total > 0
+    loading_progress_bar.value = clampf(float(completed) / float(maxi(1, total)), 0.0, 1.0)
 
 func set_status(seed_text: String, biome: String, chunk_count: int, coords: Vector2, time_text: String, weather_state := {}) -> void:
     GameHudRendererScript.set_status(self, seed_text, biome, chunk_count, coords, time_text, weather_state)
@@ -613,6 +628,11 @@ func show_objective_complete(label: String) -> void:
 
 func _process(delta: float) -> void:
     GameHudOverlayControllerScript.process(self, delta)
+    if loading_overlay != null and loading_overlay.visible and loading_label != null:
+        loading_elapsed += maxf(delta, 0.0)
+        var seconds := int(loading_elapsed)
+        var dots := ".".repeat(int(floor(loading_elapsed * 2.0)) % 4)
+        loading_label.text = "%s%s · %02d:%02d" % [loading_base_message, dots, seconds / 60, seconds % 60]
 
 func render() -> void:
     GameHudRendererScript.render(self)

@@ -3,6 +3,7 @@ extends SceneTree
 const ControllerScript := preload("res://scripts/world/VisibleWorldDemandController.gd")
 const TerrainManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const ReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
+const StructureManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const REPORT_ENV := "VOXEL_VISIBLE_PREDICTIVE_DEMAND_REPORT"
 
 class TerrainRuntime extends RefCounted:
@@ -52,6 +53,77 @@ class HorizonPublisher extends RefCounted:
 			_metadata: Dictionary, _representation_id: String, _tier: String) -> bool:
 		return installed
 
+class PropReadinessMain extends RefCounted:
+	var ready: Dictionary = {}
+	func chunk_prop_visual_source_scan_complete(key: Vector2i,
+			_near_bounds: Rect2i) -> bool:
+		return bool(ready.get(key, false))
+
+class UndergroundModeMain extends RefCounted:
+	func visible_world_underground_visuals_required() -> bool:
+		return true
+
+class PrefetchCapture extends RefCounted:
+	var source: Object
+	var bounds := Rect2i()
+	var current := true
+	func eligible_for(owner: Object, requested_bounds: Rect2i) -> bool:
+		return current and source == owner and bounds == requested_bounds
+	func advance(_max_atoms: int, _max_usec: int) -> Dictionary:
+		return {"status": "described", "sourceRevision": "prefetched",
+			"candidates": [], "sliceUsec": 1}
+
+class PrefetchSource extends RefCounted:
+	func begin_region_ordinary_visual_source_capture(bounds: Rect2i) -> Object:
+		var capture := PrefetchCapture.new()
+		capture.source = self
+		capture.bounds = bounds
+		return capture
+
+class StructureProducer extends RefCounted:
+	var ordinary_visual_revision := 1
+	var capture_begins := 0
+
+	func region_publication_readiness(_bounds: Rect2i) -> Dictionary:
+		return {"status": "ready"}
+
+	func region_dependency_requirements(_bounds: Rect2i) -> Dictionary:
+		return {"status": "described"}
+
+	func region_dependency_revision(_bounds: Rect2i) -> Array:
+		return ["dependency", 1]
+
+	func region_citadel_visual_source(_bounds: Rect2i) -> Dictionary:
+		return {"status": "described", "descriptionComplete": true,
+			"sourceRevision": "citadel:1"}
+
+	func region_ordinary_visual_source(_bounds: Rect2i) -> Dictionary:
+		return {"status": "described", "sourceRevision": "ordinary:1",
+			"candidates": []}
+
+	func region_dependency_scheduling_revision(_bounds: Rect2i) -> Array:
+		return ["dependency", 1]
+
+	func begin_region_ordinary_visual_source_capture(bounds: Rect2i) -> Object:
+		capture_begins += 1
+		var capture := StructureCapture.new()
+		capture.source = self
+		capture.bounds = bounds
+		return capture
+
+	func visual_structure_candidate_is_current(_candidate_id: String,
+			_metadata: Dictionary, _receipt: Dictionary) -> bool:
+		return true
+
+class StructureCapture extends RefCounted:
+	var source: Object
+	var bounds := Rect2i()
+	func eligible_for(owner: Object, requested_bounds: Rect2i) -> bool:
+		return owner == source and requested_bounds == bounds
+	func advance(_max_atoms: int, _max_usec: int) -> Dictionary:
+		return {"status": "pending", "reason": "ordinary_visual_capture_budget",
+			"retryable": true}
+
 var checks: Array = []
 
 func _initialize() -> void:
@@ -59,11 +131,18 @@ func _initialize() -> void:
 
 func _run() -> void:
 	_test_early_all_direction_demand()
+	_test_underground_mode_rebuilds_visual_sources()
 	_test_full_view_promotion()
 	_test_unsubmitted_chunk_sources_do_not_complete_view()
 	_test_stale_native_receipt_without_signal()
 	_test_bounded_chunk_diagnostics()
 	_test_retained_chunk_keys()
+	_test_superseded_retention_is_bounded()
+	_test_expired_source_deadline_retains_work()
+	_test_ranked_chunk_disk_intersection()
+	_test_ready_prop_source_admission()
+	_test_background_structure_prefetch()
+	_test_structure_overlap_transfer_requires_current_proof()
 	await _test_tree_receipt_handoff_across_views()
 	var passed := true
 	for check: Dictionary in checks:
@@ -116,6 +195,32 @@ func _test_early_all_direction_demand() -> void:
 		and pending.get("bounds", Rect2i()).has_point(Vector2i(32, 0)))
 	_check("predictive_demand_does_not_claim_source_ready",
 		controller.full_view_readiness("player", 7, "pinned", "mock-world-1").status == "pending")
+	var first_keys: Array[Vector2i] = pending.chunkKeys
+	var first_revision: int = pending.demandRevision
+	var shifted_near: Dictionary = controller.ensure(main, runtime, "player", 7,
+		"pinned", "mock-world-1", Vector3(20, 0, 0),
+		Rect2i(18, -2, 4, 4), 20.0, 1.0, 4)
+	_check("pending_full_view_survives_moving_near_band",
+		shifted_near.status == "pending"
+		and int(controller._owners.player.pending.demandRevision) == first_revision)
+	var rebased: Dictionary = controller.ensure(main, runtime, "player", 7,
+		"pinned", "mock-world-1", Vector3(36, 0, 0),
+		Rect2i(34, -2, 4, 4), 20.0, 1.0, 4)
+	state = controller._owners.player
+	pending = state.pending
+	_check("fast_rebase_retains_only_previous_producer_footprint",
+		rebased.status == "pending" and int(pending.demandRevision) != first_revision
+		and (state.superseded as Dictionary).chunkKeys == first_keys
+		and (pending.propSources as Dictionary).is_empty()
+		and controller.full_view_readiness("player", 7, "pinned", "mock-world-1").status == "pending")
+	var second_keys: Array[Vector2i] = pending.chunkKeys
+	var rebased_again: Dictionary = controller.ensure(main, runtime, "player", 7,
+		"pinned", "mock-world-1", Vector3(60, 0, 0),
+		Rect2i(58, -2, 4, 4), 20.0, 1.0, 4)
+	state = controller._owners.player
+	_check("repeated_rebase_keeps_one_superseded_footprint",
+		rebased_again.status == "pending"
+		and (state.superseded as Dictionary).chunkKeys == second_keys)
 
 func _test_full_view_promotion() -> void:
 	var controller = ControllerScript.new()
@@ -159,6 +264,30 @@ func _test_full_view_promotion() -> void:
 	_check("changed_world_cannot_borrow_old_full_receipts", changed.status == "pending"
 		and changed.reason == "visual_world_revision_changed"
 		and (controller._owners.player.current as Dictionary).is_empty())
+
+
+func _test_underground_mode_rebuilds_visual_sources() -> void:
+	var controller = ControllerScript.new()
+	var runtime := TerrainRuntime.new()
+	var main := UndergroundModeMain.new()
+	var old_ledger := Ledger.new()
+	var current := {"ledger": old_ledger, "terrain": TerrainWork.new(),
+		"requestId": 81, "seed": "pinned", "worldRevision": "mock-world-1",
+		"viewRevision": 1, "demandRevision": 4,
+		"center": Vector2.ZERO, "radius": 20.0,
+		"bounds": Rect2i(-20, -20, 41, 41),
+		"nearBounds": Rect2i(-4, -4, 8, 8),
+		"undergroundVisualsRequired": false}
+	controller._owners["player"] = {"current": current, "pending": {}}
+	var rebuilt: Dictionary = controller.ensure(main, runtime, "player", 81,
+		"pinned", "mock-world-1", Vector3.ZERO, Rect2i(-4, -4, 8, 8),
+		20.0, 1.0, 4)
+	var pending: Dictionary = controller._owners.player.pending
+	_check("entering_underground_rebuilds_full_visual_source_set",
+		rebuilt.status == "pending" and not pending.is_empty() \
+		and bool(pending.get("undergroundVisualsRequired", false)) \
+		and (pending.get("overlapLedgers", []) as Array).is_empty() \
+		and is_same((controller._owners.player.current as Dictionary).ledger, old_ledger))
 
 
 func _test_unsubmitted_chunk_sources_do_not_complete_view() -> void:
@@ -238,6 +367,184 @@ func _test_retained_chunk_keys() -> void:
 	controller._owners.player.current = {"chunkKeys": pending_keys, "publicationComplete": true}
 	_check("retained_keys_retire_superseded_view_only_after_rebase",
 		controller.retained_chunk_keys("player") == [Vector2i(1, 0), Vector2i(2, 0)])
+
+func _test_superseded_retention_is_bounded() -> void:
+	var controller = ControllerScript.new()
+	var now := Time.get_ticks_usec()
+	controller._owners["player"] = {"current": {"chunkKeys": [Vector2i(0, 0)]},
+		"pending": {"chunkKeys": [Vector2i(1, 0)], "publicationComplete": false},
+		"superseded": {"chunkKeys": [Vector2i(2, 0)],
+			"expiresUsec": now + ControllerScript.SUPERSEDED_RETENTION_USEC}}
+	_check("superseded_producer_keys_retained_without_ranking",
+		controller.retained_chunk_keys("player") == [Vector2i(0, 0),
+			Vector2i(1, 0), Vector2i(2, 0)]
+		and controller.ranked_chunk_keys("player") == [Vector2i(1, 0)])
+	controller._owners.player.superseded = {"chunkKeys": [Vector2i(3, 0)],
+		"expiresUsec": now + ControllerScript.SUPERSEDED_RETENTION_USEC}
+	_check("second_rebase_replaces_prior_retention",
+		controller.retained_chunk_keys("player") == [Vector2i(0, 0),
+			Vector2i(1, 0), Vector2i(3, 0)])
+	controller._owners.player.superseded.expiresUsec = now - 1
+	_check("superseded_producer_keys_expire",
+		controller.retained_chunk_keys("player") == [Vector2i(0, 0), Vector2i(1, 0)])
+
+func _test_expired_source_deadline_retains_work() -> void:
+	var controller = ControllerScript.new()
+	var ledger := Ledger.new()
+	var keys: Array[Vector2i] = [Vector2i.ZERO]
+	controller._owners["player"] = {"current": {}, "pending": {
+		"ledger": ledger, "terrain": TerrainWork.new(), "requestId": 17,
+		"seed": "pinned", "worldRevision": "mock-world-1", "viewRevision": 1,
+		"demandRevision": 2, "bounds": Rect2i(-20, -20, 41, 41),
+		"nearBounds": Rect2i(-4, -4, 8, 8), "centerWorld": Vector3.ZERO,
+		"chunkKeys": keys, "propCursor": 0, "structureCursor": 0,
+		"nextChunkKind": "prop", "propSources": {}, "structureSources": {},
+		"missingChunkSources": {}, "dirtyChunkKeys": [], "lastProp": {},
+		"lastStructure": {}, "overlapLedgers": []}}
+	var result: Dictionary = controller.advance(RefCounted.new(), TerrainRuntime.new(),
+		RefCounted.new(), "player", 28, Time.get_ticks_usec() - 1)
+	var pending: Dictionary = controller._owners.player.pending
+	_check("expired_publication_deadline_keeps_both_source_cursors_retryable",
+		result.status == "pending" and int(result.sourceAtomsAttempted) == 0
+		and int(pending.propCursor) == 0 and int(pending.structureCursor) == 0
+		and (pending.propSources as Dictionary).is_empty()
+		and (pending.structureSources as Dictionary).is_empty())
+
+func _test_ranked_chunk_disk_intersection() -> void:
+	var keys: Array[Vector2i] = ControllerScript._ranked_chunk_keys(
+		Rect2i(-72, -72, 145, 145), Vector3.ZERO, 1.0, 28, 72.0)
+	_check("ranked_sources_exclude_only_whole_chunks_outside_view_disk",
+		keys.size() == 32 and not keys.has(Vector2i(-3, -3))
+		and not keys.has(Vector2i(-3, 2)) and not keys.has(Vector2i(2, -3))
+		and not keys.has(Vector2i(2, 2)) and keys.has(Vector2i(-3, 0))
+		and keys.has(Vector2i(2, 0)))
+	var radial: Array[Vector2i] = ControllerScript._ranked_chunk_keys(
+		Rect2i(-56, -56, 141, 141), Vector3(14.0, 0.0, 14.0),
+		1.0, 28, 72.0)
+	_check("visual_source_order_covers_all_cardinal_directions_before_diagonals",
+		radial.size() >= 5 and radial.slice(0, 5) == [Vector2i.ZERO,
+		Vector2i(-1, 0), Vector2i(0, -1), Vector2i(0, 1), Vector2i(1, 0)])
+
+func _test_ready_prop_source_admission() -> void:
+	var controller = ControllerScript.new()
+	var main := PropReadinessMain.new()
+	var keys: Array[Vector2i] = [Vector2i.ZERO, Vector2i(1, 0), Vector2i(2, 0)]
+	var view := {"nearBounds": Rect2i(-1, -1, 3, 3), "propSources": {},
+		"propJobs": {}}
+	main.ready[Vector2i(1, 0)] = true
+	_check("ready_prop_source_precedes_unfinished_producer",
+		controller._next_prop_cursor(main, keys, 0, view) == 1)
+	view.propSources[Vector2i(1, 0)] = true
+	_check("submitted_prop_source_does_not_block_unfinished_retry",
+		controller._next_prop_cursor(main, keys, 0, view) == 0)
+	view.propJobs[Vector2i(2, 0)] = RefCounted.new()
+	_check("bounded_capture_job_keeps_admission_priority",
+		controller._next_prop_cursor(main, keys, 0, view) == 2)
+	view.propSources[Vector2i.ZERO] = true
+	view.propSources[Vector2i(2, 0)] = true
+	_check("settled_sources_remain_available_for_revalidation",
+		controller._next_prop_cursor(main, keys, 1, view) == 1)
+
+func _test_background_structure_prefetch() -> void:
+	var controller = ControllerScript.new()
+	var source := PrefetchSource.new()
+	var current_keys := ControllerScript._ranked_chunk_keys(
+		Rect2i(-72, -72, 145, 145), Vector3.ZERO, 1.0, 28, 72.0)
+	var current := {"requestId": 26, "seed": "pinned", "worldRevision": "world:1",
+		"demandRevision": 3, "center": Vector2.ZERO, "centerWorld": Vector3.ZERO,
+		"radius": 72.0, "cellScale": 1.0, "chunkKeys": current_keys}
+	var state: Dictionary = {}
+	var first: Dictionary = controller._advance_structure_prefetch(source, state,
+		current, "player", 28, Time.get_ticks_usec() + 10000000)
+	var prefetch: Dictionary = state.get("structurePrefetch", {})
+	var keys: Array[Vector2i] = prefetch.get("keys", [])
+	_check("structure_prefetch_prepares_all_direction_ring_without_publishing",
+		first.get("status") == "described" and int(first.get("ready", 0)) == 1
+		and keys.size() > 4 and not current_keys.has(first.key)
+		and keys.any(func(key: Vector2i) -> bool: return key.x >= 3)
+		and keys.any(func(key: Vector2i) -> bool: return key.x <= -4)
+		and keys.any(func(key: Vector2i) -> bool: return key.y >= 3)
+		and keys.any(func(key: Vector2i) -> bool: return key.y <= -4))
+	var capture := controller._prefetched_structure_capture(state, source,
+		current, first.key, Rect2i(first.key * 28, Vector2i.ONE * 28)) as PrefetchCapture
+	_check("prefetch_carries_producer_capture_across_view_revision",
+		capture != null and capture == prefetch.jobs[first.key])
+	if capture != null: capture.current = false
+	var stale := controller._prefetched_structure_capture(state, source,
+		current, first.key, Rect2i(first.key * 28, Vector2i.ONE * 28))
+	_check("stale_prefetch_cannot_be_reused_as_new_view_proof",
+		stale == null and not (prefetch.jobs as Dictionary).has(first.key))
+
+func _test_structure_overlap_transfer_requires_current_proof() -> void:
+	var controller = ControllerScript.new()
+	var producer := StructureProducer.new()
+	var structure_bounds := Rect2i(2, 0, 2, 2)
+	var main_id := 100
+	var source_id := "generated-structure-blocks:%s" % str(structure_bounds)
+	var certificate: Dictionary = StructureManifestScript.producer_certificate(
+		producer, structure_bounds)
+	var old_ledger = ReadinessScript.new()
+	var old_bounds := Rect2i(-20, -20, 41, 41)
+	var near_bounds := Rect2i(-2, -2, 4, 4)
+	var old_revision := int(old_ledger.begin_view(31, "seed", "world:1",
+		old_bounds, near_bounds, Vector2.ZERO, 20.0).viewRevision)
+	var source_identity := "generated-structure-blocks:%d:%d:%s" % [
+		main_id, producer.get_instance_id(), str(structure_bounds)]
+	old_ledger.expect_source(source_id, "structures", source_identity,
+		"structure-rev:1", structure_bounds, old_revision)
+	var owner := Node3D.new()
+	root.add_child(owner)
+	var visual := MeshInstance3D.new()
+	visual.mesh = BoxMesh.new()
+	owner.add_child(visual)
+	old_ledger.describe_candidate(source_id, "ordinary:stable", "horizon", {
+		"positionXZ": Vector2(2.5, 0.5), "cell": Vector3i(2, 0, 0),
+		"ordinaryVisualSourceId": "town:0,0", "ordinaryBlockType": "stoneBlock"})
+	old_ledger.accept_receipt(source_id, "ordinary:stable", "ordinary:stable:installed",
+		"horizon", source_identity, "structure-rev:1", old_revision, owner, visual)
+	old_ledger.finish_source(source_id, source_identity, "structure-rev:1", old_revision)
+	var old_view := {"ledger": old_ledger, "mainId": main_id,
+		"structureProofs": {Vector2i.ZERO: certificate}}
+	var next_ledger = ReadinessScript.new()
+	var next_revision := int(next_ledger.begin_view(31, "seed", "world:1",
+		old_bounds, near_bounds, Vector2(1.0, 0.0), 20.0).viewRevision)
+	var next_view := {"ledger": next_ledger, "viewRevision": next_revision,
+		"structureTransfers": {}, "overlapViews": [old_view]}
+	var transferred: Dictionary = controller._transfer_structure_overlap({}, next_view,
+		producer, Vector2i.ZERO, structure_bounds)
+	_check("structure_overlap_transfers_only_with_matching_source_proof",
+		transferred.get("status") == "ready"
+		and next_ledger.has_candidate(source_id, "ordinary:stable")
+		and transferred.get("producerCertificate") == certificate)
+	var changed_ledger = ReadinessScript.new()
+	var changed_revision := int(changed_ledger.begin_view(31, "seed", "world:1",
+		old_bounds, near_bounds, Vector2(1.0, 0.0), 20.0).viewRevision)
+	var changed_view := {"ledger": changed_ledger, "viewRevision": changed_revision,
+		"structureTransfers": {}, "overlapViews": [old_view]}
+	producer.ordinary_visual_revision += 1
+	var stale: Dictionary = controller._transfer_structure_overlap({}, changed_view,
+		producer, Vector2i.ZERO, structure_bounds)
+	_check("structure_overlap_rejects_changed_producer_revision",
+		stale.get("status") == "unavailable"
+		and not changed_ledger.has_candidate(source_id, "ordinary:stable"))
+	var fresh_ledger = ReadinessScript.new()
+	var fresh_revision := int(fresh_ledger.begin_view(31, "seed", "world:1",
+		old_bounds, near_bounds, Vector2.ZERO, 20.0).viewRevision)
+	var fresh_view := {"ledger": fresh_ledger, "requestId": 31,
+		"viewRevision": fresh_revision, "nearBounds": near_bounds,
+		"structureTransfers": {}, "overlapViews": []}
+	var audit := {"transferUnavailable": 0, "freshCaptureBegun": 0}
+	var started: Dictionary = controller._start_structure_source_atom(RefCounted.new(),
+		{}, fresh_view, producer, Vector2i.ZERO, structure_bounds, audit)
+	var fresh_job: Object = started.get("job") as Object
+	var fresh_audit: Dictionary = started.get("audit", {})
+	_check("unavailable_overlap_starts_retryable_bounded_structure_capture",
+		started.get("result", {}).get("reason", "") == "ordinary_visual_capture_budget"
+		and is_instance_valid(fresh_job)
+		and producer.capture_begins == 1
+		and int(fresh_audit.get("transferUnavailable", 0)) == 1
+		and int(fresh_audit.get("freshCaptureBegun", 0)) == 1)
+	owner.queue_free()
 
 func _test_stale_native_receipt_without_signal() -> void:
 	var block := Vector3i(4, 1, 0)

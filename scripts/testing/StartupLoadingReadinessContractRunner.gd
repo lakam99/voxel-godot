@@ -1361,6 +1361,39 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 	var presentation_ready_index := main_source.find("if not startup_result_is_ready(presentation_result):",presentation_index)
 	var region_index := main_source.find("await wait_for_initial_region_readiness()",presentation_index)
 	var region_ready_index := main_source.find("if not startup_result_is_ready(region_result):",region_index)
+	var visible_world_index := main_source.find("await wait_for_initial_visible_world_readiness()",region_ready_index)
+	var visible_world_ready_index := main_source.find("if not startup_result_is_ready(visible_result):",visible_world_index)
+	var player_spawn_index := main_source.find("spawn_player_after_visible_world_ready(visible_result)",visible_world_ready_index)
+	var visible_wait_start := main_source.find("func wait_for_initial_visible_world_readiness()")
+	var visible_wait_end := main_source.find("\nfunc ",visible_wait_start + 1)
+	var visible_wait_source := main_source.substr(visible_wait_start,visible_wait_end-visible_wait_start)
+	var spawn_helper_start := main_source.find("func spawn_player_after_visible_world_ready(")
+	var spawn_helper_end := main_source.find("\nfunc ",spawn_helper_start + 1)
+	var spawn_helper_source := main_source.substr(spawn_helper_start,spawn_helper_end-spawn_helper_start)
+	var player_setup_source := FileAccess.get_file_as_string("res://scripts/MainSetupScene.gd")
+	var loading_overlay_source := FileAccess.get_file_as_string("res://scripts/world/WorldLoadingOverlay.gd")
+	var hud_source := FileAccess.get_file_as_string("res://scripts/GameHud.gd")
+	var menu_source := FileAccess.get_file_as_string("res://scripts/TitleMenu.gd")
+	var panel_builder_source := FileAccess.get_file_as_string("res://scripts/GameHudPanelBuilder.gd")
+	var player_setup_start := player_setup_source.find("func setup_player()")
+	var player_setup_end := player_setup_source.find("\nfunc ",player_setup_start + 1)
+	var player_setup := player_setup_source.substr(player_setup_start,player_setup_end-player_setup_start)
+	var spawn_waits_without_timeout := visible_wait_source.contains("while true:") \
+		and not visible_wait_source.contains("INITIAL_READINESS_TIMEOUT_SECONDS") \
+		and visible_wait_source.contains("full_view_readiness(\"player\"")
+	var player_is_held_until_visible_view_ready := player_setup.contains("player.visible = false") \
+		and player_spawn_index > visible_world_ready_index \
+		and spawn_helper_source.contains("startup_result_is_ready(readiness)") \
+		and spawn_helper_source.contains("player.visible = true")
+	var progress_reaches_normal_game_loading_screens := main_source.contains("signal startup_loading_progress(message, completed, total)") \
+		and main_source.contains("startup_loading_progress.emit(message, completed, total)") \
+		and main_source.contains("func startup_loading_progress_counts(") \
+		and panel_builder_source.contains("hud.loading_progress_bar = progress") \
+		and loading_overlay_source.contains("func set_progress(") \
+		and hud_source.contains("func set_loading_progress(") \
+		and menu_source.contains("startup_loading_progress") \
+		and menu_source.contains("func _on_game_loading_progress(") \
+		and menu_source.contains("loading_progress_bar.value = clampf(")
 	var new_game_start := main_source.find("func run_new_game_staged(")
 	var shared_completion_start := main_source.find("func complete_runtime_world_loading_staged(")
 	var new_game_publication_call := main_source.find("await prepare_runtime_world_publication_staged()", new_game_start)
@@ -1439,7 +1472,11 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		and loading_release_index > gameplay_ready_index and loading_release_index < completion_index \
 		and presentation_index > gameplay_ready_index and presentation_index < loading_release_index \
 		and presentation_ready_index > presentation_index and region_index > presentation_ready_index \
-		and region_ready_index > region_index and region_ready_index < loading_release_index \
+		and region_ready_index > region_index and region_ready_index < visible_world_index \
+		and visible_world_index > region_ready_index and visible_world_ready_index > visible_world_index \
+		and player_is_held_until_visible_view_ready and spawn_waits_without_timeout \
+		and progress_reaches_normal_game_loading_screens \
+		and player_spawn_index > visible_world_ready_index and player_spawn_index < loading_release_index \
 		and new_game_start >= 0 and new_game_tutorial_ready > new_game_start \
 		and new_game_terrain_ready > new_game_tutorial_ready and new_game_navigation_ready > new_game_terrain_ready \
 		and new_game_physics_ready > new_game_navigation_ready and new_game_presentation > new_game_physics_ready \
@@ -1455,6 +1492,9 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		"visiblePropDiscoveryUsesIncrementalNearFirstCursor":visible_prop_discovery_is_incremental,
 		"visualReadinessReportsQueueDepthAndCoverageLag":visual_readiness_reports_queue_and_coverage_lag,
 		"nearbyStructureVisualReceiptIsRequiredAfterPhysicalRegionReadiness":nearby_structure_visual_is_required,
+		"spawnWaitsForFullVisibleViewWithoutTimeout":spawn_waits_without_timeout,
+		"playerRemainsHiddenUntilVisibleViewReady":player_is_held_until_visible_view_ready,
+		"loadingProgressReachesColdStartMenuAndInGameUI":progress_reaches_normal_game_loading_screens,
 		"completionIndex": completion_index,
 		"tutorialReadyIndex": tutorial_ready_index,
 		"terrainReadyIndex":terrain_ready_index,

@@ -24,6 +24,7 @@ func _run() -> void:
 	var surface_key := Vector2i(2, 0)
 	var pending := {underground_key: underground_state, surface_key: surface_state}
 	var visible: Array[Vector2i] = [underground_key, surface_key]
+	var near_bounds := Rect2i(Vector2i.ZERO, Vector2i(56, 56))
 	var before_underground_rng: int = underground_rng.state
 	var before_surface_rng: int = surface_rng.state
 	var chosen: Array[String] = []
@@ -31,15 +32,16 @@ func _run() -> void:
 	# already-surface-complete underground state in this pinned fixture.
 	var previous_first_surface_visits := 1 if visible[0] == surface_key else 0
 	for turn in range(1, 5):
-		var ordered: Array[Vector2i] = PRIORITY.ordered_keys(pending, visible, turn % 4 == 0)
+		var ordered: Array[Vector2i] = PRIORITY.ordered_keys(pending, visible,
+			near_bounds, 28, turn % 2 == 0)
 		chosen.append("underground" if ordered[0] == underground_key else "surface")
 		_check("turn_%d_contains_both_keys" % turn,
 			ordered.size() == 2 and ordered.has(underground_key) and ordered.has(surface_key))
 		_check("turn_%d_preserves_state_identity" % turn,
 			is_same(pending[underground_key], underground_state)
 			and is_same(pending[surface_key], surface_state))
-	_check("surface_first_for_three_turns", chosen.slice(0, 3) == ["surface", "surface", "surface"])
-	_check("underground_receives_fourth_turn", chosen[3] == "underground")
+	_check("surface_and_near_full_alternate_without_starvation",
+		chosen == ["surface", "underground", "surface", "underground"])
 	_check("first_turn_visits_new_surface_before_deep_scan",
 		previous_first_surface_visits == 0 and chosen[0] == "surface")
 	_check("attempt_and_rng_state_unchanged", underground_state.propIndex == 28
@@ -47,7 +49,6 @@ func _run() -> void:
 		and underground_rng.state == before_underground_rng and surface_rng.state == before_surface_rng)
 	_check("same_rng_objects_retained", is_same(underground_state.rng, underground_rng)
 		and is_same(surface_state.rng, surface_rng))
-	var near_bounds := Rect2i(Vector2i.ZERO, Vector2i(56, 56))
 	var physical := {underground_key: underground_chunk, surface_key: surface_chunk}
 	var required_reason := {underground_key: {"reason": "chunk_prop_candidate_scan_incomplete"}}
 	_check("pending_near_full_scan_selects_exact_physical_dependency",
@@ -70,7 +71,7 @@ func _run() -> void:
 			visible, near_bounds, 28) == null)
 	underground_chunk.set_meta("horizon_visual_only", false)
 	_check("surface_order_and_rng_remain_unchanged_after_dependency_selection",
-		PRIORITY.ordered_keys(pending, visible, false)[0] == surface_key
+		PRIORITY.ordered_keys(pending, visible, near_bounds, 28, false)[0] == surface_key
 		and underground_rng.state == before_underground_rng
 		and surface_rng.state == before_surface_rng)
 	_check("ordinary_surface_slice_budget_is_preserved_without_required_full_source",

@@ -1308,18 +1308,18 @@ func test_player_motor_characterization_baseline(_mode: String) -> Dictionary:
 	)
 
 func test_existing_save_defaults_baseline(mode: String) -> Dictionary:
-	var path := "user://npc_contract_save_defaults_%s_%s.json" % [mode, run_token]
+	var path := "user://npc_contract_save_defaults_%s_%s.bin" % [mode, run_token]
 	var absolute_path := ProjectSettings.globalize_path(path)
 	DirAccess.remove_absolute(absolute_path)
 	var save_system = SaveSystemScript.new(path)
 	var missing_load: Dictionary = save_system.load("atlas-1492")
 	var fallback_seed := save_system.active_seed("atlas-1492")
-	var wrote_wrong_version := save_system.write_all({
-		"atlas-1492": {
-			"seed": "atlas-1492",
-			"version": 0
-		}
+	var wrong_version_path: String = save_system._slot_path("atlas-1492")
+	var wrong_version_bytes: PackedByteArray = save_system._encode_snapshot({
+		"seed": "atlas-1492",
+		"version": 0
 	})
+	var wrote_wrong_version: bool = save_system._write_bytes_atomic(wrong_version_path, wrong_version_bytes)
 	var wrong_version_load: Dictionary = save_system.load("atlas-1492")
 	var saved := save_system.save("atlas-1492", { "custom": "value" })
 	var loaded: Dictionary = save_system.load("atlas-1492")

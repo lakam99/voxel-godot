@@ -2,7 +2,9 @@ extends "res://scripts/testing/NormalRuntimePerformancePassRunner.gd"
 
 const MAIN_SCENE := preload("res://scenes/Main.tscn")
 const CHUNK_PROP_PRIORITY := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
-const RUN_SECONDS := 4.5
+const STRUCTURE_MANIFEST := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
+const PROP_SOURCE_SNAPSHOT := preload("res://scripts/testing/VisibleWorldPropSourceSnapshot.gd")
+const LivePlaytestPlayerNavigatorScript := preload("res://scripts/testing/player/LivePlaytestPlayerNavigator.gd")
 const TURN_RADIANS := PI * 0.85
 const MIN_NEW_AREA_DISTANCE := 45.0
 const DATA_PREFETCH_DISTANCE := 112
@@ -30,12 +32,60 @@ var data_prefetch_samples: Array[Dictionary] = []
 var terrain_manifest_step_usec: Array[int] = []
 var visual_advance_total_usec: Array[int] = []
 var prop_manifest_step_usec: Array[int] = []
+var prop_phase_step_usec: Dictionary = {}
+var prop_capture_paths_during_sprint: Dictionary = {}
+var structure_bounded_stages_during_sprint: Dictionary = {}
 var structure_manifest_step_usec: Array[int] = []
 var structure_phase_step_usec: Dictionary = {}
 var coverage_step_usec: Array[int] = []
 var coverage_geometry_step_usec: Array[int] = []
 var receipt_validation_step_usec: Array[int] = []
 var receipt_validation_by_kind_timing: Dictionary = {}
+var sprint_route_active := false
+var elapsed := 0.0
+var sprint_route_started_msec := 0
+var sprint_route_observed_frames := 0
+var sprint_route_sprinting_frames := 0
+var sprint_route_turn_dispatched := false
+
+
+func _process(delta: float) -> void:
+    super._process(delta)
+    elapsed += delta
+    if not sprint_route_active or not is_instance_valid(main):
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    if is_instance_valid(player_body) and bool(player_body.get("is_sprinting")):
+        if sprint_route_started_msec <= 0:
+            sprint_route_started_msec = Time.get_ticks_msec()
+        sprint_route_observed_frames += 1
+        sprint_route_sprinting_frames += 1
+    if sprint_route_started_msec > 0 and not sprint_route_turn_dispatched \
+            and Time.get_ticks_msec() - sprint_route_started_msec >= int(1.7 * 1000.0):
+        sprint_route_turn_dispatched = true
+        _dispatch_camera_turn_immediate(-TURN_RADIANS)
+
+
+func _dispatch_camera_turn_immediate(radians: float) -> void:
+    var player_body := main.get("player") as CharacterBody3D if is_instance_valid(main) else null
+    if not is_instance_valid(player_body):
+        return
+    var sensitivity := maxf(0.0001, float(player_body.get("mouse_sensitivity")))
+    for _step in range(4):
+        var motion := InputEventMouseMotion.new()
+        motion.relative = Vector2(-radians / (4.0 * sensitivity), 0.0)
+        get_viewport().push_input(motion)
+
+
+func record_player_route_event(label: String, event_type: String, data: Dictionary) -> void:
+    trace.append({"event": "player_route", "label": label,
+        "eventType": event_type, "data": data.duplicate(true)})
+    if event_type != "movement_progress" or not is_instance_valid(main):
+        return
+    _advance_data_prefetch_position((main.get("player") as CharacterBody3D).global_position)
+    if main.has_method("debug_performance_state"):
+        capture_performance_sample()
+    trace.append(_trace_sample("sprint"))
 
 
 class SeededMain extends "res://scripts/Main.gd":
@@ -140,6 +190,9 @@ func run() -> void:
         "terrainManifestStepTiming": _terrain_manifest_step_timing(),
         "visualAdvanceTotalTiming": _timing_summary(visual_advance_total_usec),
         "propManifestStepTiming": _timing_summary(prop_manifest_step_usec),
+        "propManifestPhaseTiming": _timing_dictionary_summary(prop_phase_step_usec),
+        "propCapturePathsDuringSprint": prop_capture_paths_during_sprint,
+        "structureBoundedStagesDuringSprint": structure_bounded_stages_during_sprint,
         "structureManifestStepTiming": _timing_summary(structure_manifest_step_usec),
         "structureManifestPhaseTiming": _timing_dictionary_summary(structure_phase_step_usec),
         "coverageStepTiming": _timing_summary(coverage_step_usec),
@@ -231,10 +284,13 @@ func _initial_region_prop_timeout_diagnostics() -> Dictionary:
         if is_instance_valid(horizon) and horizon.has_method("source_for") else null
     var startup_priority: Array[Vector2i] = main.call("prioritized_startup_prop_chunk_keys")
     var visible_priority: Array[Vector2i] = main.get("visible_world_prop_chunk_keys")
-    var next_underground_turn := (int(main.get("chunk_prop_spawn_queue_turn")) + 1) % 4 == 0
+    var next_near_full_turn := (int(main.get("chunk_prop_spawn_queue_turn")) + 1) % 2 == 0
+    var foreground: Dictionary = main.call("player_foreground_streaming_intent")
+    var near_bounds: Rect2i = (foreground.get("bounds", Rect2i()) as Rect2i).grow(
+        DATA_PREFETCH_CHUNK_CELLS >> 1)
     var surface_order: Array[Vector2i] = CHUNK_PROP_PRIORITY.ordered_keys(
-        queue, visible_priority, next_underground_turn)
-    var near_bounds: Rect2i = main.get("visible_world_near_bounds")
+        queue, visible_priority, near_bounds, DATA_PREFETCH_CHUNK_CELLS,
+        next_near_full_turn)
     var chunk_size := DATA_PREFETCH_CHUNK_CELLS
     var surface_only := not Rect2i(key * chunk_size, Vector2i.ONE * chunk_size).intersects(near_bounds)
     var world = main.get("world_generation_system") as Object
@@ -261,7 +317,7 @@ func _initial_region_prop_timeout_diagnostics() -> Dictionary:
             "physicalQueueIndex": queue.keys().find(key),
             "startupPriorityIndex": startup_priority.find(key),
             "visiblePriorityIndex": visible_priority.find(key),
-            "surfaceFirstNextUndergroundTurn": next_underground_turn,
+            "surfaceFirstNextNearFullTurn": next_near_full_turn,
             "surfaceFirstNextQueueIndex": surface_order.find(key),
             "surfaceFirstNextHead": surface_order[0] if not surface_order.is_empty() else null,
             "horizonStateCount": horizon_states.size(),
@@ -771,62 +827,59 @@ func _run_visual_act(failures: Array[String]) -> void:
     if actual_turn < deg_to_rad(110.0):
         failures.append("viewport mouse input turned the player less than 110 degrees")
     player_body.set("automated_input", true)
-    player_body.set("automated_move", Vector3(1.0, 0.0, 0.0))
-    player_body.set("automated_sprint", true)
-    var sprint_started := Time.get_ticks_msec()
-    var turned_during_sprint := false
-    var observed_sprint_ticks := 0
-    var frame := 0
+    main.set("prop_capture_path_diagnostics", {})
+    STRUCTURE_MANIFEST.reset_bounded_diagnostics()
+    var navigator = LivePlaytestPlayerNavigatorScript.new()
+    navigator.setup(main, player_body, player_body.get("camera") as Camera3D, self)
+    if not navigator.route_authority_available():
+        failures.append("shared live player route authority is unavailable")
+        return
+    sprint_route_observed_frames = 0
+    sprint_route_sprinting_frames = 0
+    sprint_route_turn_dispatched = false
     write_progress("continuous_sprint")
-    while float(Time.get_ticks_msec() - sprint_started) / 1000.0 < RUN_SECONDS:
-        await get_tree().process_frame
-        if terrain_manifest_step_usec.size() < 600:
-            var advance: Dictionary = main.get("visible_world_demand_last_advance")
-            terrain_manifest_step_usec.append(maxi(0, int(advance.get("terrainAdvanceUsec", 0))))
-            visual_advance_total_usec.append(maxi(0, int(advance.get("advanceTotalUsec", 0))))
-            prop_manifest_step_usec.append(maxi(0, int(advance.get("propAdvanceUsec", 0))))
-            structure_manifest_step_usec.append(maxi(0, int(advance.get("structureAdvanceUsec", 0))))
-            var structure_phases: Dictionary = advance.get("structurePhaseUsec", {})
-            for phase_value in structure_phases:
-                var phase := String(phase_value)
-                if not structure_phase_step_usec.has(phase): structure_phase_step_usec[phase] = []
-                (structure_phase_step_usec[phase] as Array).append(maxi(0,
-                    int(structure_phases[phase_value])))
-            coverage_step_usec.append(maxi(0, int(advance.get("coverageAdvanceUsec", 0))))
-            coverage_geometry_step_usec.append(maxi(0, int(advance.get("coverageGeometryUsec", 0))))
-            receipt_validation_step_usec.append(maxi(0, int(advance.get("receiptValidationUsec", 0))))
-            var by_kind: Dictionary = advance.get("receiptValidationByKindUsec", {})
-            for kind_value in by_kind:
-                var kind := String(kind_value)
-                var elapsed_usec := maxi(0, int(by_kind[kind_value]))
-                var timing: Dictionary = receipt_validation_by_kind_timing.get(kind,
-                    {"samples": 0, "totalUsec": 0, "maxUsec": 0})
-                timing.samples = int(timing.samples) + 1
-                timing.totalUsec = int(timing.totalUsec) + elapsed_usec
-                timing.maxUsec = maxi(int(timing.maxUsec), elapsed_usec)
-                receipt_validation_by_kind_timing[kind] = timing
-        if bool(player_body.get("is_sprinting")):
-            observed_sprint_ticks += 1
-        if frame % 30 == 0:
-            _advance_data_prefetch_position(player_body.global_position)
-            if main.has_method("debug_performance_state"):
-                capture_performance_sample()
-            trace.append(_trace_sample("sprint"))
-        if not turned_during_sprint and float(Time.get_ticks_msec() - sprint_started) / 1000.0 >= 1.7:
-            turned_during_sprint = true
-            write_progress("rapid_turn_while_sprinting")
-            await _turn_by_mouse_input(-TURN_RADIANS)
-            await _checkpoint("after_sprint_turn")
-        frame += 1
+    var sprint_result: Dictionary = {}
+    var sprint_directions: Array[Vector3] = [Vector3.RIGHT, Vector3.LEFT, Vector3.FORWARD, Vector3.BACK]
+    for direction in sprint_directions:
+        var sprint_target := first_position + direction * (MIN_NEW_AREA_DISTANCE + 18.0)
+        sprint_route_started_msec = 0
+        sprint_route_observed_frames = 0
+        sprint_route_sprinting_frames = 0
+        sprint_route_turn_dispatched = false
+        sprint_route_active = true
+        sprint_result = await navigator.go_to_position(sprint_target,
+            {"label": "visible_world_fast_turn_sprint", "timeout": 24.0,
+                "planTimeout": 12.0, "stopDistance": 1.0, "allowOutside": true,
+                "acceptRouteGoal": true}, true)
+        sprint_route_active = false
+        trace.append({"event": "sprint_route_attempt", "target": vec3(sprint_target),
+            "status": String(sprint_result.get("status", "")),
+            "reason": String(sprint_result.get("reason", "")),
+            "sprintStarted": sprint_route_started_msec > 0})
+        if bool(sprint_result.get("ok", false)) or sprint_route_started_msec > 0:
+            break
+    var sprint_elapsed := float(Time.get_ticks_msec() - sprint_route_started_msec) / 1000.0 \
+        if sprint_route_started_msec > 0 else 0.0
     player_body.set("automated_move", Vector3.ZERO)
     player_body.set("automated_sprint", false)
+    if not bool(sprint_result.get("ok", false)):
+        failures.append("shared player navigator sprint route failed: %s" % String(sprint_result.get("reason", sprint_result.get("status", "unknown"))))
+    if not sprint_route_turn_dispatched:
+        await _turn_by_mouse_input(-TURN_RADIANS)
+    await _checkpoint("after_sprint_turn")
+    prop_capture_paths_during_sprint = _prop_capture_path_report()
+    structure_bounded_stages_during_sprint = _structure_bounded_stage_report()
     await _checkpoint("new_streamed_area")
     var distance := Vector2(player_body.global_position.x - first_position.x,
         player_body.global_position.z - first_position.z).length()
-    var sprint_fraction := float(observed_sprint_ticks) / float(maxi(1, frame))
+    var sprint_fraction := float(sprint_route_sprinting_frames) / float(maxi(1, sprint_route_observed_frames))
     trace.append({"event": "act_complete", "distanceFromFirstOutdoorMeters": distance,
-        "observedSprintFrames": observed_sprint_ticks, "observedProcessFrames": frame,
-        "sprintFrameFraction": sprint_fraction, "elapsedSeconds": RUN_SECONDS})
+        "observedSprintFrames": sprint_route_sprinting_frames,
+        "observedProcessFrames": sprint_route_observed_frames,
+        "sprintFrameFraction": sprint_fraction, "elapsedSeconds": sprint_elapsed,
+        "routeStatus": String(sprint_result.get("status", "")),
+        "routeReason": String(sprint_result.get("reason", "")),
+        "routeSummary": sprint_result.get("routeSummary", {})})
     if distance < MIN_NEW_AREA_DISTANCE:
         failures.append("continuous sprint did not reach a new streamed area 45m away")
     if sprint_fraction < 0.8:
@@ -857,6 +910,7 @@ func _checkpoint(name: String) -> void:
     var destination := capture_dir.path_join("%s.png" % name)
     await capture_screenshot(destination)
     var row := _trace_sample(name)
+    row["propSourceSnapshot"] = PROP_SOURCE_SNAPSHOT.capture(main)
     row["nativeTerrainFrontier"] = _native_terrain_frontier_diagnostics(row)
     if not data_prefetch_probe_mode.is_empty():
         var prefetch := _data_prefetch_snapshot(name, true)
@@ -916,6 +970,14 @@ func _native_terrain_frontier_diagnostics(checkpoint: Dictionary) -> Dictionary:
 
 func _bounded_native_terrain_work(runtime: Object) -> Dictionary:
     var result := {"tasks": {}, "terrain": {}, "recentViewerRequests": []}
+    var preparation: Node = runtime.get("mesh_preparation_viewer") as Node
+    result["meshPreparation"] = {
+        "attached": is_instance_valid(preparation) and preparation.is_inside_tree(),
+        "reason": String(runtime.get("mesh_preparation_admission_reason")),
+        "attempts": int(runtime.get("mesh_preparation_admission_attempts")),
+        "accepts": int(runtime.get("mesh_preparation_admission_accepts")),
+        "backpressureDeferrals": int(runtime.get("mesh_preparation_backpressure_deferrals")),
+        "lastPendingNativeTasks": int(runtime.get("mesh_preparation_last_pending_native_tasks"))}
     var engine_stats: Dictionary = runtime.call("voxel_engine_task_stats") \
         if runtime.has_method("voxel_engine_task_stats") else {}
     var tasks: Dictionary = engine_stats.get("tasks", {}) \
@@ -984,10 +1046,24 @@ func _trace_sample(label: String) -> Dictionary:
             "reason": advance.get("reason", ""), "queueDepth": advance.get("queueDepth", 0),
             "terrainAdvanceUsec": advance.get("terrainAdvanceUsec", 0),
             "propAdvanceUsec": advance.get("propAdvanceUsec", 0),
+            "propPhaseUsec": advance.get("propPhaseUsec", {}),
             "structureAdvanceUsec": advance.get("structureAdvanceUsec", 0),
+            "structureStartAudit": advance.get("structureStartAudit", {}),
+            "sourceAtomsAttempted": advance.get("sourceAtomsAttempted", 0),
             "structurePhaseUsec": advance.get("structurePhaseUsec", {}),
             "coverageAdvanceUsec": advance.get("coverageAdvanceUsec", 0),
-            "advanceTotalUsec": advance.get("advanceTotalUsec", 0)}}
+            "advanceTotalUsec": advance.get("advanceTotalUsec", 0),
+            "structurePrefetch": advance.get("structurePrefetch", {})}}
+    if is_instance_valid(controller):
+        var owner_states: Dictionary = controller.get("_owners")
+        var owner_state: Dictionary = owner_states.get("player", {})
+        var prefetch_state: Dictionary = owner_state.get("structurePrefetch", {})
+        row["structurePrefetchState"] = {
+            "expected": (prefetch_state.get("keys", []) as Array).size(),
+            "ready": (prefetch_state.get("ready", {}) as Dictionary).size(),
+            "jobs": (prefetch_state.get("jobs", {}) as Dictionary).size(),
+            "requestId": int(prefetch_state.get("requestId", 0)),
+            "currentDemandRevision": int(prefetch_state.get("currentDemandRevision", 0))}
     row["viewDemand"] = _view_demand_diagnostics(controller)
     var horizon_cache = main.get("horizon_chunk_prop_manifest_cache")
     row["horizonManifestCache"] = horizon_cache.call("diagnostics") \
@@ -1018,6 +1094,48 @@ func _timing_dictionary_summary(durations_by_phase: Dictionary) -> Dictionary:
         var durations: Array[int] = []
         for value in durations_by_phase[phase_value]: durations.append(int(value))
         result[String(phase_value)] = _timing_summary(durations)
+    return result
+
+
+func _prop_capture_path_report() -> Dictionary:
+    if not is_instance_valid(main): return {}
+    var diagnostic_value: Variant = main.get("prop_capture_path_diagnostics")
+    if not diagnostic_value is Dictionary: return {}
+    var paths: Dictionary = (diagnostic_value as Dictionary).get("paths", {})
+    var result := {"scope": "continuous_sprint_only", "paths": {}}
+    var summarized: Dictionary = result.paths
+    for path_value in paths:
+        var path := String(path_value)
+        var row: Dictionary = paths[path_value]
+        var durations: Array[int] = []
+        for duration in row.get("samplesUsec", []): durations.append(int(duration))
+        summarized[path] = {"calls": int(row.get("calls", 0)),
+            "events": (row.get("events", {}) as Dictionary).duplicate(true),
+            "stages": (row.get("stages", {}) as Dictionary).duplicate(true),
+            "totalUsec": int(row.get("totalUsec", 0)),
+            "maxUsec": int(row.get("maxUsec", 0)),
+            "samplesDropped": int(row.get("samplesDropped", 0)),
+            "timing": _timing_summary(durations)}
+    return result
+
+
+func _structure_bounded_stage_report() -> Dictionary:
+    var diagnostic: Dictionary = STRUCTURE_MANIFEST.bounded_diagnostics()
+    var rows: Dictionary = diagnostic.get("stages", {})
+    var result := {"scope": "continuous_sprint_only",
+        "events": (diagnostic.get("events", {}) as Dictionary).duplicate(true),
+        "stages": {}}
+    var summarized: Dictionary = result.stages
+    for stage_value in rows:
+        var stage := String(stage_value)
+        var row: Dictionary = rows[stage_value]
+        var durations: Array[int] = []
+        for duration in row.get("samplesUsec", []): durations.append(int(duration))
+        summarized[stage] = {"calls": int(row.get("calls", 0)),
+            "totalUsec": int(row.get("totalUsec", 0)),
+            "maxUsec": int(row.get("maxUsec", 0)),
+            "samplesDropped": int(row.get("samplesDropped", 0)),
+            "timing": _timing_summary(durations)}
     return result
 
 

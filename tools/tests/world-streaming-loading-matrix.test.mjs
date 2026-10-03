@@ -228,20 +228,20 @@ test('loading binary manifest detects an engine-only mutation behind an unchange
   }
 });
 
-test('loading save receipts reject oversized saves and hash through a bounded stream', async () => {
+test('loading save receipts reject oversized binary slots and hash through a bounded stream', async () => {
   const root = await mkdtemp(join(tmpdir(), 'loading-matrix-save-'));
   try {
     const saveRoot = join(root, 'Godot/app_userdata/Voxel Biome World Godot');
     const active = join(saveRoot, 'voxel_biome_world_saves_active_seed.txt');
-    const slot = join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.json');
+    const slot = join(saveRoot, 'voxel_biome_world_saves_slot_atlas-123.bin');
     await mkdir(saveRoot, { recursive: true });
     await writeFile(active, 'atlas-123\n');
     const handle = await open(slot, 'w');
     try { await handle.truncate(loadingSaveBounds.slotBytes + 1); } finally { await handle.close(); }
     await assert.rejects(saveReceipt(root, 'atlas-123'), /exceeds its byte bound/);
-    await writeFile(slot, '{"version":2,"seed":"atlas-123"}');
+    await writeFile(slot, Buffer.concat([Buffer.from('VBW2'), Buffer.from([0, 0, 0, 0])]));
     const receipt = await saveReceipt(root, 'atlas-123');
-    assert.equal(receipt.slotBytes, 32);
+    assert.equal(receipt.slotBytes, 8);
     await writeFile(join(root, 'small.bin'), '12345');
     await assert.rejects(sha256File(join(root, 'small.bin'), 4), /exceeded 4 bytes/);
   } finally {

@@ -151,7 +151,7 @@ export function prepare(c, isolate = 'userdata', save = false) {
     c.env.LOCALAPPDATA = path.join(c.run, isolate === 'split' ? 'localappdata' : isolate);
     for (const p of new Set([c.env.APPDATA, c.env.LOCALAPPDATA])) fs.mkdirSync(p);
   }
-  if (save) c.env.VOXEL_SAVE_PATH_OVERRIDE = path.join(c.run, 'test-save.json');
+  if (save) c.env.VOXEL_SAVE_PATH_OVERRIDE = path.join(c.run, 'test-save.bin');
 }
 export function launchRecord(c, files, metadata = {}) {
   const sourceSha256 = hashes(c.project, [...files, ...watchdogSources]);

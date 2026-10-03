@@ -77,7 +77,8 @@ func begin_view(request_id: int, seed: String, world_revision: String,
 ## excluded candidates now inside the new circle.
 func transfer_complete_overlap_source(previous: VisibleWorldReadiness,
 		source_id: String, current_identity: String, current_revision: String,
-		view_revision: int, candidate_budget := 64) -> Dictionary:
+		view_revision: int, candidate_budget := 64,
+		source_validator: Object = null) -> Dictionary:
 	if previous == null or previous == self or not previous._view_active or not _view_active \
 			or view_revision != _view_revision or _request_id != previous._request_id \
 			or _seed != previous._seed or _world_revision != previous._world_revision:
@@ -130,14 +131,20 @@ func transfer_complete_overlap_source(previous: VisibleWorldReadiness,
 		var old_candidate: Dictionary = old_source.candidates[candidate_id]
 		var metadata: Dictionary = old_candidate.get("metadata", {})
 		var position: Vector2 = metadata.get("positionXZ", Vector2(INF, INF))
+		var receipt: Dictionary = old_candidate.get("receipt", {})
 		if bool(old_candidate.failed) or not position.is_finite() or not candidate_in_view(position) \
 				or not previous._candidate_receipt_current(old_source, old_candidate,
 					previous._view_revision):
 			_abort_overlap_transfer(source_id)
 			return {"status": "pending", "reason": "visual_overlap_receipt_not_current"}
+		if is_instance_valid(source_validator) \
+				and source_validator.has_method("visual_structure_candidate_is_current") \
+				and not bool(source_validator.call("visual_structure_candidate_is_current",
+					candidate_id, metadata, receipt)):
+			_abort_overlap_transfer(source_id)
+			return {"status": "pending", "reason": "visual_overlap_producer_candidate_changed"}
 		var tier := "near" if _near_bounds.has_point(Vector2i(floori(position.x),
 			floori(position.y))) else "horizon"
-		var receipt: Dictionary = old_candidate.get("receipt", {})
 		if _tier_rank(String(receipt.get("tier", ""))) < _tier_rank(tier):
 			_abort_overlap_transfer(source_id)
 			return {"status": "pending", "reason": "visual_overlap_tier_promotion_required"}
@@ -178,6 +185,23 @@ func transfer_complete_overlap_source(previous: VisibleWorldReadiness,
 	_overlap_transfers.erase(source_id)
 	return {"status": "ready", "sourceId": source_id,
 		"copiedCandidates": candidate_ids.size(), "viewRevision": view_revision}
+
+
+func complete_source_descriptor(source_id: String) -> Dictionary:
+	if not _sources.has(source_id): return {}
+	var source: Dictionary = _sources[source_id]
+	if not bool(source.get("complete", false)) or bool(source.get("failed", false)):
+		return {}
+	return {"sourceId": source_id, "kind": String(source.get("kind", "")),
+		"identity": String(source.get("identity", "")),
+		"revision": String(source.get("revision", "")),
+		"bounds": source.get("bounds", Rect2i()),
+		"viewRevision": int(source.get("viewRevision", 0)),
+		"candidateCount": (source.get("candidates", {}) as Dictionary).size()}
+
+
+func abort_overlap_transfer(source_id: String) -> void:
+	_abort_overlap_transfer(source_id)
 
 
 func _abort_overlap_transfer(source_id: String) -> void:
@@ -414,8 +438,10 @@ func accept_receipt(source_id: String, candidate_id: String, representation_id: 
 	if not is_instance_valid(owner) or not is_instance_valid(representation) \
 			or not owner.is_inside_tree() or not representation.is_inside_tree() \
 			or owner.is_queued_for_deletion() or representation.is_queued_for_deletion() \
-			or not representation.visible or not _is_descendant_or_self(owner, representation) \
-			or not _has_visible_renderable(representation):
+			or not representation.visible or not _is_descendant_or_self(owner, representation):
+		return {"status": "pending", "reason": "visual_representation_not_installed"}
+	var renderable := _first_visible_renderable(representation)
+	if renderable == null:
 		return {"status": "pending", "reason": "visual_representation_not_installed"}
 	if _tier_rank(tier) < _tier_rank(String(candidate.requiredTier)):
 		return {"status": "pending", "reason": "visual_representation_tier_insufficient"}
@@ -424,7 +450,9 @@ func accept_receipt(source_id: String, candidate_id: String, representation_id: 
 		"worldRevision": _world_revision, "viewRevision": view_revision,
 		"ownerInstanceId": owner.get_instance_id(), "owner": weakref(owner),
 		"representationInstanceId": representation.get_instance_id(),
-		"representation": weakref(representation)}
+		"representation": weakref(representation),
+		"renderableInstanceId": renderable.get_instance_id(),
+		"renderable": weakref(renderable)}
 	candidate.receipt.erase("publisher")
 	candidate.failed = false
 	candidate.failureReason = ""
@@ -619,6 +647,9 @@ func pending_candidate_diagnostics(request_id: int, seed: String,
 			rows.append({"sourceId": String(source_id_value),
 				"candidateId": String(candidate_id_value), "kind": String(source.kind),
 				"requiredTier": String(candidate.requiredTier),
+				"sourceCandidateRenderable": bool(candidate.metadata.get("sourceCandidateRenderable", false)),
+				"treeVisualState": String(candidate.metadata.get("sourceCandidateTreeVisualState", "")),
+				"treeRenderLodTier": String(candidate.metadata.get("sourceCandidateTreeLodTier", "")),
 				"receiptTier": String(receipt.get("tier", "")),
 				"representationId": String(receipt.get("representationId", "")),
 				"receiptMissing": receipt.is_empty()})
@@ -720,19 +751,26 @@ func _candidate_receipt_current(source: Dictionary, candidate: Dictionary, view_
 				candidate, String(receipt.representationId), String(receipt.tier), view_revision)
 	var owner_ref: WeakRef = receipt.get("owner") as WeakRef
 	var representation_ref: WeakRef = receipt.get("representation") as WeakRef
+	var renderable_ref: WeakRef = receipt.get("renderable") as WeakRef
 	var owner: Node = owner_ref.get_ref() as Node if owner_ref != null else null
 	var representation: Node3D = representation_ref.get_ref() as Node3D if representation_ref != null else null
+	var renderable: GeometryInstance3D = renderable_ref.get_ref() as GeometryInstance3D \
+		if renderable_ref != null else null
 	if String(source.kind) == "trees_foliage" and is_instance_valid(owner) \
 			and not _tree_lod_satisfies_tier(String(owner.get_meta("tree_render_lod_tier", "")),
 				String(candidate.requiredTier)):
 		return false
 	return is_instance_valid(owner) and is_instance_valid(representation) \
+		and is_instance_valid(renderable) \
 		and owner.get_instance_id() == int(receipt.get("ownerInstanceId", 0)) \
 		and representation.get_instance_id() == int(receipt.get("representationInstanceId", 0)) \
+		and renderable.get_instance_id() == int(receipt.get("renderableInstanceId", 0)) \
 		and owner.is_inside_tree() and representation.is_inside_tree() \
-		and not owner.is_queued_for_deletion() and not representation.is_queued_for_deletion() \
+		and renderable.is_inside_tree() and not owner.is_queued_for_deletion() \
+		and not representation.is_queued_for_deletion() and not renderable.is_queued_for_deletion() \
 		and representation.visible and _is_descendant_or_self(owner, representation) \
-		and _has_visible_renderable(representation)
+		and _is_descendant_or_self(representation, renderable) \
+		and _renderable_is_visible(renderable)
 
 
 func _valid_publisher_tier(candidate: Dictionary, tier: String) -> bool:
@@ -832,16 +870,24 @@ static func _is_descendant_or_self(owner: Node, node: Node) -> bool:
 	return false
 
 
-static func _has_visible_renderable(root_node: Node) -> bool:
+static func _first_visible_renderable(root_node: Node) -> GeometryInstance3D:
 	if root_node is GeometryInstance3D:
 		var geometry := root_node as GeometryInstance3D
-		if geometry.visible and geometry.is_visible_in_tree():
-			if geometry is MeshInstance3D and (geometry as MeshInstance3D).mesh != null:
-				return true
-			if geometry is MultiMeshInstance3D and (geometry as MultiMeshInstance3D).multimesh != null:
-				return true
+		if _renderable_is_visible(geometry): return geometry
 	for child in root_node.get_children():
-		if child is Node and _has_visible_renderable(child): return true
+		if child is Node:
+			var found := _first_visible_renderable(child)
+			if found != null: return found
+	return null
+
+
+static func _renderable_is_visible(geometry: GeometryInstance3D) -> bool:
+	if not is_instance_valid(geometry) or not geometry.visible \
+			or not geometry.is_visible_in_tree():
+		return false
+	if geometry is MeshInstance3D: return (geometry as MeshInstance3D).mesh != null
+	if geometry is MultiMeshInstance3D:
+		return (geometry as MultiMeshInstance3D).multimesh != null
 	return false
 
 

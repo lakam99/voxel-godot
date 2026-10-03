@@ -4,9 +4,10 @@ extends RefCounted
 ## attempts. Surface completion is the producer's marker, not an estimate from
 ## the current phase or a viewer's visual receipt.
 static func ordered_keys(pending: Dictionary, priority_keys: Array[Vector2i],
-        underground_turn: bool) -> Array[Vector2i]:
+        near_bounds: Rect2i, chunk_size: int, near_full_turn: bool) -> Array[Vector2i]:
     var visible_surface: Array[Vector2i] = []
     var other_surface: Array[Vector2i] = []
+    var near_full: Array[Vector2i] = []
     var visible_underground: Array[Vector2i] = []
     var other_underground: Array[Vector2i] = []
     var seen: Dictionary = {}
@@ -15,7 +16,11 @@ static func ordered_keys(pending: Dictionary, priority_keys: Array[Vector2i],
             continue
         seen[key] = true
         if _surface_complete(pending[key]):
-            visible_underground.append(key)
+            if chunk_size > 0 and Rect2i(key * chunk_size,
+                    Vector2i.ONE * chunk_size).intersects(near_bounds):
+                near_full.append(key)
+            else:
+                visible_underground.append(key)
         else:
             visible_surface.append(key)
     for key_value in pending.keys():
@@ -29,14 +34,14 @@ static func ordered_keys(pending: Dictionary, priority_keys: Array[Vector2i],
         else:
             other_surface.append(key)
     var result: Array[Vector2i] = []
-    if underground_turn:
-        result.append_array(visible_underground)
-        result.append_array(other_underground)
+    if near_full_turn:
+        result.append_array(near_full)
     result.append_array(visible_surface)
+    if not near_full_turn:
+        result.append_array(near_full)
+    result.append_array(visible_underground)
     result.append_array(other_surface)
-    if not underground_turn:
-        result.append_array(visible_underground)
-        result.append_array(other_underground)
+    result.append_array(other_underground)
     return result
 
 static func _surface_complete(state_value) -> bool:

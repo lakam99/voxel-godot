@@ -4,12 +4,14 @@ const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRu
 const ChunkPropSpawnPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
 
 var chunk_prop_spawn_queue_turn := 0
+var last_chunk_prop_spawn_key: Variant = null
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
 const STREAMING_CHUNK_RETIREMENTS_PER_FRAME := 1
 const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 1
 const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 3
 const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
+const PHYSICAL_PROP_RING_MAX_KEYS := 16
 const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
 const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
 const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
@@ -641,14 +643,24 @@ func advance_visible_surface_prop_publication_shared() -> int:
         horizon_ecology_source.retire_promoted_one(self, live_near_bounds,
             seed_text, CELL, CHUNK_SIZE)
     if ranked_keys.is_empty(): return 0
-    var has_retained_source := false
-    for key: Vector2i in ranked_keys:
-        if pending_chunk_prop_spawns.has(key):
-            has_retained_source = true
-            break
-    var has_horizon_source: bool = not horizon_ecology_source.states.is_empty()
-    if not has_retained_source and not has_horizon_source: return 0
     var monitor = runtime_perf_monitor
+    var visible_physical: Array[Vector2i] = physical_prop_visible_pending_keys(
+        pending_chunk_prop_spawns, chunks, ranked_keys, live_near_bounds, CHUNK_SIZE)
+    var visible_horizon_count := 0
+    for key: Vector2i in ranked_keys:
+        if horizon_ecology_source.states.has(key):
+            visible_horizon_count += 1
+    var ring: Dictionary = physical_prop_ring_priority(
+        pending_chunk_prop_spawns, chunks, ranked_keys, player.global_position,
+        CELL, CHUNK_SIZE, VoxelTerrainRuntimeScript.FINAL_VIEW_DISTANCE,
+        VoxelTerrainRuntimeScript.MESH_PREPARATION_VIEW_DISTANCE,
+        PHYSICAL_PROP_RING_MAX_KEYS)
+    var ring_keys: Array[Vector2i] = ring["keys"]
+    if monitor != null:
+        monitor.observe_gauge("visible_prop_current_source_pending",
+            visible_physical.size() + visible_horizon_count)
+        monitor.observe_gauge("physical_prop_ring_eligible", int(ring.eligibleCount))
+    if visible_physical.is_empty() and visible_horizon_count == 0 and ring_keys.is_empty(): return 0
     var remaining_usec := gameplay_publication_deadline_usec - Time.get_ticks_usec()
     var required_usec := ceili(STREAMING_CHUNK_PROP_FRAME_BUDGET_MS * 1000.0) + 250
     if remaining_usec < required_usec:
@@ -657,19 +669,109 @@ func advance_visible_surface_prop_publication_shared() -> int:
         return 0
     var started_usec := Time.get_ticks_usec()
     horizon_ecology_publication_turn += 1
-    var process_horizon: bool = has_horizon_source and (not has_retained_source \
-        or horizon_ecology_publication_turn % 3 == 0)
-    var processed := horizon_ecology_source.advance_one(self, ranked_keys,
-        STREAMING_CHUNK_PROP_FRAME_BUDGET_MS,
-        STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME,
-        STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME) if process_horizon \
-        else process_pending_chunk_prop_spawns_for_visible_surface(ranked_keys)
+    var work_lane := physical_prop_work_lane(visible_physical.size(), visible_horizon_count,
+        ring_keys.size(), horizon_ecology_publication_turn)
+    var processed := 0
+    if work_lane == "horizon":
+        processed = horizon_ecology_source.advance_one(self, ranked_keys,
+            STREAMING_CHUNK_PROP_FRAME_BUDGET_MS,
+            STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME,
+            STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME)
+    elif work_lane == "current_physical":
+        # Keep the established surface-first queue order for visible demand.
+        processed = process_pending_chunk_prop_spawns_for_visible_surface(ranked_keys)
+    elif work_lane == "ring":
+        # Every admitted ring key still lacks its surface scan. The direct
+        # priority path selects one of those existing states before background
+        # underground work, within the same one-slice budget.
+        processed = process_pending_chunk_prop_spawns(ring_keys)
     if monitor != null:
         monitor.observe_external_duration("gameplay_visible_surface_prop_slice",
             float(Time.get_ticks_usec() - started_usec) / 1000.0)
         if processed > 0:
             monitor.increment_counter("gameplay_visible_surface_prop_slices", processed)
+            if work_lane == "horizon" or last_chunk_prop_spawn_key is Vector2i \
+                    and ranked_keys.has(last_chunk_prop_spawn_key):
+                monitor.increment_counter("visible_prop_current_source_slices", processed)
+            elif last_chunk_prop_spawn_key is Vector2i \
+                    and ring_keys.has(last_chunk_prop_spawn_key):
+                monitor.increment_counter("physical_prop_ring_slices", processed)
     return processed
+
+
+static func physical_prop_work_lane(current_physical_count: int, current_horizon_count: int,
+        ring_count: int, turn: int) -> String:
+    if current_horizon_count > 0 and (current_physical_count == 0 or turn % 3 == 0):
+        return "horizon"
+    if current_physical_count > 0: return "current_physical"
+    if ring_count > 0: return "ring"
+    return "none"
+
+
+static func physical_prop_visible_pending_keys(pending: Dictionary, physical_chunks: Dictionary,
+        ranked_keys: Array[Vector2i], near_bounds: Rect2i, chunk_size: int) -> Array[Vector2i]:
+    var result: Array[Vector2i] = []
+    for key: Vector2i in ranked_keys:
+        if not pending.has(key) or not physical_chunks.has(key): continue
+        var state_value: Variant = pending[key]
+        if not state_value is Dictionary: continue
+        var chunk := state_value.get("chunk") as Node3D
+        if not is_instance_valid(chunk) or chunk.is_queued_for_deletion() \
+                or not chunk.is_inside_tree() or not is_same(chunk, physical_chunks[key]): continue
+        var near := Rect2i(key * chunk_size, Vector2i.ONE * chunk_size).intersects(near_bounds)
+        if near and not bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false)) \
+                or not near and not bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
+            result.append(key)
+    return result
+
+
+static func physical_prop_ring_priority(pending: Dictionary, physical_chunks: Dictionary,
+        ranked_keys: Array[Vector2i], player_position: Vector3, cell_scale: float,
+        chunk_size: int, visible_distance: float, preparation_distance: float,
+        max_keys: int) -> Dictionary:
+    var result: Array[Vector2i] = []
+    if cell_scale <= 0.0 or chunk_size <= 0 or max_keys <= 0 \
+            or preparation_distance <= visible_distance:
+        return {"keys": result, "eligibleCount": 0}
+    var ranked := {}
+    for key: Vector2i in ranked_keys: ranked[key] = true
+    var candidates: Array[Dictionary] = []
+    for key_value in pending.keys():
+        if not key_value is Vector2i: continue
+        var key: Vector2i = key_value
+        if ranked.has(key) or not physical_chunks.has(key): continue
+        var state_value: Variant = pending[key]
+        if not state_value is Dictionary: continue
+        var chunk := state_value.get("chunk") as Node3D
+        if not is_instance_valid(chunk) or chunk.is_queued_for_deletion() \
+                or not chunk.is_inside_tree() or not is_same(chunk, physical_chunks[key]) \
+                or bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
+            continue
+        var distance_squared := physical_prop_chunk_distance_squared(key,
+            player_position, cell_scale, chunk_size)
+        if distance_squared <= visible_distance * visible_distance \
+                or distance_squared > preparation_distance * preparation_distance:
+            continue
+        candidates.append({"key": key, "distanceSquared": distance_squared})
+    candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        if not is_equal_approx(float(a.distanceSquared), float(b.distanceSquared)):
+            return float(a.distanceSquared) < float(b.distanceSquared)
+        var left: Vector2i = a.key
+        var right: Vector2i = b.key
+        return left.x < right.x if left.x != right.x else left.y < right.y)
+    for index in mini(max_keys, candidates.size()):
+        result.append(candidates[index].key)
+    return {"keys": result, "eligibleCount": candidates.size()}
+
+
+static func physical_prop_chunk_distance_squared(key: Vector2i, player_position: Vector3,
+        cell_scale: float, chunk_size: int) -> float:
+    var side := cell_scale * float(chunk_size)
+    var low := Vector2(float(key.x) * side, float(key.y) * side)
+    var high := low + Vector2.ONE * side
+    var closest := Vector2(clampf(player_position.x, low.x, high.x),
+        clampf(player_position.z, low.y, high.y))
+    return closest.distance_squared_to(Vector2(player_position.x, player_position.z))
 
 ## The only ordinary-gameplay claim for Citadel publication. Main establishes
 ## one frame token/deadline before any lane work; a child callback may consume
@@ -1689,6 +1791,7 @@ func process_pending_chunk_prop_spawns_for_visible_surface(priority_keys: Array[
     return _process_pending_chunk_prop_spawns(priority_keys, true)
 
 func _process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i], surface_first: bool) -> int:
+    last_chunk_prop_spawn_key = null
     if pending_chunk_prop_spawns.is_empty():
         return 0
     var monitor = runtime_perf_monitor
@@ -1696,13 +1799,17 @@ func _process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i], surface_
     var processed := 0
     var pending_keys: Array[Vector2i] = []
     if surface_first:
-        # The foreground startup gate requires full near-chunk publication;
-        # only the later full-view stage opts into surface-first scheduling.
-        # Every fourth slice still advances already-decided underground work.
+        # Keep the existing one-slice frame budget. Alternate current near
+        # full scans with visible surface discovery; far underground work is
+        # outside the visible source dependency until it becomes near.
         chunk_prop_spawn_queue_turn += 1
-        var underground_turn := chunk_prop_spawn_queue_turn % 4 == 0
+        var near_full_turn := chunk_prop_spawn_queue_turn % 2 == 0
+        var near_bounds: Rect2i = player_foreground_streaming_intent().get("bounds", Rect2i()) \
+            if player != null and is_instance_valid(player) else Rect2i()
+        near_bounds = near_bounds.grow(CHUNK_SIZE >> 1)
         pending_keys = ChunkPropSpawnPriorityScript.ordered_keys(
-            pending_chunk_prop_spawns, priority_keys, underground_turn)
+            pending_chunk_prop_spawns, priority_keys, near_bounds, CHUNK_SIZE,
+            near_full_turn)
     else:
         var priority_set: Dictionary = {}
         for key_value in priority_keys:
@@ -1721,6 +1828,7 @@ func _process_pending_chunk_prop_spawns(priority_keys: Array[Vector2i], surface_
         if chunk == null or not is_instance_valid(chunk) or not chunk.is_inside_tree():
             pending_chunk_prop_spawns.erase(key)
             continue
+        last_chunk_prop_spawn_key = key
         var props_start: int = monitor.begin_section("chunk_spawn_props") if monitor != null else Time.get_ticks_usec()
         var complete := process_chunk_prop_spawn_state(
             state,

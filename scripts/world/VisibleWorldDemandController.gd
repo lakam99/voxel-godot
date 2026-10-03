@@ -6,16 +6,21 @@ class_name VisibleWorldDemandController
 const ReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const TerrainManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
-const ViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 ## Begin the next all-direction source view before the old 24-cell rebase.
 ## This only schedules existing owners; it does not enlarge the rendered view.
 const REFRESH_DISTANCE_CELLS := 12.0
 const PENDING_REBASE_DISTANCE_CELLS := 24.0
-const TERRAIN_BLOCKS_PER_STEP := 12
-const CHUNK_SOURCE_STEPS_PER_STEP := 1
+const TERRAIN_BLOCKS_PER_STEP := 24
+const MAX_CHUNK_SOURCE_ATOMS_PER_STEP := 4
+const SOURCE_DEADLINE_RESERVE_USEC := 1000
 const MAX_CHUNK_SOURCES_PER_VIEW := 256
 const MAX_MISSING_CHUNK_DIAGNOSTICS := 8
 const MAX_STALE_TERRAIN_REVISITS_PER_STEP := 8
+const SUPERSEDED_RETENTION_USEC := 3000000
+const STRUCTURE_PREFETCH_SHIFT_CELLS := 24.0
+const STRUCTURE_PREFETCH_MAX_KEYS := 64
+const STRUCTURE_PREFETCH_SLICE_USEC := 750
+const STRUCTURE_PREFETCH_DEADLINE_RESERVE_USEC := 150
 
 var _owners: Dictionary = {}
 var _next_demand_revision := 0
@@ -49,7 +54,7 @@ func adopt(owner: String, request_id: int, seed: String, world_revision: String,
 func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 		seed: String, world_revision: String, center_world: Vector3,
 		near_bounds: Rect2i, radius_cells: float, cell_scale: float,
-		chunk_size: int, view_intent: Dictionary = {},
+		chunk_size: int, _view_intent: Dictionary = {},
 		near_margin_cells := -1) -> Dictionary:
 	if not is_instance_valid(main) or not is_instance_valid(runtime) or owner.is_empty() \
 			or request_id <= 0 or seed.is_empty() or world_revision.is_empty() \
@@ -61,18 +66,29 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 	var state: Dictionary = _owners.get(owner, {"current": {}, "pending": {}})
 	var current: Dictionary = state.get("current", {})
 	var pending: Dictionary = state.get("pending", {})
+	var superseded: Dictionary = state.get("superseded", {})
+	var underground_visuals_required := bool(main.call(
+		"visible_world_underground_visuals_required")) \
+		if main.has_method("visible_world_underground_visuals_required") else false
 	if not current.is_empty() and (int(current.requestId) != request_id \
 			or String(current.seed) != seed or String(current.worldRevision) != world_revision):
 		current = {}
 	if not pending.is_empty() and (int(pending.requestId) != request_id \
 			or String(pending.seed) != seed or String(pending.worldRevision) != world_revision):
 		pending = {}
+	if not superseded.is_empty() and (int(superseded.get("requestId", 0)) != request_id \
+			or String(superseded.get("seed", "")) != seed \
+			or String(superseded.get("worldRevision", "")) != world_revision):
+		superseded = {}
 	# The adopted startup ledger proves nearby playability, but it has no
 	# controller-owned horizon publishers. Build the full-view replacement before
 	# first control, then retain that accepted view during ordinary movement.
 	var current_covers := current.has("terrain") \
+		and bool(current.get("undergroundVisualsRequired", false)) \
+			== underground_visuals_required \
 		and _covers(current, center, near_bounds, REFRESH_DISTANCE_CELLS)
-	var pending_covers := _covers(pending, center, near_bounds, PENDING_REBASE_DISTANCE_CELLS)
+	var pending_covers := _pending_covers(pending, center, near_bounds,
+		underground_visuals_required)
 	if not current_covers and not pending_covers:
 		var radius_int := ceili(radius_cells)
 		var bounds := Rect2i(Vector2i(floori(center.x) - radius_int,
@@ -90,36 +106,61 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 			bounds, prepared_near, center, radius_cells)
 		if admitted.get("status") != "ready": return admitted
 		var previous_ledgers: Array = []
+		var previous_views: Array[Dictionary] = []
 		for old_view: Dictionary in [pending, current]:
 			if not old_view.is_empty() and is_instance_valid(old_view.get("ledger")) \
-					and not previous_ledgers.has(old_view.ledger):
+					and bool(old_view.get("undergroundVisualsRequired", false)) \
+						== underground_visuals_required \
+				and not previous_ledgers.has(old_view.ledger):
 				previous_ledgers.append(old_view.ledger)
+				previous_views.append(old_view)
 		var manifest = TerrainManifestScript.new()
 		var terrain_start: Dictionary = manifest.begin(runtime, ledger, request_id, seed,
 			world_revision, int(admitted.viewRevision), bounds, prepared_near,
 			center_cells, radius_cells, previous_ledgers)
 		if terrain_start.get("status") != "ready": return terrain_start
 		var keys := _ranked_chunk_keys(bounds, center_world, cell_scale,
-			chunk_size, view_intent)
+			chunk_size, radius_cells)
 		if keys.size() > MAX_CHUNK_SOURCES_PER_VIEW:
 			return {"status": "failed", "reason": "visual_chunk_source_capacity",
 				"chunkSourceCount": keys.size(), "limit": MAX_CHUNK_SOURCES_PER_VIEW}
+		# Keep one superseded producer footprint briefly across a fast rebase.
+		# Only the new view publishes receipts and controls readiness.
+		if not pending.is_empty() and pending.has("chunkKeys"):
+			superseded = {"requestId": request_id, "seed": seed,
+				"worldRevision": world_revision, "chunkKeys": pending.chunkKeys,
+				"expiresUsec": Time.get_ticks_usec() + SUPERSEDED_RETENTION_USEC}
 		pending = {"ledger": ledger, "terrain": manifest, "terrainState": terrain_start,
+			"mainId": main.get_instance_id(),
 			# Retain only the two immediately superseded ledgers while their
 			# complete interior sources can be checked against this demand.
 			"overlapLedgers": previous_ledgers,
+			"overlapViews": previous_views,
 			"requestId": request_id, "seed": seed, "worldRevision": world_revision,
 			"demandRevision": _next_demand_revision,
 			"viewRevision": int(admitted.viewRevision), "center": center,
+			"undergroundVisualsRequired": underground_visuals_required,
 			"centerWorld": center_world,
 			"radius": radius_cells, "bounds": bounds, "nearBounds": prepared_near,
+			"cellScale": cell_scale,
 			"chunkKeys": keys,
 			"propCursor": 0, "structureCursor": 0,
-			"propSources": {}, "structureSources": {}, "lastProp": {}, "lastStructure": {},
+			"propJobs": {}, "propBudgetStreak": 0,
+			"structureJobs": {}, "structureBudgetStreak": 0,
+			"nextChunkKind": "prop",
+			"propSources": {}, "structureSources": {}, "structureProofs": {},
+			"structureTransfers": {}, "lastProp": {}, "lastStructure": {},
+			"structureStartAudit": {"transferUnavailable": 0,
+				"freshCaptureBegun": 0, "lastFreshCaptureStatus": "",
+				"lastFreshCaptureReason": "", "structureAtomsAttempted": 0,
+				"lastStructureKey": "", "lastPath": "",
+				"lastJobWasValid": false, "lastTransferStatus": "",
+				"lastTransferReason": ""},
 			"missingChunkSources": {},
 			"dirtyChunkKeys": []}
 	state.current = current
 	state.pending = pending
+	state.superseded = superseded
 	_owners[owner] = state
 	return {"status": "ready" if pending.is_empty() else "pending",
 		"reason": "" if pending.is_empty() else "visual_demand_preparing",
@@ -130,14 +171,25 @@ func ensure(main: Object, runtime: Object, owner: String, request_id: int,
 
 
 func advance(main: Object, runtime: Object, structure_system: Object, owner: String,
-		chunk_size: int) -> Dictionary:
+		chunk_size: int, deadline_usec: int = 0) -> Dictionary:
 	if not _owners.has(owner): return {"status": "pending", "reason": "visual_request_not_started"}
 	var state: Dictionary = _owners[owner]
 	var pending: Dictionary = state.get("pending", {})
+	var accepted: Dictionary = state.get("current", {})
+	var prefetch: Dictionary = {}
+	if not accepted.is_empty() and bool(accepted.get("publicationComplete", false)) \
+			and is_instance_valid(runtime) and is_instance_valid(structure_system) \
+			and runtime.has_method("visible_mesh_world_revision") \
+			and String(runtime.call("visible_mesh_world_revision")) == String(accepted.worldRevision):
+		prefetch = _advance_structure_prefetch(structure_system, state, accepted,
+			owner, chunk_size, deadline_usec)
+		_owners[owner] = state
 	var advancing_pending := not pending.is_empty()
 	var coverage_advance_usec := 0
 	var prop_advance_usec := 0
+	var prop_phase_usec: Dictionary = {}
 	var structure_advance_usec := 0
+	var source_atoms_attempted := 0
 	if pending.is_empty():
 		pending = state.get("current", {})
 		var terrain_changed: bool = pending.has("terrain") \
@@ -163,7 +215,8 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 						"coverageAdvanceUsec": coverage_advance_usec,
 						"coverageGeometryUsec": confirmed.get("coverageGeometryUsec", 0),
 						"receiptValidationUsec": confirmed.get("receiptValidationUsec", 0),
-						"receiptValidationByKindUsec": confirmed.get("receiptValidationByKindUsec", {})}
+						"receiptValidationByKindUsec": confirmed.get("receiptValidationByKindUsec", {}),
+						"structurePrefetch": prefetch}
 				_request_stale_terrain_revisits(pending, confirmed)
 			# A removed owner, changed tree tier, or missing source must be retried
 			# through the same bounded publisher, never acknowledged from a flag.
@@ -188,34 +241,105 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 			"retryable": true}
 	var keys: Array[Vector2i] = pending.chunkKeys
 	if not keys.is_empty():
-		for _step in CHUNK_SOURCE_STEPS_PER_STEP:
-			var prop_key: Vector2i = keys[int(pending.propCursor)]
-			pending.propCursor = (int(pending.propCursor) + 1) % keys.size()
-			var prop_started_usec := Time.get_ticks_usec()
-			var prop: Dictionary = main.call("publish_chunk_prop_visual_readiness",
-				pending.ledger, int(pending.viewRevision), pending.nearBounds,
-				prop_key, pending.centerWorld)
-			prop_advance_usec += maxi(0, Time.get_ticks_usec() - prop_started_usec)
-			pending.lastProp = prop
-			if bool(prop.get("manifestSubmitted", false)):
-				pending.propSources[prop_key] = true
-			if String(prop.get("reason", "")) in ["chunk_prop_source_missing", "chunk_prop_source_not_live"]:
-				pending.missingChunkSources[prop_key] = true
+		var maximum_atoms := 2 if deadline_usec <= 0 else MAX_CHUNK_SOURCE_ATOMS_PER_STEP
+		for _step in maximum_atoms:
+			if deadline_usec > 0 \
+					and Time.get_ticks_usec() + SOURCE_DEADLINE_RESERVE_USEC >= deadline_usec:
+				break
+			var kind := String(pending.get("nextChunkKind", "prop"))
+			pending.nextChunkKind = "structure" if kind == "prop" else "prop"
+			source_atoms_attempted += 1
+			if kind == "prop":
+				pending.propCursor = _next_prop_cursor(main, keys,
+					int(pending.propCursor), pending)
+				var prop_key: Vector2i = keys[int(pending.propCursor)]
+				var prop_started_usec := Time.get_ticks_usec()
+				var prop_jobs: Dictionary = pending.get("propJobs", {})
+				var prop: Dictionary = main.call("publish_chunk_prop_visual_readiness",
+					pending.ledger, int(pending.viewRevision), pending.nearBounds,
+					prop_key, pending.centerWorld, prop_jobs.get(prop_key))
+				var capture_job: Object = prop.get("captureJob") as Object
+				if is_instance_valid(capture_job):
+					prop_jobs[prop_key] = capture_job
+				else:
+					prop_jobs.erase(prop_key)
+				prop.erase("captureJob")
+				prop_advance_usec += maxi(0, Time.get_ticks_usec() - prop_started_usec)
+				prop_phase_usec = prop.get("propPhaseUsec", {}) as Dictionary
+				pending.lastProp = prop
+				if bool(prop.get("manifestSubmitted", false)):
+					pending.propSources[prop_key] = true
+				if String(prop.get("reason", "")) in ["chunk_prop_source_missing", "chunk_prop_source_not_live"]:
+					pending.missingChunkSources[prop_key] = true
+				else:
+					pending.missingChunkSources.erase(prop_key)
+				var prop_budget_pending: bool = String(prop.get("reason", "")) == \
+					"chunk_prop_bounded_capture_budget"
+				if prop_budget_pending and int(pending.get("propBudgetStreak", 0)) < 2:
+					pending.propBudgetStreak = int(pending.get("propBudgetStreak", 0)) + 1
+				else:
+					pending.propCursor = (int(pending.propCursor) + 1) % keys.size()
+					pending.propBudgetStreak = 0
 			else:
-				pending.missingChunkSources.erase(prop_key)
-			var structure_key: Vector2i = keys[int(pending.structureCursor)]
-			pending.structureCursor = (int(pending.structureCursor) + 1) % keys.size()
-			var source_bounds := Rect2i(structure_key * chunk_size,
-				Vector2i.ONE * chunk_size)
-			var structure_started_usec := Time.get_ticks_usec()
-			var structure: Dictionary = StructureManifestScript.submit(main,
-				structure_system, pending.ledger, int(pending.requestId),
-				int(pending.viewRevision), source_bounds, source_bounds, false,
-				pending.nearBounds)
-			structure_advance_usec += maxi(0, Time.get_ticks_usec() - structure_started_usec)
-			pending.lastStructure = structure
-			if structure.get("status") == "ready":
-				pending.structureSources[structure_key] = true
+				var structure_key: Vector2i = keys[int(pending.structureCursor)]
+				var source_bounds := Rect2i(structure_key * chunk_size,
+					Vector2i.ONE * chunk_size)
+				var structure_started_usec := Time.get_ticks_usec()
+				var structure_jobs: Dictionary = pending.get("structureJobs", {})
+				var job: Object = structure_jobs.get(structure_key)
+				var structure: Dictionary = {}
+				var start_audit: Dictionary = pending.get("structureStartAudit", {})
+				start_audit["structureAtomsAttempted"] = int(
+					start_audit.get("structureAtomsAttempted", 0)) + 1
+				start_audit["lastStructureKey"] = str(structure_key)
+				start_audit["lastJobWasValid"] = is_instance_valid(job)
+				if not is_instance_valid(job):
+					var start_result: Dictionary = _start_structure_source_atom(main,
+						state, pending, structure_system, structure_key, source_bounds,
+						start_audit)
+					structure = start_result.get("result", {})
+					job = start_result.get("job") as Object
+					start_audit = start_result.get("audit", start_audit)
+					if structure.get("status") == "ready":
+						pending.structureSources[structure_key] = true
+						(pending.get("structureProofs", {}) as Dictionary)[structure_key] = \
+							structure.get("producerCertificate", {})
+					if is_instance_valid(job): structure_jobs[structure_key] = job
+				if is_instance_valid(job):
+					structure = job.call("advance", 128, 3000)
+					if (job.get("_bounded") as Dictionary).is_empty() \
+							or structure.get("status") == "ready":
+						structure_jobs.erase(structure_key)
+				elif structure.get("reason") == "visual_overlap_transfer_budget":
+					pass
+				else:
+					start_audit["lastPath"] = "continue_capture"
+				pending.structureJobs = structure_jobs
+				pending.structureStartAudit = start_audit
+				structure_advance_usec += maxi(0, Time.get_ticks_usec() - structure_started_usec)
+				pending.lastStructure = structure
+				if String(structure.get("reason", "")) in [
+						"ordinary_visual_capture_source_changed",
+						"ordinary_visual_capture_owner_changed",
+						"generated_structure_bounded_owner_changed",
+						"generated_structure_source_revision_changed"]:
+					var prefetch_state: Dictionary = state.get("structurePrefetch", {})
+					(prefetch_state.get("jobs", {}) as Dictionary).erase(structure_key)
+					(prefetch_state.get("ready", {}) as Dictionary).erase(structure_key)
+					state.structurePrefetch = prefetch_state
+				if structure.get("status") == "ready":
+					pending.structureSources[structure_key] = true
+					if structure.has("producerCertificate"):
+						(pending.get("structureProofs", {}) as Dictionary)[structure_key] = \
+							structure.producerCertificate
+				var budget_pending: bool = String(structure.get("reason", "")) in [
+					"ordinary_visual_capture_budget", "generated_structure_candidate_budget",
+					"generated_structure_bounded_budget", "visual_overlap_transfer_budget"]
+				if budget_pending and int(pending.get("structureBudgetStreak", 0)) < 2:
+					pending.structureBudgetStreak = int(pending.get("structureBudgetStreak", 0)) + 1
+				else:
+					pending.structureCursor = (int(pending.structureCursor) + 1) % keys.size()
+					pending.structureBudgetStreak = 0
 	var unscanned := maxi(0, keys.size() - pending.propSources.size()) \
 		+ maxi(0, keys.size() - pending.structureSources.size())
 	var terrain_pending := int(terrain.get("pendingBlocks", 0))
@@ -240,6 +364,7 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 	if advancing_pending and full_result.get("status") == "ready":
 		state.current = pending
 		state.pending = {}
+		state.superseded = {}
 	elif advancing_pending:
 		state.pending = pending
 	else:
@@ -262,14 +387,220 @@ func advance(main: Object, runtime: Object, structure_system: Object, owner: Str
 		"staleTerrainRevisitsQueued": stale_revisits,
 		"terrainAdvanceUsec": terrain_advance_usec,
 		"propAdvanceUsec": prop_advance_usec,
+		"propPhaseUsec": prop_phase_usec,
 		"structureAdvanceUsec": structure_advance_usec,
+		"sourceAtomsAttempted": source_atoms_attempted,
 		"structurePhaseUsec": (pending.lastStructure as Dictionary).get("phaseUsec", {}),
 		"coverageAdvanceUsec": coverage_advance_usec,
 		"coverageGeometryUsec": full_result.get("coverageGeometryUsec", 0),
 		"receiptValidationUsec": full_result.get("receiptValidationUsec", 0),
 		"receiptValidationByKindUsec": full_result.get("receiptValidationByKindUsec", {}),
 		"terrain": terrain,
-		"prop": pending.lastProp, "structures": pending.lastStructure}
+		"prop": pending.lastProp, "structures": pending.lastStructure,
+		"structureStartAudit": pending.get("structureStartAudit", {}).duplicate(true),
+		"structurePrefetch": prefetch}
+
+
+func _start_structure_source_atom(main: Object, state: Dictionary, pending: Dictionary,
+		structure_system: Object, key: Vector2i, bounds: Rect2i,
+		audit: Dictionary) -> Dictionary:
+	audit["lastPath"] = "overlap_check"
+	var result: Dictionary = _transfer_structure_overlap(state, pending,
+		structure_system, key, bounds)
+	audit["lastTransferStatus"] = String(result.get("status", ""))
+	audit["lastTransferReason"] = String(result.get("reason", ""))
+	var job: Object = null
+	if result.get("status") != "ready" \
+			and result.get("reason") != "visual_overlap_transfer_budget":
+		audit["lastPath"] = "fresh_capture"
+		if String(result.get("reason", "")) == "visual_overlap_source_not_transferable":
+			audit["transferUnavailable"] = int(audit.get("transferUnavailable", 0)) + 1
+		var prefetched: Object = _prefetched_structure_capture(state,
+			structure_system, pending, key, bounds)
+		var begun: Dictionary = StructureManifestScript.begin_bounded(main,
+			structure_system, pending.ledger, int(pending.requestId),
+			int(pending.viewRevision), bounds, bounds, false,
+			pending.nearBounds, prefetched)
+		audit["freshCaptureBegun"] = int(audit.get("freshCaptureBegun", 0)) + 1
+		audit["lastFreshCaptureStatus"] = String(begun.get("status", ""))
+		audit["lastFreshCaptureReason"] = String(begun.get("reason", ""))
+		job = begun.get("job") as Object
+		result = begun
+	return {"result": result, "job": job, "audit": audit}
+
+
+func _prefetched_structure_capture(state: Dictionary, structure_system: Object,
+		view: Dictionary, key: Vector2i, bounds: Rect2i) -> Object:
+	var prefetch: Dictionary = state.get("structurePrefetch", {})
+	if int(prefetch.get("requestId", 0)) != int(view.requestId) \
+			or String(prefetch.get("seed", "")) != String(view.seed) \
+			or String(prefetch.get("worldRevision", "")) != String(view.worldRevision) \
+			or int(prefetch.get("structureId", 0)) != structure_system.get_instance_id():
+		return null
+	var jobs: Dictionary = prefetch.get("jobs", {})
+	var capture := jobs.get(key) as Object
+	if not is_instance_valid(capture) or not capture.has_method("eligible_for") \
+			or not bool(capture.call("eligible_for", structure_system, bounds)):
+		jobs.erase(key)
+		(prefetch.get("ready", {}) as Dictionary).erase(key)
+		return null
+	return capture
+
+
+func _transfer_structure_overlap(state: Dictionary, view: Dictionary,
+		structure_system: Object, key: Vector2i, bounds: Rect2i) -> Dictionary:
+	var source_id := "generated-structure-blocks:%s" % str(bounds)
+	var transfers: Dictionary = view.get("structureTransfers", {})
+	var existing: Dictionary = transfers.get(key, {})
+	var previous_views: Array = view.get("overlapViews", [])
+	var has_previous_proof := not existing.is_empty()
+	if not has_previous_proof:
+		for old_view_value in previous_views:
+			if old_view_value is Dictionary \
+					and (old_view_value as Dictionary).get("structureProofs", {}).has(key):
+				has_previous_proof = true
+				break
+	if not has_previous_proof:
+		return {"status": "unavailable", "reason": "visual_overlap_source_not_transferable"}
+	var current_certificate: Dictionary = StructureManifestScript.producer_certificate(
+		structure_system, bounds)
+	if current_certificate.is_empty():
+		return {"status": "pending", "reason": "generated_structure_producer_certificate_pending",
+			"retryable": true}
+	if not existing.is_empty() and JSON.stringify(existing.get("certificate", {})) \
+			!= JSON.stringify(current_certificate):
+		var in_progress_ledger := existing.get("ledger") as Object
+		if is_instance_valid(in_progress_ledger) and in_progress_ledger.has_method("abort_overlap_transfer"):
+			in_progress_ledger.call("abort_overlap_transfer", source_id)
+		transfers.erase(key)
+		view.structureTransfers = transfers
+		existing.clear()
+	for old_view_value in previous_views:
+		if not old_view_value is Dictionary: continue
+		var old_view: Dictionary = old_view_value
+		var old_proofs: Dictionary = old_view.get("structureProofs", {})
+		var old_certificate: Dictionary = old_proofs.get(key, {})
+		if old_certificate.is_empty() or JSON.stringify(old_certificate) \
+				!= JSON.stringify(current_certificate):
+			continue
+		var old_ledger := old_view.get("ledger") as Object
+		if not is_instance_valid(old_ledger) or not old_ledger.has_method("complete_source_descriptor"):
+			continue
+		var descriptor: Dictionary = old_ledger.call("complete_source_descriptor", source_id)
+		if descriptor.is_empty() or String(descriptor.get("kind", "")) != "structures":
+			continue
+		var source_identity := String(descriptor.get("identity", ""))
+		var old_main_id := int(old_view.get("mainId", 0))
+		if old_main_id <= 0 or source_identity != "generated-structure-blocks:%d:%d:%s" % [
+				old_main_id, structure_system.get_instance_id(), str(bounds)]:
+			continue
+		var result: Dictionary = view.ledger.call("transfer_complete_overlap_source",
+			old_ledger, source_id, source_identity, String(descriptor.get("revision", "")),
+			int(view.viewRevision), 64, structure_system)
+		if result.get("status") == "ready":
+			transfers.erase(key)
+			view.structureTransfers = transfers
+			result["producerCertificate"] = current_certificate
+			result["candidateCount"] = int(descriptor.get("candidateCount", 0))
+			result["sourceRevision"] = String(descriptor.get("revision", ""))
+			return result
+		if String(result.get("reason", "")) == "visual_overlap_transfer_budget":
+			transfers[key] = {"ledger": old_ledger, "sourceId": source_id,
+				"certificate": current_certificate}
+			view.structureTransfers = transfers
+			return result
+		old_ledger.call("abort_overlap_transfer", source_id)
+		if not existing.is_empty() and existing.get("ledger") == old_ledger:
+			transfers.erase(key)
+	view.structureTransfers = transfers
+	return {"status": "unavailable", "reason": "visual_overlap_source_not_transferable"}
+
+
+func _advance_structure_prefetch(structure_system: Object, state: Dictionary,
+		current: Dictionary, owner: String, chunk_size: int,
+		deadline_usec: int) -> Dictionary:
+	if owner != "player" or deadline_usec <= 0 \
+			or Time.get_ticks_usec() + STRUCTURE_PREFETCH_SLICE_USEC \
+				+ STRUCTURE_PREFETCH_DEADLINE_RESERVE_USEC >= deadline_usec \
+			or not structure_system.has_method("begin_region_ordinary_visual_source_capture"):
+		return {"status": "deferred"}
+	var prefetch: Dictionary = state.get("structurePrefetch", {})
+	if int(prefetch.get("currentDemandRevision", 0)) != int(current.demandRevision) \
+			or int(prefetch.get("requestId", 0)) != int(current.requestId) \
+			or String(prefetch.get("seed", "")) != String(current.seed) \
+			or String(prefetch.get("worldRevision", "")) != String(current.worldRevision) \
+			or int(prefetch.get("structureId", 0)) != structure_system.get_instance_id():
+		var cell_scale := float(current.get("cellScale", 0.0))
+		if cell_scale <= 0.0: return {"status": "deferred"}
+		var center: Vector2 = current.center
+		var radius := float(current.radius) + STRUCTURE_PREFETCH_SHIFT_CELLS
+		var extent := ceili(radius)
+		var bounds := Rect2i(Vector2i(floori(center.x) - extent,
+			floori(center.y) - extent), Vector2i.ONE * (2 * extent + 1))
+		var current_keys: Dictionary = {}
+		for key: Vector2i in current.chunkKeys: current_keys[key] = true
+		var keys: Array[Vector2i] = []
+		for key: Vector2i in _ranked_chunk_keys(bounds, current.centerWorld,
+				cell_scale, chunk_size, radius):
+			if not current_keys.has(key): keys.append(key)
+			if keys.size() >= STRUCTURE_PREFETCH_MAX_KEYS: break
+		prefetch = {"requestId": int(current.requestId), "seed": String(current.seed),
+			"worldRevision": String(current.worldRevision),
+			"structureId": structure_system.get_instance_id(),
+			"currentDemandRevision": int(current.demandRevision),
+			"keys": keys, "cursor": 0, "jobs": {}, "ready": {}}
+		state.structurePrefetch = prefetch
+	var keys: Array[Vector2i] = prefetch.get("keys", [])
+	if keys.is_empty(): return {"status": "empty", "ready": 0, "expected": 0}
+	var jobs: Dictionary = prefetch.jobs
+	var ready: Dictionary = prefetch.ready
+	for offset in keys.size():
+		var index := (int(prefetch.cursor) + offset) % keys.size()
+		var key: Vector2i = keys[index]
+		if ready.has(key): continue
+		var bounds := Rect2i(key * chunk_size, Vector2i.ONE * chunk_size)
+		var capture := jobs.get(key) as Object
+		if not is_instance_valid(capture) or not capture.has_method("eligible_for") \
+				or not bool(capture.call("eligible_for", structure_system, bounds)):
+			capture = structure_system.call("begin_region_ordinary_visual_source_capture", bounds)
+			jobs[key] = capture
+		if not is_instance_valid(capture) or not capture.has_method("advance"):
+			jobs.erase(key)
+			prefetch.cursor = (index + 1) % keys.size()
+			break
+		var result: Dictionary = capture.call("advance", 512, STRUCTURE_PREFETCH_SLICE_USEC)
+		if result.get("status") == "described":
+			ready[key] = true
+			prefetch.cursor = (index + 1) % keys.size()
+		elif result.get("reason") == "ordinary_visual_capture_budget":
+			prefetch.cursor = index
+		else:
+			jobs.erase(key)
+			prefetch.cursor = (index + 1) % keys.size()
+		state.structurePrefetch = prefetch
+		return {"status": String(result.get("status", "pending")),
+			"reason": String(result.get("reason", "")), "key": key,
+			"ready": ready.size(), "expected": keys.size(),
+			"sliceUsec": int(result.get("sliceUsec", 0))}
+	return {"status": "ready", "ready": ready.size(), "expected": keys.size()}
+
+
+func _next_prop_cursor(main: Object, keys: Array[Vector2i], cursor: int,
+		view: Dictionary) -> int:
+	# A producer that has finished its required scan can be admitted now.
+	# Leave unfinished producers in the rotation so missing owners still retry.
+	var submitted: Dictionary = view.get("propSources", {})
+	var jobs: Dictionary = view.get("propJobs", {})
+	var first_unsubmitted := -1
+	for offset in keys.size():
+		var index := (cursor + offset) % keys.size()
+		var key: Vector2i = keys[index]
+		if submitted.has(key): continue
+		if first_unsubmitted < 0: first_unsubmitted = index
+		if jobs.has(key) or bool(main.call("chunk_prop_visual_source_scan_complete",
+				key, view.nearBounds)):
+			return index
+	return first_unsubmitted if first_unsubmitted >= 0 else cursor
 
 
 func region_readiness(owner: String, request_id: int, seed: String,
@@ -366,7 +697,12 @@ func retained_chunk_keys(owner: String) -> Array[Vector2i]:
 	if not _owners.has(owner): return result
 	var state: Dictionary = _owners[owner]
 	var seen: Dictionary = {}
-	for view_value in [state.get("current", {}), state.get("pending", {})]:
+	var views: Array = [state.get("current", {}), state.get("pending", {})]
+	var superseded: Dictionary = state.get("superseded", {})
+	if not superseded.is_empty() \
+			and Time.get_ticks_usec() < int(superseded.get("expiresUsec", 0)):
+		views.append(superseded)
+	for view_value in views:
 		if not view_value is Dictionary: continue
 		var view: Dictionary = view_value
 		for key_value in view.get("chunkKeys", []):
@@ -439,9 +775,17 @@ func _refresh_current_chunk(main: Object, state: Dictionary,
 		return {"status": "pending", "reason": "visual_publisher_unavailable"}
 	var dirty: Array = current.get("dirtyChunkKeys", [])
 	var chunk_key: Vector2i = dirty.pop_front()
+	var prop_jobs: Dictionary = current.get("propJobs", {})
 	var refresh: Dictionary = main.call("publish_chunk_prop_visual_readiness",
 		current.ledger, int(current.viewRevision), current.nearBounds,
-		chunk_key, current.centerWorld)
+		chunk_key, current.centerWorld, prop_jobs.get(chunk_key))
+	var capture_job: Object = refresh.get("captureJob") as Object
+	if is_instance_valid(capture_job):
+		prop_jobs[chunk_key] = capture_job
+	else:
+		prop_jobs.erase(chunk_key)
+	refresh.erase("captureJob")
+	current.propJobs = prop_jobs
 	if refresh.get("status") != "ready" or not bool(refresh.get("manifestSubmitted", false)):
 		dirty.append(chunk_key)
 	current.dirtyChunkKeys = dirty
@@ -474,6 +818,19 @@ static func _covers(view: Dictionary, center: Vector2, near_bounds: Rect2i,
 	return not view.is_empty() and view.get("bounds", Rect2i()) is Rect2i \
 		and view.bounds.encloses(near_bounds) and view.nearBounds.encloses(near_bounds) \
 		and center.distance_to(view.center) < maximum_lag
+
+
+static func _pending_covers(view: Dictionary, center: Vector2,
+		near_bounds: Rect2i, underground_visuals_required := false) -> bool:
+	# A prepared view covers its full source bounds while publication catches up.
+	# Its initial near priority band does not move with the player, and leaving
+	# that band must not discard still-useful work from the same full view.
+	return not view.is_empty() \
+		and bool(view.get("undergroundVisualsRequired", false)) \
+			== underground_visuals_required \
+		and view.get("bounds", Rect2i()) is Rect2i \
+		and view.bounds.encloses(near_bounds) \
+		and center.distance_to(view.center) < PENDING_REBASE_DISTANCE_CELLS
 
 
 static func _full_view_result(view: Dictionary) -> Dictionary:
@@ -534,28 +891,38 @@ static func _bounded_pending_chunk_keys(view: Dictionary,
 	return result
 
 
+## Scheduling-only order: nearest chunk edge in the complete circular view first.
+## Camera direction never demotes a source behind or beside the player.
 static func _ranked_chunk_keys(bounds: Rect2i, center_world: Vector3,
-		cell_scale: float, chunk_size: int, view_intent: Dictionary) -> Array[Vector2i]:
-	var groups := {}
-	var keys_by_id := {}
+		cell_scale: float, chunk_size: int, radius_cells: float) -> Array[Vector2i]:
+	var candidates: Array[Dictionary] = []
+	if bounds.size.x <= 0 or bounds.size.y <= 0 or not is_finite(cell_scale) \
+			or cell_scale <= 0.0 or chunk_size <= 0 or not is_finite(radius_cells) \
+			or radius_cells <= 0.0 or not center_world.is_finite():
+		return []
+	var center_cells := Vector2(center_world.x / cell_scale,
+		center_world.z / cell_scale)
+	var radius_squared := radius_cells * radius_cells
 	for z in range(floori(float(bounds.position.y) / float(chunk_size)),
 			floori(float(bounds.end.y - 1) / float(chunk_size)) + 1):
 		for x in range(floori(float(bounds.position.x) / float(chunk_size)),
 				floori(float(bounds.end.x - 1) / float(chunk_size)) + 1):
-			var key := Vector2i(x, z)
-			var id := "%d,%d" % [x, z]
-			var low := Vector3(float(x * chunk_size) * cell_scale, 0.0,
-				float(z * chunk_size) * cell_scale)
-			groups[id] = {"bounds": AABB(low, Vector3(float(chunk_size) * cell_scale,
-				1.0, float(chunk_size) * cell_scale)), "doorPartIds": []}
-			keys_by_id[id] = key
-	var intent := view_intent.duplicate(true)
-	intent["origin"] = center_world
-	if not intent.get("predictedOrigin") is Vector3:
-		intent["predictedOrigin"] = center_world
-	var ranked: Array[Dictionary] = ViewPriorityScript.ranked_groups(groups,
-		ViewPriorityScript.normalize(intent))
+			# A whole chunk strictly outside the circular visible view has no
+			# candidates for this ledger. Keep every tangent/boundary chunk.
+			var closest := Vector2(clampf(center_cells.x, float(x * chunk_size),
+				float((x + 1) * chunk_size)), clampf(center_cells.y,
+				float(z * chunk_size), float((z + 1) * chunk_size)))
+			var distance_squared := center_cells.distance_squared_to(closest)
+			if distance_squared > radius_squared:
+				continue
+			candidates.append({"key": Vector2i(x, z), "distanceSquared": distance_squared})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if not is_equal_approx(float(a.distanceSquared), float(b.distanceSquared)):
+			return float(a.distanceSquared) < float(b.distanceSquared)
+		var left: Vector2i = a.key
+		var right: Vector2i = b.key
+		return left.x < right.x if left.x != right.x else left.y < right.y)
 	var result: Array[Vector2i] = []
-	for row: Dictionary in ranked:
-		result.append(keys_by_id[String(row.id)])
+	for candidate: Dictionary in candidates:
+		result.append(candidate.key)
 	return result

@@ -295,7 +295,6 @@ const scriptTools = {
   'run-underground-fluid-render-tests': ['res://scripts/testing/UndergroundFluidRenderContractRunner.gd', 'VOXEL_UNDERGROUND_FLUID_RENDER_REPORT'],
   'run-underground-generation-tests': ['res://scripts/testing/UndergroundGenerationTestRunner.gd', 'VOXEL_UNDERGROUND_GENERATION_REPORT'],
   'run-underground-volume-contract-tests': ['res://scripts/testing/UndergroundVolumeContractRunner.gd', 'VOXEL_UNDERGROUND_VOLUME_CONTRACT_REPORT'],
-  'run-voxel-terrain-save-parity': ['res://scripts/testing/terrain/VoxelTerrainSaveParityRunner.gd', 'VOXEL_TERRAIN_SAVE_PARITY_REPORT']
 };
 
 const sceneTools = {
@@ -318,6 +317,7 @@ const sceneTools = {
   'run-vox43-underground-fluid-visual': ['res://scenes/testing/Vox43UndergroundFluidVisual.tscn', 'VOXEL_VOX43_FLUID_VISUAL_REPORT'],
   'run-voxel-terrain-collision-publication': ['res://scenes/testing/VoxelTerrainCollisionPublication.tscn', 'VOXEL_TERRAIN_PUBLICATION_REPORT'],
   'run-voxel-tools-backend-smoke': ['res://scenes/testing/VoxelToolsBackendSmoke.tscn', 'VOXEL_VOXEL_TOOLS_BACKEND_REPORT'],
+  'run-voxel-terrain-save-parity': ['res://scenes/testing/VoxelTerrainSaveParityTest.tscn', 'VOXEL_TERRAIN_SAVE_PARITY_REPORT'],
   'run-wolf-behavior-contract': ['res://scenes/testing/WolfBehaviorContractTest.tscn', 'VOXEL_WOLF_BEHAVIOR_CONTRACT_REPORT']
 };
 
@@ -404,6 +404,34 @@ async function runConfiguredGodot(toolId, rawArgs) {
   const [target, reportEnvironment, progressEnvironment, screenshotEnvironment, configuredReport, configuredProgress, configuredScreenshots] = config;
   const requiresReport = Boolean(reportEnvironment);
   const reportPath = requiresReport ? resolveProjectPath(parsed.options.reportPath, configuredReport ?? defaultReportPath(toolId)) : '';
+  if (toolId === 'run-voxel-terrain-save-parity' && parsed.options.stage === undefined) {
+    const writeReportPath = reportPath.replace(/\.json$/i, '.write.json');
+    await runConfiguredGodot(toolId, [...rawArgs, '--stage', 'write', '--report-path', writeReportPath]);
+    const writeReport = await readJson(writeReportPath);
+    const target = writeReport.targetCell;
+    if (!writeReport.passed || !target || !['x', 'y', 'z'].every((key) => Number.isInteger(target[key]))) {
+      const summary = { schemaVersion: 1, runnerId: 'voxel_terrain_save_parity',
+        evidenceLevel: 'headed_save_reload_and_visual_readiness_integration', passed: false,
+        seed: writeReport.seed ?? parsed.options.seed ?? 'atlas-31684266', writeStage: writeReport,
+        reason: 'save_write_stage_failed_or_target_missing' };
+      await writeJson(reportPath, summary);
+      process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    await runConfiguredGodot(toolId, [...rawArgs, '--stage', 'read', '--target-cell',
+      `${target.x},${target.y},${target.z}`, '--report-path', reportPath]);
+    const readReport = await readJson(reportPath);
+    const summary = { schemaVersion: 1, runnerId: 'voxel_terrain_save_parity',
+      evidenceLevel: 'headed_save_reload_and_visual_readiness_integration',
+      seed: readReport.seed ?? writeReport.seed,
+      passed: Boolean(writeReport.passed && readReport.passed),
+      writeStage: writeReport, readStage: readReport };
+    await writeJson(reportPath, summary);
+    process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    if (!summary.passed) process.exitCode = 1;
+    return;
+  }
   const progressPath = progressEnvironment ? resolveProjectPath(parsed.options.progressPath, configuredProgress) : '';
   const screenshotDir = screenshotEnvironment ? resolveProjectPath(parsed.options.screenshotDir, configuredScreenshots) : '';
   if (requiresReport) {
@@ -422,6 +450,11 @@ async function runConfiguredGodot(toolId, rawArgs) {
   const environment = { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1' };
   if (requiresReport) environment[reportEnvironment] = reportPath;
   if (parsed.options.seed !== undefined) environment.VOXEL_TEST_SEED = String(parsed.options.seed);
+	if (toolId === 'run-voxel-terrain-save-parity') {
+		environment.VOXEL_SAVE_PATH_OVERRIDE = join(dirname(reportPath), 'voxel-terrain-save-parity.bin');
+		if (parsed.options.stage !== undefined) environment.VOXEL_TERRAIN_SAVE_PARITY_STAGE = String(parsed.options.stage);
+		if (parsed.options.targetCell !== undefined) environment.VOXEL_TERRAIN_SAVE_PARITY_TARGET = String(parsed.options.targetCell);
+	}
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
   if (progressEnvironment) environment[progressEnvironment] = progressPath;
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
@@ -444,7 +477,8 @@ async function runConfiguredGodot(toolId, rawArgs) {
   if (!isScript && parsed.passthrough.length) godotArguments.push('--', ...parsed.passthrough);
   const execution = await runGodotProcess(godot, godotArguments, {
     env: environment,
-    timeoutSeconds: asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds, isVisual ? 90 : 0)
+    timeoutSeconds: asNumber(parsed.options.watchdogSeconds ?? parsed.options.timeoutSeconds,
+		toolId === 'run-voxel-terrain-save-parity' ? 600 : isVisual ? 90 : 0)
   });
   if (!requiresReport) {
     if (execution.code !== 0) process.exitCode = execution.code;

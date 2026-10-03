@@ -5,6 +5,7 @@ const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/Tree
 const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
 const ChunkPropVisualManifestScript := preload("res://scripts/world/ChunkPropVisualManifest.gd")
 const HorizonChunkPropManifestCacheScript := preload("res://scripts/world/HorizonChunkPropManifestCache.gd")
+const PhysicalChunkPropManifestCacheScript := preload("res://scripts/world/PhysicalChunkPropManifestCache.gd")
 const DetailBatchVisualReceiptPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
@@ -58,6 +59,31 @@ var underground_chunk_exposure_cache := {}
 var tree_publication_queue = null
 var tree_runtime_request_builder = null
 var horizon_chunk_prop_manifest_cache = HorizonChunkPropManifestCacheScript.new()
+var physical_chunk_prop_manifest_cache = PhysicalChunkPropManifestCacheScript.new()
+var prop_capture_path_diagnostics: Dictionary = {}
+
+
+func _record_prop_capture_path(path: String, entry: String, outcome: String,
+        stage: String, elapsed_usec: int) -> void:
+    # Diagnostic-only, bounded per-path samples. The sprint fixture resets this
+    # before movement; no path selection or readiness decision reads it.
+    var paths: Dictionary = prop_capture_path_diagnostics.get("paths", {})
+    var row: Dictionary = paths.get(path, {"calls": 0, "totalUsec": 0,
+        "maxUsec": 0, "events": {}, "stages": {}, "samplesUsec": [],
+        "samplesDropped": 0})
+    row.calls = int(row.calls) + 1
+    row.totalUsec = int(row.totalUsec) + maxi(0, elapsed_usec)
+    row.maxUsec = maxi(int(row.maxUsec), elapsed_usec)
+    var events: Dictionary = row.events
+    for event: String in [entry, outcome]:
+        if not event.is_empty(): events[event] = int(events.get(event, 0)) + 1
+    var stages: Dictionary = row.stages
+    if not stage.is_empty(): stages[stage] = int(stages.get(stage, 0)) + 1
+    var samples: Array = row.samplesUsec
+    if samples.size() < 256: samples.append(maxi(0, elapsed_usec))
+    else: row.samplesDropped = int(row.samplesDropped) + 1
+    paths[path] = row
+    prop_capture_path_diagnostics.paths = paths
 
 func generated_volume_exposure_cache_metadata(start_x: int, start_z: int) -> Dictionary:
     var chunk_key := Vector2i(floori(float(start_x) / float(CHUNK_SIZE)), floori(float(start_z) / float(CHUNK_SIZE)))
@@ -3096,9 +3122,35 @@ func process_chunk_prop_spawn_state(
 
 ## Read-only view of the real chunk prop publisher. Empty manifests are
 ## available only after the existing seeded spawn state has completed.
-func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false) -> Dictionary:
+func chunk_prop_visual_source_scan_complete(chunk_key: Vector2i,
+        near_bounds: Rect2i) -> bool:
+    var chunk := chunks.get(chunk_key) as Node3D
+    if visible_world_underground_visuals_required():
+        return is_instance_valid(chunk) and bool(chunk.get_meta(
+            "chunk_prop_candidate_scan_complete", false))
+    var horizon_chunk := horizon_ecology_source.source_for(chunk_key) as Node3D
+    if is_instance_valid(horizon_chunk) and bool(horizon_chunk.get_meta(
+            "chunk_surface_candidate_scan_complete", false)):
+        return true
+    return is_instance_valid(chunk) and bool(chunk.get_meta(
+        "chunk_surface_candidate_scan_complete", false))
+
+
+func visible_world_underground_visuals_required() -> bool:
+    if player == null or not is_instance_valid(player): return false
+    var cell := Vector3i(world_to_cell(player.global_position.x), 0,
+        world_to_cell(player.global_position.z))
+    var surface_y := chunk_bound_surface_y_at_cell(cell)
+    return ChunkPropVisualManifestScript.underground_visuals_required(
+        player.global_position.y, surface_y, CELL)
+
+
+func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false,
+        capture_job: Object = null) -> Dictionary:
     var chunk := chunks.get(chunk_key) as Node3D
     var horizon_chunk := horizon_ecology_source.source_for(chunk_key) as Node3D
+    var physical_handoff_manifest: Dictionary = {}
+    var physical_handoff_job: Object = null
     if surface_only and horizon_chunk != null:
         # Keep the old far visual until the physical producer has completed
         # its surface scan and its live visual receipt can replace it.
@@ -3106,47 +3158,118 @@ func visible_chunk_prop_manifest(chunk_key: Vector2i, surface_only := false) -> 
                 or not bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
             chunk = horizon_chunk
         else:
-            var physical_manifest := ChunkPropVisualManifestScript.capture(chunk,
-                chunk_key, seed_text,
-                String(chunk.get_meta("chunk_surface_candidate_source_revision", "")),
-                true, CELL, true)
+            var physical_manifest := _bounded_physical_chunk_prop_manifest(
+                chunk, chunk_key, true, capture_job)
             if physical_manifest.get("status") == "ready":
-                horizon_ecology_source.retire(chunk_key)
+                physical_handoff_manifest = physical_manifest
             else:
+                physical_handoff_job = physical_manifest.get("captureJob") as Object
                 chunk = horizon_chunk
     elif not surface_only and horizon_chunk != null and chunk != null \
             and is_instance_valid(chunk) and bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false)):
         # The far visual stays installed while the near producer catches up.
-        var near_manifest := ChunkPropVisualManifestScript.capture(chunk,
-            chunk_key, seed_text,
-            String(chunk.get_meta("chunk_prop_candidate_source_revision", "")),
-            true, CELL, false)
-        if near_manifest.get("status") == "ready":
-            horizon_ecology_source.retire(chunk_key)
+        var near_manifest := _bounded_physical_chunk_prop_manifest(
+            chunk, chunk_key, false, capture_job)
+        return near_manifest
     if chunk == null or not is_instance_valid(chunk):
         return {"status": "pending", "reason": "chunk_prop_source_missing", "chunk": chunk_key}
     var complete := bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)) if surface_only \
         else bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
     var source_revision := String(chunk.get_meta("chunk_surface_candidate_source_revision", "")) if surface_only \
         else String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
-    return horizon_chunk_prop_manifest_cache.capture_or_refresh(
+    if not physical_handoff_manifest.is_empty(): return physical_handoff_manifest
+    if not bool(chunk.get_meta("horizon_visual_only", false)):
+        return _bounded_physical_chunk_prop_manifest(chunk, chunk_key, surface_only, capture_job)
+    var cache_started_usec := Time.get_ticks_usec()
+    var cached_manifest: Dictionary = horizon_chunk_prop_manifest_cache.capture_or_refresh(
         self, chunk, chunk_key, seed_text, source_revision, complete, CELL,
         CHUNK_SIZE, surface_only
     )
+    _record_prop_capture_path("horizon_cache" if bool(chunk.get_meta("horizon_visual_only", false))
+        else "static_fallback", "capture",
+        "hit" if bool(cached_manifest.get("candidateSnapshotCacheHit", false))
+        else String(cached_manifest.get("status", "")), "complete",
+        Time.get_ticks_usec() - cache_started_usec)
+    if is_instance_valid(physical_handoff_job):
+        cached_manifest["captureJob"] = physical_handoff_job
+    return cached_manifest
+
+
+func _bounded_physical_chunk_prop_manifest(chunk: Node3D, chunk_key: Vector2i,
+        surface_only: bool, capture_job: Object = null) -> Dictionary:
+    var source_revision := String(chunk.get_meta("chunk_surface_candidate_source_revision", "")) \
+        if surface_only else String(chunk.get_meta("chunk_prop_candidate_source_revision", ""))
+    var complete := bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)) \
+        if surface_only else bool(chunk.get_meta("chunk_prop_candidate_scan_complete", false))
+    if complete and not is_instance_valid(capture_job):
+        var cache_started_usec := Time.get_ticks_usec()
+        var cached: Dictionary = physical_chunk_prop_manifest_cache.recall(self,
+            chunk, chunk_key, seed_text, source_revision, surface_only, CELL)
+        if bool(cached.get("scanComplete", false)):
+            _record_prop_capture_path("physical_cache", "recall", "hit",
+                "complete", Time.get_ticks_usec() - cache_started_usec)
+            return cached
+    var job := capture_job
+    var entry := "continue" if is_instance_valid(job) else "begin"
+    var started_usec := Time.get_ticks_usec()
+    if not is_instance_valid(job):
+        var begun: Dictionary = ChunkPropVisualManifestScript.begin_capture(self,
+            chunk, chunk_key, seed_text, source_revision, complete, CELL, surface_only)
+        job = begun.get("job") as Object
+        if not is_instance_valid(job):
+            _record_prop_capture_path("physical_bounded", entry,
+                "source_pending" if begun.get("status") == "pending" else "failed",
+                "begin", Time.get_ticks_usec() - started_usec)
+            return begun
+    var captured: Dictionary = job.call("advance", 128, 3000)
+    if String(captured.get("reason", "")) == "chunk_prop_bounded_capture_budget":
+        captured["captureJob"] = job
+    var outcome := "complete" if bool(captured.get("scanComplete", false)) else \
+        ("budget" if String(captured.get("reason", "")) == "chunk_prop_bounded_capture_budget" else \
+        ("restart" if String(captured.get("reason", "")) == "chunk_prop_bounded_source_changed" else \
+        String(captured.get("status", ""))))
+    _record_prop_capture_path("physical_bounded", entry, outcome,
+        String(captured.get("stage", "complete" if outcome == "complete" else "unknown")),
+        Time.get_ticks_usec() - started_usec)
+    if bool(captured.get("scanComplete", false)):
+        physical_chunk_prop_manifest_cache.remember(self, chunk, chunk_key,
+            seed_text, source_revision, surface_only, CELL, captured)
+    return captured
 
 
 func publish_chunk_prop_visual_readiness(readiness: Object, view_revision: int,
         near_bounds: Rect2i, chunk_key: Vector2i,
-        observer_position: Vector3 = Vector3.INF) -> Dictionary:
-    var chunk_bounds := Rect2i(chunk_key * CHUNK_SIZE, Vector2i.ONE * CHUNK_SIZE)
+        observer_position: Vector3 = Vector3.INF,
+        capture_job: Object = null) -> Dictionary:
+    var phase_started_usec := Time.get_ticks_usec()
     if horizon_ecology_source.source_for(chunk_key) != null:
         horizon_ecology_source.refresh_ordinary_visual_ranges(self, chunk_key)
-    var manifest := visible_chunk_prop_manifest(chunk_key, not chunk_bounds.intersects(near_bounds))
+    var range_refresh_usec := maxi(0, Time.get_ticks_usec() - phase_started_usec)
+    phase_started_usec = Time.get_ticks_usec()
+    var manifest := visible_chunk_prop_manifest(chunk_key,
+        not visible_world_underground_visuals_required(), capture_job)
+    var capture_usec := maxi(0, Time.get_ticks_usec() - phase_started_usec)
     if manifest.get("status") == "failed" or not bool(manifest.get("scanComplete", false)):
+        manifest["propPhaseUsec"] = {"rangeRefresh": range_refresh_usec,
+            "capture": capture_usec, "submit": 0}
         return manifest
     var visual_observer := observer_position if observer_position.is_finite() else player.global_position
+    phase_started_usec = Time.get_ticks_usec()
     var submitted: Dictionary = ChunkPropVisualManifestScript.submit(manifest, readiness, view_revision,
         near_bounds, visual_observer)
+    submitted["propPhaseUsec"] = {"rangeRefresh": range_refresh_usec,
+        "capture": capture_usec,
+        "submit": maxi(0, Time.get_ticks_usec() - phase_started_usec)}
+    submitted["propCandidateCount"] = int(manifest.get("candidateCount", 0))
+    submitted["propSurfaceOnly"] = bool(manifest.get("surfaceOnly", false))
+    if is_instance_valid(manifest.get("captureJob") as Object):
+        submitted["captureJob"] = manifest.captureJob
+    if submitted.get("status") == "ready":
+        var physical_chunk := chunks.get(chunk_key) as Node3D
+        if is_instance_valid(physical_chunk) \
+                and int(manifest.get("chunkInstanceId", 0)) == physical_chunk.get_instance_id() \
+                and horizon_ecology_source.source_for(chunk_key) != null:
+            horizon_ecology_source.retire(chunk_key)
     if manifest.has("candidateSnapshotCacheHit"):
         submitted["candidateSnapshotCacheHit"] = manifest.candidateSnapshotCacheHit
         submitted["candidateSnapshotValidationUsec"] = manifest.get("candidateSnapshotValidationUsec", 0)
@@ -3398,12 +3521,20 @@ func scan_underground_prop_candidates_from_volume_service(
     )
     scan_state = result.get("state", scan_state) if result.get("state", scan_state) is Dictionary else scan_state
     state["undergroundVolumeFloorScan"] = scan_state
+    state["undergroundScanLastSliceCells"] = int(result.get("processed", 0))
+    state["undergroundScanCellsProcessed"] = int(
+        state.get("undergroundScanCellsProcessed", 0)) \
+        + int(result.get("processed", 0))
+    state["undergroundScanColumn"] = int(scan_state.get("columnIndex", 0))
+    state["undergroundScanY"] = int(scan_state.get("scanY", 0))
     if bool(result.get("restarted", false)):
         # The volume owner discarded its old scan cursor after a source
         # revision change. Its prior cells are no longer one complete source;
         # no underground RNG draws have happened before scan completion.
         candidates.clear()
         state["undergroundIndex"] = 0
+        state["undergroundScanRestartCount"] = int(
+            state.get("undergroundScanRestartCount", 0)) + 1
         if runtime_perf_monitor != null:
             runtime_perf_monitor.increment_counter("underground_prop_scan_restarts")
     var found_count_before := candidates.size()

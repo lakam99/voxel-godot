@@ -199,7 +199,7 @@ function savePaths(userdata, seed) {
   const root = join(userdata, ...appDataSuffix);
   return {
     active: join(root, 'voxel_biome_world_saves_active_seed.txt'),
-    slot: join(root, `voxel_biome_world_saves_slot_${seed}.json`),
+    slot: join(root, `voxel_biome_world_saves_slot_${seed}.bin`),
   };
 }
 
@@ -214,8 +214,8 @@ export async function saveReceipt(userdata, seed) {
   demand(slotInfo.isFile() && !slotInfo.isSymbolicLink() && slotInfo.size <= loadingSaveBounds.slotBytes,
     'Pairing slot save is invalid, symlinked, or exceeds its byte bound.');
   const activeText = (await readUtf8Bounded(paths.active, loadingSaveBounds.activeSeedBytes)).replace(/^\uFEFF/, '').trim();
-  const slot = JSON.parse((await readUtf8Bounded(paths.slot, loadingSaveBounds.slotBytes)).replace(/^\uFEFF/, ''));
-  demand(activeText === seed && slot.seed === seed && slot.version === 2, 'Pairing save seed/version mismatch.');
+  const slot = await readFile(paths.slot);
+  demand(activeText === seed && slot.subarray(0, 4).toString('ascii') === 'VBW2', 'Pairing binary save seed/header mismatch.');
   return {
     seed,
     activeRelativePath: relative(userdata, paths.active).replaceAll('\\', '/'),

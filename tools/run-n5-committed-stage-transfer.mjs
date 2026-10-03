@@ -31,7 +31,7 @@ const execution = await runGodotProcess(godot, [
   timeoutSeconds: 90,
   reportPath,
   env: { ...process.env, VWB_N5_COMMITTED_STAGE_TRANSFER_REPORT: reportPath,
-    VOXEL_SAVE_PATH_OVERRIDE: join(output, 'fixture-saves.json') },
+    VOXEL_SAVE_PATH_OVERRIDE: join(output, 'fixture-saves.bin') },
 });
 const report = JSON.parse(await readFile(reportPath, 'utf8').catch(() => '{}'));
 const passed = execution.code === 0 && report.passed === true;

@@ -213,3 +213,21 @@ static func build_loading_overlay(hud, root: Control) -> void:
     label.add_theme_font_size_override("font_size", 24)
     hud.loading_overlay.add_child(label)
     hud.loading_label = label
+
+    var progress := ProgressBar.new()
+    progress.name = "LoadingProgress"
+    progress.min_value = 0.0
+    progress.max_value = 1.0
+    progress.value = 0.0
+    progress.show_percentage = true
+    progress.visible = false
+    progress.anchor_left = 0.25
+    progress.anchor_right = 0.75
+    progress.anchor_top = 0.61
+    progress.anchor_bottom = 0.65
+    progress.offset_left = 0.0
+    progress.offset_right = 0.0
+    progress.offset_top = 0.0
+    progress.offset_bottom = 0.0
+    hud.loading_overlay.add_child(progress)
+    hud.loading_progress_bar = progress

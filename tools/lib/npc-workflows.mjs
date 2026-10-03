@@ -94,7 +94,7 @@ export async function runProductionTutorial(argv, saveContinue = false) {
   const output = await mkdtemp(join(root,saveContinue?'save-continue-':'no-flags-'));
   const reportPath = resolveProjectPath(options.reportPath,join(output,'report.json'));
   const proofPath = resolveProjectPath(options.noFlagsProofPath,join(dirname(reportPath),`${basename(reportPath,'.json')}-proof.json`));
-  const savePath = resolveProjectPath(options.savePathOverride ?? options.SavePathOverride,join(output,'save.json'));
+  const savePath = resolveProjectPath(options.savePathOverride ?? options.SavePathOverride,join(output,'save.bin'));
   // Never destroy a supplied save. A clean two-process fixture needs a fresh namespace.
   if (saveContinue && await stat(savePath).then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error;})) throw new Error('SavePathOverride must be fresh.');
   if (saveContinue) {

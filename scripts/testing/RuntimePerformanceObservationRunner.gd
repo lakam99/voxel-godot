@@ -1694,8 +1694,8 @@ func summarize_samples(samples: Array) -> Dictionary:
     var route_jobs_pending_events_available := false
     var autosave_completed := 0
     var autosave_pending := false
-    var max_autosave_read_parse := 0.0
-    var max_autosave_stringify_write := 0.0
+    var max_autosave_binary_read_decode := 0.0
+    var max_autosave_binary_encode_write := 0.0
     var job_scan_nodes := 0
     var forage_scan_nodes := 0
     var indexed_resource_queries := 0
@@ -1799,10 +1799,10 @@ func summarize_samples(samples: Array) -> Dictionary:
         static_rebuild_count = max(static_rebuild_count, int(counters.get("nav_static_rebuild_count", static_rebuild_count)))
         dynamic_update_count = max(dynamic_update_count, int(counters.get("nav_dynamic_update_count", dynamic_update_count)))
         var autosave_stats: Dictionary = sample.get("autosaveStats", {})
-        max_autosave_read_parse = maxf(max_autosave_read_parse, float(autosave_stats.get("lastReadParseMs", 0.0)))
-        max_autosave_stringify_write = maxf(max_autosave_stringify_write, maxf(
-            float(autosave_stats.get("lastStringifyWriteMs", 0.0)),
-            float(section_max.get("autosave_json_stringify_write", 0.0))
+        max_autosave_binary_read_decode = maxf(max_autosave_binary_read_decode, float(autosave_stats.get("lastReadParseMs", 0.0)))
+        max_autosave_binary_encode_write = maxf(max_autosave_binary_encode_write, maxf(
+            float(autosave_stats.get("lastBinaryEncodeWriteMs", 0.0)),
+            float(section_max.get("autosave_binary_encode_write", 0.0))
         ))
         autosave_completed = max(autosave_completed, int(autosave_stats.get("asyncCompleted", autosave_completed)))
         autosave_pending = autosave_pending or bool(autosave_stats.get("asyncPending", false))
@@ -2017,8 +2017,8 @@ func summarize_samples(samples: Array) -> Dictionary:
         "maxNavSnapshotMs": max_nav,
         "maxJobScanMs": max_job,
         "maxAutosaveMs": max_save,
-        "maxAutosaveJsonReadParseMs": max_autosave_read_parse,
-        "maxAutosaveJsonStringifyWriteMs": max_autosave_stringify_write,
+        "maxAutosaveBinaryReadDecodeMs": max_autosave_binary_read_decode,
+        "maxAutosaveBinaryEncodeWriteMs": max_autosave_binary_encode_write,
         "navStaticRebuildCount": static_rebuild_count,
         "navDynamicUpdateCount": dynamic_update_count,
         # The legacy counters are cumulative events, not a current job census.

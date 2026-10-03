@@ -39,6 +39,16 @@ func candidate_snapshot() -> Array[Dictionary]:
 	return _instances.duplicate(true)
 
 
+func candidate_count() -> int:
+	return _instances.size()
+
+
+func candidate_at(index: int) -> Dictionary:
+	if index < 0 or index >= _instances.size():
+		return {}
+	return _instances[index].duplicate(true)
+
+
 func source_identity() -> Dictionary:
 	return {"batchInstanceId": _batch_instance_id,
 		"multimeshInstanceId": _multimesh_instance_id,

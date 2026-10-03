@@ -48,6 +48,27 @@ func request_viewer(viewer: Node3D, world_position: Vector3, distance: int) -> b
 	_requests[viewer.get_instance_id()] = {"viewer":weakref(viewer),"position":world_position,"distance":distance}
 	return _try_request(_requests[viewer.get_instance_id()])
 
+## Optional mesh work uses the same site admission as gameplay viewers, but a
+## distant rejected footprint cannot turn off the mandatory terrain owner.
+## Keep an existing accepted position until its replacement is also admitted.
+func request_optional_viewer(viewer: Node3D, world_position: Vector3, distance: int) -> Dictionary:
+	if _stopped or not is_instance_valid(viewer):
+		return {"status":"pending","reason":"optional_viewer_unavailable"}
+	if not _failure.is_empty():
+		return {"status":"pending","reason":"mandatory_viewer_admission_failed"}
+	var admission := request_cells(footprint(world_position,distance))
+	if admission.get("status") != "ready": return admission
+	_world.refresh_generated_site_profiles()
+	var id := viewer.get_instance_id()
+	_owned[id] = weakref(viewer)
+	_requests[id] = {"viewer":weakref(viewer),"position":world_position,
+		"distance":distance,"optional":true}
+	if not _attach_admitted_viewer(_requests[id]):
+		_requests.erase(id)
+		_owned.erase(id)
+		return {"status":"pending","reason":"optional_viewer_retired"}
+	return {"status":"ready","reason":""}
+
 func request_cells(bounds: Rect2i) -> Dictionary:
 	if not _failure.is_empty(): return {"status":"failed","reason":_failure}
 	if not current(): return {"status":"pending","reason":"terrain_generation_reset_pending"}
@@ -73,11 +94,18 @@ func _try_request(request: Dictionary) -> bool:
 	if not _failure.is_empty() or not current(): return false
 	var result := request_cells(footprint(request.position,request.distance))
 	if result.status == "failed":
+		if bool(request.get("optional",false)):
+			var optional_viewer: Node3D = request.viewer.get_ref()
+			if optional_viewer != null: remove_viewer(optional_viewer)
+			return false
 		_failure = result.reason
 		_terrain.automatic_loading_enabled = false
 		return false
 	if result.status != "ready": return false
 	_world.refresh_generated_site_profiles()
+	return _attach_admitted_viewer(request)
+
+func _attach_admitted_viewer(request: Dictionary) -> bool:
 	var viewer: Node3D = request.viewer.get_ref()
 	if viewer == null: return false
 	viewer.set("view_distance",request.distance)
