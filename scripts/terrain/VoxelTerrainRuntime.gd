@@ -1833,6 +1833,201 @@ func visible_mesh_source_revision(block_position: Vector3i) -> String:
 		int(mesh_block_revisions.get(block_position, 0)), block_position.x, block_position.y, block_position.z]
 
 
+## Captures the currently resident production VoxelData for one Transvoxel
+## mesh block. This is a render-source snapshot only: Voxel Tools remains the
+## visible and collision authority until a complete section candidate is
+## installed and acknowledged. The one-cell sample halo is included because
+## the configured Transvoxel mesher needs neighboring density/material data.
+func capture_resident_terrain_mesh_block(block_position: Vector3i) -> Dictionary:
+	var initial := _resident_terrain_capture_state(block_position)
+	if initial.get("status") != "ready":
+		return initial
+	var service = volume_service()
+	if service == null or not service is Object:
+		return {"status":"pending", "reason":"terrain_volume_authority_unavailable", "retryable":true}
+	# Transvoxel advertises asymmetric one-cell minimum / two-cell maximum
+	# padding. The copied inclusive range is therefore 16 + 1 + 2 = 19 cells.
+	var size := NATIVE_MESH_BLOCK_SIZE_CELLS + 3
+	var origin := block_position * NATIVE_MESH_BLOCK_SIZE_CELLS - Vector3i.ONE
+	var capture_area := AABB(Vector3(origin), Vector3.ONE * float(size))
+	var tool = terrain.get_voxel_tool()
+	if not bool(tool.is_area_editable(capture_area)):
+		return {"status":"pending", "reason":"terrain_capture_halo_not_resident", "retryable":true,
+			"block":block_position, "origin":origin, "size":Vector3i.ONE * size}
+	if not terrain.is_area_meshed(capture_area):
+		return {"status":"pending", "reason":"terrain_capture_halo_not_meshed", "retryable":true,
+			"block":block_position, "origin":origin, "size":Vector3i.ONE * size}
+	var sections := _terrain_capture_section_revisions(service, origin, Vector3i.ONE * size)
+	if sections.get("status") != "ready":
+		return sections
+	var buffer := VoxelBuffer.new()
+	buffer.create(size, size, size)
+	buffer.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+	buffer.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
+	buffer.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)
+	var channels_mask := (1 << VoxelBuffer.CHANNEL_SDF) | (1 << VoxelBuffer.CHANNEL_INDICES) | (1 << VoxelBuffer.CHANNEL_DATA5)
+	tool.copy(origin, buffer, channels_mask, false)
+	var sdf_bytes: PackedByteArray = buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_SDF)
+	var indices_bytes: PackedByteArray = buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_INDICES)
+	var data5_bytes: PackedByteArray = buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_DATA5)
+	var sample_count := size * size * size
+	if sdf_bytes.size() != sample_count * 2 or indices_bytes.size() != sample_count \
+			or data5_bytes.size() != sample_count:
+		return {"status":"failed", "reason":"terrain_capture_channel_size_mismatch",
+			"sdfBytes":sdf_bytes.size(), "indicesBytes":indices_bytes.size(), "data5Bytes":data5_bytes.size()}
+	var payload_digest := _terrain_capture_payload_digest(sdf_bytes, indices_bytes, data5_bytes)
+	var after := _resident_terrain_capture_state(block_position)
+	if after.get("status") != "ready" or String(after.get("captureToken", "")) != String(initial.get("captureToken", "")):
+		return {"status":"pending", "reason":"terrain_capture_source_changed_during_copy", "retryable":true}
+	var after_sections := _terrain_capture_section_revisions(service, origin, Vector3i.ONE * size)
+	if after_sections.get("status") != "ready" \
+			or String(after_sections.get("revisionDigest", "")) != String(sections.get("revisionDigest", "")):
+		return {"status":"pending", "reason":"terrain_capture_sections_changed_during_copy", "retryable":true}
+	var result := {"status":"ready", "schema":"resident-terrain-mesh-block/v1",
+		"captureToken":String(initial.captureToken), "sourceIdentity":visible_mesh_source_identity(),
+		"worldRevision":visible_mesh_world_revision(), "sourceRevision":visible_mesh_source_revision(block_position),
+		"terrainInstanceId":terrain.get_instance_id(), "generatorInstanceId":generator.get_instance_id() if is_instance_valid(generator) else 0,
+		"seed":configured_seed, "block":block_position, "origin":origin,
+		"size":Vector3i.ONE * size, "sectionRevisions":sections.revisions,
+		"sectionRevisionDigest":String(sections.revisionDigest),
+		"meshMaterialRevision":_terrain_capture_mesher_material_revision(),
+		"sdf16Le":sdf_bytes, "indices8":indices_bytes, "data5_8":data5_bytes,
+		"payloadDigest":payload_digest, "sampleCount":sample_count,
+		"captureIsTerrainOnly":true, "collisionAuthority":"VoxelTerrainRuntime"}
+	result.make_read_only()
+	return result
+
+
+## Call again immediately before installing a captured candidate. A snapshot
+## does not pin source chunks or make later source revisions current.
+func resident_terrain_capture_is_current(capture: Dictionary) -> bool:
+	if not capture.is_read_only() or String(capture.get("schema", "")) != "resident-terrain-mesh-block/v1":
+		return false
+	var block_value: Variant = capture.get("block")
+	var origin_value: Variant = capture.get("origin")
+	var size_value: Variant = capture.get("size")
+	if not block_value is Vector3i or not origin_value is Vector3i or not size_value is Vector3i:
+		return false
+	var block: Vector3i = block_value
+	var sdf_value: Variant = capture.get("sdf16Le")
+	var indices_value: Variant = capture.get("indices8")
+	var data5_value: Variant = capture.get("data5_8")
+	if not sdf_value is PackedByteArray or not indices_value is PackedByteArray \
+			or not data5_value is PackedByteArray \
+			or _terrain_capture_payload_digest(sdf_value, indices_value, data5_value) \
+				!= String(capture.get("payloadDigest", "")):
+		return false
+	var state := _resident_terrain_capture_state(block)
+	if state.get("status") != "ready" or String(state.get("captureToken", "")) != String(capture.get("captureToken", "")):
+		return false
+	if String(capture.get("sourceIdentity", "")) != visible_mesh_source_identity() \
+			or String(capture.get("worldRevision", "")) != visible_mesh_world_revision() \
+			or int(capture.get("terrainInstanceId", 0)) != terrain.get_instance_id() \
+			or String(capture.get("meshMaterialRevision", "")) != _terrain_capture_mesher_material_revision():
+		return false
+	var service = volume_service()
+	if service == null:
+		return false
+	var sections := _terrain_capture_section_revisions(service, origin_value, size_value)
+	return sections.get("status") == "ready" \
+		and String(sections.get("revisionDigest", "")) == String(capture.get("sectionRevisionDigest", ""))
+
+
+func _resident_terrain_capture_state(block_position: Vector3i) -> Dictionary:
+	if not authority_ready or terrain == null or not is_instance_valid(terrain) \
+			or not terrain.is_inside_tree() or last_volume_revision < 0:
+		return {"status":"pending", "reason":"terrain_authority_not_ready", "retryable":true}
+	if not visible_mesh_block_rendered(block_position):
+		return {"status":"pending", "reason":"terrain_mesh_block_not_visible", "retryable":true,
+			"block":block_position}
+	var area := AABB(Vector3(block_position * NATIVE_MESH_BLOCK_SIZE_CELLS - Vector3i.ONE),
+		Vector3.ONE * float(NATIVE_MESH_BLOCK_SIZE_CELLS + 3))
+	var tool = terrain.get_voxel_tool()
+	if not bool(tool.is_area_editable(area)) or not terrain.is_area_meshed(area):
+		return {"status":"pending", "reason":"terrain_mesh_block_halo_not_ready", "retryable":true,
+			"block":block_position}
+	if _terrain_capture_has_pending_edits(area):
+		return {"status":"pending", "reason":"terrain_mesh_block_has_pending_edits", "retryable":true,
+			"block":block_position}
+	var service = volume_service()
+	if service == null:
+		return {"status":"pending", "reason":"terrain_volume_authority_unavailable", "retryable":true}
+	var token := "%s:%d:%d:%d:%d:%d" % [visible_mesh_source_revision(block_position),
+		terrain.get_instance_id(), generator.get_instance_id() if is_instance_valid(generator) else 0,
+		area.position.x, area.position.y, int(service.get("revision"))]
+	return {"status":"ready", "captureToken":token}
+
+
+func _terrain_capture_payload_digest(sdf_bytes: PackedByteArray, indices_bytes: PackedByteArray,
+		data5_bytes: PackedByteArray) -> String:
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(sdf_bytes)
+	hasher.update(indices_bytes)
+	hasher.update(data5_bytes)
+	return hasher.finish().hex_encode()
+
+
+func _terrain_capture_has_pending_edits(area: AABB) -> bool:
+	var min_cell := Vector3i(floori(area.position.x), floori(area.position.y), floori(area.position.z))
+	var max_cell := min_cell + Vector3i(ceili(area.size.x), ceili(area.size.y), ceili(area.size.z)) - Vector3i.ONE
+	var min_section := Vector3i(floori(float(min_cell.x) / SECTION_SIZE),
+		floori(float(min_cell.y) / SECTION_SIZE), floori(float(min_cell.z) / SECTION_SIZE))
+	var max_section := Vector3i(floori(float(max_cell.x) / SECTION_SIZE),
+		floori(float(max_cell.y) / SECTION_SIZE), floori(float(max_cell.z) / SECTION_SIZE))
+	for section_value in pending_edit_sections:
+		if not section_value is Vector3i:
+			return true
+		var section: Vector3i = section_value
+		if section.x >= min_section.x and section.x <= max_section.x \
+				and section.y >= min_section.y and section.y <= max_section.y \
+				and section.z >= min_section.z and section.z <= max_section.z:
+			return true
+	return false
+
+
+func _terrain_capture_section_revisions(service, origin: Vector3i, size: Vector3i) -> Dictionary:
+	if not service is Object:
+		return {"status":"failed", "reason":"terrain_section_revision_authority_unavailable"}
+	var section_revisions_value = service.get("section_revisions")
+	if not section_revisions_value is Dictionary:
+		return {"status":"failed", "reason":"terrain_section_revision_authority_invalid"}
+	var end := origin + size - Vector3i.ONE
+	var min_section := Vector3i(floori(float(origin.x) / SECTION_SIZE),
+		floori(float(origin.y) / SECTION_SIZE), floori(float(origin.z) / SECTION_SIZE))
+	var max_section := Vector3i(floori(float(end.x) / SECTION_SIZE),
+		floori(float(end.y) / SECTION_SIZE), floori(float(end.z) / SECTION_SIZE))
+	var keys: Array[Vector3i] = []
+	var values: Array[Dictionary] = []
+	for y in range(min_section.y, max_section.y + 1):
+		for z in range(min_section.z, max_section.z + 1):
+			for x in range(min_section.x, max_section.x + 1):
+				var key := Vector3i(x, y, z)
+				keys.append(key)
+				values.append({"sectionKey":key, "revision":int(section_revisions_value.get(key, 0))})
+	var digest_context := HashingContext.new()
+	digest_context.start(HashingContext.HASH_SHA256)
+	for row in values:
+		digest_context.update(":".to_utf8_buffer())
+		digest_context.update(str(row.sectionKey.x, ",", row.sectionKey.y, ",", row.sectionKey.z, "=", row.revision).to_utf8_buffer())
+	var digest := digest_context.finish().hex_encode()
+	keys.make_read_only()
+	for row in values: row.make_read_only()
+	values.make_read_only()
+	return {"status":"ready", "revisions":values, "sectionKeys":keys, "revisionDigest":digest}
+
+
+func _terrain_capture_mesher_material_revision() -> String:
+	if terrain == null or not is_instance_valid(terrain):
+		return ""
+	var mesher = terrain.mesher
+	var material := terrain.material_override
+	return "%s:%s:%s:%d" % [str(mesher.get_class()) if is_instance_valid(mesher) else "missing",
+		str(mesher.get_instance_id()) if is_instance_valid(mesher) else "0",
+		str(material.get_instance_id()) if is_instance_valid(material) else "0",
+		NATIVE_MESH_BLOCK_SIZE_CELLS]
+
+
 func visible_mesh_vertical_bounds() -> Vector2i:
 	return vertical_cell_bounds()
 

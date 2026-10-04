@@ -5,6 +5,11 @@ const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
+const TerrainInstanceBufferScript := preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
+const TerrainMeshFingerprintScript := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const TerrainContributorLedgerScript := preload("res://scripts/world/PreparedStaticContributorLedger.gd")
+const TerrainPacketOwnerScript := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
+const TerrainSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -28,6 +33,13 @@ var hostile_motion_combat_contact_events: Array[Dictionary] = []
 # attributable without changing its frame limit, collision criterion, or
 # production-world behavior.
 var progress_context := "startup"
+
+func get_static_section_render_owner(owner_cell: Vector2i,
+        create_if_missing := true) -> Dictionary:
+    if main == null or not is_instance_valid(main) \
+            or not main.has_method("get_static_section_render_owner"):
+        return {"status":"pending", "reason":"main_section_owner_registry_unavailable"}
+    return main.call("get_static_section_render_owner", owner_cell, create_if_missing)
 
 func active_chunk_size() -> int:
     if main != null:
@@ -167,12 +179,199 @@ func surface_biome_at_cell2(cell: Vector2i) -> String:
         return String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
     return "plains"
 
+func install_terrain_capture_through_main_section_renderer(runtime, capture: Dictionary) -> Dictionary:
+    if not runtime.call("resident_terrain_capture_is_current", capture):
+        return {"status":"failed", "reason":"terrain_capture_stale_before_mesh_build"}
+    var size: Vector3i = capture.get("size", Vector3i.ZERO)
+    var buffer := VoxelBuffer.new()
+    buffer.create(size.x, size.y, size.z)
+    buffer.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+    buffer.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
+    buffer.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)
+    buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_SDF, capture.sdf16Le)
+    buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_INDICES, capture.indices8)
+    buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_DATA5, capture.data5_8)
+    var terrain = runtime.get("terrain")
+    var mesh: Mesh = terrain.mesher.build_mesh(buffer, [])
+    if mesh == null or mesh.get_surface_count() == 0:
+        return {"status":"failed", "reason":"resident_transvoxel_candidate_has_no_surfaces"}
+    var mesh_binding := TerrainMeshFingerprintScript.inspect(mesh)
+    if mesh_binding.get("status") != "ready":
+        return {"status":"failed", "reason":"resident_transvoxel_mesh_fingerprint_failed",
+            "fingerprint":mesh_binding}
+    var material: Material = terrain.material_override
+    if material == null:
+        return {"status":"failed", "reason":"production_terrain_material_missing"}
+    var block: Vector3i = capture.block
+    var source_id := "resident-terrain:%d,%d,%d" % [block.x, block.y, block.z]
+    var source_part_id := source_id + ":part"
+    var source_revision := String(capture.sourceRevision) + ":" + String(capture.payloadDigest)
+    var mesh_key := "resident-transvoxel:" + String(mesh_binding.contentDigest)
+    var material_key := "production-terrain-shader"
+    # Native packet render tiers are currently limited to visual importance
+    # classes; terrain identity and opaque layer remain bound by the manifest.
+    var render_tier := "structural"
+    var segment_id := source_id + ":mesh"
+    var mesh_bounds := mesh.get_aabb()
+    var segment_declaration: Dictionary = {"segmentId":segment_id,
+        "materialKey":material_key, "renderTier":render_tier, "meshKey":mesh_key,
+        "meshContentDigest":mesh_binding.contentDigest, "meshLocalBounds":mesh_bounds,
+        "pipelineRevision":"voxel-mesher-transvoxel:s4:no-transitions:v1",
+        "renderLayer":"opaque", "translucentSortPolicy":"none",
+        "castShadows":true, "visibilityRangeEnd":100000.0, "fadeMargin":0.0}
+    segment_declaration.make_read_only()
+    var segment_declarations: Array[Dictionary] = [segment_declaration]
+    segment_declarations.make_read_only()
+    var world_origin := Vector3(block * 16) * CELL
+    var source_to_world := Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * CELL), world_origin)
+    var owner_cell := TerrainSectionGridScript.logical_owner_cell_for_world_position(world_origin)
+    var declaration: Dictionary = {"sourcePartId":source_part_id, "sourceId":source_id,
+        "sourceRevision":source_revision, "sourceToWorld":source_to_world,
+        "ownerCell":owner_cell, "segments":segment_declarations}
+    declaration.make_read_only()
+    var declarations: Array[Dictionary] = [declaration]
+    declarations.make_read_only()
+    var removals: Array = []
+    removals.make_read_only()
+    var ledger = TerrainContributorLedgerScript.new()
+    var boundary_id := "terrain-shadow:" + String(capture.payloadDigest).substr(0, 16)
+    var begun: Dictionary = ledger.begin_boundary(boundary_id, declarations, removals)
+    if begun.get("status") != "ready":
+        return {"status":"failed", "reason":"terrain_candidate_boundary_rejected", "detail":begun}
+    var transform_buffer: Array[float] = []
+    for value: float in TerrainInstanceBufferScript.encode(Transform3D.IDENTITY, Color.WHITE):
+        transform_buffer.append(value)
+    transform_buffer.make_read_only()
+    var prepared_segment: Dictionary = {"sourcePartId":source_part_id, "sourceId":source_id,
+        "sourceRevision":source_revision, "segmentId":segment_id,
+        "buffer":transform_buffer, "instanceCount":1,
+        "materialKey":material_key, "renderTier":render_tier, "meshKey":mesh_key,
+        "meshContentDigest":mesh_binding.contentDigest, "meshLocalBounds":mesh_bounds,
+        "pipelineRevision":"voxel-mesher-transvoxel:s4:no-transitions:v1",
+        "renderLayer":"opaque", "translucentSortPolicy":"none",
+        "castShadows":true, "visibilityRangeEnd":100000.0, "fadeMargin":0.0}
+    prepared_segment.make_read_only()
+    var accepted: Dictionary = ledger.accept_prepared_segment(boundary_id, prepared_segment)
+    if accepted.get("status") != "accepted":
+        return {"status":"failed", "reason":"terrain_candidate_segment_rejected", "detail":accepted}
+    var source_revisions: Dictionary = {source_part_id:source_revision}
+    source_revisions.make_read_only()
+    var world_id := "resident-terrain-shadow:" + String(capture.seed)
+    var prepared: Dictionary = ledger.prepare_boundary(boundary_id, source_revisions, world_id, 1)
+    if prepared.get("status") != "prepared" or prepared.replacements.size() != 1:
+        return {"status":"failed", "reason":"terrain_candidate_snapshot_failed", "detail":prepared}
+    if not runtime.call("resident_terrain_capture_is_current", capture):
+        return {"status":"failed", "reason":"terrain_capture_stale_before_install"}
+    var candidate: Dictionary = prepared.replacements[0]
+    var installation: Dictionary = TerrainPacketOwnerScript.begin_static_section_install(
+        candidate, {material_key:material}, {mesh_key:mesh})
+    if installation.get("status") != "ready":
+        return {"status":"failed", "reason":"terrain_candidate_install_begin_failed", "detail":installation}
+    var session = installation.session
+    var result: Dictionary = {"status":"pending", "reason":"not_started"}
+    for _step in range(128):
+        if not runtime.call("resident_terrain_capture_is_current", capture):
+            session.cancel()
+            return {"status":"failed", "reason":"terrain_capture_stale_during_install"}
+        if session.state in ["installed", "failed", "cancelled"]:
+            break
+        result = session.advance(4)
+        if result.get("status") == "installed":
+            break
+        if result.get("status") == "failed":
+            return {"status":"failed", "reason":"terrain_candidate_install_failed", "detail":result}
+        await get_tree().process_frame
+    if session.state != "installed" or result.get("status") != "installed":
+        session.cancel()
+        return {"status":"failed", "reason":"terrain_candidate_install_did_not_acknowledge",
+            "state":String(session.state), "last":result}
+    return {"status":"installed", "sectionKey":candidate.sectionKey,
+        "generation":candidate.generation, "meshSurfaceCount":mesh.get_surface_count(),
+        "meshContentDigest":mesh_binding.contentDigest,
+        "manifestDigest":candidate.contentManifestDigest,
+        "receipt":result.get("receipt"), "terrainOnly":true,
+        "previousVoxelTerrainVisualRetained":true}
+
+func test_resident_terrain_section_capture() -> void:
+    var runtime = null
+    var terrain = null
+    for _frame in range(600):
+        runtime = main.get("voxel_terrain_runtime") if main != null else null
+        terrain = runtime.get("terrain") if runtime != null else null
+        if runtime != null and terrain != null and is_instance_valid(terrain) \
+                and runtime.has_method("capture_resident_terrain_mesh_block"):
+            break
+        await get_tree().process_frame
+    if runtime == null or terrain == null or not is_instance_valid(terrain) \
+            or not runtime.has_method("capture_resident_terrain_mesh_block"):
+        add_result("resident_terrain_section_capture", false, "production terrain runtime unavailable during startup")
+        return
+    var viewer = runtime.get("viewer")
+    if not viewer is Node3D or not is_instance_valid(viewer):
+        add_result("resident_terrain_section_capture", false, "production VoxelViewer unavailable during startup")
+        return
+    player = main.get("player") as CharacterBody3D if main != null else null
+    var target_position: Vector3 = player.global_position if player != null \
+        else (viewer as Node3D).global_position
+    var local_cells: Vector3 = terrain.to_local(target_position) / CELL
+    var block := Vector3i(floori(local_cells.x / 16.0), floori(local_cells.y / 16.0),
+        floori(local_cells.z / 16.0))
+    var capture: Dictionary = {"status":"pending", "reason":"not_attempted"}
+    for attempt in range(600):
+        capture = runtime.call("capture_resident_terrain_mesh_block", block)
+        if capture.get("status") == "ready":
+            break
+        if attempt % 60 == 0:
+            mark_progress("resident_terrain_capture_wait_%d_%s" % [attempt, String(capture.get("reason", "unknown"))])
+        await get_tree().process_frame
+    if capture.get("status") != "ready":
+        add_result("resident_terrain_section_capture", false,
+            JSON.stringify({"block":block, "lastCapture":capture,
+                "runtime":runtime.call("stats") if runtime.has_method("stats") else {}}))
+        return
+    var sdf: PackedByteArray = capture.get("sdf16Le", PackedByteArray())
+    var indices: PackedByteArray = capture.get("indices8", PackedByteArray())
+    var data5: PackedByteArray = capture.get("data5_8", PackedByteArray())
+    var sample_count := 19 * 19 * 19
+    var section_revisions: Array = capture.get("sectionRevisions", [])
+    var current: bool = runtime.call("resident_terrain_capture_is_current", capture)
+    var tampered := capture.duplicate(false)
+    var tampered_sdf := sdf.duplicate()
+    if not tampered_sdf.is_empty():
+        tampered_sdf[0] = tampered_sdf[0] ^ 1
+    tampered["sdf16Le"] = tampered_sdf
+    tampered.make_read_only()
+    var tamper_rejected: bool = not runtime.call("resident_terrain_capture_is_current", tampered)
+    var passed: bool = capture.is_read_only() and capture.get("captureIsTerrainOnly") == true \
+        and capture.get("block") == block and capture.get("size") == Vector3i(19, 19, 19) \
+        and int(capture.get("sampleCount", 0)) == sample_count \
+        and sdf.size() == sample_count * 2 and indices.size() == sample_count \
+        and data5.size() == sample_count and String(capture.get("payloadDigest", "")).length() == 64 \
+        and section_revisions.size() == 27 and current and tamper_rejected
+    add_result("resident_terrain_section_capture", passed, JSON.stringify({
+        "block":block, "sampleCount":sample_count, "sdfBytes":sdf.size(),
+        "indicesBytes":indices.size(), "data5Bytes":data5.size(),
+        "sectionRevisionCount":section_revisions.size(),
+        "payloadDigest":capture.get("payloadDigest"), "currentAtReceipt":current,
+        "tamperedPayloadRejected":tamper_rejected,
+        "terrainOnly":capture.get("captureIsTerrainOnly"),
+        "renderAuthorityRetained":"VoxelTerrainRuntime"}))
+    if passed:
+        var install: Dictionary = await install_terrain_capture_through_main_section_renderer(runtime, capture)
+        add_result("resident_terrain_candidate_native_renderer_install",
+            install.get("status") == "installed", JSON.stringify(install))
+
 func run() -> void:
     var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()
     mark_progress("start")
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("main_instantiated")
+    if only_section == "resident_terrain_section_capture":
+        mark_progress("resident_terrain_section_capture_during_startup")
+        await test_resident_terrain_section_capture()
+        finish_playtest()
+        return
     if not await wait_for_runtime_loading_complete():
         add_result("startup_loading_complete", false, JSON.stringify(startup_failure_diagnostics(main)))
         finish_playtest()
