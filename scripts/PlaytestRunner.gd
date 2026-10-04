@@ -1013,7 +1013,8 @@ func run() -> void:
                 JSON.stringify({"schema":"production-section-candidate-diagnostic/v1",
                     "status":"failed", "passed":false,
                     "firstBlocker":{"stage":"main_startup",
-                        "reason":String(main.get("startup_loading_failure_result"))},
+                        "startupFailure":main.get("startup_loading_failure_result"),
+                        "diagnostics":startup_failure_diagnostics(main)},
                     "evidenceLevel":"headed_live_main_real_provider_roster_diagnostic"}))
             finish_playtest()
             return
@@ -2311,15 +2312,45 @@ func startup_failure_diagnostics(main_node: Node) -> Dictionary:
     var domains_value: Variant = main_node.get("startup_readiness_domains")
     var domains: Dictionary = domains_value if domains_value is Dictionary else {}
     var selected_domains := {}
-    for domain in ["terrain_view_expansion", "visible_terrain_meshes", "initial_region",
-            "initial_structure_visual", "gameplay"]:
+    for domain in ["terrain_view_expansion", "visible_terrain_meshes", "visible_world",
+            "initial_region", "initial_structure_visual", "gameplay"]:
         if domains.has(domain):
             selected_domains[domain] = domains[domain]
     var timeline_start := maxi(0, timeline.size() - 16)
+    var prop_chunk_keys_value: Variant = main_node.get("visible_world_prop_chunk_keys")
+    var prop_chunk_keys: Array = prop_chunk_keys_value if prop_chunk_keys_value is Array else []
+    var prop_chunk_cursor := int(main_node.get("visible_world_prop_chunk_cursor"))
+    var current_prop_key: Variant = prop_chunk_keys[prop_chunk_cursor] \
+        if prop_chunk_cursor >= 0 and prop_chunk_cursor < prop_chunk_keys.size() else null
+    var pending_prop_spawns_value: Variant = main_node.get("pending_chunk_prop_spawns")
+    var pending_prop_spawns: Dictionary = pending_prop_spawns_value \
+        if pending_prop_spawns_value is Dictionary else {}
+    var current_prop_spawn_state: Dictionary = pending_prop_spawns.get(current_prop_key, {}) \
+        if current_prop_key != null else {}
+    var capture_jobs_value: Variant = main_node.get("visible_world_prop_capture_jobs")
+    var capture_jobs: Dictionary = capture_jobs_value if capture_jobs_value is Dictionary else {}
+    var pending_reasons_value: Variant = main_node.get("visible_world_prop_pending_reasons")
+    var pending_reasons: Dictionary = pending_reasons_value \
+        if pending_reasons_value is Dictionary else {}
+    var current_prop_spawn_summary := {}
+    for key in ["phase", "propIndex", "undergroundIndex", "undergroundScanColumn",
+            "undergroundScanComplete", "detailIndex", "detailAttempts"]:
+        if current_prop_spawn_state.has(key):
+            current_prop_spawn_summary[key] = current_prop_spawn_state[key]
     return {"startup_loading_failure_result": main_node.get("startup_loading_failure_result"),
         "startupTimelineTail": timeline.slice(timeline_start),
         "startupMaxStep": main_node.get("startup_loading_max_step"),
-        "startupReadinessDomains": selected_domains}
+        "startupReadinessDomains": selected_domains,
+        "visibleWorldPropChunkCursor":prop_chunk_cursor,
+        "visibleWorldPropChunkCount":prop_chunk_keys.size(),
+        "visibleWorldPropCurrentChunk":current_prop_key,
+        "visibleWorldPropCaptureStreak":main_node.get("visible_world_prop_capture_streak"),
+        "visibleWorldPropLastAttempt":main_node.get("visible_world_prop_last_attempt"),
+        "visibleWorldPropPendingReasonCount":pending_reasons.size(),
+        "visibleWorldPropPendingReasonSample":pending_reasons.values().slice(0, 8),
+        "pendingChunkPropSpawnCount":pending_prop_spawns.size(),
+        "currentChunkPropSpawnSummary":current_prop_spawn_summary,
+        "visibleWorldPropCaptureJobCount":capture_jobs.size()}
 
 func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
     if main == null:

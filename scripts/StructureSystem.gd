@@ -324,10 +324,38 @@ func generated_visual_block_removed(body: Node3D) -> void:
     var key:=_ordinary_visual_block_key(source_id,cell_value,String(body.get_meta("block_type","")))
     if not removed_generated_structure_blocks.has(key):
         removed_generated_structure_blocks[key]=true
+        var source_revision := 0
         if ordinary_visual_sources.has(source_id):
             var source: Dictionary=ordinary_visual_sources[source_id]
             source.revision=int(source.get("revision",0))+1
+            source_revision = int(source.revision)
         ordinary_visual_revision+=1
+        _invalidate_ordinary_visual_source(source_id, source_revision, body)
+
+func _invalidate_ordinary_visual_source(source_id: String, source_revision: int,
+        body: Node3D) -> void:
+    if not is_instance_valid(main) or not main.has_method("invalidate_static_render_source"):
+        return
+    var bounds := _ordinary_visual_block_world_bounds(body)
+    main.call("invalidate_static_render_source", "ordinary-structures", source_id,
+        "ordinary:%s:%d" % [source_id, source_revision], bounds)
+
+func _ordinary_visual_block_world_bounds(body: Node3D) -> AABB:
+    var bounds := AABB()
+    var have_bounds := false
+    var mesh_nodes := body.find_children("*", "MeshInstance3D", true, false)
+    for node_value: Node in mesh_nodes:
+        var mesh_node := node_value as MeshInstance3D
+        if mesh_node == null or mesh_node.mesh == null:
+            continue
+        var mesh_bounds := mesh_node.get_aabb() * mesh_node.global_transform
+        if mesh_bounds.size.is_finite() and mesh_bounds.size.x >= 0.0 \
+                and mesh_bounds.size.y >= 0.0 and mesh_bounds.size.z >= 0.0:
+            bounds = mesh_bounds if not have_bounds else bounds.merge(mesh_bounds)
+            have_bounds = true
+    if have_bounds:
+        return bounds
+    return AABB(body.global_position - Vector3.ONE * 0.5, Vector3.ONE)
 
 func generated_visual_block_is_removed(source_id: String, cell: Vector3i, block_type: String) -> bool:
     return removed_generated_structure_blocks.has(_ordinary_visual_block_key(source_id,cell,block_type))

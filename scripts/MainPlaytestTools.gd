@@ -3193,6 +3193,18 @@ func _record_realized_ecology_prop(parent: Node, body: StaticBody3D,
         bounds = member_bounds if not have_bounds else bounds.merge(member_bounds)
         have_bounds = true
     candidate["localBounds"] = bounds if have_bounds else AABB(body.position, Vector3.ZERO)
+    body.set_meta("static_ecology_source_id", source_id)
+    if have_bounds:
+        var world_bounds := bounds * body.global_transform
+        body.set_meta("static_ecology_source_bounds", world_bounds)
+        var recorded := _record_ecology_source_value(parent, candidate)
+        if recorded:
+            var section_coordinator: Variant = get("world_static_section_coordinator")
+            if section_coordinator != null \
+                    and section_coordinator.has_method("invalidate_visible_static_source"):
+                section_coordinator.call("invalidate_visible_static_source",
+                    "ecology_and_static_props", source_id, source_revision, world_bounds)
+        return recorded
     return _record_ecology_source_value(parent, candidate)
 
 
@@ -3883,7 +3895,7 @@ func spawn_underground_prop_attempt(state: Dictionary, solid_cell: Vector3i, rng
     var local_position := Vector3((float(solid_cell.x - start_x) + 0.5) * CELL, float(air_cell.y) * CELL + CELL * 0.04, (float(solid_cell.z - start_z) + 0.5) * CELL)
     var roll := rng.randf()
     var scan_state: Variant = state.get("undergroundVolumeFloorScan", {})
-    var scan_revision := String(scan_state.get("revision", "")) if scan_state is Dictionary else ""
+    var scan_revision := str(scan_state.get("revision", "")) if scan_state is Dictionary else ""
     if scan_revision.is_empty():
         scan_revision = _underground_prop_scan_revision(state)
     if material in ["copperOre", "ironOre"]:
@@ -4929,6 +4941,10 @@ func _publish_tree_body(
     # enqueued; using global_position before this point asks Godot for an
     # invalid transform during ordinary chunk prop creation.
     add_tree_visual(body, prop_id, biome, spec)
+    var tree_source_bounds := AABB(Vector3(-canopy_radius, 0.0, -canopy_radius),
+        Vector3(canopy_radius * 2.0, float(spec.get("height", legacy_height)), canopy_radius * 2.0))
+    body.set_meta("static_ecology_source_id", "%s:tree:%s" % [seed_text, prop_id])
+    body.set_meta("static_ecology_source_bounds", tree_source_bounds * body.global_transform)
     if resolve_player_overlap and not horizon_only:
         resolve_player_tree_publication_overlap(body)
     if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
@@ -4988,6 +5004,15 @@ func _on_visible_world_tree_visual_published(body: StaticBody3D, _recipe: Dictio
     if body == null or not is_instance_valid(body): return
     visible_world_demand_controller.handoff_published_tree("player",
         world_to_chunk(body.global_position.x, body.global_position.z), body)
+    var source_id := str(body.get_meta("static_ecology_source_id", ""))
+    var source_revision := str(body.get_meta("tree_recipe_signature", ""))
+    var source_bounds: Variant = body.get_meta("static_ecology_source_bounds", AABB())
+    if not source_id.is_empty() and not source_revision.is_empty() and source_bounds is AABB:
+        var section_coordinator: Variant = get("world_static_section_coordinator")
+        if section_coordinator != null \
+                and section_coordinator.has_method("invalidate_visible_static_source"):
+            section_coordinator.call("invalidate_visible_static_source",
+                "ecology_and_static_props", source_id, source_revision, source_bounds)
 
 func player_position_overlaps_generated_tree(position: Vector3, tree: Node3D) -> bool:
     if tree == null or not is_instance_valid(tree):

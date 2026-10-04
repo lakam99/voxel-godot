@@ -28,6 +28,7 @@ const CandidateAssembler = preload("res://scripts/world/WorldStaticSectionCandid
 
 const MAX_VISIBLE_SECTION_DEMAND_SCAN_PER_ADVANCE := 32
 const VISIBLE_SECTION_DEMAND_RETRY_FRAMES := 30
+const MAX_SOURCE_INVALIDATION_SECTIONS := 64
 
 var _ledger = LedgerScript.new()
 var _source_roster = SourceRoster.new()
@@ -45,6 +46,8 @@ var _production_candidates_by_section: Dictionary = {}
 var _production_candidate_jobs: Dictionary = {}
 var _production_candidate_receipts: Dictionary = {}
 var _production_candidate_generation := 0
+var _visible_sections_by_source_id: Dictionary = {}
+var _dirty_source_sections: Dictionary = {}
 var _visible_section_demands: Dictionary = {}
 var _visible_section_demand_queue: Array[Dictionary] = []
 var _visible_section_demand_head := 0
@@ -104,6 +107,8 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 		state = {"terrainRevision":revision, "priority":camera_distance_squared,
 			"stage":"waiting", "attempts":0,
 			"nextAttemptFrame":Engine.get_process_frames(), "queued":false}
+		if _dirty_source_sections.has(section_key):
+			state["sourceInvalidation"] = _dirty_source_sections[section_key].duplicate(true)
 		_visible_section_demands[section_key] = state
 		_enqueue_visible_section_demand(section_key, state)
 	else:
@@ -125,6 +130,138 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 	return {"status":"queued" if state.get("stage") == "waiting" else "tracked",
 		"sectionKey":section_key, "stage":String(state.get("stage", "waiting")),
 		"terrainRevision":revision}
+
+
+## Rebuild a demanded section after an authoritative contributor changes. The
+## old accepted candidate and renderer receipt remain owned until a replacement
+## receives a current native install acknowledgement.
+func invalidate_visible_section_source(section_key: Vector3i, provider_id: String,
+		source_id: String, source_revision: String) -> Dictionary:
+	if provider_id.strip_edges().is_empty() or source_id.strip_edges().is_empty() \
+			or source_revision.strip_edges().is_empty():
+		return _failed("invalid_visible_section_source_invalidation")
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	var dirty_sources: Dictionary = _dirty_source_sections.get(section_key, {})
+	dirty_sources[source_id] = {"providerId":provider_id,
+		"sourceRevision":source_revision, "requestedFrame":Engine.get_process_frames()}
+	_dirty_source_sections[section_key] = dirty_sources
+	_cancel_stale_replay_for_section(section_key)
+	if state.is_empty():
+		return {"status":"deferred", "reason":"section_not_currently_demanded",
+			"retryable":true, "dirtyRetained":true,
+			"sectionKey":section_key, "providerId":provider_id, "sourceId":source_id}
+	var previous_generation := int(state.get("installedGeneration", 0))
+	_cancel_pending_production_candidate(section_key)
+	state["stage"] = "waiting"
+	state["attempts"] = 0
+	state["lastReason"] = "authoritative_source_revision_changed"
+	state["lastInstallStatus"] = "pending"
+	state["lastInstallReason"] = "authoritative_source_revision_changed"
+	state["nextAttemptFrame"] = Engine.get_process_frames()
+	state["sourceInvalidation"] = {"providerId":provider_id, "sourceId":source_id,
+		"sourceRevision":source_revision, "requestedFrame":Engine.get_process_frames()}
+	state.erase("candidateGeneration")
+	state.erase("blockedReason")
+	if not bool(state.get("queued", false)):
+		_enqueue_visible_section_demand(section_key, state)
+	_visible_section_demands[section_key] = state
+	return {"status":"queued", "sectionKey":section_key,
+		"providerId":provider_id, "sourceId":source_id,
+		"sourceRevision":source_revision,
+		"previousInstalledGeneration":previous_generation,
+		"previousRepresentationRetained":_production_candidates_by_section.has(section_key)}
+
+
+## Resolve changed/removed sources from installed complete manifests, and include
+## sections intersecting current bounds for additions or moves. This searches
+## the bounded source index, not resident gameplay chunks.
+func invalidate_visible_static_source(provider_id: String, source_id: String,
+		source_revision: String, current_world_bounds: AABB = AABB()) -> Dictionary:
+	if provider_id.strip_edges().is_empty() or source_id.strip_edges().is_empty() \
+			or source_revision.strip_edges().is_empty():
+		return _failed("invalid_visible_static_source_invalidation")
+	var affected: Dictionary = {}
+	var installed_sections: Variant = _visible_sections_by_source_id.get(source_id, {})
+	if installed_sections is Dictionary:
+		for section_value: Variant in installed_sections:
+			if section_value is Vector3i:
+				affected[Vector3i(section_value)] = true
+	if _valid_source_invalidation_bounds(current_world_bounds):
+		for section_key: Vector3i in SectionGrid.keys_intersecting_bounds(current_world_bounds):
+			affected[section_key] = true
+	if affected.is_empty():
+		return {"status":"pending", "reason":"source_affected_sections_unknown",
+			"retryable":true, "providerId":provider_id, "sourceId":source_id}
+	if affected.size() > MAX_SOURCE_INVALIDATION_SECTIONS:
+		return _failed("source_invalidation_section_budget_exceeded")
+	var section_keys: Array[Vector3i] = []
+	for section_value: Variant in affected:
+		section_keys.append(Vector3i(section_value))
+	section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	var results: Array[Dictionary] = []
+	var queued_count := 0
+	var deferred := 0
+	for section_key: Vector3i in section_keys:
+		var invalidation := invalidate_visible_section_source(section_key, provider_id,
+			source_id, source_revision)
+		results.append(invalidation)
+		if invalidation.get("status") == "queued":
+			queued_count += 1
+		elif invalidation.get("status") == "deferred":
+			deferred += 1
+	results.make_read_only()
+	return {"status":"queued" if queued_count > 0 else "deferred",
+		"providerId":provider_id, "sourceId":source_id,
+		"sourceRevision":source_revision, "affectedSectionKeys":section_keys,
+		"queuedCount":queued_count, "deferredCount":deferred, "results":results}
+
+
+static func _valid_source_invalidation_bounds(bounds: AABB) -> bool:
+	return bounds.position.is_finite() and bounds.size.is_finite() \
+		and bounds.size.x > 0.0 and bounds.size.y > 0.0 and bounds.size.z > 0.0
+
+
+func _replace_section_source_index(section_key: Vector3i, previous: Dictionary,
+		replacement: Dictionary) -> void:
+	for source_id: String in _section_candidate_source_revisions(previous):
+		var sections: Dictionary = _visible_sections_by_source_id.get(source_id, {})
+		sections.erase(section_key)
+		if sections.is_empty():
+			_visible_sections_by_source_id.erase(source_id)
+		else:
+			_visible_sections_by_source_id[source_id] = sections
+	var replacement_source_revisions := _section_candidate_source_revisions(replacement)
+	for source_id: String in replacement_source_revisions:
+		var sections: Dictionary = _visible_sections_by_source_id.get(source_id, {})
+		sections[section_key] = String(replacement_source_revisions[source_id])
+		_visible_sections_by_source_id[source_id] = sections
+
+
+## Resolve source identity from the accepted render manifest, which carries
+## sourceId/sourceRevision. sourceRevisions on the candidate is keyed by
+## sourcePartId and is a different identity boundary.
+static func _section_candidate_source_revisions(candidate: Dictionary) -> Dictionary:
+	var prepared_value: Variant = candidate.get("candidate", {})
+	if not prepared_value is Dictionary:
+		return {}
+	var snapshot_value: Variant = prepared_value.get("snapshot", {})
+	if not snapshot_value is Dictionary:
+		return {}
+	var manifest_value: Variant = snapshot_value.get("manifest", [])
+	if not manifest_value is Array:
+		return {}
+	var result: Dictionary = {}
+	for manifest_value_row: Variant in manifest_value:
+		if not manifest_value_row is Dictionary:
+			continue
+		var source_id := String(manifest_value_row.get("sourceId", ""))
+		var source_revision := String(manifest_value_row.get("sourceRevision", ""))
+		if not source_id.is_empty() and not source_revision.is_empty():
+			result[source_id] = source_revision
+	return result
 
 
 ## Remove only queued/staged candidate work for an exited native mesh block.
@@ -500,8 +637,25 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		_reconcile_visible_section_candidate_outcome(section_key,
 			int(candidate.get("generation", 0)), receipt_failure)
 		return receipt_failure
+	if not _receipt_is_live(candidate, receipt):
+		var stale_owner_session = job.get("session")
+		if stale_owner_session is RefCounted and stale_owner_session.has_method("cancel"):
+			stale_owner_session.cancel()
+		job["session"] = null
+		job["stage"] = "owner_replaced"
+		_production_candidate_jobs[section_key] = job
+		var owner_changed := {"status":"pending_owner",
+			"reason":"complete_section_candidate_receipt_owner_changed",
+			"sectionKey":section_key, "generation":int(candidate.get("generation", 0)),
+			"retryable":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), owner_changed)
+		return owner_changed
+	var previous_candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
+	_replace_section_source_index(section_key, previous_candidate, candidate)
 	_production_candidates_by_section[section_key] = candidate
 	_production_candidate_receipts[section_key] = receipt
+	_dirty_source_sections.erase(section_key)
 	_production_candidate_jobs.erase(section_key)
 	var installed_result := {"status":"installed", "sectionKey":section_key,
 		"generation":int(candidate.get("generation", 0)), "receipt":receipt}
@@ -536,6 +690,7 @@ func _reconcile_visible_section_candidate_outcome(section_key: Vector3i,
 		state["stage"] = "installed"
 		state["installedGeneration"] = candidate_generation
 		state.erase("blockedReason")
+		state.erase("sourceInvalidation")
 		state["installedReceipt"] = {
 			"censusDigest":String(receipt.get("censusDigest", "")),
 			"contentManifestDigest":String(receipt.get("contentManifestDigest", "")),
@@ -664,6 +819,8 @@ func reset_for_world(world_id: String) -> Dictionary:
 	_production_candidates_by_section.clear()
 	_production_candidate_jobs.clear()
 	_production_candidate_receipts.clear()
+	_visible_sections_by_source_id.clear()
+	_dirty_source_sections.clear()
 	_visible_section_demands.clear()
 	_visible_section_demand_queue.clear()
 	_visible_section_demand_head = 0
@@ -861,8 +1018,9 @@ func notify_stream_chunk_unloaded(owner_cell: Vector2i, chunk_instance_id := 0) 
 		if chunk_instance_id > 0 and int(receipt.get("chunkInstanceId", 0)) not in [0, chunk_instance_id]:
 			continue
 		_installed_receipts.erase(section_key)
-		_queue_replay(section_key)
-		queued += 1
+		if not _dirty_source_sections.has(section_key):
+			_queue_replay(section_key)
+			queued += 1
 	for section_value: Variant in _production_candidates_by_section:
 		if not section_value is Vector3i:
 			continue
@@ -887,7 +1045,8 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 	var queued := 0
 	for section_value: Variant in _committed_candidates:
 		var section_key: Vector3i = section_value
-		if SectionGrid.chunk_key_for_section(section_key) == owner_cell:
+		if SectionGrid.chunk_key_for_section(section_key) == owner_cell \
+				and not _dirty_source_sections.has(section_key):
 			_queue_replay(section_key)
 			queued += 1
 	for section_value: Variant in _production_candidates_by_section:
@@ -895,6 +1054,7 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 			continue
 		var section_key: Vector3i = section_value
 		if SectionGrid.chunk_key_for_section(section_key) != owner_cell \
+				or _dirty_source_sections.has(section_key) \
 				or _production_candidate_receipts.has(section_key) \
 				or _production_candidate_jobs.has(section_key):
 			continue
@@ -906,6 +1066,8 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 
 
 func request_section_replay(section_key: Vector3i) -> bool:
+	if _dirty_source_sections.has(section_key):
+		return false
 	if _production_candidates_by_section.has(section_key):
 		if _production_candidate_receipts.has(section_key) \
 				or _production_candidate_jobs.has(section_key):
@@ -950,6 +1112,8 @@ func advance_replay(current_source_revisions: Dictionary,
 	while not _replay_queue.is_empty():
 		var section_key: Vector3i = _replay_queue.pop_front()
 		_replay_set.erase(section_key)
+		if _dirty_source_sections.has(section_key):
+			continue
 		if not _committed_candidates.has(section_key):
 			continue
 		var candidate: Dictionary = _committed_candidates[section_key]
@@ -1012,6 +1176,13 @@ func _advance_replay_session(current_source_revisions: Dictionary,
 		return _failed("invalid_section_replay_inputs")
 	var candidate: Dictionary = _active_replay.candidate
 	var section_key: Vector3i = _active_replay.sectionKey
+	if _dirty_source_sections.has(section_key):
+		var stale_replay_session = _active_replay.get("installSession")
+		if stale_replay_session is RefCounted and stale_replay_session.has_method("cancel"):
+			stale_replay_session.cancel()
+		_active_replay.clear()
+		return {"status":"deferred_dirty", "reason":"section_has_dirty_source",
+			"sectionKey":section_key, "retryable":true}
 	var current_check := _validate_candidate_census([candidate],
 		expected_contributors_by_section, current_source_revisions)
 	if current_check.get("status") != "ready":
@@ -1256,10 +1427,22 @@ func _abort_active(reason: String) -> Dictionary:
 
 
 func _queue_replay(section_key: Vector3i) -> void:
-	if _replay_set.has(section_key) or not _committed_candidates.has(section_key):
+	if _dirty_source_sections.has(section_key) or _replay_set.has(section_key) \
+			or not _committed_candidates.has(section_key):
 		return
 	_replay_set[section_key] = true
 	_replay_queue.append(section_key)
+
+
+func _cancel_stale_replay_for_section(section_key: Vector3i) -> void:
+	if not _active_replay.is_empty() and _active_replay.get("sectionKey") == section_key:
+		var session = _active_replay.get("installSession")
+		if session is RefCounted and session.has_method("cancel"):
+			session.cancel()
+		_active_replay.clear()
+	if _replay_set.has(section_key):
+		_replay_set.erase(section_key)
+		_replay_queue.erase(section_key)
 
 
 func _valid_revision_map(value: Dictionary) -> bool:

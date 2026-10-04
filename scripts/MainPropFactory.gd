@@ -1,5 +1,15 @@
 ﻿extends "res://scripts/MainChunkTerrain.gd"
 
+func invalidate_static_render_source(provider_id: String, source_id: String,
+        source_revision: String, world_bounds: AABB) -> Dictionary:
+    var section_coordinator: Variant = get("world_static_section_coordinator")
+    if section_coordinator == null \
+            or not section_coordinator.has_method("invalidate_visible_static_source"):
+        return {"status":"pending", "reason":"world_section_coordinator_unavailable",
+            "retryable":true, "providerId":provider_id, "sourceId":source_id}
+    return section_coordinator.call("invalidate_visible_static_source", provider_id,
+        source_id, source_revision, world_bounds)
+
 func destroy_target() -> void:
     if try_fire_ranged():
         return
@@ -197,6 +207,11 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         removed_props[prop_id] = true
         removed_props_revision += 1
         mark_world_dirty("prop_removed")
+        var ecology_source_id := str(collider.get_meta("static_ecology_source_id", ""))
+        var ecology_source_bounds: Variant = collider.get_meta("static_ecology_source_bounds", AABB())
+        if not ecology_source_id.is_empty() and ecology_source_bounds is AABB:
+            invalidate_static_render_source("ecology_and_static_props", ecology_source_id,
+                str(removed_props_revision), ecology_source_bounds)
         if npc_system and npc_system.has_method("notify_navigation_prop_removed"):
             npc_system.notify_navigation_prop_removed(prop_id, collider)
         if material_id == "wildlife":

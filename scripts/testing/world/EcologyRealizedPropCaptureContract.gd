@@ -70,6 +70,15 @@ func run() -> void:
 		"ore-source", Vector3(3.0, 5.0, 7.0), "copperOre", baseline_rng, 2)
 	var captured_nodes: Array = captured.make_ore_cluster(captured_parent,
 		"ore-source", Vector3(3.0, 5.0, 7.0), "copperOre", captured_rng, 2)
+	var captured_ore_body := captured_nodes[0] as StaticBody3D
+	var captured_ore_bounds: Variant = captured_ore_body.get_meta("static_ecology_source_bounds", null) \
+		if is_instance_valid(captured_ore_body) else null
+	check("realized_prop_body_exports_stable_source_identity_and_world_bounds",
+		is_instance_valid(captured_ore_body) \
+		and String(captured_ore_body.get_meta("static_ecology_source_id", "")) \
+			== "%s:ore:ore-source" % seed \
+		and captured_ore_bounds is AABB and captured_ore_bounds.size.x > 0.0 \
+		and captured_ore_bounds.size.y > 0.0 and captured_ore_bounds.size.z > 0.0)
 	var ore_proof := {"producer":"surface_spawn", "chunk":Vector2i.ZERO,
 		"sourceRevision":ledger.source_revision, "scanRevision":"", "producerComplete":true}
 	var ore_completion_accepted: bool = ledger.mark_category_complete("ore", ore_proof)

@@ -8,6 +8,15 @@ const MainRuntime := preload("res://scripts/MainRuntimeTools.gd")
 const SectionGrid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 
 
+class FixtureCoordinator extends "res://scripts/world/WorldStaticSectionCoordinator.gd":
+	func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
+		return receipt.get("status") == "installed" \
+			and receipt.get("worldId") == candidate.get("worldId") \
+			and receipt.get("sectionKey") == candidate.get("sectionKey") \
+			and int(receipt.get("generation", 0)) == int(candidate.get("generation", 0)) \
+			and receipt.get("contentManifestDigest") == candidate.get("contentManifestDigest")
+
+
 class FakeTerrainRuntime extends Node3D:
 	signal visible_mesh_block_revision_changed(section_key: Vector3i, revision: int)
 	var published_mesh_blocks: Dictionary = {}
@@ -23,20 +32,29 @@ class FakeTerrainRuntime extends Node3D:
 
 class FakeInstalledSession extends RefCounted:
 	var receipt: Dictionary = {}
+	var cancelled := false
 
 	func configure(candidate: Dictionary) -> void:
 		receipt = {"status":"installed",
+			"worldId":String(candidate.get("worldId", "")),
+			"sectionKey":candidate.get("sectionKey", Vector3i.ZERO),
 			"generation":int(candidate.get("generation", 0)),
 			"censusDigest":String(candidate.get("censusDigest", "")),
 			"contentManifestDigest":String(candidate.get("contentManifestDigest", "")),
 			"backendInstanceId":101, "chunkInstanceId":202, "ownerCell":Vector2i(2, 0)}
+		receipt.make_read_only()
 
 	func advance(_max_upload_units: int) -> Dictionary:
 		return {"status":"installed", "receipt":receipt}
 
+	func cancel() -> Dictionary:
+		cancelled = true
+		return {"status":"cancelled"}
+
 class EmptySectionProvider extends RefCounted:
 	var provider_id := ""
 	var configured_world_id := ""
+	var authority_revision := 1
 
 	func configure(next_provider_id: String, world_id: String) -> void:
 		provider_id = next_provider_id
@@ -57,7 +75,7 @@ class EmptySectionProvider extends RefCounted:
 		var revisions: Dictionary = {}
 		revisions.make_read_only()
 		return {"status":"complete", "worldId":world_id,
-			"authorityRevision":provider_id + ":authority:1",
+			"authorityRevision":provider_id + ":authority:" + str(authority_revision),
 			"sourceRevisions":revisions, "sections":sections}
 
 	func capture_static_section_contribution(census: Dictionary,
@@ -93,12 +111,12 @@ func run() -> void:
 	var world_id := "seed:visible-section-demand-contract:1"
 	var required: Array[String] = ["terrain", "ecology"]
 	required.make_read_only()
-	var coordinator = Coordinator.new()
+	var coordinator = FixtureCoordinator.new()
 	var configured: Dictionary = coordinator.configure(world_id)
 	var roster_configured: Dictionary = coordinator.configure_source_roster(required)
 	var section_near := Vector3i(0, 0, 0)
 	var section_far := Vector3i(3, 0, 0)
-	var signal_coordinator = Coordinator.new()
+	var signal_coordinator = FixtureCoordinator.new()
 	signal_coordinator.configure(world_id + ":signal")
 	var main_runtime = MainRuntime.new()
 	main_runtime.world_static_section_coordinator = signal_coordinator
@@ -187,7 +205,7 @@ func run() -> void:
 	check("withdrawal_cancels_only_staged_work_and_keeps_accepted_visual_state",
 		withdrawn.get("status") == "withdrawn"
 		and not withdrawn.get("installedRepresentationRetained", true), withdrawn)
-	var lifecycle := Coordinator.new()
+	var lifecycle := FixtureCoordinator.new()
 	var lifecycle_world := world_id + ":candidate-lifecycle"
 	lifecycle.configure(lifecycle_world)
 	lifecycle.configure_source_roster(required)
@@ -222,6 +240,174 @@ func run() -> void:
 		and lifecycle._production_candidate_receipts.has(installed_key),
 		{"admission":lifecycle_admission, "outcome":install_outcome,
 			"demand":installed_state})
+	var prior_candidate: Dictionary = lifecycle._production_candidates_by_section[installed_key]
+	var indexed_candidate: Dictionary = prior_candidate.duplicate(false)
+	var prior_source_revisions := {"ecology:part:fixture":"prop-revision-1"}
+	prior_source_revisions.make_read_only()
+	indexed_candidate["sourceRevisions"] = prior_source_revisions
+	var indexed_prepared: Dictionary = prior_candidate.candidate.duplicate(true)
+	var indexed_snapshot: Dictionary = indexed_prepared.snapshot.duplicate(true)
+	indexed_snapshot["manifest"] = [{"sourceId":"ecology:prop:fixture",
+		"sourcePartId":"ecology:part:fixture", "sourceRevision":"prop-revision-1"}]
+	indexed_prepared["snapshot"] = indexed_snapshot
+	indexed_candidate["candidate"] = indexed_prepared
+	lifecycle._replace_section_source_index(installed_key, prior_candidate, indexed_candidate)
+	lifecycle._production_candidates_by_section[installed_key] = indexed_candidate
+	prior_candidate = indexed_candidate
+	var prior_generation := int(installed_state.get("installedGeneration", 0))
+	lifecycle_ecology.authority_revision = 2
+	var invalidation: Dictionary = lifecycle.invalidate_visible_static_source(
+		"ecology", "ecology:prop:fixture", "prop-revision-2")
+	var invalidated_state: Dictionary = lifecycle._visible_section_demands[installed_key].duplicate(true)
+	var invalidation_results: Array = invalidation.get("results", [])
+	var first_invalidation: Dictionary = invalidation_results[0] if not invalidation_results.is_empty() else {}
+	var invalidation_checks := {"queued":invalidation.get("status") == "queued",
+		"previous_generation":first_invalidation.get("previousInstalledGeneration") == prior_generation,
+		"representation_retained":bool(first_invalidation.get("previousRepresentationRetained", false)),
+		"waiting":invalidated_state.get("stage") == "waiting",
+		"still_queued":bool(invalidated_state.get("queued", false)),
+		"old_generation_retained":int(invalidated_state.get("installedGeneration", 0)) == prior_generation,
+		"old_candidate_retained":is_same(lifecycle._production_candidates_by_section[installed_key], prior_candidate),
+		"index_uses_source_id_not_source_part_id":lifecycle._visible_sections_by_source_id.has("ecology:prop:fixture")
+			and not lifecycle._visible_sections_by_source_id.has("ecology:part:fixture")}
+	check("source_revision_invalidation_queues_complete_rebuild_and_keeps_old_receipt",
+		not invalidation_checks.values().has(false),
+		{"invalidation":invalidation, "state":invalidated_state,
+		"checks":invalidation_checks,
+		"sourceIndexedByManifestIdentity":lifecycle._visible_sections_by_source_id.has("ecology:prop:fixture")
+			and not lifecycle._visible_sections_by_source_id.has("ecology:part:fixture"),
+		"candidateSame":is_same(lifecycle._production_candidates_by_section[installed_key], prior_candidate)})
+	var replacement_admission: Dictionary = lifecycle.advance_visible_section_candidate_demands(1)
+	var replacement_job: Dictionary = lifecycle._production_candidate_jobs.get(installed_key, {})
+	var replacement_candidate: Dictionary = replacement_job.get("candidate", {})
+	var replacement_session := FakeInstalledSession.new()
+	replacement_session.configure(replacement_candidate)
+	replacement_job["session"] = replacement_session
+	lifecycle._production_candidate_jobs[installed_key] = replacement_job
+	var replacement_outcome: Dictionary = lifecycle.advance_complete_section_candidate(installed_key, 1)
+	var replaced_state: Dictionary = lifecycle._visible_section_demands[installed_key]
+	check("changed_source_replaces_candidate_only_after_current_install_receipt",
+		replacement_admission.get("attemptCount") == 1
+		and replacement_job.get("candidate", {}).get("censusDigest") != prior_candidate.get("censusDigest")
+		and replacement_outcome.get("status") == "installed"
+		and replaced_state.get("stage") == "installed"
+		and int(replaced_state.get("installedGeneration", 0)) > prior_generation
+		and not replaced_state.has("sourceInvalidation")
+		and int(lifecycle._production_candidates_by_section[installed_key].get("generation", 0)) \
+			== int(replacement_candidate.get("generation", 0))
+		and not lifecycle._visible_sections_by_source_id.has("ecology:prop:fixture"),
+		{"admission":replacement_admission, "outcome":replacement_outcome,
+			"installedGeneration":replaced_state.get("installedGeneration", 0)})
+	var added_source_bounds := AABB(SectionGrid.origin_for_key(installed_key),
+		Vector3.ONE * SectionGrid.SECTION_SIZE_METERS)
+	var added_source_invalidation: Dictionary = lifecycle.invalidate_visible_static_source(
+		"ecology", "ecology:new:fixture", "new-source-revision", added_source_bounds)
+	var added_source_state: Dictionary = lifecycle._visible_section_demands[installed_key]
+	check("new_static_source_bounds_invalidate_intersecting_demanded_section",
+		added_source_invalidation.get("status") == "queued"
+		and added_source_invalidation.get("affectedSectionKeys") == [installed_key]
+		and int(added_source_invalidation.get("queuedCount", 0)) == 1
+		and added_source_state.get("stage") == "waiting"
+		and added_source_state.get("queued"),
+		{"invalidation":added_source_invalidation, "state":added_source_state})
+	var replay_lifecycle := FixtureCoordinator.new()
+	var replay_world := world_id + ":withdrawn-source-replay"
+	replay_lifecycle.configure(replay_world)
+	replay_lifecycle.configure_source_roster(required)
+	var replay_terrain := EmptySectionProvider.new()
+	replay_terrain.configure("terrain", replay_world)
+	var replay_ecology := EmptySectionProvider.new()
+	replay_ecology.configure("ecology", replay_world)
+	replay_lifecycle.register_source_provider("terrain", replay_terrain,
+		"capture_static_section_sources")
+	replay_lifecycle.register_source_provider("ecology", replay_ecology,
+		"capture_static_section_sources")
+	var replay_key := Vector3i(4, 0, 0)
+	replay_lifecycle.request_visible_section_demand(replay_key, 41, 1.0)
+	replay_lifecycle.advance_visible_section_candidate_demands(1)
+	var replay_job: Dictionary = replay_lifecycle._production_candidate_jobs.get(replay_key, {})
+	var replay_original: Dictionary = replay_job.get("candidate", {})
+	var replay_session := FakeInstalledSession.new()
+	replay_session.configure(replay_original)
+	replay_job["session"] = replay_session
+	replay_lifecycle._production_candidate_jobs[replay_key] = replay_job
+	var replay_install: Dictionary = replay_lifecycle.advance_complete_section_candidate(replay_key, 1)
+	var replay_indexed: Dictionary = replay_lifecycle._production_candidates_by_section[replay_key].duplicate(false)
+	var replay_prepared: Dictionary = replay_indexed.candidate.duplicate(true)
+	var replay_snapshot: Dictionary = replay_prepared.snapshot.duplicate(true)
+	replay_snapshot["manifest"] = [{"sourceId":"ecology:prop:replay",
+		"sourcePartId":"ecology:part:replay", "sourceRevision":"prop-revision-1"}]
+	replay_prepared["snapshot"] = replay_snapshot
+	replay_indexed["candidate"] = replay_prepared
+	replay_lifecycle._replace_section_source_index(replay_key,
+		replay_lifecycle._production_candidates_by_section[replay_key], replay_indexed)
+	replay_lifecycle._production_candidates_by_section[replay_key] = replay_indexed
+	replay_lifecycle._committed_candidates[replay_key] = replay_indexed
+	replay_lifecycle._replay_set[replay_key] = true
+	replay_lifecycle._replay_queue.append(replay_key)
+	var legacy_active_session := FakeInstalledSession.new()
+	legacy_active_session.configure(replay_indexed)
+	replay_lifecycle._active_replay = {"candidate":replay_indexed,
+		"sectionKey":replay_key, "installSession":legacy_active_session}
+	var replay_withdrawal: Dictionary = replay_lifecycle.withdraw_visible_section_demand(replay_key)
+	replay_ecology.authority_revision = 2
+	var replay_invalidation: Dictionary = replay_lifecycle.invalidate_visible_static_source(
+		"ecology", "ecology:prop:replay", "prop-revision-2")
+	var replay_dirty: Dictionary = replay_lifecycle._dirty_source_sections.get(replay_key, {})
+	var replay_invalidation_rows: Array = replay_invalidation.get("results", [])
+	var replay_invalidation_row: Dictionary = replay_invalidation_rows[0] \
+		if not replay_invalidation_rows.is_empty() else {}
+	var owner_cell := SectionGrid.chunk_key_for_section(replay_key)
+	var unload_count: int = replay_lifecycle.notify_stream_chunk_unloaded(owner_cell, 202)
+	var load_count: int = replay_lifecycle.notify_stream_chunk_loaded(owner_cell)
+	var replay_request_blocked: bool = not replay_lifecycle.request_section_replay(replay_key)
+	var no_stale_replay_job := not replay_lifecycle._production_candidate_jobs.has(replay_key)
+	var no_legacy_replay_work := replay_lifecycle._replay_queue.is_empty() \
+		and not replay_lifecycle._replay_set.has(replay_key) \
+		and replay_lifecycle._active_replay.is_empty() and legacy_active_session.cancelled
+	var late_legacy_session := FakeInstalledSession.new()
+	late_legacy_session.configure(replay_indexed)
+	replay_lifecycle._active_replay = {"candidate":replay_indexed,
+		"sectionKey":replay_key, "installSession":late_legacy_session}
+	var empty_revision_map: Dictionary = {}
+	empty_revision_map.make_read_only()
+	var empty_census_map: Dictionary = {}
+	empty_census_map.make_read_only()
+	var dirty_replay_advance: Dictionary = replay_lifecycle.advance_replay(
+		empty_revision_map, empty_census_map, {}, {})
+	var dirty_advance_blocked: bool = dirty_replay_advance.get("status") == "deferred_dirty" \
+		and late_legacy_session.cancelled and replay_lifecycle._active_replay.is_empty()
+	replay_lifecycle.request_visible_section_demand(replay_key, 41, 1.0)
+	var fresh_admission: Dictionary = replay_lifecycle.advance_visible_section_candidate_demands(1)
+	var fresh_candidate_job: Dictionary = replay_lifecycle._production_candidate_jobs.get(replay_key, {})
+	var fresh_candidate: Dictionary = fresh_candidate_job.get("candidate", {})
+	var replay_checks := {"initial_candidate_installed":replay_install.get("status") == "installed",
+		"demand_withdrawn":replay_withdrawal.get("status") == "withdrawn",
+		"invalidation_deferred_but_retained":replay_invalidation.get("status") == "deferred"
+			and bool(replay_invalidation_row.get("dirtyRetained", false)),
+		"dirty_source_identity_retained":replay_dirty.has("ecology:prop:replay"),
+		"owner_unloaded":unload_count == 1,
+		"stale_replay_not_queued":load_count == 0 and replay_request_blocked
+			and no_stale_replay_job,
+		"queued_and_active_legacy_replay_cancelled":no_legacy_replay_work,
+		"late_active_legacy_replay_blocked_at_advance":dirty_advance_blocked,
+		"fresh_demand_reassembles":fresh_admission.get("attemptCount") == 1
+			and int(fresh_candidate.get("generation", 0)) > int(replay_indexed.get("generation", 0)),
+		"dirty_marker_survives_until_receipt":replay_lifecycle._dirty_source_sections.has(replay_key)}
+	check("withdrawn_source_invalidation_survives_unload_and_blocks_stale_replay",
+		not replay_checks.values().has(false),
+		{"checks":replay_checks, "withdrawal":replay_withdrawal,
+			"invalidation":replay_invalidation, "dirtySources":replay_dirty,
+			"unloadCount":unload_count, "loadReplayCount":load_count,
+			"legacyReplayQueue":replay_lifecycle._replay_queue,
+			"legacyReplaySetContainsSection":replay_lifecycle._replay_set.has(replay_key),
+			"legacyActiveReplayEmpty":replay_lifecycle._active_replay.is_empty(),
+			"legacyReplaySessionCancelled":legacy_active_session.cancelled,
+			"dirtyReplayAdvance":dirty_replay_advance,
+			"lateLegacyReplaySessionCancelled":late_legacy_session.cancelled,
+			"freshAdmission":fresh_admission,
+			"freshCandidateGeneration":fresh_candidate.get("generation"),
+			"staleGeneration":replay_indexed.get("generation")})
 	var unresolved_key := Vector3i(10, 1, 0)
 	lifecycle.request_visible_section_demand(unresolved_key, 33, 9.0)
 	lifecycle._pop_visible_section_demand()

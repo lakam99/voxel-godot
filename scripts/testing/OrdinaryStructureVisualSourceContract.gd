@@ -11,12 +11,19 @@ class FixtureWorld extends Node:
 	var blocks: Dictionary = {}
 	var town_region_cache: Dictionary = {}
 	var include_town := true
+	var static_source_invalidations: Array[Dictionary] = []
 
 	func town_region(x: int, z: int) -> Dictionary:
 		if include_town and x == 0 and z == 0:
 			return {"regionX": 0, "regionZ": 0, "centerX": 0, "centerZ": 0,
 				"radius": 12, "level": 0.0}
 		return {}
+
+	func invalidate_static_render_source(provider_id: String, source_id: String,
+			source_revision: String, world_bounds: AABB) -> Dictionary:
+		static_source_invalidations.append({"providerId":provider_id, "sourceId":source_id,
+			"sourceRevision":source_revision, "worldBounds":world_bounds})
+		return {"status":"deferred", "reason":"section_not_currently_demanded"}
 
 var checks: Array[Dictionary] = []
 
@@ -112,7 +119,18 @@ func run() -> void:
 	check("missing_emitted_owner_cannot_become_empty",
 		missing.status == "described" and missing.candidateCount == 1
 		and missing.candidates[0].owner == null and not missing.candidates[0].installed, missing)
+	world.static_source_invalidations.clear()
 	source.generated_visual_block_removed(body)
+	var invalidation: Dictionary = world.static_source_invalidations.back() \
+		if not world.static_source_invalidations.is_empty() else {}
+	var invalidation_bounds: Variant = invalidation.get("worldBounds", AABB())
+	check("generated_removal_invalidates_the_installed_section_source",
+		invalidation.get("providerId", "") == "ordinary-structures"
+		and invalidation.get("sourceId", "") == source_id
+		and String(invalidation.get("sourceRevision", "")).begins_with("ordinary:%s:" % source_id)
+		and invalidation_bounds is AABB and invalidation_bounds.has_point(body.global_position),
+		{"status":String(invalidation.get("status", "missing")),
+			"reason":String(invalidation.get("sourceRevision", ""))})
 	var removed: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("durable_removal_retires_exact_candidate",
 		removed.status == "described" and removed.candidateCount == 0
