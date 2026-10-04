@@ -891,3 +891,14 @@ census; seam parity, post-unload revision checks, edit/collision/fluid/light
 parity, replay, performance, and later building and ecology cutovers remain open.
 Canonical stage record:
 `C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
+
+The separate loaded-world headed mode
+`node tools/run-playtest.mjs --only terrain_section_shadow_live_install --seed section-shadow-live-install-20261004 --visible true`
+failed before invoking the queue: startup reached 2074/2082 visuals, with eight
+generated-structure visuals pending and only 29/31 structure sources complete.
+The owned process exited with code 1 and zero job members; see
+`playtest-report.json` and
+`artifacts/node-tools/process-runs/godot-QXCTkr/watchdog.json`. Thus the
+installed candidate has a native renderer receipt and bounded local mesh
+coordinates, but there is no loaded-world screenshot, traversal proof, or
+performance result yet. This reproduces the prior startup-readiness blocker.
