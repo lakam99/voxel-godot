@@ -51,7 +51,7 @@ cli(async () => {
   const report = read(path.join(c.run, 'report.json'));
   const checks = report.checks || {};
   demand(report.schema === 'native_chunk_render_packet_contract/v1'
-    && report.evidence === 'native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; no generated-world/live-gameplay acceptance' && report.passed === true
+    && report.evidence === 'native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; ArrayMesh triangle resource is installed in native section slot; no generated-world/live-gameplay acceptance' && report.passed === true
     && checks.native_backend_attached_to_actual_chunk === true
     && checks.native_backend_rejects_wrong_owner_cell === true
     && checks.native_packet_generation_one_installs === true
@@ -84,9 +84,10 @@ cli(async () => {
     && checks.main_runtime_creates_independent_static_section_owner === true
     && checks.main_runtime_retires_static_section_owner_after_render_demand === true
     && checks.world_coordinator_candidate_installs_and_promotes_through_native_renderer === true
+    && checks.native_section_slot_installs_transvoxel_shaped_array_mesh === true
     && checks.world_coordinator_rejects_incomplete_source_census_without_replacing_slot === true,
   'Native chunk packet lifecycle contract failed.');
   return { reportPath: path.join(c.run, 'report.json'), checks,
     nativeSourceSha256: sourceSha,
-    evidence: 'Production building flush/replay plus world-coordinator census-checked section installation and rejection through the native backend, and Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
+    evidence: 'Production building flush/replay plus world-coordinator census-checked section installation and rejection through the native backend, including an ArrayMesh triangle surface installed into a native section MultiMesh; Main.gd chunk creation/retirement uses actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
 });

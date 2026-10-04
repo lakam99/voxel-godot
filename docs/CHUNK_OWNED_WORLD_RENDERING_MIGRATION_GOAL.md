@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Worker-prepared, single-owner-cell building batches now have packet installation, revision-exact readiness, stale-packet retirement, per-advance bounded chunk-unload replay, and site-teardown release in code. Packet release now preserves its receipt until acknowledgement. Source-verified native GDExtension contracts cover packet lifecycle and the `Main.gd` chunk-container creation/retirement seam; its focused fixture uses actual `VoxelTerrainRuntime` demand/release bookkeeping with a stubbed site gate. Resident streamer-scheduled packet replay, source artifact memory, cross-cell fragments, and live-game acceptance remain open.**
+Status: **Active; chunk-priority, static-source/readiness, and render-demand-owned section-slot seams are present. The section owner is independent of gameplay chunk lifetime, and the native GDExtension accepts immutable cross-chunk capture coverage while preserving the prior installed root through cancellation. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt/lifecycle evidence; worker-prepared, single-owner-cell building batches retain per-source packet installation and replay. No ordinary terrain/building/tree/prop producer yet publishes a complete shared section candidate. Exact source-capture epochs, multi-layer/native geometry support, producer census integration, and all live gameplay/visual/performance gates remain open.**
 
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository at
@@ -786,13 +786,25 @@ corrected runs are preserved under the adjacent `*-debug-*` and `*-recheck-*`
 artifact directories; neither is acceptance evidence. No headed visual,
 traversal, or runtime-performance gate has been run for this coordinator.
 
+**Triangle-mesh renderer probe (2026-10-04):** the native contract was extended
+to install a real triangle `ArrayMesh` resource through the census-checked
+section candidate into the native section `MultiMeshInstance3D`. The updated
+runner passed 34/34 checks at
+`artifacts/citadel-runtime-integration/native-chunk-packet-arraymesh-section-20261004/report.json`.
+This confirms the resource shape is accepted by the real GDExtension node path;
+it uses a small synthetic triangle, does not capture or display Transvoxel
+terrain, and does not account for mesh-array bytes in native capacity metrics.
+The next production edit must close those two gaps before a terrain producer
+can use the shared candidate safely. No generated-world, headed visual,
+traversal or gameplay performance claim follows from this probe.
+
 ## Stage tracker — 7 stages total (0–6)
 
 | Stage | Status | Evidence / remaining exit gate |
 |---|---|---|
 | 0. Map authorities and baseline | Complete | Producer-to-renderer, revisions, ownership, collision, interactions, unload/replay and save paths documented. |
 | 1. Shared candidate and producer census | Partial | Ledger and coordinator contract exist; wire a world-lifetime producer roster and authoritative census into normal gameplay. |
-| 2. Native section install lifecycle | Partial | 31/31 native contract checks pass; production callers, multi-layer policies and cross-chunk dependency pins remain. |
+| 2. Native section install lifecycle | Partial | 34/34 native contract checks pass, including a triangle `ArrayMesh` under the real section owner; production callers, mesh-payload byte budgets, multi-layer policies and exact per-source capture epochs remain. |
 | 3. Smooth terrain | Not started | Capture/revision/halo and install receipt path through the configured Transvoxel mesher, then prove collision, edits, seams, fluids and replacement. |
 | 4. Generated buildings | Not started | Replace per-source final publication with complete section candidates; preserve structure gameplay authority, removals, replay and readiness. |
 | 5. Trees, flora and static props | Not started | Admit canonical deterministic prepared outputs, visual attributes, harvesting/removal and save/reload into shared candidates. |

@@ -104,8 +104,16 @@ func _run() -> void:
 	var material := StandardMaterial3D.new()
 	publisher.material_cache["native-contract-material"]=material
 	var section_material := StandardMaterial3D.new()
-	var section_mesh := BoxMesh.new()
-	section_mesh.size=Vector3.ONE
+	# Smooth terrain compiles to arbitrary triangle geometry. Exercise that exact
+	# renderer resource shape through the section slot instead of another box.
+	var section_mesh := ArrayMesh.new()
+	var terrain_surface_arrays: Array=[]
+	terrain_surface_arrays.resize(Mesh.ARRAY_MAX)
+	terrain_surface_arrays[Mesh.ARRAY_VERTEX]=PackedVector3Array([
+		Vector3(0.0,0.0,0.0),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)])
+	terrain_surface_arrays[Mesh.ARRAY_NORMAL]=PackedVector3Array([
+		Vector3.BACK,Vector3.BACK,Vector3.BACK])
+	section_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,terrain_surface_arrays)
 	var section_buffer: Array[float]=[]
 	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
 		section_buffer.append(value)
@@ -183,6 +191,10 @@ func _run() -> void:
 		and section_backend_snapshot.get("status")=="ready" \
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
 		and section_promoted.get("status")=="committed")
+	_check("native_section_slot_installs_transvoxel_shaped_array_mesh",
+		section_mesh.get_surface_count()==1 \
+		and section_mesh.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
+		and _has_installed_mesh(section_backend,section_mesh))
 	var coordinator := WorldStaticSectionCoordinator.new()
 	var coordinator_world := "native-section-coordinator-contract-world"
 	var coordinator_source_id := "coordinator-building-source"
@@ -609,6 +621,17 @@ func _install(backend: Node, generation: int) -> bool:
 		SOURCE_REVISION,PACKET_DIGEST)
 
 
+func _has_installed_mesh(root_node: Node, expected: Mesh) -> bool:
+	if root_node is MultiMeshInstance3D:
+		var instance := root_node as MultiMeshInstance3D
+		if instance.multimesh != null and instance.multimesh.mesh == expected \
+				and instance.is_visible_in_tree():
+			return true
+	for child: Node in root_node.get_children():
+		if _has_installed_mesh(child,expected): return true
+	return false
+
+
 func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:
 	var chunk := Node3D.new()
 	chunk.name="Chunk_%d_%d" % [cell.x,cell.y]
@@ -621,7 +644,7 @@ func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:
 
 func _finish(passed: bool, reason: String) -> void:
 	var report := {"schema":"native_chunk_render_packet_contract/v1",
-		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; no generated-world/live-gameplay acceptance",
+		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; ArrayMesh triangle resource is installed in native section slot; no generated-world/live-gameplay acceptance",
 		"checks":checks,"diagnostics":diagnostics,"passed":passed,"reason":reason}
 	var path := OS.get_environment("NATIVE_CHUNK_PACKET_REPORT")
 	if not path.is_empty():
