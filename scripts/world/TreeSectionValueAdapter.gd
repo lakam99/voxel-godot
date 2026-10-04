@@ -20,6 +20,57 @@ const SCHEMA := "tree-section-value-adapter/v1"
 const PIPELINE_REVISION := "procedural-tree-runtime-visual/v1"
 
 
+## Hash the queue-owned raw member values and the mutable resources they refer
+## to. This is intentionally a census-safe operation: it fingerprints resources
+## and value arrays, but does not encode instance attributes or partition them.
+static func raw_member_content_revision(members: Dictionary) -> String:
+	var parts: Array = [SCHEMA, "raw-members/v1"]
+	for role: String in ["bole", "branches", "foliage"]:
+		var role_members: Variant = members.get(role, null)
+		if not role_members is Array:
+			return ""
+		for member_value: Variant in role_members:
+			if not member_value is Dictionary or not member_value.is_read_only():
+				return ""
+			var member: Dictionary = member_value
+			var mesh_value: Variant = member.get("mesh", null)
+			var material_value: Variant = member.get("material", null)
+			var local_transform: Variant = member.get("localTransform", null)
+			var transforms: Variant = member.get("transforms", null)
+			var colors: Variant = member.get("colors", null)
+			var custom_data: Variant = member.get("customData", null)
+			if not mesh_value is Mesh or not material_value is Material \
+					or not local_transform is Transform3D \
+					or not transforms is Array or not transforms.is_read_only() \
+					or not colors is Array or not colors.is_read_only() \
+					or not custom_data is Array or not custom_data.is_read_only() \
+					or transforms.is_empty() or transforms.size() != colors.size() \
+					or transforms.size() != custom_data.size():
+				return ""
+			var mesh_report: Dictionary = MeshFingerprint.inspect(mesh_value as Mesh)
+			if mesh_report.get("status") != "ready":
+				return ""
+			var material_digest := _material_digest(material_value as Material)
+			if material_digest.is_empty():
+				return ""
+			for index: int in range(transforms.size()):
+				if not transforms[index] is Transform3D or not colors[index] is Color \
+						or not custom_data[index] is Color:
+					return ""
+			parts.append([role, String(member.get("schema", "")),
+				String(mesh_report.get("contentDigest", "")), material_digest,
+				local_transform, transforms, colors, custom_data,
+				int(member.get("producerElementCount", -1)),
+				float(member.get("visibilityRangeEnd", 0.0)),
+				float(member.get("fadeMargin", 0.0)),
+				bool(member.get("castShadows", false))])
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK \
+			or context.update(var_to_bytes(parts)) != OK:
+		return ""
+	return context.finish().hex_encode()
+
+
 ## Resolve the producer's committed recipe and value geometry from the queue's
 ## own acknowledgement record. This lets the ecology provider join the normal
 ## source census without enumerating GeneratedTreeVisual scene children.
@@ -304,8 +355,12 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	mesh_bindings.make_read_only()
 	material_bindings.make_read_only()
 	var inputs: Array[Dictionary] = []
+	var raw_member_revision := raw_member_content_revision(members)
+	if raw_member_revision.is_empty():
+		return _pending("tree_raw_member_content_revision_failed", {"sourceId":source_id})
 	var source_revision := _source_revision(world_id, seed, source_id,
-		recipe_signature, tier, owner_cell, body.global_transform, member_rows)
+		recipe_signature, tier, owner_cell, body.global_transform,
+		raw_member_revision, member_rows)
 	if source_revision.is_empty():
 		return _pending("tree_source_revision_failed", {"sourceId":source_id})
 	for row_value: Variant in member_rows:
@@ -341,6 +396,9 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	return {"status":"ready", "schema":SCHEMA, "worldId":world_id,
 		"sourceId":source_id, "sourcePartId":source_id,
 		"sourceRevision":source_revision, "producerRevision":recipe_signature,
+		"rawMemberContentRevision":raw_member_revision,
+		"bodyGlobalTransform":body.global_transform,
+		"seed":seed,
 		"ownerCell":owner_cell,
 		"bodyInstanceId":body.get_instance_id(), "renderLodTier":tier,
 		"memberRows":member_rows, "inputs":inputs, "partition":partition,
@@ -386,17 +444,35 @@ static func _material_digest(material: Material) -> String:
 			var name := String(uniform_value.get("name", ""))
 			if name.begins_with("global_"): continue
 			var parameter: Variant = shader_material.get_shader_parameter(name)
-			if not _digest_value_supported(parameter): return ""
-			uniforms.append([name, parameter])
+			var canonical_parameter: Variant = parameter
+			if parameter is Texture2D:
+				var texture_digest := _texture_digest(parameter as Texture2D)
+				if texture_digest.is_empty(): return ""
+				canonical_parameter = ["texture2d", texture_digest]
+			elif not _digest_value_supported(parameter):
+				return ""
+			uniforms.append([name, canonical_parameter])
 		uniforms.sort_custom(func(a: Array, b: Array) -> bool: return String(a[0]) < String(b[0]))
 		return Marshalls.raw_to_base64(var_to_bytes([shader.code, uniforms])).sha256_text()
-	if material is StandardMaterial3D:
-		var standard := material as StandardMaterial3D
-		var properties: Array[String] = ["albedo_color", "metallic", "roughness",
-			"emission_enabled", "emission", "transparency", "cull_mode", "shading_mode"]
+	if material is BaseMaterial3D:
 		var values: Array = []
-		for property_name: String in properties:
-			values.append([property_name, standard.get(property_name)])
+		for property_value: Variant in material.get_property_list():
+			if not property_value is Dictionary: return ""
+			var property_name := String(property_value.get("name", ""))
+			if property_name.is_empty() or property_name.begins_with("resource_") \
+					or property_name in ["script", "resource_local_to_scene", "resource_name"]:
+				continue
+			var value: Variant = material.get(property_name)
+			var canonical_value: Variant = value
+			if value is Texture2D:
+				var texture_digest := _texture_digest(value as Texture2D)
+				if texture_digest.is_empty(): return ""
+				canonical_value = ["texture2d", texture_digest]
+			elif value is Resource or value is Object or value is Callable \
+					or not _digest_value_supported(value):
+				return ""
+			values.append([property_name, canonical_value])
+		values.sort_custom(func(a: Array, b: Array) -> bool: return String(a[0]) < String(b[0]))
 		return Marshalls.raw_to_base64(var_to_bytes([material.get_class(), values])).sha256_text()
 	return ""
 
@@ -404,14 +480,31 @@ static func _material_digest(material: Material) -> String:
 static func _digest_value_supported(value: Variant) -> bool:
 	return value == null or value is bool or value is int or value is float \
 		or value is String or value is Color or value is Vector2 or value is Vector3 \
-		or value is Vector4
+		or value is Vector4 or value is Vector2i or value is Vector3i \
+		or value is Rect2 or value is Quaternion or value is Basis \
+		or value is Transform3D or value is AABB
+
+
+static func _texture_digest(texture: Texture2D) -> String:
+	if not is_instance_valid(texture): return ""
+	var image := texture.get_image()
+	if image == null or image.is_empty(): return ""
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK:
+		return ""
+	var identity := var_to_bytes([texture.get_class(), image.get_width(),
+		image.get_height(), image.get_format(), image.has_mipmaps()])
+	if context.update(identity) != OK or context.update(image.get_data()) != OK:
+		return ""
+	return context.finish().hex_encode()
 
 
 static func _source_revision(world_id: String, seed: String, source_id: String,
 		recipe_signature: String, tier: String,
-		owner_cell: Vector2i, source_to_world: Transform3D, rows: Array[Dictionary]) -> String:
+		owner_cell: Vector2i, source_to_world: Transform3D,
+		raw_member_revision: String, rows: Array[Dictionary]) -> String:
 	var parts: Array = [SCHEMA, world_id, seed, source_id, recipe_signature,
-		tier, owner_cell, source_to_world]
+		tier, owner_cell, source_to_world, raw_member_revision]
 	for row: Dictionary in rows:
 		parts.append([row.role, row.meshContentDigest,
 			row.materialContentDigest, row.compatibilityKey,

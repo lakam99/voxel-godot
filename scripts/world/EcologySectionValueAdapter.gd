@@ -1099,10 +1099,12 @@ func _tree_census_source_revision(candidate: Dictionary,
 	var candidate_revision := String(candidate.get("contentRevision", ""))
 	if candidate_revision.is_empty():
 		return ""
-	var revision := _value_digest([TREE_SECTION_SOURCE_REVISION_SCHEMA, _world_id,
-		String(candidate.get("sourceId", "")), candidate_revision,
-		recipe_signature, tier, body.global_transform, body.get_instance_id()])
-	return revision if not revision.is_empty() else ""
+	var grouped := TreeAdapter._members_by_role(members)
+	if grouped.get("status") != "ready":
+		return ""
+	var raw_member_revision := TreeAdapter.raw_member_content_revision(grouped.members)
+	return _tree_section_source_revision_for_values(candidate, recipe_signature,
+		tier, body.global_transform, body.get_instance_id(), raw_member_revision)
 
 
 func _tree_section_source_revision(candidate: Dictionary,
@@ -1111,13 +1113,26 @@ func _tree_section_source_revision(candidate: Dictionary,
 	var tier := String(captured.get("renderLodTier", ""))
 	var body_transform: Variant = captured.get("bodyGlobalTransform", null)
 	var body_instance_id := int(captured.get("bodyInstanceId", 0))
+	var raw_member_revision := String(captured.get("rawMemberContentRevision", ""))
 	if producer_revision.is_empty() or tier.is_empty() \
-			or not body_transform is Transform3D or body_instance_id <= 0:
+			or not body_transform is Transform3D or body_instance_id <= 0 \
+			or raw_member_revision.is_empty():
+		return ""
+	return _tree_section_source_revision_for_values(candidate, producer_revision,
+		tier, body_transform as Transform3D, body_instance_id, raw_member_revision)
+
+
+func _tree_section_source_revision_for_values(candidate: Dictionary,
+		producer_revision: String, tier: String, body_transform: Transform3D,
+		body_instance_id: int, raw_member_revision: String) -> String:
+	if producer_revision.is_empty() or tier.is_empty() or body_instance_id <= 0 \
+			or raw_member_revision.is_empty():
 		return ""
 	var candidate_revision := String(candidate.get("contentRevision", ""))
 	return _value_digest([TREE_SECTION_SOURCE_REVISION_SCHEMA, _world_id,
 		String(candidate.get("sourceId", "")), candidate_revision,
-		producer_revision, tier, body_transform, body_instance_id])
+		producer_revision, tier, body_transform, body_instance_id,
+		raw_member_revision])
 
 
 ## Census section ownership from committed queue values only. This mirrors the

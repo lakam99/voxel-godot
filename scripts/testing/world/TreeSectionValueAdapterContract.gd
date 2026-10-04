@@ -6,12 +6,16 @@ const TreeServiceScript := preload("res://scripts/environment/TreeSpawnService.g
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const RemovedProps := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const EcologyAdapter := preload("res://scripts/world/EcologySectionValueAdapter.gd")
 
 class TestAuthority extends Node:
 	var seed_text := "tree-section-adapter-contract"
 	var seed_hash := 19
 	var removed_props := {}
 	var removed_props_revision := 0
+	func detail_mesh(_chunk: Vector2i) -> Mesh: return BoxMesh.new()
+	func detail_material(_chunk: Vector2i) -> Material: return StandardMaterial3D.new()
+	func _ecology_chunk_source_revision(_chunk: Vector2i) -> String: return "fixture"
 
 var checks := {}
 
@@ -88,6 +92,9 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 	var branch_mesh := BoxMesh.new()
 	branch_mesh.resource_name = "tree-contract-branch"
 	var branch_material := _material(Color("65411e"))
+	var branch_image := Image.create(2, 2, false, Image.FORMAT_RGBA8)
+	branch_image.fill(Color("8a633e"))
+	branch_material.albedo_texture = ImageTexture.create_from_image(branch_image)
 	var branches := _multi_instance(branch_mesh, branch_material,
 		[Transform3D(Basis.IDENTITY, Vector3(24.0,2.0,0.0))],
 		[Color(0.5,0.7,0.37,0.81)], "ProceduralTreeDistalBranches",
@@ -186,6 +193,51 @@ func run() -> void:
 	authority.removed_props_revision += 1
 	var unrelated_removal_capture := _make_capture(queue, authority, body, recipe, world_id)
 	var partition: Dictionary = captured.get("partition", {})
+	var ecology := EcologyAdapter.new()
+	ecology.configure(world_id)
+	ecology.bind_main_authority(authority)
+	var tree_candidate := {"propId":prop_id, "sourceId":"%s:tree:%s" % [authority.seed_text, prop_id],
+		"contentRevision":"tree-census-fixture-r1"}
+	var publication := {"record":Adapter._published_record(queue, body), "body":body}
+	var census_revision := ecology._tree_census_source_revision(tree_candidate, publication)
+	var contribution_revision := ecology._tree_section_source_revision(tree_candidate, captured)
+	check("tree_census_and_contribution_share_resource_aware_revision",
+		census_revision == contribution_revision and not census_revision.is_empty())
+	var initial_resource_revision := census_revision
+	var shared_branch_mesh := section_members[1].mesh as BoxMesh
+	shared_branch_mesh.size += Vector3(0.25, 0.0, 0.0)
+	var changed_resource_capture := _make_capture(queue, authority, body, recipe, world_id)
+	var changed_census_revision := ecology._tree_census_source_revision(tree_candidate, publication)
+	var changed_contribution_revision := ecology._tree_section_source_revision(
+		tree_candidate, changed_resource_capture)
+	check("retained_mesh_mutation_revises_census_and_contribution_together",
+		changed_resource_capture.get("status") == "ready" \
+		and changed_census_revision == changed_contribution_revision \
+		and changed_census_revision != initial_resource_revision)
+	var shared_branch_material := section_members[1].material as StandardMaterial3D
+	shared_branch_material.albedo_color = Color("855126")
+	var changed_material_capture := _make_capture(queue, authority, body, recipe, world_id)
+	var changed_material_census_revision := ecology._tree_census_source_revision(
+		tree_candidate, publication)
+	var changed_material_contribution_revision := ecology._tree_section_source_revision(
+		tree_candidate, changed_material_capture)
+	check("retained_material_mutation_revises_census_and_contribution_together",
+		changed_material_capture.get("status") == "ready" \
+		and changed_material_census_revision == changed_material_contribution_revision \
+		and changed_material_census_revision != changed_census_revision)
+	var branch_texture := shared_branch_material.albedo_texture as ImageTexture
+	var changed_texture_image := branch_texture.get_image()
+	changed_texture_image.set_pixel(0, 0, Color("cfb54a"))
+	branch_texture.update(changed_texture_image)
+	var changed_texture_capture := _make_capture(queue, authority, body, recipe, world_id)
+	var changed_texture_census_revision := ecology._tree_census_source_revision(
+		tree_candidate, publication)
+	var changed_texture_contribution_revision := ecology._tree_section_source_revision(
+		tree_candidate, changed_texture_capture)
+	check("retained_material_texture_mutation_revises_census_and_contribution_together",
+		changed_texture_capture.get("status") == "ready" \
+		and changed_texture_census_revision == changed_texture_contribution_revision \
+		and changed_texture_census_revision != changed_material_census_revision)
 	var expected_instances := 3 # one bole, one branch, one foliage cluster
 	check("exact_queue_acknowledged_recipe_membership_partitions_every_draw_instance",
 		captured.get("status") == "ready" \

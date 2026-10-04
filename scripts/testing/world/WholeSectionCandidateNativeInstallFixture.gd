@@ -25,6 +25,7 @@ var coordinator
 class CensusProvider extends RefCounted:
 	const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 	const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
+	const MeshFingerprint := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 	var world_id := ""
 	var provider_id := ""
 	var source_part_id := ""
@@ -33,6 +34,14 @@ class CensusProvider extends RefCounted:
 	var material: Material
 	var batch_key := ""
 	var compatibility: Dictionary
+
+	func _current_source_revision() -> String:
+		var mesh_report: Dictionary = MeshFingerprint.inspect(mesh)
+		if mesh_report.get("status") != "ready" or not material is StandardMaterial3D:
+			return ""
+		return Marshalls.raw_to_base64(var_to_bytes([source_revision,
+			String(mesh_report.get("contentDigest", "")),
+			(material as StandardMaterial3D).albedo_color])).sha256_text()
 
 	func capture_static_section_sources(request_world_id: String,
 			section_keys: Array) -> Dictionary:
@@ -43,7 +52,10 @@ class CensusProvider extends RefCounted:
 		var row := {"status":"complete", "coverageRevision":provider_id + "-coverage-r1",
 			"sourcePartIds":ids}
 		row.make_read_only()
-		var revisions := {source_part_id:source_revision}
+		var current_revision := _current_source_revision()
+		if current_revision.is_empty():
+			return {"status":"pending", "reason":"fixture_source_resource_unavailable", "retryable":true}
+		var revisions := {source_part_id:current_revision}
 		revisions.make_read_only()
 		var sections := {SECTION:row}
 		sections.make_read_only()
@@ -60,13 +72,18 @@ class CensusProvider extends RefCounted:
 				census.get("expectedContributorsBySection", {}).get(section_key, []):
 			return {"status":"pending", "reason":"fixture_contribution_census_stale",
 				"retryable":true}
+		var current_revision := _current_source_revision()
+		if current_revision.is_empty() or String(census.get("sourceRevisions", {}).get(
+			source_part_id, "")) != current_revision:
+			return {"status":"pending", "reason":"fixture_contribution_resource_stale",
+				"retryable":true}
 		var values: Array[float] = []
 		for value: float in Attributes.encode(Transform3D.IDENTITY, Color.WHITE):
 			values.append(value)
 		values.make_read_only()
 		var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 			"sourceId":source_part_id, "sourcePartId":source_part_id,
-			"sourceRevision":source_revision,
+			"sourceRevision":current_revision,
 			"ownerCell":Grid.logical_owner_cell_for_world_position(Vector3(2, 0, 2)),
 			"sourceToWorld":Transform3D(Basis.IDENTITY, Vector3(2, 0, 2)),
 			"meshLocalBounds":mesh.get_aabb(), "batchKey":batch_key,
@@ -74,7 +91,7 @@ class CensusProvider extends RefCounted:
 		input.make_read_only()
 		var inputs: Array[Dictionary] = [input]
 		inputs.make_read_only()
-		var revisions := {source_part_id:source_revision}
+		var revisions := {source_part_id:current_revision}
 		revisions.make_read_only()
 		var compatibility_map := {batch_key:compatibility}
 		compatibility_map.make_read_only()
@@ -226,20 +243,24 @@ func _run() -> void:
 		and staged_session is RefCounted \
 		and String(staged_session.get("state")) in ["append", "upload", "commit"] \
 		and int(staged_snapshot.get("generation", 0)) == 2
-	ordinary_provider.source_revision = "ordinary-r2"
+	var original_mesh_digest := String(MeshFingerprint.inspect(shared_mesh).get("contentDigest", ""))
+	_replace_shared_mesh_geometry(0.75)
 	var stale_advance: Dictionary = coordinator.advance_complete_section_candidate(SECTION, 8)
 	var retained_after_stale: Dictionary = backend.call("installed_snapshot", slot)
 	_check("stale_authority_cancels_staged_replacement_and_retains_last_live_slot",
 		began_stale_replacement
+		and original_mesh_digest != String(MeshFingerprint.inspect(shared_mesh).get("contentDigest", ""))
 		and stale_advance.get("status") == "pending"
 		and bool(stale_advance.get("requiresReassembly", false))
 		and int(retained_after_stale.get("generation", 0)) == 2
 		and int(retained_after_stale.get("rootInstanceId", 0)) == retained_root_id,
 		{"admission":third_admission, "stagedAdvance":staged_advance,
 		"stagedState":staged_session.get("state") if staged_session is RefCounted else "missing",
+		"resourceRevisionChanged":original_mesh_digest != String(MeshFingerprint.inspect(shared_mesh).get("contentDigest", "")),
 		"advance":stale_advance, "retainedGeneration":retained_after_stale.get("generation", 0),
 		"retainedRootId":retained_after_stale.get("rootInstanceId", 0),
 		"previousRootId":retained_root_id})
+	_replace_shared_mesh_geometry(0.5)
 	ordinary_provider.source_revision = "ordinary-r1"
 	var old_chunk_instance_id := chunk.get_instance_id()
 	var unloaded_sections: int = coordinator.notify_stream_chunk_unloaded(Vector2i.ZERO,
@@ -302,6 +323,15 @@ func _build_shared_batch() -> void:
 	raw["compatibilityKey"] = shared_batch_key
 	raw.make_read_only()
 	shared_compatibility = raw
+
+
+func _replace_shared_mesh_geometry(edge: float) -> void:
+	shared_mesh.clear_surfaces()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array([
+		Vector3(-edge, 0.0, -0.5), Vector3(edge, 0.0, -0.5), Vector3(0.0, 0.0, 0.5)])
+	shared_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 
 func _check(name: String, passed: bool, evidence: Variant) -> void:
