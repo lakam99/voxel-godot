@@ -830,3 +830,21 @@ triangle and building fixtures. It demonstrates a real GDExtension install
 and wrong-binding rejection, not a live production producer cutover or terrain
 capture. Stages 1–2 remain partial; headed generated-world, traversal and
 runtime-performance gates are still open.
+
+**Candidate-to-native mesh binding recheck (2026-10-04):** closed the gap where
+the install session checked mesh content before native append, but the backend
+deep-copied it later without comparing against the candidate's declared digest.
+Native `append_batch` now requires the expected digest and rejects a changed
+deep-copied payload. Production building packets capture this digest before
+staging and include it in their packet digest. `StaticRenderMeshFingerprint`
+supports both `ArrayMesh` and `PrimitiveMesh` under schema v2. The focused owned
+native runner passed 37 checks at
+`artifacts/citadel-runtime-integration/native-chunk-packet-append-mesh-binding-clean-20261004/report.json`,
+including mutation of a `BoxMesh` between begin and append. This is a Stage 2
+safety improvement, not a producer cutover: normal building publication still
+uses per-source packets, terrain and ecology remain outside section candidates,
+and headed visual/traversal/performance acceptance remains open. The broader
+native-world runner stopped on failures in cave-field, natural-terrain,
+underground-prop and world-source tests at
+`artifacts/native-world-backend/section-mesh-identity-20261004-rerun/report.json`;
+their baseline classification is unknown, and they remain unresolved.

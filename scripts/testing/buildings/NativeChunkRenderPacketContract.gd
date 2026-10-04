@@ -90,6 +90,8 @@ func _run() -> void:
 	_check("native_packet_generation_one_installs",_install(backend,1))
 	_check("native_packet_receipt_matches_generation_one",backend.call("receipt_installed",SOURCE_ID,1,
 		SOURCE_REVISION,PACKET_DIGEST))
+	_check("native_packet_rejects_mesh_mutated_after_candidate_binding",
+		_reject_mutated_mesh_after_begin(backend))
 	_check("native_packet_generation_two_replaces_generation_one",_install(backend,2) \
 		and backend.call("receipt_installed",SOURCE_ID,2,SOURCE_REVISION,PACKET_DIGEST) \
 		and not backend.call("receipt_installed",SOURCE_ID,1,SOURCE_REVISION,PACKET_DIGEST))
@@ -647,8 +649,11 @@ func _install(backend: Node, generation: int) -> bool:
 	if begun.get("status")!="ready_to_append": return false
 	var material := StandardMaterial3D.new()
 	var mesh := BoxMesh.new()
+	var mesh_identity: Dictionary=StaticMeshFingerprint.inspect(mesh)
+	if mesh_identity.get("status")!="ready": return false
 	var buffer: PackedFloat32Array=InstanceBuffer.encode(Transform3D.IDENTITY,Color.WHITE)
-	var appended: Dictionary=backend.call("append_batch",SOURCE_ID,generation,"batch-0",mesh,material,
+	var appended: Dictionary=backend.call("append_batch",SOURCE_ID,generation,"batch-0",mesh,
+		String(mesh_identity.contentDigest),material,
 		buffer,AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE),"structural",true,240.0,18.0)
 	if appended.get("status")!="accepted": return false
 	var upload: Dictionary=backend.call("advance_packet",SOURCE_ID,generation,1)
@@ -656,6 +661,25 @@ func _install(backend: Node, generation: int) -> bool:
 	var committed: Dictionary=backend.call("commit_packet",SOURCE_ID,generation)
 	return committed.get("status")=="ready" and backend.call("receipt_installed",SOURCE_ID,generation,
 		SOURCE_REVISION,PACKET_DIGEST)
+
+
+func _reject_mutated_mesh_after_begin(backend: Node) -> bool:
+	const source_id := "native-contract:mesh-mutation"
+	var mesh := BoxMesh.new()
+	var identity: Dictionary=StaticMeshFingerprint.inspect(mesh)
+	if identity.get("status")!="ready": return false
+	var generation:=1
+	var begun: Dictionary=backend.call("begin_packet",source_id,OWNER_CELL,generation,
+		"mesh-revision",PACKET_DIGEST,Transform3D.IDENTITY,1,1)
+	if begun.get("status")!="ready_to_append": return false
+	mesh.size=Vector3(2.0,1.0,1.0)
+	var buffer: PackedFloat32Array=InstanceBuffer.encode(Transform3D.IDENTITY,Color.WHITE)
+	var appended: Dictionary=backend.call("append_batch",source_id,generation,"batch-mutated",mesh,
+		String(identity.contentDigest),StandardMaterial3D.new(),buffer,
+		AABB(Vector3(-1.0,-0.5,-0.5),Vector3(2.0,1.0,1.0)),"structural",true,240.0,18.0)
+	backend.call("abort_packet",source_id,generation)
+	return appended.get("status")=="failed" \
+		and String(appended.get("reason",""))=="mesh_content_identity_mismatch"
 
 
 func _has_installed_mesh(root_node: Node, expected: Mesh) -> bool:

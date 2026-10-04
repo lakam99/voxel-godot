@@ -124,6 +124,7 @@ public:
 		int64_t p_expected_batch_count, int64_t p_expected_instance_count);
 	Dictionary append_batch(const String &p_source_id, int64_t p_generation,
 		const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest,
 		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
 		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
 		double p_visibility_range, double p_fade_margin);

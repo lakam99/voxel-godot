@@ -15,6 +15,7 @@ const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/C
 const PublicationPreparation := preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const SpatialDependencies := preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
 const ChunkRenderPacketOwnerScript := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
+const StaticRenderSectionGrid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const StaticBatchFlush := preload("res://scripts/buildings/BuildingStaticBatchFlush.gd")
 const MeshBatchUpload := preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublication.gd")
@@ -57,6 +58,7 @@ var static_visual_collecting := false
 var static_visual_part_transform := Transform3D.IDENTITY
 var static_visual_part_tier := "structural"
 var static_visual_owner_cell := Vector2i.ZERO
+var static_visual_render_chunk_key := Vector2i.ZERO
 var static_visual_source_part_id := ""
 var static_visual_source_revision := ""
 var static_visual_transform_count := 0
@@ -652,6 +654,7 @@ func clear_published() -> void:
 	static_visual_part_transform = Transform3D.IDENTITY
 	static_visual_part_tier = "structural"
 	static_visual_owner_cell = Vector2i.ZERO
+	static_visual_render_chunk_key = Vector2i.ZERO
 	static_visual_source_part_id = ""
 	static_visual_source_revision = ""
 	static_visual_transform_count = 0
@@ -845,10 +848,12 @@ func publish_static_part(part, parent: Node3D) -> void:
 	if not _paving_part_valid(part): return
 	if not _masonry_part_valid(part): return
 	var previous_owner_cell := static_visual_owner_cell
+	var previous_render_chunk_key := static_visual_render_chunk_key
 	var previous_source_part_id := static_visual_source_part_id
 	var previous_source_revision := static_visual_source_revision
 	var world_anchor: Vector3 = parent.global_transform * part.position
 	static_visual_owner_cell = _owner_cell_for_anchor(world_anchor)
+	static_visual_render_chunk_key = StaticRenderSectionGrid.chunk_key_for_world_position(world_anchor)
 	static_visual_source_part_id = String(part.id)
 	static_visual_source_revision = PublicationPreparation.static_record_binding(part.snapshot())
 	if _physical_packet_mode and (not _physical_packet_owner_cells_by_part_id.has(String(part.id)) \
@@ -902,6 +907,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 		static_visual_part_transform = Transform3D.IDENTITY
 		static_visual_part_tier = "structural"
 	static_visual_owner_cell = previous_owner_cell
+	static_visual_render_chunk_key = previous_render_chunk_key
 	static_visual_source_part_id = previous_source_part_id
 	static_visual_source_revision = previous_source_revision
 
@@ -1906,8 +1912,11 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 	var group: Dictionary = static_visual_batches.get(key, {}) if static_visual_batches.get(key, {}) is Dictionary else {}
 	if group.is_empty():
 		group = {"material": material, "transforms": [], "customData": [], "renderTier":static_visual_part_tier,
-			"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id}
-	if group.get("ownerCell") != static_visual_owner_cell or String(group.get("sourcePartId","")) != static_visual_source_part_id:
+			"ownerCell":static_visual_owner_cell,"renderChunkKey":static_visual_render_chunk_key,
+			"sourcePartId":static_visual_source_part_id}
+	if group.get("ownerCell") != static_visual_owner_cell \
+			or group.get("renderChunkKey") != static_visual_render_chunk_key \
+			or String(group.get("sourcePartId","")) != static_visual_source_part_id:
 		_paving_reject("static_visual_batch_owner_cell_mismatch")
 		return
 	var transforms: Array = group.get("transforms", []) as Array
@@ -1925,9 +1934,12 @@ func collect_prepared_static_visual_segment(segment, material: Material) -> void
 	var key := _static_visual_batch_key(material,static_visual_part_tier,static_visual_owner_cell,static_visual_source_part_id)
 	var group: Dictionary = static_visual_batches.get(key,{})
 	if group.is_empty(): group={"material":material,"transforms":[],"customData":[],"renderTier":static_visual_part_tier,
-		"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id,
+		"ownerCell":static_visual_owner_cell,"renderChunkKey":static_visual_render_chunk_key,
+		"sourcePartId":static_visual_source_part_id,
 		"sourceRevision":static_visual_source_revision,"materialKey":material_key}
-	if group.get("ownerCell") != static_visual_owner_cell or String(group.get("sourcePartId","")) != static_visual_source_part_id:
+	if group.get("ownerCell") != static_visual_owner_cell \
+			or group.get("renderChunkKey") != static_visual_render_chunk_key \
+			or String(group.get("sourcePartId","")) != static_visual_source_part_id:
 		_paving_reject("prepared_static_batch_owner_cell_mismatch")
 		return
 	if String(group.get("sourceRevision","")) != static_visual_source_revision or String(group.get("materialKey","")) != material_key:
@@ -1957,6 +1969,7 @@ func static_packet_group_eligible(group: Dictionary, parent: Node3D) -> bool:
 	if parent == null or not group.get("preparedSegments") is Dictionary or group.preparedSegments.is_empty(): return false
 	if String(group.get("sourcePartId","" )).is_empty() or String(group.get("sourceRevision","" )).is_empty() \
 			or String(group.get("materialKey","" )).is_empty(): return false
+	if not group.get("renderChunkKey") is Vector2i: return false
 	var owner_cell: Vector2i = group.get("ownerCell",Vector2i.ZERO)
 	var cell_size: float = SpatialDependencies.OWNER_SIZE
 	var min_x := float(owner_cell.x)*cell_size
@@ -2059,7 +2072,9 @@ func retain_chunk_static_packet_recipe(source_id: String, group: Dictionary, pac
 		instance_count+=int(segment.instanceCount)
 	segments.make_read_only()
 	var recipe: Dictionary={"sourceId":source_id,"sourcePartId":String(group.get("sourcePartId","")),
-		"sourceRevision":String(group.get("sourceRevision","")),"ownerCell":group.get("ownerCell",Vector2i.ZERO),
+		"sourceRevision":String(group.get("sourceRevision","")),
+		"ownerCell":group.get("ownerCell",Vector2i.ZERO),
+		"renderChunkKey":group.get("renderChunkKey",Vector2i.ZERO),
 		"materialKey":String(group.get("materialKey","")),"material":group.get("material"),
 		"mesh":mesh,"renderTier":String(group.get("renderTier","structural")),"preparedSegments":segments,
 		"packetInstanceCount":instance_count}
@@ -2099,7 +2114,8 @@ func advance_chunk_static_packet_replay(parent: Node3D, budget_usec: int = 2500)
 		var recipe: Dictionary=_chunk_static_packet_recipes.get(source_id,{})
 		var part_id:=String(recipe.get("sourcePartId",""))
 		if not _chunk_static_packet_expected.get(part_id,{}).has(source_id) or chunk_static_packet_receipt_live(part_id,source_id): continue
-		var owner: Dictionary=resolve_chunk_render_packet_backend(recipe.get("ownerCell",Vector2i.ZERO))
+		var owner: Dictionary=resolve_chunk_render_packet_backend(
+			recipe.get("renderChunkKey",recipe.get("ownerCell",Vector2i.ZERO)))
 		if owner.get("status")=="pending":
 			waiting_for_owner=true
 			continue

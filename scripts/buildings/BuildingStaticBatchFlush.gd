@@ -1,6 +1,7 @@
 extends RefCounted
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const InstanceBuffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
+const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 ## One existing static-batch boundary, prepared in small main-thread units.
 ## No Node references survive a call. The owner pauses part publication until
 ## ready, and retains retired containers until its existing worker disposal.
@@ -48,6 +49,7 @@ var _packet_chunk: Node3D
 var _packet_source_id := ""
 var _packet_source_revision := ""
 var _packet_digest := ""
+var _packet_mesh_content_digest := ""
 var _packet_generation := 0
 var _packet_owner_cell := Vector2i.ZERO
 var _packet_hash: HashingContext
@@ -142,7 +144,7 @@ func _step(publisher) -> void:
 				_group_index += 1
 				return
 			if publisher.static_packet_group_eligible(group,parent):
-				_packet_owner_cell=group.ownerCell
+				_packet_owner_cell=group.renderChunkKey
 				_packet_source_revision=String(group.sourceRevision)
 				var site_identity: String=publisher.publication_site_id if not publisher.publication_site_id.is_empty() else publisher.source_blueprint_id
 				_packet_source_id="building:%s:%s:%d,%d:%s:%s" % [site_identity,String(group.sourcePartId),
@@ -230,11 +232,16 @@ func _step(publisher) -> void:
 				_packet_local_to_chunk.basis.x.z,_packet_local_to_chunk.basis.y.z,_packet_local_to_chunk.basis.z.z,_packet_local_to_chunk.origin.z
 			]).to_byte_array()
 			var packet_mesh: Mesh=packet_group.get("mesh",publisher.unit_box)
+			var mesh_identity: Dictionary=MeshFingerprint.inspect(packet_mesh)
+			if mesh_identity.get("status")!="ready":
+				state="failed"; reason=String(mesh_identity.get("reason","chunk_packet_mesh_identity_failed")); return
+			_packet_mesh_content_digest=String(mesh_identity.contentDigest)
 			var mesh_size: Vector3=packet_mesh.size if packet_mesh is BoxMesh else publisher.unit_box.size
 			var mesh_bytes:=PackedFloat32Array([mesh_size.x,mesh_size.y,mesh_size.z]).to_byte_array()
-			var header: String="%s\n%s\n%s\n%d\n%d\n%s\n%s\n%s\n%s" % [
+			var header: String="%s\n%s\n%s\n%d\n%d\n%s\n%s\n%s\n%s\n%s" % [
 				_packet_source_id,_packet_source_revision,str(_packet_owner_cell),_packet_segments.size(),_packet_instance_count,
-				String(packet_group.materialKey),String(packet_group.renderTier),str(policy),"unit_box_v1"]
+				String(packet_group.materialKey),String(packet_group.renderTier),str(policy),"unit_box_v1",
+				_packet_mesh_content_digest]
 			if _packet_hash.start(HashingContext.HASH_SHA256)!=OK \
 					or _packet_hash.update(header.to_utf8_buffer())!=OK \
 					or _packet_hash.update(transform_bytes)!=OK or _packet_hash.update(mesh_bytes)!=OK:
@@ -284,7 +291,8 @@ func _step(publisher) -> void:
 			var tier:=String(group.renderTier)
 			var policy: Dictionary=publisher.static_packet_policy(tier)
 			var appended: Dictionary=_packet_backend.call("append_batch",_packet_source_id,_packet_generation,entry.id,
-				group.get("mesh",publisher.unit_box),group.material,PackedFloat32Array(segment.buffer),segment.bounds,tier,
+				group.get("mesh",publisher.unit_box),_packet_mesh_content_digest,group.material,
+				PackedFloat32Array(segment.buffer),segment.bounds,tier,
 				bool(policy.castShadows),float(policy.visibilityRange),float(policy.fadeMargin))
 			if appended.get("status")=="backpressure": return
 			if appended.get("status")!="accepted":
@@ -302,7 +310,18 @@ func _step(publisher) -> void:
 			if not _publication_boundary.is_empty() and not publisher._publication_boundary_is_current(_publication_boundary):
 				state="failed"; reason="publication_boundary_owner_changed"; return
 			var committed: Dictionary=_packet_backend.call("commit_packet",_packet_source_id,_packet_generation)
-			if committed.get("status")=="backpressure": return
+			if committed.get("status")=="backpressure":
+				var capacity_reason:=String(committed.get("reason",""))
+				if capacity_reason=="installed_packet_capacity":
+					# Installed-packet capacity cannot clear through retrying this same
+					# staged generation. Abort it and surface a terminal publication
+					# failure; transient upload/registration backpressure remains retryable.
+					var aborted: Dictionary=_packet_backend.call("abort_packet",_packet_source_id,_packet_generation)
+					state="failed"
+					reason="chunk_packet_installed_capacity" if aborted.get("status")=="aborted" \
+						else "chunk_packet_installed_capacity_abort_unacknowledged"
+					return
+				return
 			if committed.get("status")!="ready" or not _packet_backend.call("receipt_installed",_packet_source_id,
 					_packet_generation,_packet_source_revision,_packet_digest):
 				state="failed"; reason=String(committed.get("reason","chunk_packet_receipt_rejected")); return

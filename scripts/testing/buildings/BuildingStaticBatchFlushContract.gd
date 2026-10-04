@@ -27,7 +27,7 @@ class PacketBackend extends Node:
 		staged[source_id]={"ownerCell":owner_cell,"generation":generation,"sourceRevision":source_revision,
 			"packetDigest":digest,"segmentCount":segment_count,"instanceCount":instance_count,"segments":0}
 		return {"status":"ready_to_append" if segment_count>0 else "ready_to_commit"}
-	func append_batch(source_id: String, _generation: int, _batch_id: String, _mesh: Mesh, _material: Material,
+	func append_batch(source_id: String, _generation: int, _batch_id: String, _mesh: Mesh, _mesh_digest: String, _material: Material,
 			_buffer: PackedFloat32Array, _bounds: AABB, _tier: String, _shadow: bool,
 			_visibility: float, _fade: float) -> Dictionary:
 		staged[source_id].segments+=1
@@ -208,7 +208,8 @@ func chunk_packet_replay_controls() -> void:
 	segment.make_read_only()
 	var segments: Dictionary={0:segment}
 	var group: Dictionary={"material":material,"transforms":[Transform3D.IDENTITY],"customData":[Color.WHITE],
-		"renderTier":"structural","ownerCell":Vector2i.ZERO,"sourcePartId":"replay-wall",
+		"renderTier":"structural","ownerCell":Vector2i.ZERO,"renderChunkKey":Vector2i.ZERO,
+		"sourcePartId":"replay-wall",
 		"sourceRevision":"revision-1","materialKey":"material-key","preparedSegments":segments}
 	publisher.static_visual_batches={"group":group}
 	publisher._pending_publication_boundary={"epoch":1,"sourcePartIds":["replay-wall"],"committed":false}

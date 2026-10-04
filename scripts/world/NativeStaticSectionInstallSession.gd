@@ -159,11 +159,12 @@ func advance(max_upload_units: int = 1) -> Dictionary:
 		var segment: Dictionary = entry.segment
 		var batch: Dictionary = entry.batch
 		var batch_id := String(entry.get("batchKey", "")) + ":" + String(segment.get("segmentId", ""))
+		var mesh_content_digest := String(batch.get("meshContentDigest", ""))
 		var policy := {"castShadows":batch.get("castShadows", true),
 			"visibilityRangeEnd":batch.get("visibilityRangeEnd", 0.0),
 			"fadeMargin":batch.get("fadeMargin", 0.0)}
 		var appended: Dictionary = backend.call("append_batch", _source_id,
-			_generation, batch_id, entry.mesh, entry.material,
+			_generation, batch_id, entry.mesh, mesh_content_digest, entry.material,
 			PackedFloat32Array(segment.buffer), segment.bounds,
 			String(batch.get("renderTier", "structural")),
 			bool(policy.castShadows), float(policy.visibilityRangeEnd), float(policy.fadeMargin))

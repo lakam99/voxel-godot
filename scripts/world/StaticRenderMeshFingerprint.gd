@@ -2,7 +2,7 @@ extends RefCounted
 ## Stable identity and conservative CPU payload estimate for immutable render meshes.
 ## Keep the payload shape/version in sync with ChunkRenderPacketBackend.
 
-const SCHEMA := "chunk-render-mesh-content/v1"
+const SCHEMA := "chunk-render-mesh-content/v2"
 
 
 static func inspect(mesh: Mesh) -> Dictionary:
@@ -17,7 +17,12 @@ static func inspect(mesh: Mesh) -> Dictionary:
 				or (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).is_empty():
 			return {"status":"failed", "reason":"mesh_surface_missing_vertices"}
 		payload.append(surface_index)
-		payload.append(mesh.surface_get_primitive_type(surface_index))
+		# PrimitiveMesh resources expose surface arrays but do not implement
+		# ArrayMesh.surface_get_primitive_type. Read the property through Object
+		# reflection so the same payload shape works for both resource families.
+		var primitive_type: Variant = mesh.get("primitive_type") if mesh is PrimitiveMesh \
+			else mesh.surface_get_primitive_type(surface_index)
+		payload.append(primitive_type)
 		payload.append(arrays)
 		for value: Variant in arrays:
 			var size := _packed_array_bytes(value)

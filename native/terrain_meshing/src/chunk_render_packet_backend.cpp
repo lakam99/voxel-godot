@@ -65,13 +65,15 @@ bool mesh_surface_fingerprint(const Ref<Mesh> &p_mesh, int64_t &r_payload_bytes,
 	const int64_t bytes = mesh_surface_payload_bytes(p_mesh);
 	if (bytes < 0) return false;
 	Array fingerprint_payload;
-	fingerprint_payload.push_back(String("chunk-render-mesh-content/v1"));
+	fingerprint_payload.push_back(String("chunk-render-mesh-content/v2"));
 	fingerprint_payload.push_back(p_mesh->get_aabb());
 	const int32_t surface_count = p_mesh->get_surface_count();
 	fingerprint_payload.push_back(surface_count);
 	for (int32_t surface = 0; surface < surface_count; ++surface) {
 		fingerprint_payload.push_back(surface);
-		fingerprint_payload.push_back(p_mesh->call("surface_get_primitive_type", surface));
+		fingerprint_payload.push_back(p_mesh->is_class("PrimitiveMesh")
+				? p_mesh->get("primitive_type")
+				: p_mesh->call("surface_get_primitive_type", surface));
 		fingerprint_payload.push_back(p_mesh->surface_get_arrays(surface));
 	}
 	const PackedByteArray payload_bytes = UtilityFunctions::var_to_bytes(fingerprint_payload);
@@ -95,7 +97,7 @@ bool transform_finite(const Transform3D &p_transform) {
 
 void ChunkRenderPacketBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("begin_packet", "source_id", "owner_cell", "generation", "source_revision", "packet_digest", "local_to_chunk", "expected_batch_count", "expected_instance_count"), &ChunkRenderPacketBackend::begin_packet);
-	ClassDB::bind_method(D_METHOD("append_batch", "source_id", "generation", "batch_id", "mesh", "material", "buffer", "bounds", "render_tier", "cast_shadows", "visibility_range", "fade_margin"), &ChunkRenderPacketBackend::append_batch);
+	ClassDB::bind_method(D_METHOD("append_batch", "source_id", "generation", "batch_id", "mesh", "expected_mesh_content_digest", "material", "buffer", "bounds", "render_tier", "cast_shadows", "visibility_range", "fade_margin"), &ChunkRenderPacketBackend::append_batch);
 	ClassDB::bind_method(D_METHOD("advance_packet", "source_id", "generation", "max_units"), &ChunkRenderPacketBackend::advance_packet, DEFVAL(1));
 	ClassDB::bind_method(D_METHOD("commit_packet", "source_id", "generation"), &ChunkRenderPacketBackend::commit_packet);
 	ClassDB::bind_method(D_METHOD("abort_packet", "source_id", "generation"), &ChunkRenderPacketBackend::abort_packet);
@@ -244,6 +246,7 @@ Dictionary ChunkRenderPacketBackend::begin_packet(const String &p_source_id,
 
 Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 		int64_t p_generation, const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest,
 		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
 		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
 		double p_visibility_range, double p_fade_margin) {
@@ -253,7 +256,8 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 	if (packet.state != "collecting") return _status("failed", "packet_not_collecting");
 	Node3D *staging_root = _node3d_for_id(packet.root_instance_id);
 	if (staging_root == nullptr || staging_root->get_parent() != this) return _status("failed", "staging_root_retired");
-	if (p_batch_id.strip_edges().is_empty() || p_mesh.is_null() || p_buffer.is_empty() ||
+	if (p_batch_id.strip_edges().is_empty() || p_mesh.is_null() ||
+			p_expected_mesh_content_digest.length() != 64 || p_buffer.is_empty() ||
 			p_buffer.size() % FLOATS_PER_INSTANCE != 0 ||
 			p_buffer.size() > MAX_BATCH_INSTANCES * FLOATS_PER_INSTANCE ||
 			!tier_supported(p_render_tier) || !std::isfinite(p_visibility_range) ||
@@ -275,6 +279,7 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 	int64_t mesh_bytes = 0;
 	String mesh_digest;
 	if (!mesh_surface_fingerprint(owned_mesh, mesh_bytes, mesh_digest)) return _status("failed", "mesh_surface_payload_unmeasurable");
+	if (mesh_digest != p_expected_mesh_content_digest) return _status("failed", "mesh_content_identity_mismatch");
 	if (buffer_bytes > std::numeric_limits<int64_t>::max() - mesh_bytes) return _status("failed", "batch_payload_size_overflow");
 	const int64_t payload_bytes = buffer_bytes + mesh_bytes;
 	for (int64_t index = 0; index < p_buffer.size(); ++index) {

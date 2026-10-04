@@ -13,10 +13,11 @@ class_name WorldStaticSectionCoordinator
 ## on every advance. The census must come from authoritative producer discovery;
 ## the ledger's known contributors alone do not prove completeness.
 ##
-## Current renderer support is opaque instance batches whose section residency
-## dependencies all fit the canonical owner stream chunk. Cross-chunk candidates
-## stay rejected by NativeStaticSectionInstallSession until an external owner
-## can positively pin and validate every dependency chunk generation.
+## Current renderer support is opaque instance batches. Section slots resolve to
+## independent render-demand owners; source-chunk keys describe immutable
+## capture coverage and do not pin gameplay chunks after sealing. Producer
+## revisions and exact contributor census still require authoritative discovery
+## on every advance; this coordinator does not infer completeness from its ledger.
 
 const LedgerScript = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
 const PacketOwner = preload("res://scripts/world/ChunkRenderPacketOwner.gd")
