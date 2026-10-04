@@ -110,7 +110,8 @@ func capture_static_section_sources(world_id: String,
 			bool(production.get("undergroundRequired", true)))
 		if not category_missing.is_empty():
 			return _pending("ecology_static_category_coverage_incomplete", {
-				"chunk":chunk, "missingCategories":category_missing})
+				"chunk":chunk, "missingCategories":category_missing,
+				"categoryEvidence":_missing_category_evidence(snapshot, category_missing)})
 		var scoped_removal_snapshot: Dictionary = production.get("removedSnapshot", {})
 		var removal_identity := String(scoped_removal_snapshot.get("contentIdentity", ""))
 		if removal_identity.is_empty():
@@ -194,13 +195,19 @@ func capture_static_section_sources(world_id: String,
 							or not bounds_value is AABB or not _valid_bounds(bounds_value):
 						return _pending("ecology_tree_membership_bounds_unavailable", {
 							"chunk":chunk, "sourceId":source_id})
+					var candidate_world_bounds: AABB = chunk_to_world \
+						* (transform_value as Transform3D) * (bounds_value as AABB)
+					if not _tree_candidate_bounds_intersect_sections(candidate_world_bounds, sections):
+						continue
 					var tree_prop_id := String(candidate.get("propId", ""))
 					var tree_publication: Dictionary = trees_by_prop_id.get(tree_prop_id, {})
 					var tree_revision := _tree_census_source_revision(candidate,
 						tree_publication)
 					if tree_revision.is_empty():
 						return _pending("ecology_tree_queue_geometry_not_committed", {
-							"chunk":chunk, "sourceId":source_id})
+							"chunk":chunk, "sourceId":source_id,
+							"candidateWorldBounds":candidate_world_bounds,
+							"requestedSections":sections.duplicate()})
 					candidate_sections = _tree_census_section_keys(tree_publication)
 					if candidate_sections.is_empty():
 						return _pending("ecology_tree_queue_geometry_not_committed", {
@@ -881,6 +888,40 @@ static func _missing_categories(snapshot: Dictionary,
 		if not covered:
 			missing.append(category)
 	return missing
+
+
+static func _missing_category_evidence(snapshot: Dictionary,
+		missing_categories: Array[String]) -> Dictionary:
+	var evidence := {}
+	var candidates: Variant = snapshot.get("candidates", [])
+	for category: String in missing_categories:
+		var records: Array = []
+		if candidates is Array:
+			for candidate_value: Variant in candidates:
+				if not candidate_value is Dictionary \
+						or String(candidate_value.get("category", "")) != category:
+					continue
+				var candidate: Dictionary = candidate_value
+				var missing_members: Array = []
+				for member_value: Variant in candidate.get("missingMembers", []):
+					if not member_value is Dictionary:
+						continue
+					var member: Dictionary = member_value
+					missing_members.append({"memberId":String(member.get("memberId", "")),
+						"reason":String(member.get("reason", ""))})
+					if missing_members.size() >= 6:
+						break
+				records.append({"sourceId":String(candidate.get("sourceId", "")),
+					"kind":String(candidate.get("kind", "")),
+					"renderStatus":String(candidate.get("renderStatus", "")),
+					"pendingReason":String(candidate.get("pendingReason", "")),
+					"missingMembers":missing_members})
+				if records.size() >= 12:
+					break
+		evidence[category] = {"candidateCount":records.size(),
+				"candidates":records}
+	evidence.make_read_only()
+	return evidence
 
 
 static func _section_membership(outputs: Array) -> Dictionary:
@@ -1846,6 +1887,18 @@ static func _valid_bounds(bounds: AABB) -> bool:
 	return bounds.position.is_finite() and bounds.size.is_finite() \
 		and bounds.size.x > 0.0 and bounds.size.y > 0.0 and bounds.size.z > 0.0 \
 		and bounds.end.is_finite()
+
+
+static func _tree_candidate_bounds_intersect_sections(world_bounds: AABB,
+		requested_sections: Array[Vector3i]) -> bool:
+	if not _valid_bounds(world_bounds):
+		return false
+	for section_key: Vector3i in requested_sections:
+		var section_bounds := AABB(Grid.origin_for_key(section_key),
+			Vector3.ONE * Grid.SECTION_SIZE_METERS)
+		if world_bounds.intersects(section_bounds):
+			return true
+	return false
 
 
 static func _pending(reason: String, detail := {}) -> Dictionary:

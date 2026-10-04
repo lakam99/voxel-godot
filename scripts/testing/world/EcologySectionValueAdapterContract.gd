@@ -714,10 +714,18 @@ func run() -> void:
 		_tree_census_center_owner_matches_partitioner())
 	check("surface_detail_census_matches_partitioner_at_section_boundary",
 		_surface_detail_census_owner_matches_partitioner())
-	check("enumerated_tree_without_committed_queue_geometry_stays_pending",
-		uncommitted_tree_result.get("status") == "pending" \
-		and uncommitted_tree_result.get("reason") == "ecology_tree_queue_geometry_not_committed" \
-		and uncommitted_tree_result.get("sourceId", "").ends_with(":tree:uncommitted-tree"))
+	var overlapping_uncommitted_tree: Dictionary = uncommitted_tree_result.get("overlapping", {})
+	var off_section_uncommitted_tree: Dictionary = uncommitted_tree_result.get("offSection", {})
+	check("enumerated_tree_without_committed_queue_geometry_stays_pending_when_intersecting",
+		overlapping_uncommitted_tree.get("status") == "pending" \
+		and overlapping_uncommitted_tree.get("reason") == "ecology_tree_queue_geometry_not_committed" \
+		and overlapping_uncommitted_tree.get("sourceId", "").ends_with(":tree:uncommitted-tree"))
+	check("uncommitted_tree_outside_requested_section_does_not_block_section_census",
+		off_section_uncommitted_tree.get("status") == "complete" \
+		and off_section_uncommitted_tree.get("sections", {}).get(Vector3i(1, 0, 0), {}).get(
+			"status", "") == "empty")
+	check("tree_source_bounds_filter_rejects_off_section_tree",
+		not bool(uncommitted_tree_result.get("offSectionBoundsIntersect", true)))
 	check("census_rejects_candidate_digest_corruption_before_membership",
 		realized_assembler_result.get("corruptedSnapshotCensus", {}).get("status") == "pending" \
 		and realized_assembler_result.get("corruptedSnapshotCensus", {}).get("reason") \
@@ -805,9 +813,12 @@ func run() -> void:
 		"successfulCensusStatus":realized_assembler_result.get("census", {}).get("status", ""),
 		"tombstoneCensusDetails":realized_assembler_result.get("tombstoneCensus", {}).get("details", {}),
 		"tombstoneRemovals":realized_assembler_result.get("sectionRemovals", []),
-		"uncommittedTreeStatus":uncommitted_tree_result.get("status", ""),
-		"uncommittedTreeReason":uncommitted_tree_result.get("reason", ""),
-		"uncommittedTreeSourceId":uncommitted_tree_result.get("sourceId", ""),
+		"uncommittedTreeStatus":overlapping_uncommitted_tree.get("status", ""),
+		"uncommittedTreeReason":overlapping_uncommitted_tree.get("reason", ""),
+		"uncommittedTreeSourceId":overlapping_uncommitted_tree.get("sourceId", ""),
+		"offSectionUncommittedTreeStatus":off_section_uncommitted_tree.get("status", ""),
+		"offSectionUncommittedTreeReason":off_section_uncommitted_tree.get("reason", ""),
+		"offSectionBoundsIntersect":uncommitted_tree_result.get("offSectionBoundsIntersect", true),
 		"unsupportedDetailIds":realized_assembler_result.get("unsupportedDetailIds", []),
 		"unsupportedCensusReason":realized_assembler_result.get("unsupportedCensus", {}).get("reason", ""),
 		"exactExpectedIds":realized_assembler_result.get("exactExpectedIds", []),
@@ -840,7 +851,12 @@ func _tree_without_committed_queue_geometry_stays_pending() -> Dictionary:
 	provider.configure(world_id)
 	provider.bind_main_authority(main)
 	var result := {}
-	for chunk_key: Vector2i in provider._chunks_for_section(section_key):
+	var setup_chunks: Dictionary = {}
+	for requested_section: Vector3i in [section_key, Vector3i(1, 0, 0)]:
+		for chunk_key: Vector2i in provider._chunks_for_section(requested_section):
+			setup_chunks[chunk_key] = true
+	for chunk_value: Variant in setup_chunks:
+		var chunk_key := Vector2i(chunk_value)
 		var owner := Node3D.new()
 		owner.position = Vector3(chunk_key.x * 32, 0, chunk_key.y * 32)
 		main.add_child(owner)
@@ -854,6 +870,10 @@ func _tree_without_committed_queue_geometry_stays_pending() -> Dictionary:
 				"propId":"uncommitted-tree", "kind":"trees_foliage",
 				"renderLayers":["opaque"], "materials":["tree"],
 				"transform":Transform3D.IDENTITY, "localBounds":AABB(Vector3.ZERO, Vector3.ONE)}
+			result["fixtureTreeBounds"] = (owner.global_transform
+				* tree_candidate.transform * tree_candidate.localBounds)
+			result["offSectionBoundsIntersect"] = Adapter._tree_candidate_bounds_intersect_sections(
+				result["fixtureTreeBounds"], [Vector3i(1, 0, 0)])
 			ledger.record_candidate(tree_candidate)
 		for category: String in ["surface_rocks", "ore", "forage"]:
 			ledger.mark_category_complete(category, {"producer":"surface_spawn",
@@ -874,9 +894,13 @@ func _tree_without_committed_queue_geometry_stays_pending() -> Dictionary:
 	var roster := Roster.new()
 	roster.bind_world(world_id, [Adapter.PROVIDER_ID])
 	roster.register_provider(Adapter.PROVIDER_ID, provider, "capture_static_section_sources")
-	result = provider.capture_static_section_sources(world_id, [section_key])
+	var overlapping_result: Dictionary = provider.capture_static_section_sources(
+		world_id, [section_key])
+	var off_section_result: Dictionary = provider.capture_static_section_sources(
+		world_id, [Vector3i(1, 0, 0)])
 	main.free()
-	return result
+	return {"overlapping":overlapping_result, "offSection":off_section_result,
+		"offSectionBoundsIntersect":result.get("offSectionBoundsIntersect", true)}
 
 
 func _tree_census_center_owner_matches_partitioner() -> bool:
