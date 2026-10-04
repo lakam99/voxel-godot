@@ -10,7 +10,7 @@ plants, natural props, and static generated structures should be prepared and
 published through that chunk's rendering lifecycle instead of appearing later
 through a chain of independent per-object visual queues.
 
-The inspiration is Minecraft Java 26.3's section renderer: its block section
+The inspiration is Minecraft Java 26.2's section renderer: its block section
 compiler builds visible block and fluid geometry by render layer, prioritizes
 near sections, compiles work asynchronously, and uploads completed geometry to
 shared GPU buffers. Trees, plants, and block-built structures participate
@@ -18,6 +18,45 @@ because they are represented by block states. Minecraft still renders mobs as
 independent entities. Our migration should adopt the useful chunk publication
 boundary without copying Minecraft code or replacing our procedural world
 authorities.
+
+### Minecraft 26.2 source review
+
+The local reference is `C:\Users\arkam\Documents\Minecraft Java Source Reference\26.2`.
+The relevant implementation is `decompiled/net/minecraft/client/renderer/chunk/`:
+
+- `SectionCompiler.compile` walks the 16x16x16 block volume for one section and
+  emits one mesh per non-empty render layer (`SOLID`, cutout variants, and
+  translucent), alongside visibility and block-entity results. Fluids join the
+  same layer builders. Translucent quads carry camera-dependent sort state.
+- `SectionRenderDispatcher` owns replaceable section slots. Compilation and
+  upload are separate stages; the previous mesh stays installed until every
+  layer's vertex and index uploads have acknowledged. Reassignment cancels old
+  work. Our equivalent must additionally verify source/owner revisions at the
+  final swap, including an authoritative empty section.
+- `SectionTaskDynamicQueue` chooses nearby work and bounds consecutive
+  recompiles so first-time sections still progress. This is a useful fairness
+  property, not a quota to copy without measuring our queue mix.
+
+This review sharpens the target boundary: the eventual publication unit is a
+complete spatial section generation with a stable section-slot identity and a
+sorted manifest of every current contributor. Per-building or per-tree packets
+keyed by source revision are useful migration bridges, but are not the final
+Minecraft-like section renderer: otherwise contributors in the same section
+remain separate packets and cannot be atomically replaced or culled as one
+complete section. A replacement is admitted only when its full contributor set
+is declared, all render-layer/material/mesh groups are accounted for, and the
+current owner epoch is revalidated. Empty output is an explicit replacement,
+not missing work.
+
+Minecraft's cell mesher cannot be copied literally for our procedural meshes.
+The initial building producer declares unit-box bounds, while the partition
+contract now carries a mesh-local AABB; production must source that AABB from
+the actual mesh resource before tree, rock, or arbitrary structure meshes join
+the shared section compiler. Tree impostor pages remain a temporary compatibility
+producer until an exact section generation can replace their candidates while
+preserving candidate IDs, recipe/source revisions, and independent gameplay
+bodies. Section render layers/pipeline and translucent sorting are part of the
+batch key and readiness proof, rather than inferred from category labels.
 
 ## Target architecture
 
@@ -291,15 +330,81 @@ Any memory-control path must coordinate the lifetime of replay references and
 their owning prepared artifacts; missing source authority must remain an explicit
 pending/failure state, never empty success.
 
-The canonical static owner grid is 32 terrain cells (43.2m) in XZ. Resolve a
-member's unique owner from its world-space anchor with negative-safe floor
-division, while retaining that packet as a dependency of every intersecting
-visible cell. Do not duplicate the full visual or gameplay member across cells.
-Install beneath the actual `Chunk_x_z` owner through a chunk registry, not by
-reparenting a completed site batch: the current site job validates its root and
-publication witnesses. On replacement, retain the accepted old packet until the
-new owner confirms installation; on chunk unload, retire its packet while
-preserving source demand needed by still-visible intersecting cells.
+**Installed-packet capacity failure (2026-10-03):** the native owner has a hard
+128-installed-packet limit. A new source at capacity previously returned
+`backpressure/installed_packet_capacity` from commit, which the static flush
+retried forever while retaining its staged packet. `BuildingStaticBatchFlush`
+now distinguishes that permanent capacity condition from transient backpressure,
+aborts the un-installable stage, and reports an explicit
+`chunk_packet_installed_capacity` publication failure (including a distinct
+abort-unacknowledged failure). Transient backpressure still retries. The native
+contract fills all 128 slots with real backend packets, then runs the production
+flush path for packet 129 and verifies the failure is terminal and staged packet
+count returns to zero. Command:
+`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-capacity-v5`.
+The report passed all 21 checks; watchdog exit was 0, cleanup passed, and
+authoritative owned-process membership returned to zero. This is a native/service
+contract, not evidence that real worlds cannot exceed the cap. A demand-aware
+slot release/eviction policy or justified capacity sizing remains necessary for
+production parity at scale.
+
+**Next stage charter — chunk-layer aggregation and resident-slot reuse:**
+Replace the current per-building-part native packet residency with compiled
+chunk-owned outputs aggregated by render tier/material layer. Preserve a
+revision-bound contribution receipt for every building source part so the
+scene/readiness authorities can still prove exactly which records are present.
+The chunk publication identity should be stable across source revisions where
+owner and batch family remain stable; a moved source contributes to its new
+owner and retires its old contribution only after replacement is accepted.
+Keep the prior visible packet until every required batch for its replacement
+has upload and installation acknowledgements. Retain/rebuild demand for visible
+intersecting chunks, cancel superseded work, and release resident slots only
+when demand leaves or replacement commits. Geometry crossing owner cells must
+produce explicit deterministic visual fragments with source mapping, while
+collision, interaction, and save ownership stay singular and unchanged.
+
+**Atomicity constraint:** `BuildingStaticBatchFlush` currently commits eligible
+packets one source/material/tier group at a time, before the enclosing
+publication boundary advances. A later group failure can therefore leave an
+earlier group replaced even though that boundary did not complete. Do not wire
+the contributor ledger only into `_commit_publication_boundary()` and treat
+that as atomic rendering. The next section path must stage a full affected
+section snapshot from the closed contributor set, then promote the section
+generation and contributor receipts only after the complete candidate is
+installed. `BuildingScenePublicationJob` must continue to keep physical,
+door, collision, and interaction acknowledgements separate from that visual
+receipt.
+
+Entry evidence is the native capacity contract above plus the existing
+source-revision and chunk-replacement contracts. Before changing packet identity,
+map all consumers of `_chunk_static_packet_expected`, receipt recording/replay,
+stale-source retirement, and `BuildingScenePublicationJob.visual_receipt_installed`.
+The focused exit gate must fill a chunk with many source parts sharing a small
+set of material/tier batches, replace one and then several contributors, reject
+stale worker results, verify all contributor receipts against the installed
+generation/digest, unload/recreate the owner and replay from retained immutable
+data, and prove buffers/slots are reclaimed after demand release. It must also
+cover a contributor spanning adjacent XZ owner cells and show per-cell fragments
+without duplicate gameplay records. Then run a representative seeded headed
+building/town traversal and measure upload work, draw/page count, frame cadence,
+and resident packet/byte high-water marks. This follows the 26.2 reference
+contract: one recycled section owner compiles layer outputs, queued work favors
+near initial builds, and installation waits for all required upload receipts;
+it does not copy Minecraft's block-state authority or fixed 16-cube dimensions.
+
+`BuildingSpatialDependencies.OWNER_SIZE` defines a 32-cell (43.2m) logical
+source-owner grid in XZ. `Main.chunks`, however, is keyed in the 28-cell
+(37.8m) gameplay chunk grid. These are separate authorities: derive the static
+source owner for contributor coverage, but resolve native packet lifetime
+against the actual streamed chunk key. Render-section origins and bounds can
+cross both grids; record every intersecting dependency while assigning one
+canonical visual owner. Do not duplicate the full visual or gameplay member
+across cells. Install beneath the actual `Chunk_x_z` owner through a chunk
+registry, not by reparenting a completed site batch: the current site job
+validates its root and publication witnesses. On replacement, retain the
+accepted old packet until the new owner confirms installation; on chunk unload,
+retire its packet while preserving source demand needed by still-visible
+intersecting cells.
 
 **Current worktree progress (2026-10-03):** `ChunkRenderPacketBackend` is
 registered in the native terrain extension with bounded staged packets,
@@ -325,6 +430,37 @@ renderer integration, cross-cell fragment coverage, or live gameplay. The
 service contract currently has three failed frozen-source fixture/hash checks;
 it still compiled and ran through the edited scheduler, and its watchdog proved
 clean process shutdown.
+
+The native packet integration currently installs one packet per building part.
+The bridge now keeps the 32-cell logical source owner separate from the actual
+28-cell streamed chunk key; a focused native contract covers a part where those
+keys differ. `StaticRenderSectionGrid` adds the 16-cell candidate section grid
+and records all streamed chunks intersecting each section. Its 12-check
+spatial contract passes. The snapshot assembler's 18-check contract now proves
+compatible instance buffers coalesce deterministically, split at the native
+256-instance limit, and retain source/revision ranges. Its report is at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-snapshot-coalesced-v3/report.json`;
+the owned-process watchdog proves exit 0 and an empty job. This remains a pure
+prototype: no production contributor capture, cross-section clipping, or section
+installation is wired. The 26.2 comparison therefore strengthens the destination
+model; it does not make the current bridge Minecraft-equivalent.
+
+**Mesh-bound section data contract (2026-10-04):** the local 26.2 `SectionCompiler`
+emits geometry from each block model inside the section walk; our static meshes
+cannot assume those models are centered unit cubes. The partitioner now requires
+and carries the actual mesh-local AABB through world/section transforms,
+ownership selection, culling bounds, batch identity, and streamed-chunk
+dependencies. The snapshot independently recomputes center ownership against
+that AABB and rejects a batch/segment bounds mismatch. The ledger's building
+slice explicitly declares its hard-opaque unit-box bounds. The focused
+partitioner contract passes 17 checks at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-instance-partitioner-mesh-aabb-v11/`;
+the snapshot contract passes 27 at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-snapshot-mesh-aabb-v10/`;
+the contributor transaction contract passes 15 at
+`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-mesh-aabb-v5/`.
+All are pure data contracts. Producer-supplied bounds still need binding to the
+actual mesh resource, and no section slot or live renderer is wired to them.
 
 The approved ordered architecture plan and maturity plan are maintained in the
 separate `voxel-godot-docs` repository at
@@ -367,9 +503,185 @@ Reconcile checkout, baseline, and gate requirements before each cutover. The
 canonical order is authoritative when this goal's category list could be read as
 a different implementation sequence.
 
+Minecraft Java 26.2 is the active local source reference at
+`C:/Users/arkam/Documents/Minecraft Java Source Reference/26.2/decompiled/`.
+That directory contains CFR-decompiled client bytecode, not Mojang's original
+source tree. `SectionCompiler.java` walks the section's 16x16x16 block volume,
+collects block and fluid geometry into builders keyed by render layer, records a
+visibility set and block entities, and emits a mesh per nonempty layer.
+Translucent geometry has a separate sort state. `SectionTaskDynamicQueue.java`
+favors nearby work while limiting recompiles so initial builds continue.
+`SectionRenderDispatcher.java` cancels superseded work, resets recycled section
+owners, and only swaps the installed mesh after every layer's vertex/index
+uploads are acknowledged.
+
+This exposes an important mismatch in the current native packet prototype:
+its lifetime owner is the right streamed chunk, but its installed identity is
+still one packet per building source part. That is a useful lifecycle bridge,
+not the steady-state publication model. Keep the chunk as the residency and
+retirement owner, and give it smaller render-section slots. Each slot should
+compile all intersecting static contributors into compatible material/render
+policy batches (the equivalent of Minecraft's layers), then atomically replace
+the old section publication only after every batch is installed. The existing
+backend already stages multiple batches under one packet, so this is a natural
+direction for the next cutover; it does not require one backend node or draw
+submission per source. Choose section size from this game's measured culling,
+upload, and memory costs rather than copying Minecraft's 16-cube dimensions or
+assuming the current 43.2m owner-cell is a good render granularity.
+
+The source comparison found a promising initial dimension already used by the
+terrain renderer: 16 terrain cells per axis (`VoxelTerrainRuntime.SECTION_SIZE`,
+21.6m at 1.35m/cell). It is not nested cleanly in either owner grid: gameplay
+chunks are 28 cells and logical static source owners are 32 cells. Keep render
+section identity, logical source ownership, canonical streamed-chunk residency,
+and all intersecting streamed-chunk dependencies as separate values. A section
+can cross stream-chunk boundaries; anchoring it by its origin does not remove
+the other chunk dependencies. Sixteen cells is a measured candidate, not an
+approved performance winner. The pure spatial key contract is implemented in
+`scripts/world/StaticRenderSectionGrid.gd`; its focused runner proves
+negative-safe keys, half-open AABB dependencies, exact section-plane handling,
+section-to-stream-chunk mapping, and the intersecting stream chunks for each
+section. It does not publish render data or prove a visual benefit. The pure
+instance partitioner in
+`scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd` converts prepared
+prepared instance transforms into section-local transforms using each batch's
+declared mesh-local AABB, assigns each instance once by the transformed
+world-AABB center, keeps each source and revision separate, and emits
+conservative local/world bounds plus every intersected streamed-chunk
+dependency. The initial building batch declares the unit-box AABB explicitly;
+wide or offset meshes can now select their actual section owner. The snapshot
+assembler verifies the mesh-bound and ownership claims from the instance
+transforms and source ranges, rejects missing, mismatched, or forged dependency
+evidence, then coalesces compatible source buffers into 256-instance batches
+with revision-bound output ranges. Its compatibility key now separates explicit
+opaque/cutout/translucent layers, sort policy, pipeline revision, and mesh-local
+bounds in addition to material, mesh, tier, shadow, and visibility policy. The
+revision and AABB remain producer-supplied metadata; production must bind them
+to actual resource content.
+Focused contracts cover this data path only; it is still disconnected from
+production capture and section-slot installation.
+The mesh-AABB partitioner contract passed 17 checks at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-instance-partitioner-mesh-aabb-v11/`;
+the assembler and proof-validation contract passed 27 checks at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-snapshot-mesh-aabb-v10/`.
+Both are pure data contracts, not renderer or gameplay acceptance.
+Unlike Minecraft's cell mesher, this prototype partitions prepared instances
+and does not yet compile a complete 3D visibility set, model/fluid layers, block
+entities, or camera-dependent translucent sort state. The next production step
+still needs a copy-on-write snapshot over the complete active contributor set
+and section-slot publication.
+
+Preserve a contributor manifest beside each staged/installed section so a
+building, tree, or prop keeps its exact source revision and readiness proof.
+Map each contributor to its ranges in coalesced batches; commit the section's
+manifest and render batches together, and map contributor receipts to the
+accepted section generation only after commit. Rebuild affected
+sections when contributors change, keep the prior valid publication visible
+until replacement succeeds, and retain source demand across unload/reload for
+still-visible dependencies. Cross-section objects need an explicit coverage
+dependency while retaining one canonical visual owner. Reuse Minecraft's
+initial-compile versus recompile scheduling pressure and stale-task cancellation
+principles when the section queue is built; do not copy its numeric quota without
+measuring this workload. The current native backend can stage a complete packet
+and retain the old root until commit, but its acknowledgement proves Godot-side
+resource installation, not a GPU upload fence. A later section integration must
+define its actual readiness receipt accordingly. The current fail-closed
+128-packet capacity result is therefore a guardrail and evidence of the
+per-source packet model's scaling limit, not a reason to merely raise the cap.
+
 Minecraft is a reference for chunk/section ownership, asynchronous prioritization,
 and shared static geometry publication. Its block-state representation is not a
 drop-in fit for this game's smooth editable voxel terrain, procedural tree
 recipes, generated building scenes, or actor simulation. This is an architecture
 goal, not authorization to copy proprietary code or assets, to replace
 authoritative world data, or to make a broad cutover without measured gates.
+
+**Source-guided bridge review (2026-10-04):** inspecting the local 26.2
+`SectionCompiler` and `SectionRenderDispatcher` against the in-progress bridge
+confirms that the adapter boundary is the important architectural choice. The
+compiler reads authoritative 16³ section contents and emits one result per
+nonempty render layer, plus visibility, block-entity, and translucent-sort
+state. Our current instance partitioner instead starts from already-prepared
+static meshes. That is a valid incremental path for trees, structures, and
+props, but it must not become a second source of world truth or be described as
+the final equivalent of Minecraft's section compiler. In steady state, each
+section snapshot should consume a closed, revision-bound set of terrain and
+static contributor artifacts, group by real render/material policy, and
+publish all batches plus the contributor manifest as one generation. Terrain
+visibility/occlusion remains derived from terrain authority; mesh bounds and
+stream dependencies provide conservative culling/residency for overhanging
+static meshes. Static object ownership cannot substitute for terrain visibility
+or block/entity simulation.
+
+The 26.2 lifecycle distinguishes an uncompiled slot from a compiled empty
+section (`CompiledSectionMesh.UNCOMPILED` versus `EMPTY`); both states affect
+visibility differently. A candidate's installed-layer set is complete only
+after every present layer has upload acknowledgement, while an empty result is
+still an explicit accepted replacement. Its `RenderSectionRegion` captures a
+3x3x3 neighborhood for reads around the section being compiled, which suggests
+an explicit terrain halo contract here; worker artifacts must remain value-only
+even though Minecraft's copied block-entity map can still reference objects.
+In this project, `ChunkRenderPacketBackend` already atomically swaps one staged
+packet slot, including a zero-batch packet, but that slot is presently named by
+source and its native batch has no render-layer or translucent-sort field. The
+opaque building bridge can use that capability; it does not yet implement
+Minecraft's whole-section, multi-layer replacement contract.
+
+The comparison also exposed a ledger identity bug: changed-section discovery
+used producer `sourceId` even though the stable key is `sourcePartId`. A source
+replacement that reused its part identity under a new producer ID could then
+omit the old/new section pair from its rebuild set. Impact collection now keys
+on `sourcePartId`, and the partitioner carries that identity and logical
+`ownerCell` through its source manifest. The focused ledger contract now
+exercises a same-part replacement with a changed source ID. It passed 16 checks
+at
+`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-source-part-impact-v3/report.json`;
+the neighboring partitioner contract passed 17 checks at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-instance-partitioner-source-part-v1/report.json`;
+the snapshot contract passed 27 checks at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-snapshot-source-part-v1/report.json`.
+These prove pure identity, partition, and snapshot contracts only; they do not
+prove section-level upload atomicity or live rendering. The first ledger rerun
+also caught and repaired duplicate dictionary-key syntax and missing manifest
+mapping fields before acceptance.
+
+The next comparison against the 26.2 source sharpened the boundary: the new
+`PreparedStaticSectionSnapshotBuilder` is a validated staging adapter for the
+opaque static-contributor path, not a complete section compiler. Minecraft's
+`SectionCompiler.compile` puts every block/fluid render layer from a section
+into one candidate, and `SectionRenderDispatcher` keeps the prior candidate
+until every present layer has upload acknowledgement; explicit empty is also a
+replacement. Keep this builder as an input to a future shared section
+candidate, and do not install it as an independent final publication beside
+terrain, foliage, or other section content. Its validation proves internal
+partition/manifest completeness, not freshness: production must pass the exact
+current ledger result and revalidate world, generation, contributor revisions,
+section owner, and boundary immediately before accepting receipts. A changed
+`Vector3` component now changes the canonical digest at float-byte precision,
+and owner-cell identity is carried and checked through source ranges, segments,
+and manifests. The focused contracts passed 18 checks for the partitioner at
+`artifacts/citadel-runtime-integration/chunk-static-render-section-instance-partitioner-owner-cell-20261003/report.json`
+and 16 for the snapshot builder at
+`artifacts/citadel-runtime-integration/prepared-static-section-snapshot-builder-owner-cell-digest-20261003/report.json`.
+These remain pure contracts; they do not establish renderer installation,
+GPU completion, or live visual behavior.
+
+**Ledger prepare/install/promote gate (2026-10-04):** applying Minecraft's
+old-section-retained-until-candidate-complete rule exposed that
+`PreparedStaticContributorLedger.commit_boundary()` promoted its memory state
+before a renderer receipt could exist. It is now split into
+`prepare_boundary()` and `accept_installed_candidate()`: preparation computes
+the next full partition and impacted section set while preserving the current
+committed ledger; promotion requires one read-only section candidate and a
+matching installed receipt for every impacted key, with the source revision
+set checked again at acceptance. Incomplete receipt sets, content-digest
+mismatches, and revisions that go stale after preparation are rejected while
+the prior committed ledger remains active. The 17-check watchdog contract
+passed at
+`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-section-install-gate-v3-20261003/report.json`.
+Its install receipts are contract fixtures, not calls to a live section owner;
+the production caller must query and revalidate each actual slot's world,
+generation, digest, owner chunk/backend identity, and residency dependencies
+immediately before promotion. This gate prepares the real section cutover but
+does not yet wire `BuildingStaticBatchFlush` (currently per source/material/tier
+packet) or the natural detail/tree producers into section slots.
