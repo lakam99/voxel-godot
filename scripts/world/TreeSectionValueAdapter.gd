@@ -71,6 +71,25 @@ static func raw_member_content_revision(members: Dictionary) -> String:
 	return context.finish().hex_encode()
 
 
+## Bind the same complete producer identity during census and contribution.
+## All fields are value data; no geometry encoding or section partitioning is
+## performed here.
+static func source_revision_from_raw_members(world_id: String, seed: String,
+		source_id: String, recipe_signature: String, tier: String,
+		owner_cell: Vector2i, body_transform: Transform3D,
+		raw_revision: String) -> String:
+	if world_id.is_empty() or seed.is_empty() or source_id.is_empty() \
+			or recipe_signature.is_empty() or tier.is_empty() or raw_revision.is_empty():
+		return ""
+	var context := HashingContext.new()
+	var values := [SCHEMA, PIPELINE_REVISION, world_id, seed, source_id,
+		recipe_signature, tier, owner_cell, body_transform, raw_revision]
+	if context.start(HashingContext.HASH_SHA256) != OK \
+			or context.update(var_to_bytes(values)) != OK:
+		return ""
+	return context.finish().hex_encode()
+
+
 ## Resolve the producer's committed recipe and value geometry from the queue's
 ## own acknowledgement record. This lets the ecology provider join the normal
 ## source census without enumerating GeneratedTreeVisual scene children.
@@ -358,9 +377,9 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	var raw_member_revision := raw_member_content_revision(members)
 	if raw_member_revision.is_empty():
 		return _pending("tree_raw_member_content_revision_failed", {"sourceId":source_id})
-	var source_revision := _source_revision(world_id, seed, source_id,
-		recipe_signature, tier, owner_cell, body.global_transform,
-		raw_member_revision, member_rows)
+	var source_revision := source_revision_from_raw_members(world_id, seed,
+		source_id, recipe_signature, tier, owner_cell, body.global_transform,
+		raw_member_revision)
 	if source_revision.is_empty():
 		return _pending("tree_source_revision_failed", {"sourceId":source_id})
 	for row_value: Variant in member_rows:
@@ -495,23 +514,6 @@ static func _texture_digest(texture: Texture2D) -> String:
 	var identity := var_to_bytes([texture.get_class(), image.get_width(),
 		image.get_height(), image.get_format(), image.has_mipmaps()])
 	if context.update(identity) != OK or context.update(image.get_data()) != OK:
-		return ""
-	return context.finish().hex_encode()
-
-
-static func _source_revision(world_id: String, seed: String, source_id: String,
-		recipe_signature: String, tier: String,
-		owner_cell: Vector2i, source_to_world: Transform3D,
-		raw_member_revision: String, rows: Array[Dictionary]) -> String:
-	var parts: Array = [SCHEMA, world_id, seed, source_id, recipe_signature,
-		tier, owner_cell, source_to_world, raw_member_revision]
-	for row: Dictionary in rows:
-		parts.append([row.role, row.meshContentDigest,
-			row.materialContentDigest, row.compatibilityKey,
-			row.instanceCount, row.input.buffer])
-	var context := HashingContext.new()
-	if context.start(HashingContext.HASH_SHA256) != OK \
-			or context.update(var_to_bytes(parts)) != OK:
 		return ""
 	return context.finish().hex_encode()
 
