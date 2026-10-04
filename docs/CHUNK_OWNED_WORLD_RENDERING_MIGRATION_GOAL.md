@@ -709,9 +709,9 @@ world epoch and 3D section key. The native contract built a candidate through
 the actual ledger, partitioner and snapshot builder, installed it through the
 native GDExtension, and promoted from the backend-verified receipt. It also
 proved staged cancellation retains the previous root, reused generations are
-rejected, and unpinned cross-chunk dependencies fail closed. The 28-check
-runner passed at
-`artifacts/citadel-runtime-integration/native-chunk-packet-ledger-bound-section-install-20261004/report.json`.
+rejected, stale registry ownership is rejected before upload, and unpinned
+cross-chunk dependencies fail closed. The 29-check runner passed at
+`artifacts/citadel-runtime-integration/native-chunk-packet-owner-epoch-gate-20261004/report.json`.
 This is the first renderer-install proof, not a production producer cutover:
 the existing `BuildingStaticBatchFlush` still commits one packet per
 source/material/tier group, the section session currently admits opaque content

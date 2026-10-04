@@ -230,6 +230,19 @@ func _current_chunk() -> Node3D:
 			or not chunk.is_inside_tree() or chunk.get_name() != "Chunk_%d_%d" % [_owner_cell.x, _owner_cell.y] \
 			or _current_backend() == null or _current_backend().get_parent() != chunk:
 		return null
+	var scene := Engine.get_main_loop() as SceneTree
+	if scene == null or scene.current_scene == null:
+		return null
+	var exposes_chunk_registry := false
+	for property: Dictionary in scene.current_scene.get_property_list():
+		if String(property.get("name", "")) == "chunks":
+			exposes_chunk_registry = true
+			break
+	if not exposes_chunk_registry:
+		return null
+	var chunks: Variant = scene.current_scene.get("chunks")
+	if not chunks is Dictionary or not is_same(chunks.get(_owner_cell), chunk):
+		return null
 	return chunk
 
 

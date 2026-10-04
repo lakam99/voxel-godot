@@ -178,6 +178,22 @@ func _run() -> void:
 	_check("native_section_slot_rejects_reused_generation",
 		stale_section_start.get("status")=="failed" \
 		and stale_section_start.get("reason")=="stale_section_slot_generation")
+	var owner_swap_started: Dictionary=PacketOwner.begin_static_section_install(cancelled_candidate,
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+	var owner_swap_session: Variant=owner_swap_started.get("session")
+	var previous_registry_chunk: Variant=scene.chunks[OWNER_CELL]
+	var replacement_registry_chunk:=Node3D.new()
+	replacement_registry_chunk.name="Chunk_0_0"
+	scene.chunks[OWNER_CELL]=replacement_registry_chunk
+	var owner_swap_result: Dictionary=owner_swap_session.advance(4) if owner_swap_session is RefCounted \
+		else {"status":"missing"}
+	scene.chunks[OWNER_CELL]=previous_registry_chunk
+	replacement_registry_chunk.free()
+	_check("section_install_revalidates_registry_owner_before_upload",
+		owner_swap_started.get("status")=="ready" \
+		and owner_swap_result.get("status")=="failed" \
+		and owner_swap_result.get("reason")=="section_install_owner_replaced" \
+		and int(backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
 	var cross_chunk_snapshot: Dictionary=section_snapshot.duplicate(false)
 	var cross_chunk_dependencies: Array[Vector2i]=[OWNER_CELL,Vector2i(1,0)]
 	cross_chunk_dependencies.make_read_only()

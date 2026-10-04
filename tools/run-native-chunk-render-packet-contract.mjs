@@ -46,7 +46,7 @@ cli(async () => {
   const report = read(path.join(c.run, 'report.json'));
   const checks = report.checks || {};
   demand(report.schema === 'native_chunk_render_packet_contract/v1'
-    && report.evidence === 'native_building_packet_flush_main_runtime_integration' && report.passed === true
+    && report.evidence === 'native_building_packet_flush_and_replay; ledger-bound static section candidate installed through the native backend; section cancellation retains the old root; no generated-world/live-gameplay acceptance' && report.passed === true
     && checks.native_backend_attached_to_actual_chunk === true
     && checks.native_backend_rejects_wrong_owner_cell === true
     && checks.native_packet_generation_one_installs === true
@@ -65,9 +65,14 @@ cli(async () => {
     && checks.main_runtime_chunk_retirement_frees_native_owner === true
     && checks.main_runtime_preserves_retained_terrain_owner === true
     && checks.main_runtime_preserves_startup_auxiliary_terrain_owner === true
-    && checks.main_runtime_retires_owner_after_dependencies_release === true,
+    && checks.main_runtime_retires_owner_after_dependencies_release === true
+    && checks.bound_section_candidate_installs_through_native_chunk_renderer === true
+    && checks.cancelled_section_replacement_keeps_previous_native_root_visible === true
+    && checks.native_section_slot_rejects_reused_generation === true
+    && checks.section_install_revalidates_registry_owner_before_upload === true
+    && checks.section_candidate_waits_for_cross_chunk_dependency_pin === true,
   'Native chunk packet lifecycle contract failed.');
   return { reportPath: path.join(c.run, 'report.json'), checks,
     nativeSourceSha256: sourceSha,
-    evidence: 'Production building flush/replay through the native packet backend, plus Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
+    evidence: 'Production building flush/replay plus ledger-bound section candidate installation through the native backend, and Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
 });
