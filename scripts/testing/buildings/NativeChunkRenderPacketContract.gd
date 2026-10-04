@@ -8,6 +8,7 @@ const StaticRenderSectionGrid = preload("res://scripts/world/StaticRenderSection
 const StaticSectionSnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const StaticSectionInstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const StaticContributorLedger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
+const WorldStaticSectionCoordinator = preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const OWNER_CELL := Vector2i(0,0)
 const SOURCE_ID := "native-contract:wall"
 const SOURCE_REVISION := "revision-1"
@@ -157,6 +158,103 @@ func _run() -> void:
 		and section_backend_snapshot.get("status")=="ready" \
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
 		and section_promoted.get("status")=="committed")
+	var coordinator := WorldStaticSectionCoordinator.new()
+	var coordinator_world := "native-section-coordinator-contract-world"
+	var coordinator_source_id := "coordinator-building-source"
+	var coordinator_part_id := "coordinator-building-part"
+	var coordinator_revision := "coordinator-rev-1"
+	var coordinator_boundary_id := "coordinator-boundary-1"
+	var coordinator_configured: Dictionary=coordinator.configure(coordinator_world)
+	var coordinator_declaration_segment: Dictionary=section_segment_declaration.duplicate(false)
+	coordinator_declaration_segment["segmentId"]="coordinator-segment-1"
+	coordinator_declaration_segment.make_read_only()
+	var coordinator_segment_declarations: Array[Dictionary]=[coordinator_declaration_segment]
+	coordinator_segment_declarations.make_read_only()
+	var coordinator_declaration: Dictionary={"sourcePartId":coordinator_part_id,
+		"sourceId":coordinator_source_id,"sourceRevision":coordinator_revision,
+		"sourceToWorld":Transform3D.IDENTITY,"ownerCell":OWNER_CELL,
+		"segments":coordinator_segment_declarations}
+	coordinator_declaration.make_read_only()
+	var coordinator_declarations: Array[Dictionary]=[coordinator_declaration]
+	coordinator_declarations.make_read_only()
+	var coordinator_removals: Array=[]
+	coordinator_removals.make_read_only()
+	var coordinator_enqueued: Dictionary=coordinator.enqueue_boundary(coordinator_boundary_id,
+		coordinator_declarations,coordinator_removals)
+	var coordinator_input: Dictionary=section_input.duplicate(false)
+	coordinator_input["sourcePartId"]=coordinator_part_id
+	coordinator_input["sourceId"]=coordinator_source_id
+	coordinator_input["sourceRevision"]=coordinator_revision
+	coordinator_input["segmentId"]="coordinator-segment-1"
+	coordinator_input.make_read_only()
+	var coordinator_segment_admitted: Dictionary=coordinator.submit_prepared_segment(
+		coordinator_boundary_id,coordinator_input)
+	var coordinator_revisions: Dictionary={coordinator_part_id:coordinator_revision}
+	coordinator_revisions.make_read_only()
+	var coordinator_contributors: Array[String]=[coordinator_part_id]
+	coordinator_contributors.make_read_only()
+	var coordinator_census: Dictionary={Vector3i.ZERO:coordinator_contributors}
+	coordinator_census.make_read_only()
+	var coordinator_materials: Dictionary={section_material_key:section_material}
+	coordinator_materials.make_read_only()
+	var coordinator_meshes: Dictionary={section_resource_mesh_key:section_mesh}
+	coordinator_meshes.make_read_only()
+	var coordinator_install: Dictionary={"status":"pending"}
+	var coordinator_turns:=0
+	while coordinator_turns<64 and coordinator_install.get("status") not in ["committed","failed","unsupported"]:
+		coordinator_install=coordinator.advance_boundary(coordinator_revisions,
+			coordinator_census,coordinator_materials,coordinator_meshes,4)
+		coordinator_turns+=1
+	var coordinator_slot_id:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i.ZERO)
+	var coordinator_backend_snapshot: Dictionary=backend.call("installed_snapshot",coordinator_slot_id)
+	diagnostics["worldCoordinatorInstall"]={"configured":coordinator_configured,
+		"enqueued":coordinator_enqueued,"segmentAdmitted":coordinator_segment_admitted,
+		"lastAdvance":coordinator_install,"turns":coordinator_turns,
+		"status":coordinator.status(),"backend":coordinator_backend_snapshot}
+	_check("world_coordinator_candidate_installs_and_promotes_through_native_renderer",
+		coordinator_configured.get("status")=="ready" \
+		and coordinator_enqueued.get("status")=="queued" \
+		and coordinator_segment_admitted.get("status")=="queued" \
+		and coordinator_install.get("status")=="committed" \
+		and coordinator_backend_snapshot.get("status")=="ready" \
+		and int(coordinator_backend_snapshot.get("generation",0))==1 \
+		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id) \
+		and backend.call("receipt_installed",coordinator_slot_id,1,
+			"%s:1" % coordinator_world,String(coordinator_backend_snapshot.get("packetDigest",""))))
+	var stale_declaration_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
+	stale_declaration_segment["segmentId"]="coordinator-segment-2"
+	stale_declaration_segment.make_read_only()
+	var stale_declaration_segments: Array[Dictionary]=[stale_declaration_segment]
+	stale_declaration_segments.make_read_only()
+	var stale_declaration: Dictionary=coordinator_declaration.duplicate(false)
+	stale_declaration["sourceRevision"]="coordinator-rev-2"
+	stale_declaration["segments"]=stale_declaration_segments
+	stale_declaration.make_read_only()
+	var stale_declarations: Array[Dictionary]=[stale_declaration]
+	stale_declarations.make_read_only()
+	var stale_boundary_id:="coordinator-boundary-incomplete-census"
+	coordinator.enqueue_boundary(stale_boundary_id,stale_declarations,coordinator_removals)
+	var stale_input: Dictionary=coordinator_input.duplicate(false)
+	stale_input["sourceRevision"]="coordinator-rev-2"
+	stale_input["segmentId"]="coordinator-segment-2"
+	stale_input.make_read_only()
+	coordinator.submit_prepared_segment(stale_boundary_id,stale_input)
+	var stale_revisions: Dictionary={coordinator_part_id:"coordinator-rev-2"}
+	stale_revisions.make_read_only()
+	var incomplete_contributors: Array[String]=[coordinator_part_id,"undiscovered-part"]
+	incomplete_contributors.make_read_only()
+	var incomplete_census: Dictionary={Vector3i.ZERO:incomplete_contributors}
+	incomplete_census.make_read_only()
+	var incomplete_result: Dictionary=coordinator.advance_boundary(stale_revisions,
+		incomplete_census,coordinator_materials,coordinator_meshes,4)
+	var retained_coordinator_slot: Dictionary=backend.call("installed_snapshot",coordinator_slot_id)
+	diagnostics["worldCoordinatorIncompleteCensus"]={"result":incomplete_result,
+		"status":coordinator.status(),"backend":retained_coordinator_slot}
+	_check("world_coordinator_rejects_incomplete_source_census_without_replacing_slot",
+		incomplete_result.get("status")=="failed" \
+		and String(incomplete_result.get("reason","" )).begins_with("section_candidate_contributor_census_mismatch:") \
+		and int(retained_coordinator_slot.get("generation",0))==1 \
+		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id))
 	var section_root_id:=int(section_backend_snapshot.get("rootInstanceId",0))
 	var cancelled_candidate: Dictionary=section_candidate.duplicate(false)
 	cancelled_candidate["generation"]=2
@@ -464,7 +562,7 @@ func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:
 
 func _finish(passed: bool, reason: String) -> void:
 	var report := {"schema":"native_chunk_render_packet_contract/v1",
-		"evidence":"native_building_packet_flush_and_replay; ledger-bound static section candidate installed through the native backend; section cancellation retains the old root; no generated-world/live-gameplay acceptance",
+		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; no generated-world/live-gameplay acceptance",
 		"checks":checks,"diagnostics":diagnostics,"passed":passed,"reason":reason}
 	var path := OS.get_environment("NATIVE_CHUNK_PACKET_REPORT")
 	if not path.is_empty():

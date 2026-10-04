@@ -105,11 +105,8 @@ gate or require uploading off-screen high-detail geometry.
 ## Category scope and ordered cutovers
 
 The list below defines the content domains and their ownership invariants; it
-does not override implementation order. Follow the canonical ordered sequence
-in `migrations/world-streaming/world-streaming-architecture-plan.md`: measured
-baselines, worker-prepared building geometry, regional dependency readiness,
-source-derived building LOD/shared tree batching, then native kernels where
-measurements justify them. The approved plan lives in the separate
+does not override implementation order. Follow the seven-stage sequence in the
+canonical `section-owned-world-rendering-charter.md` in the separate
 `voxel-godot-docs` repository. Keep its readiness constraints reconciled with
 this game's current startup contract (near field plus camera-facing coarse
 horizon; progressive background streaming).
@@ -158,6 +155,27 @@ part of one chunk render artifact. Current ownership at the checked-in baseline:
 | Generated structures | `GeneratedStructureVisualManifest` and `OrdinaryStructureVisualSourceCapture` capture and validate installed structure visuals for readiness. | Capturing installed structure nodes is not chunk-owned structure geometry publication. Cross-chunk ownership and revisioned visual fragments still need a production contract. |
 | Mobs and NPCs | Existing actor systems create and render actors independently. | This is the intended boundary and must remain independent. |
 | Coordinator | `VisibleWorldDemandController` schedules terrain, prop, and structure producers and collects revision-bound receipts in `VisibleWorldReadiness`. | It is a readiness/source coordinator, not a unified static render compiler, immutable geometry packet, or shared chunk upload owner. |
+
+## Migration progress — 2026-10-04 (7 stages total)
+
+Use the canonical charter's stages 0–6 as the only stage numbering for this
+goal. “Partial” means implementation evidence exists but the stage exit gate is
+not met.
+
+| Stage | Status | Evidence or remaining exit gate |
+|---|---|---|
+| 0. Source map and baseline | **Complete** | Producer-to-renderer maps, authority/revision/lifecycle audits, and the per-source baseline are recorded in the charter. |
+| 1. Close the candidate contract | **Partial** | The contributor ledger and immutable manifest/snapshot builders exist. Still needs a coordinator-owned expected contributor census, cross-domain/layer completeness, and caller-side live source/owner revalidation. |
+| 2. Section-slot installation | **Partial** | The native GDExtension installs section-keyed opaque candidates and retains the previous root through cancellation. It has no normal-world producer callsite, multi-layer install contract, or dependency pinning. |
+| 3. Integrate smooth terrain | **Not started** | Capture resident authoritative SDF/material data with halo revisions, mesh it through the configured Transvoxel path, then prove terrain visual/edit/collision/fluid parity before retiring the old visual slot. |
+| 4. Cut over construction | **Not started** | A world-owned coordinator must aggregate contributors from concurrent scene jobs; replace per-source production commits only after all affected section replacements and replays are acknowledged. |
+| 5. Admit ecology and static props | **Not started** | Canonical tree recipes, foliage/detail attributes, natural prop visuals and removal/save identity must enter the same complete section candidates; actor simulation remains separate. |
+| 6. Readiness, performance and legacy retirement | **Not started** | Wire current section receipts into readiness/unload replay; pass headed visual/traversal and representative performance checks; retire old publishers only after parity. |
+
+The 2026-10-04 native renderer seam recheck passed 29/29 checks at
+`artifacts/citadel-runtime-integration/native-chunk-packet-section-coordinator-preintegration-20261004/report.json`.
+It confirms the backend/install seam, including old-root retention, but does
+not pass a production producer cutover or live gameplay gate.
 
 ### Current stage charter: native far-tree readiness and traversal evidence
 
@@ -740,3 +758,36 @@ neighbor sample revisions, collision parity, fluids, and materials must be
 included before retiring the current Voxel Tools visual. Minecraft 26.2's
 compiler/dispatcher informs candidate completeness and replacement lifetime,
 not the smooth terrain mesher itself.
+
+**World coordinator gate (2026-10-04):** the unconnected
+`WorldStaticSectionCoordinator` serializes source-part deltas through the world
+ledger, requires an authoritative section-to-contributor census on each
+advance, installs the resulting candidate through the native chunk renderer,
+and promotes only after verifying its live owner receipt. An incomplete census
+rejects the replacement while preserving the installed generation. Its first
+contract run caught a schema mismatch: section envelopes hold contributor rows
+under `snapshot.manifest`, not `snapshot.contributors`; the check now reads the
+canonical manifest. The native runner passed 31/31 checks at
+`artifacts/citadel-runtime-integration/native-chunk-packet-world-coordinator-contract-final-20261004/report.json`.
+This is still a bridge contract, not production integration: no world producer
+calls the coordinator, the session only installs opaque batches whose section
+dependencies fit its stream owner, and terrain/foliage/props/buildings are not
+yet combined into complete gameplay section candidates. The failed and
+corrected runs are preserved under the adjacent `*-debug-*` and `*-recheck-*`
+artifact directories; neither is acceptance evidence. No headed visual,
+traversal, or runtime-performance gate has been run for this coordinator.
+
+## Stage tracker — 7 stages total (0–6)
+
+| Stage | Status | Evidence / remaining exit gate |
+|---|---|---|
+| 0. Map authorities and baseline | Complete | Producer-to-renderer, revisions, ownership, collision, interactions, unload/replay and save paths documented. |
+| 1. Shared candidate and producer census | Partial | Ledger and coordinator contract exist; wire a world-lifetime producer roster and authoritative census into normal gameplay. |
+| 2. Native section install lifecycle | Partial | 31/31 native contract checks pass; production callers, multi-layer policies and cross-chunk dependency pins remain. |
+| 3. Smooth terrain | Not started | Capture/revision/halo and install receipt path through the configured Transvoxel mesher, then prove collision, edits, seams, fluids and replacement. |
+| 4. Generated buildings | Not started | Replace per-source final publication with complete section candidates; preserve structure gameplay authority, removals, replay and readiness. |
+| 5. Trees, flora and static props | Not started | Admit canonical deterministic prepared outputs, visual attributes, harvesting/removal and save/reload into shared candidates. |
+| 6. Readiness, performance and retirement | Not started | Headed real-world visual/traversal and performance gates, full lifecycle parity, then retire superseded queues. |
+
+Do not advance a stage based on this coordinator contract. The overall goal
+remains active.

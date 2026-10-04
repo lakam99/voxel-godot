@@ -15,6 +15,11 @@ cli(async () => {
     'scripts/terrain/VoxelTerrainRuntime.gd',
     'scripts/terrain/VoxelTerrainSiteGate.gd',
     'scripts/world/ChunkRenderPacketOwner.gd',
+    'scripts/world/WorldStaticSectionCoordinator.gd',
+    'scripts/world/PreparedStaticContributorLedger.gd',
+    'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
+    'scripts/world/NativeStaticSectionInstallSession.gd',
+    'scripts/world/StaticRenderSectionGrid.gd',
     'scripts/buildings/BuildingInstanceBuffer.gd',
     'scripts/buildings/BuildingPartPublisher.gd',
     'scripts/buildings/BuildingStaticBatchFlush.gd',
@@ -46,7 +51,7 @@ cli(async () => {
   const report = read(path.join(c.run, 'report.json'));
   const checks = report.checks || {};
   demand(report.schema === 'native_chunk_render_packet_contract/v1'
-    && report.evidence === 'native_building_packet_flush_and_replay; ledger-bound static section candidate installed through the native backend; section cancellation retains the old root; no generated-world/live-gameplay acceptance' && report.passed === true
+    && report.evidence === 'native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; no generated-world/live-gameplay acceptance' && report.passed === true
     && checks.native_backend_attached_to_actual_chunk === true
     && checks.native_backend_rejects_wrong_owner_cell === true
     && checks.native_packet_generation_one_installs === true
@@ -54,11 +59,16 @@ cli(async () => {
     && checks.native_packet_generation_two_replaces_generation_one === true
     && checks.native_packet_stale_release_preserves_current_generation === true
     && checks.production_static_flush_installs_through_native_backend === true
+    && checks['32_cell_source_owner_differs_from_28_cell_stream_chunk'] === true
+    && checks.production_packet_attaches_to_actual_28_cell_stream_chunk === true
+    && checks.nonzero_packet_retires_from_actual_chunk_owner === true
     && checks.native_backend_recreated_for_replacement_chunk === true
     && checks.production_static_packet_replays_after_chunk_recreation === true
     && checks.production_static_packet_release_acknowledged === true
     && checks.native_packet_republishes_after_chunk_replacement === true
     && checks.native_packet_release_acknowledged === true
+    && checks.native_packet_capacity_fixture_fills_installed_limit === true
+    && checks.production_flush_fails_closed_at_installed_packet_capacity === true
     && checks.main_runtime_creates_chunk_owned_native_backend === true
     && checks.main_runtime_admits_and_requests_production_chunk === true
     && checks.main_runtime_releases_backend_before_unregistering_chunk === true
@@ -70,9 +80,11 @@ cli(async () => {
     && checks.cancelled_section_replacement_keeps_previous_native_root_visible === true
     && checks.native_section_slot_rejects_reused_generation === true
     && checks.section_install_revalidates_registry_owner_before_upload === true
-    && checks.section_candidate_waits_for_cross_chunk_dependency_pin === true,
+    && checks.section_candidate_waits_for_cross_chunk_dependency_pin === true
+    && checks.world_coordinator_candidate_installs_and_promotes_through_native_renderer === true
+    && checks.world_coordinator_rejects_incomplete_source_census_without_replacing_slot === true,
   'Native chunk packet lifecycle contract failed.');
   return { reportPath: path.join(c.run, 'report.json'), checks,
     nativeSourceSha256: sourceSha,
-    evidence: 'Production building flush/replay plus ledger-bound section candidate installation through the native backend, and Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
+    evidence: 'Production building flush/replay plus world-coordinator census-checked section installation and rejection through the native backend, and Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
 });
