@@ -175,12 +175,17 @@ func capture_static_section_contribution(census: Dictionary,
 ## Keeping this separate prevents an unaccepted candidate from consuming its
 ## tombstone and losing the retryable removal demand.
 func acknowledge_section_install(section_key: Vector3i,
-		coverage_revision: String) -> Dictionary:
+		coverage_revision: String, receipt: Dictionary = {}) -> Dictionary:
 	var section_id := _section_id(section_key)
 	var snapshot: Dictionary = _latest_by_section.get(section_id, {})
 	if snapshot.is_empty() or coverage_revision.is_empty() \
 			or _coverage_revision(section_key, snapshot) != coverage_revision:
 		return _failed("ordinary_section_install_acknowledgement_stale")
+	if not receipt.is_empty() and (not receipt.is_read_only() \
+			or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key \
+			or String(receipt.get("contentManifestDigest", "")).is_empty()):
+		return _failed("ordinary_section_install_receipt_invalid")
 	var installed: Dictionary = {}
 	var declarations: Variant = snapshot.prepared.get("declarations", [])
 	if not declarations is Array:

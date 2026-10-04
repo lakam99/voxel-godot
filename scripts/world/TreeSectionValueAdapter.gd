@@ -101,8 +101,22 @@ static func capture_from_queue_record(queue: Object, main: Object, world_id: Str
 	var recipe_value: Variant = record.get("recipeSnapshot", null)
 	if not recipe_value is Dictionary or not recipe_value.is_read_only():
 		return _pending("tree_queue_recipe_snapshot_missing")
-	return capture_published_tree(queue, main, world_id, body, recipe_value,
-		removed_snapshot)
+	return _capture_tree_record(queue, main, world_id, body, recipe_value,
+		removed_snapshot, record, true)
+
+
+static func capture_from_prepared_record(queue: Object, main: Object,
+		world_id: String, body: StaticBody3D, record: Dictionary,
+		removed_snapshot: Dictionary) -> Dictionary:
+	if not is_instance_valid(queue) or not queue is QueueScript \
+			or not record.is_read_only() \
+			or String(record.get("schema", "")) != "prepared-tree-section-artifact/v1":
+		return _pending("tree_prepared_section_artifact_missing")
+	var recipe_value: Variant = record.get("recipeSnapshot", null)
+	if not recipe_value is Dictionary or not recipe_value.is_read_only():
+		return _pending("tree_prepared_recipe_snapshot_missing")
+	return _capture_tree_record(queue, main, world_id, body, recipe_value,
+		removed_snapshot, record, false)
 
 
 ## Capture is fail-closed: it accepts only the exact body instance and recipe
@@ -111,6 +125,17 @@ static func capture_from_queue_record(queue: Object, main: Object, world_id: Str
 ## one-tree tombstone; an absent body or queue record is always pending.
 static func capture_published_tree(queue: Object, main: Object, world_id: String,
 		body: StaticBody3D, recipe: Dictionary, removed_snapshot: Dictionary) -> Dictionary:
+	if not is_instance_valid(queue) or not queue is QueueScript \
+			or not is_instance_valid(main) or not is_instance_valid(body):
+		return _pending("tree_capture_authority_missing")
+	var queue_record := _published_record(queue, body)
+	return _capture_tree_record(queue, main, world_id, body, recipe,
+		removed_snapshot, queue_record, true)
+
+
+static func _capture_tree_record(queue: Object, main: Object, world_id: String,
+		body: StaticBody3D, recipe: Dictionary, removed_snapshot: Dictionary,
+		queue_record: Dictionary, require_published: bool) -> Dictionary:
 	if not is_instance_valid(queue) or not queue is QueueScript \
 			or not is_instance_valid(main) or not is_instance_valid(body):
 		return _pending("tree_capture_authority_missing")
@@ -129,14 +154,24 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 			"schema":SCHEMA, "worldId":world_id, "sourceId":source_id,
 			"sourcePartId":source_id, "sourceRevision":_tombstone_revision(
 				world_id, source_id, prop_id), "propId":prop_id}
+	var body_state := String(body.get_meta("tree_visual_state", ""))
+	var body_source := String(body.get_meta("visual_source", ""))
+	var prepared_transform: Variant = queue_record.get("bodyGlobalTransform", null)
+	var section_owned := bool(queue_record.get("sectionOwned", false))
+	var published_visual_valid := body_state == "published" \
+		and body_source == "procedural_tree_recipe"
+	var section_visual_valid := section_owned and body_state == "section_owned" \
+		and body_source == "chunk_owned_static_section"
 	if not body.is_inside_tree() or body.is_queued_for_deletion() \
 			or bool(body.get_meta("tree_publication_cancelled", false)) \
-			or String(body.get_meta("tree_visual_state", "")) != "published" \
-			or String(body.get_meta("visual_source", "")) != "procedural_tree_recipe":
+			or (require_published and not published_visual_valid and not section_visual_valid) \
+			or (not require_published and (body_state != "section_candidate_pending" \
+				or not prepared_transform is Transform3D \
+				or not (prepared_transform as Transform3D).is_equal_approx(body.global_transform))):
 		return _pending("tree_body_not_currently_publishable", {"sourceId":source_id})
-	var queue_record := _published_record(queue, body)
 	if queue_record.is_empty():
-		return _pending("tree_queue_acknowledgement_missing", {"sourceId":source_id})
+		return _pending("tree_queue_prepared_record_missing" if not require_published \
+			else "tree_queue_acknowledgement_missing", {"sourceId":source_id})
 	if bool(queue_record.get("rebuildPending", false)):
 		return _pending("tree_lod_replacement_pending", {"sourceId":source_id})
 	var request_value: Variant = queue_record.get("request", {})
@@ -165,8 +200,9 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 	var expected_signature := String(service_value.call(
 		"runtime_recipe_signature", recipe, normalized_request))
 	if expected_signature.is_empty() or expected_signature != String(recipe.get("signature", "")) \
-			or expected_signature != String(body.get_meta("tree_recipe_signature", "")) \
-			or String(body.get_meta("tree_render_lod_tier", "")) != tier:
+			or (require_published and expected_signature != String(body.get_meta("tree_recipe_signature", ""))) \
+			or (require_published and String(body.get_meta("tree_render_lod_tier", "")) != tier) \
+			or (not require_published and expected_signature != String(queue_record.get("recipeSignature", ""))):
 		return _pending("tree_recipe_revision_not_current", {
 			"sourceId":source_id,
 			"queueRequestKey":String(service_value.call("request_key", normalized_request)),

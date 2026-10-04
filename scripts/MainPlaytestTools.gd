@@ -4993,19 +4993,39 @@ func ensure_tree_publication_queue():
     if tree_publication_queue != null and is_instance_valid(tree_publication_queue):
         if player != null and is_instance_valid(player) and tree_publication_queue.has_method("set_viewer"):
             tree_publication_queue.set_viewer(player)
+        _enable_section_owned_tree_publication_if_available()
         return tree_publication_queue
     tree_publication_queue = TreePublicationQueueScript.new()
     tree_publication_queue.name = "TreePublicationQueue"
     add_child(tree_publication_queue)
     tree_publication_queue.tree_visual_published.connect(_on_visible_world_tree_visual_published)
+    tree_publication_queue.tree_section_values_prepared.connect(
+        _on_visible_world_tree_section_values_prepared)
     if player != null and is_instance_valid(player) and tree_publication_queue.has_method("set_viewer"):
         tree_publication_queue.set_viewer(player)
+    _enable_section_owned_tree_publication_if_available()
     return tree_publication_queue
+
+func _enable_section_owned_tree_publication_if_available() -> void:
+    var coordinator: Variant = get("world_static_section_coordinator")
+    var ecology_provider: Variant = get("ecology_static_section_provider")
+    if is_instance_valid(tree_publication_queue) \
+            and tree_publication_queue.has_method("set_section_owned_publication_enabled") \
+            and coordinator != null and is_instance_valid(coordinator) \
+            and ecology_provider != null and is_instance_valid(ecology_provider):
+        tree_publication_queue.call("set_section_owned_publication_enabled", true)
 
 func _on_visible_world_tree_visual_published(body: StaticBody3D, _recipe: Dictionary) -> void:
     if body == null or not is_instance_valid(body): return
     visible_world_demand_controller.handoff_published_tree("player",
         world_to_chunk(body.global_position.x, body.global_position.z), body)
+    _invalidate_visible_world_tree_source(body)
+
+func _on_visible_world_tree_section_values_prepared(body: StaticBody3D) -> void:
+    if body == null or not is_instance_valid(body): return
+    _invalidate_visible_world_tree_source(body)
+
+func _invalidate_visible_world_tree_source(body: StaticBody3D) -> void:
     var source_id := str(body.get_meta("static_ecology_source_id", ""))
     var source_revision := str(body.get_meta("tree_recipe_signature", ""))
     var source_bounds: Variant = body.get_meta("static_ecology_source_bounds", AABB())

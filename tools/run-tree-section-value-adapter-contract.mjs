@@ -14,6 +14,8 @@ cli(async () => {
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
     'scripts/world/StaticRenderMeshFingerprint.gd',
     'scripts/world/ActiveRemovedPropsSnapshot.gd',
+    'scripts/world/EcologySectionValueAdapter.gd',
+    'scripts/world/EcologySectionValueAdapter.gd.uid',
     'scripts/environment/TreePublicationQueue.gd',
     'scripts/environment/TreeSpawnService.gd',
     'scripts/visual/ProceduralTreeVisualFactory.gd',

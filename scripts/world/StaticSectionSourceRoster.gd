@@ -357,6 +357,44 @@ func capture_section_contributions(census: Dictionary,
 	return {"status":"complete", "contributions":contributions}
 
 
+## Notify source authorities only after the coordinator has verified the live
+## native receipt. Providers without an acknowledgement contract keep their
+## existing visuals and are intentionally skipped.
+func acknowledge_section_install(section_key: Vector3i,
+		provider_coverage: Array, receipt: Dictionary) -> Dictionary:
+	if not receipt.is_read_only() or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key or provider_coverage.is_empty():
+		return _failed("invalid_static_section_install_acknowledgement")
+	var acknowledgements: Array[Dictionary] = []
+	for row_value: Variant in provider_coverage:
+		if not row_value is Array or row_value.size() < 2:
+			return _failed("invalid_static_section_provider_coverage_ack")
+		var provider_id := String(row_value[0])
+		var coverage_revision := String(row_value[1])
+		var registration: Dictionary = _providers.get(provider_id, {})
+		var owner: Object = registration.get("owner").get_ref() \
+			if registration.get("owner") is WeakRef else null
+		if not is_instance_valid(owner) \
+				or owner.get_instance_id() != int(registration.get("ownerInstanceId", 0)):
+			return _pending("static_section_install_ack_provider_owner_missing", {
+				"providerId":provider_id})
+		if not owner.has_method("acknowledge_section_install"):
+			continue
+		var acknowledged: Variant = owner.call("acknowledge_section_install",
+			section_key, coverage_revision, receipt)
+		if not acknowledged is Dictionary \
+				or String(acknowledged.get("status", "")) not in ["acknowledged", "pending"]:
+			return _failed("static_section_install_ack_provider_rejected", {
+				"providerId":provider_id, "result":acknowledged})
+		var row := {"providerId":provider_id,
+			"coverageRevision":coverage_revision, "result":acknowledged}
+		row.make_read_only()
+		acknowledgements.append(row)
+	acknowledgements.make_read_only()
+	return {"status":"acknowledged", "sectionKey":section_key,
+		"providerAcknowledgements":acknowledgements}
+
+
 func is_snapshot_current(snapshot: Dictionary) -> bool:
 	if snapshot.get("status") != "complete" or snapshot.get("worldId") != _world_id:
 		return false

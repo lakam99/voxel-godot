@@ -35,6 +35,9 @@ const PROVIDER_ID := "ecology_and_static_props"
 var _world_id := ""
 var _main_authority_ref: WeakRef
 var _latest_by_section: Dictionary = {}
+var _latest_coverage_by_section: Dictionary = {}
+var _tree_install_receipts_by_source: Dictionary = {}
+var _latest_tree_candidate_by_source: Dictionary = {}
 
 
 func configure(world_id: String) -> Dictionary:
@@ -203,6 +206,7 @@ func capture_static_section_sources(world_id: String,
 						return _pending("ecology_tree_queue_geometry_not_committed", {
 							"chunk":chunk, "sourceId":source_id})
 					candidate_revision = tree_revision
+					_latest_tree_candidate_by_source[source_id] = candidate
 				"_":
 					return _pending("ecology_candidate_kind_not_censusable", {
 						"chunk":chunk, "sourceId":source_id, "kind":candidate_kind})
@@ -261,6 +265,8 @@ func capture_static_section_sources(world_id: String,
 				requested_source_revisions[source_id] = source_revisions[source_id]
 	for section: Vector3i in sections:
 		_latest_by_section[section] = current_by_section.get(section, {})
+		_latest_coverage_by_section[section] = String(section_rows[section].get(
+			"coverageRevision", ""))
 	section_rows.make_read_only()
 	requested_source_revisions.make_read_only()
 	removals_by_section.make_read_only()
@@ -268,6 +274,113 @@ func capture_static_section_sources(world_id: String,
 		"worldId":world_id, "authorityRevision":authority_revision,
 		"sections":section_rows, "sourceRevisions":requested_source_revisions,
 		"preparedSections":{}, "removalsBySection":removals_by_section}
+
+
+## Retire a prepared per-tree scene visual only after every section that owns
+## one of its mesh members has a current native install receipt. This mirrors
+## Minecraft's section swap boundary: source acknowledgements follow accepted
+## installation, never compilation or upload admission.
+func acknowledge_section_install(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary) -> Dictionary:
+	var current_coverage := String(_latest_coverage_by_section.get(section_key, ""))
+	var current_revisions: Dictionary = _latest_by_section.get(section_key, {})
+	if coverage_revision.is_empty() or current_coverage != coverage_revision \
+			or not receipt.is_read_only() or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key:
+		return _pending("ecology_section_install_acknowledgement_stale", {
+			"section":section_key})
+	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
+	if not is_instance_valid(main):
+		return _pending("ecology_main_authority_unavailable")
+	var queue: Variant = main.get("tree_publication_queue")
+	if not is_instance_valid(queue) or not queue.has_method(
+			"acknowledge_prepared_tree_section_install"):
+		return _pending("ecology_tree_install_acknowledgement_queue_unavailable")
+	var publications := _current_tree_publications(main)
+	var acknowledged_sources: Array[String] = []
+	var pending_sources: Array[String] = []
+	for source_id_value: Variant in current_revisions:
+		var source_id := String(source_id_value)
+		var publication := _prepared_tree_publication_for_source(publications, source_id)
+		if publication.is_empty() or not bool(publication.get("prepared", false)):
+			continue
+		var body_value: Variant = publication.get("body", null)
+		var record_value: Variant = publication.get("record", null)
+		if not body_value is StaticBody3D or not record_value is Dictionary:
+			pending_sources.append(source_id)
+			continue
+		var body: StaticBody3D = body_value
+		var record: Dictionary = record_value
+		var source_revision := String(current_revisions.get(source_id, ""))
+		var candidate: Variant = _latest_tree_candidate_by_source.get(source_id, null)
+		if not candidate is Dictionary or source_revision.is_empty() \
+				or source_revision != _tree_census_source_revision(candidate, publication):
+			pending_sources.append(source_id)
+			continue
+		var required_sections := _tree_census_section_keys(publication)
+		if required_sections.is_empty():
+			pending_sources.append(source_id)
+			continue
+		required_sections.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+			if a.x != b.x: return a.x < b.x
+			if a.y != b.y: return a.y < b.y
+			return a.z < b.z)
+		var key := String(source_id)
+		var ack: Dictionary = _tree_install_receipts_by_source.get(key, {})
+		if ack.is_empty() or String(ack.get("sourceRevision", "")) != source_revision \
+				or ack.get("requiredSections", []) != required_sections:
+			ack = {"sourceRevision":source_revision,
+				"requiredSections":required_sections.duplicate(), "receipts":{}}
+		var receipts: Dictionary = ack.get("receipts", {})
+		receipts[section_key] = receipt.duplicate(false)
+		ack["receipts"] = receipts
+		_tree_install_receipts_by_source[key] = ack
+		var all_current := true
+		for required: Vector3i in required_sections:
+			if not receipts.has(required) or not _installed_tree_section_receipt_is_current(
+					required, receipts[required]):
+				all_current = false
+				break
+		if not all_current:
+			pending_sources.append(source_id)
+			continue
+		var result: Dictionary = queue.call(
+			"acknowledge_prepared_tree_section_install", source_id,
+			source_revision, required_sections, receipts)
+		if result.get("status") == "acknowledged":
+			_tree_install_receipts_by_source.erase(key)
+			acknowledged_sources.append(source_id)
+		elif String(result.get("reason", "")) == "prepared_tree_section_receipts_incomplete":
+			pending_sources.append(source_id)
+		else:
+			return _pending("ecology_prepared_tree_install_not_acknowledged", {
+				"sourceId":source_id, "detail":result})
+	return {"status":"acknowledged", "section":section_key,
+		"acknowledgedTreeCount":acknowledged_sources.size(),
+		"pendingTreeCount":pending_sources.size(),
+		"acknowledgedSourceIds":acknowledged_sources,
+		"pendingSourceIds":pending_sources}
+
+
+func _prepared_tree_publication_for_source(publications: Dictionary,
+		source_id: String) -> Dictionary:
+	for publication_value: Variant in publications.values():
+		if not publication_value is Dictionary:
+			continue
+		var publication: Dictionary = publication_value
+		var record_value: Variant = publication.get("record", null)
+		if record_value is Dictionary and String(record_value.get("sourceId", "")) == source_id:
+			return publication
+	return {}
+func _installed_tree_section_receipt_is_current(section_key: Vector3i,
+		receipt: Dictionary) -> bool:
+	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
+	if not is_instance_valid(main):
+		return false
+	var coordinator: Variant = main.get("world_static_section_coordinator")
+	return is_instance_valid(coordinator) and coordinator.has_method(
+		"installed_section_receipt_is_current") and bool(coordinator.call(
+		"installed_section_receipt_is_current", section_key, receipt))
 
 
 ## Common-provider contribution for the source values this adapter can render.
@@ -497,30 +610,25 @@ func _capture_tree_candidate(candidate: Dictionary) -> Dictionary:
 	var source_id := String(candidate.get("sourceId", ""))
 	if prop_id.is_empty() or source_id.is_empty():
 		return _pending("ecology_tree_candidate_identity_missing")
-	var records_value: Variant = queue.get("published_lod_records")
-	if not records_value is Array:
-		return _pending("ecology_tree_queue_records_unavailable")
-	var body: StaticBody3D
-	for record_value: Variant in records_value:
-		if not record_value is Dictionary:
-			continue
-		var record: Dictionary = record_value
-		var request_value: Variant = record.get("request", {})
-		var body_ref := record.get("body") as WeakRef
-		var record_body: Variant = body_ref.get_ref() if body_ref != null else null
-		if request_value is Dictionary and String(request_value.get("treeId", "")) == prop_id \
-				and is_instance_valid(record_body) \
-				and int(record.get("bodyInstanceId", 0)) == record_body.get_instance_id() \
-				and String(record_body.get_meta("prop_id", "")) == prop_id:
-			body = record_body as StaticBody3D
-			break
-	if not is_instance_valid(body):
+	var publication: Dictionary = _current_tree_publications(main).get(prop_id, {})
+	if publication.is_empty() or bool(publication.get("ambiguous", false)):
 		return _pending("ecology_tree_queue_geometry_not_committed", {"sourceId":source_id})
+	var body_value: Variant = publication.get("body", null)
+	var record_value: Variant = publication.get("record", null)
+	if not body_value is StaticBody3D or not record_value is Dictionary \
+			or String(body_value.get_meta("prop_id", "")) != prop_id:
+		return _pending("ecology_tree_queue_geometry_not_committed", {"sourceId":source_id})
+	var body: StaticBody3D = body_value
 	var removed_snapshot := RemovedProps.capture_for_ids(main, [prop_id])
 	if not bool(removed_snapshot.get("ok", false)):
 		return _pending("ecology_tree_removed_props_snapshot_unavailable", {"sourceId":source_id})
-	var captured: Dictionary = TreeAdapter.capture_from_queue_record(queue, main, _world_id,
-		body, removed_snapshot)
+	var captured: Dictionary
+	if bool(publication.get("prepared", false)):
+		captured = TreeAdapter.capture_from_prepared_record(queue, main, _world_id,
+			body, record_value, removed_snapshot)
+	else:
+		captured = TreeAdapter.capture_from_queue_record(queue, main, _world_id,
+			body, removed_snapshot)
 	if captured.get("status") == "ready":
 		captured["bodyGlobalTransform"] = body.global_transform
 		captured["bodyInstanceId"] = body.get_instance_id()
@@ -1021,6 +1129,24 @@ func _current_tree_publications(main: Object) -> Dictionary:
 	var queue: Variant = main.get("tree_publication_queue")
 	if not is_instance_valid(queue):
 		return publications
+	var prepared_records: Variant = queue.get("prepared_section_value_records")
+	if prepared_records is Array:
+		for prepared_value: Variant in prepared_records:
+			if not prepared_value is Dictionary:
+				continue
+			var prepared: Dictionary = prepared_value
+			var prepared_body_ref := prepared.get("body") as WeakRef
+			var prepared_body: Variant = prepared_body_ref.get_ref() if prepared_body_ref != null else null
+			var prepared_prop_id := String(prepared.get("propId", ""))
+			if not is_instance_valid(prepared_body) or not prepared_body is StaticBody3D \
+					or int(prepared.get("bodyInstanceId", 0)) != prepared_body.get_instance_id() \
+					or prepared_prop_id.is_empty():
+				continue
+			var previous: Dictionary = publications.get(prepared_prop_id, {})
+			if previous.is_empty() or int(prepared.get("artifactGeneration", 0)) \
+					> int(previous.get("record", {}).get("artifactGeneration", 0)):
+				publications[prepared_prop_id] = {"record":prepared,
+					"body":prepared_body, "prepared":true}
 	var records_value: Variant = queue.get("published_lod_records")
 	if not records_value is Array:
 		return publications
@@ -1038,10 +1164,12 @@ func _current_tree_publications(main: Object) -> Dictionary:
 		var prop_id := String((request as Dictionary).get("treeId", ""))
 		if prop_id.is_empty():
 			continue
+		if publications.has(prop_id) and bool(publications[prop_id].get("prepared", false)):
+			continue
 		if publications.has(prop_id):
 			publications[prop_id] = {"ambiguous":true}
 		else:
-			publications[prop_id] = {"record":record, "body":body}
+			publications[prop_id] = {"record":record, "body":body, "prepared":false}
 	return publications
 
 
@@ -1055,6 +1183,8 @@ func _tree_census_source_revision(candidate: Dictionary,
 		return ""
 	var record: Dictionary = record_value
 	var body: StaticBody3D = body_value
+	var prepared := bool(publication.get("prepared", false))
+	var section_owned := bool(record.get("sectionOwned", false))
 	var request: Variant = record.get("request", {})
 	var members: Variant = record.get("sectionValueMembers", null)
 	var tier := String(record.get("tier", ""))
@@ -1071,10 +1201,17 @@ func _tree_census_source_revision(candidate: Dictionary,
 			or bool(record.get("rebuildPending", false)) \
 			or recipe_signature.is_empty() or tier.is_empty() \
 			or tier != String((request as Dictionary).get("renderLodTier", "")) \
-			or tier != String(body.get_meta("tree_render_lod_tier", "")) \
-			or recipe_signature != String(body.get_meta("tree_recipe_signature", "")) \
-			or String(body.get_meta("tree_visual_state", "")) != "published" \
-			or String(body.get_meta("visual_source", "")) != "procedural_tree_recipe" \
+			or (not prepared and (tier != String(body.get_meta("tree_render_lod_tier", "")) \
+				or recipe_signature != String(body.get_meta("tree_recipe_signature", "")) \
+				or (section_owned and (String(body.get_meta("tree_visual_state", "")) != "section_owned" \
+					or String(body.get_meta("visual_source", "")) != "chunk_owned_static_section")) \
+				or (not section_owned and (String(body.get_meta("tree_visual_state", "")) != "published" \
+					or String(body.get_meta("visual_source", "")) != "procedural_tree_recipe")))) \
+			or (prepared and (String(record.get("schema", "")) != "prepared-tree-section-artifact/v1" \
+				or String(body.get_meta("tree_visual_state", "")) != "section_candidate_pending" \
+				or not record.get("bodyGlobalTransform") is Transform3D \
+				or not (record.bodyGlobalTransform as Transform3D).is_equal_approx(body.global_transform) \
+				or recipe_signature != String(record.get("recipeSignature", "")))) \
 			or not body.is_inside_tree() or body.is_queued_for_deletion() \
 			or not members is Array or not members.is_read_only() or members.is_empty():
 		return ""

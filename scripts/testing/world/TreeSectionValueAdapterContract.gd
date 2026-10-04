@@ -13,9 +13,17 @@ class TestAuthority extends Node:
 	var seed_hash := 19
 	var removed_props := {}
 	var removed_props_revision := 0
+	var tree_publication_queue: Object
+	var world_static_section_coordinator: Object
 	func detail_mesh(_chunk: Vector2i) -> Mesh: return BoxMesh.new()
 	func detail_material(_chunk: Vector2i) -> Material: return StandardMaterial3D.new()
 	func _ecology_chunk_source_revision(_chunk: Vector2i) -> String: return "fixture"
+
+class TestSectionCoordinator extends RefCounted:
+	var installed_receipts: Dictionary = {}
+	func installed_section_receipt_is_current(section_key: Vector3i,
+			receipt: Dictionary) -> bool:
+		return installed_receipts.get(section_key, {}) == receipt
 
 var checks := {}
 
@@ -288,6 +296,65 @@ func run() -> void:
 		body.get_node_or_null("TrunkCollision") == collider \
 		and collider.shape == cylinder and captured.get("sourceId", "") == "%s:tree:%s" % [authority.seed_text, prop_id] \
 		and captured.get("censusStatus", "") == "pending")
+	var prepared_members: Array = queue.published_lod_records[0].sectionValueMembers
+	body.set_meta("tree_visual_state", "section_candidate_pending")
+	var prepared_result := queue.seal_prepared_section_value_record({
+		"request":request.duplicate(true), "recipe":recipe,
+		"sectionValueMembers":prepared_members, "sectionValueCapturePending":""}, body)
+	var prepared_record: Dictionary = prepared_result.get("record", {})
+	var prepared_retained := queue.retain_prepared_section_value_record(prepared_record)
+	var prepared_publication := {"record":prepared_record, "body":body, "prepared":true}
+	var prepared_capture := Adapter.capture_from_prepared_record(queue, authority,
+		world_id, body, prepared_record, RemovedProps.capture(authority))
+	var prepared_census_revision := ecology._tree_census_source_revision(
+		tree_candidate, prepared_publication)
+	var prepared_sections := ecology._tree_census_section_keys(prepared_publication)
+	prepared_sections.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	check("prepared_tree_values_are_censusable_before_per_tree_commit",
+		prepared_result.get("status") == "ready" \
+		and prepared_retained.get("status") == "retained" \
+		and prepared_capture.get("status") == "ready" \
+		and not prepared_census_revision.is_empty() \
+		and prepared_census_revision == ecology._tree_section_source_revision(
+			tree_candidate, prepared_capture))
+	var prepared_receipts := {}
+	for section_key: Vector3i in prepared_sections:
+		var receipt := {"status":"installed",
+			"sectionKey":section_key, "generation":1,
+			"contentManifestDigest":"tree-contract:%s" % section_key}
+		receipt.make_read_only()
+		prepared_receipts[section_key] = receipt
+	var fake_coordinator := TestSectionCoordinator.new()
+	fake_coordinator.installed_receipts = prepared_receipts
+	authority.tree_publication_queue = queue
+	authority.world_static_section_coordinator = fake_coordinator
+	ecology._latest_tree_candidate_by_source[String(tree_candidate.sourceId)] = tree_candidate
+	for section_key: Vector3i in prepared_sections:
+		ecology._latest_by_section[section_key] = {
+			String(tree_candidate.sourceId):prepared_census_revision}
+		ecology._latest_coverage_by_section[section_key] = \
+			"tree-contract-coverage:%s" % section_key
+	var section_owner_ack: Dictionary = {}
+	for section_key: Vector3i in prepared_sections:
+		section_owner_ack = ecology.acknowledge_section_install(section_key,
+			String(ecology._latest_coverage_by_section[section_key]),
+			prepared_receipts[section_key])
+	var section_owned_publication := {"record":queue.published_lod_records[0],
+		"body":body, "prepared":false}
+	var section_owned_capture := Adapter.capture_from_queue_record(queue, authority,
+		world_id, body, RemovedProps.capture(authority))
+	check("tree_visual_retires_only_after_all_section_receipts_and_reuses_owned_values",
+		section_owner_ack.get("status") == "acknowledged" \
+		and section_owner_ack.get("acknowledgedTreeCount", 0) == 1 \
+		and String(body.get_meta("tree_visual_state", "")) == "section_owned" \
+		and bool(queue.published_lod_records[0].get("sectionOwned", false)) \
+		and section_owned_capture.get("status") == "ready" \
+		and ecology._tree_census_source_revision(tree_candidate,
+			section_owned_publication) == ecology._tree_section_source_revision(
+				tree_candidate, section_owned_capture))
 	var stale_recipe := recipe.duplicate(true)
 	stale_recipe["signature"] = "tree-v10-deadbeef"
 	var stale := _make_capture(queue, authority, body, stale_recipe, world_id)

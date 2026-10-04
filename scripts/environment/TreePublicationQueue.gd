@@ -7,6 +7,7 @@ class_name TreePublicationQueue
 ## deterministic recipe work and a bounded main-thread visual publication.
 
 signal tree_visual_published(body: StaticBody3D, recipe: Dictionary)
+signal tree_section_values_prepared(body: StaticBody3D)
 
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRecipeCacheScript := preload("res://scripts/environment/TreeRecipeCache.gd")
@@ -108,6 +109,13 @@ var viewer_motion_snapshot := {}
 var external_viewer_motion_snapshot := {}
 var external_viewer_motion_expires_usec := 0
 var published_lod_records: Array[Dictionary] = []
+## Prepared members are handed to the section owner before per-tree attachment.
+## The records are immutable values; the parallel acknowledgement map is owned
+## by this queue and tracks section receipts without mutating captured inputs.
+var prepared_section_value_records: Array[Dictionary] = []
+var prepared_section_acknowledgements := {}
+var prepared_section_generation := 0
+var section_owned_publication_enabled := false
 var lod_recheck_cursor := 0
 ## Render accounting is updated only at publish/retier/removal boundaries.  It
 ## deliberately never walks the live forest during a gameplay frame merely to
@@ -623,13 +631,15 @@ func refresh_published_lods() -> void:
 			published_lod_records[record_index] = record
 
 func remember_published_lod(body: StaticBody3D, request: Dictionary,
-		section_value_members: Array = [], recipe_snapshot: Dictionary = {}) -> void:
+		section_value_members: Array = [], recipe_snapshot: Dictionary = {},
+		section_owned := false) -> void:
 	var record := {
 		"body": weakref(body),
 		"bodyInstanceId": body.get_instance_id(),
 		"request": request.duplicate(true),
 		"tier": String(request.get("renderLodTier", "near")),
 		"rebuildPending": false,
+		"sectionOwned":section_owned,
 		"sectionValueMembers": _freeze_section_value(section_value_members),
 		"recipeSnapshot": _freeze_section_value(recipe_snapshot),
 		"recipeSignature":String(recipe_snapshot.get("signature", ""))
@@ -641,6 +651,157 @@ func remember_published_lod(body: StaticBody3D, request: Dictionary,
 			published_lod_records[index] = record
 			return
 	published_lod_records.append(record)
+
+
+func set_section_owned_publication_enabled(enabled: bool) -> void:
+	section_owned_publication_enabled = enabled
+
+
+func prepared_section_value_record_for_body(body: StaticBody3D) -> Dictionary:
+	if not is_instance_valid(body):
+		return {}
+	for record_value: Variant in prepared_section_value_records:
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value
+		var body_ref := record.get("body") as WeakRef
+		if body_ref != null and body_ref.get_ref() == body \
+				and int(record.get("bodyInstanceId", 0)) == body.get_instance_id():
+			return record
+	return {}
+
+
+func seal_prepared_section_value_record(task: Dictionary,
+		body: StaticBody3D) -> Dictionary:
+	var request_value: Variant = task.get("request", null)
+	var recipe_value: Variant = task.get("recipe", null)
+	var members_value: Variant = task.get("sectionValueMembers", null)
+	if not is_instance_valid(body) or not body.is_inside_tree() \
+			or not request_value is Dictionary or not recipe_value is Dictionary \
+			or not members_value is Array or members_value.is_empty() \
+			or not String(task.get("sectionValueCapturePending", "")).is_empty():
+		return {"status":"pending", "reason":"prepared_tree_section_values_incomplete"}
+	var request: Dictionary = request_value
+	var recipe: Dictionary = recipe_value
+	var prop_id := String(request.get("treeId", ""))
+	var seed := String(request.get("worldSeed", ""))
+	var tier := String(request.get("renderLodTier", ""))
+	var recipe_signature := String(recipe.get("signature", ""))
+	var foliage_count := 0
+	var bole_count := 0
+	var branches_count := 0
+	for member_value: Variant in members_value:
+		if not member_value is Dictionary or not member_value.is_read_only():
+			return {"status":"pending", "reason":"prepared_tree_member_mutable_or_invalid"}
+		var member: Dictionary = member_value
+		if not member.get("mesh") is Mesh or not member.get("material") is Material \
+				or not member.get("localTransform") is Transform3D \
+				or not member.get("transforms") is Array \
+				or not member.get("colors") is Array \
+				or not member.get("customData") is Array:
+			return {"status":"pending", "reason":"prepared_tree_member_layout_invalid"}
+		match String(member.get("role", "")):
+			"bole": bole_count += 1
+			"branches": branches_count += 1
+			"foliage": foliage_count += 1
+			_: return {"status":"pending", "reason":"prepared_tree_member_role_invalid"}
+	if prop_id.is_empty() or seed.is_empty() or tier.is_empty() \
+			or recipe_signature.is_empty() or bole_count != 1 \
+			or branches_count > 1 or foliage_count > 1 \
+			or String(body.get_meta("prop_id", "")) != prop_id \
+			or not (request.get("treeWorldPosition", Vector3.INF) as Vector3).is_equal_approx(body.global_position) \
+			or bool(recipe.get("runtimeImpostor", false)):
+		return {"status":"pending", "reason":"prepared_tree_identity_or_topology_invalid"}
+	prepared_section_generation += 1
+	var frozen_request: Dictionary = _freeze_section_value(request)
+	var frozen_recipe: Dictionary = _freeze_section_value(recipe)
+	var frozen_members: Array = _freeze_section_value(members_value)
+	var record := {"schema":"prepared-tree-section-artifact/v1",
+		"artifactGeneration":prepared_section_generation,
+		"sourceId":"%s:tree:%s" % [seed, prop_id], "propId":prop_id,
+		"body":weakref(body), "bodyInstanceId":body.get_instance_id(),
+		"bodyGlobalTransform":body.global_transform,
+		"request":frozen_request, "recipeSnapshot":frozen_recipe,
+		"recipeSignature":recipe_signature, "tier":tier,
+		"rebuildPending":false, "sectionValueMembers":frozen_members}
+	record.make_read_only()
+	return {"status":"ready", "record":record}
+
+
+func retain_prepared_section_value_record(record: Dictionary) -> Dictionary:
+	if String(record.get("schema", "")) != "prepared-tree-section-artifact/v1" \
+			or not record.is_read_only():
+		return {"status":"failed", "reason":"prepared_tree_record_invalid"}
+	var body_ref := record.get("body") as WeakRef
+	var body: StaticBody3D = body_ref.get_ref() as StaticBody3D if body_ref != null else null
+	if not is_instance_valid(body) or int(record.get("bodyInstanceId", 0)) != body.get_instance_id():
+		return {"status":"pending", "reason":"prepared_tree_body_replaced"}
+	for index in range(prepared_section_value_records.size() - 1, -1, -1):
+		var existing: Dictionary = prepared_section_value_records[index]
+		var existing_body_ref := existing.get("body") as WeakRef
+		if existing_body_ref != null and existing_body_ref.get_ref() == body:
+			prepared_section_acknowledgements.erase(int(existing.get("artifactGeneration", 0)))
+			prepared_section_value_records.remove_at(index)
+	prepared_section_value_records.append(record)
+	return {"status":"retained", "sourceId":String(record.get("sourceId", "")),
+		"artifactGeneration":int(record.get("artifactGeneration", 0))}
+
+
+func acknowledge_prepared_tree_section_install(source_id: String,
+		source_revision: String, required_sections: Array[Vector3i],
+		installed_receipts: Dictionary) -> Dictionary:
+	if source_id.is_empty() or source_revision.is_empty() \
+			or required_sections.is_empty() or installed_receipts.size() != required_sections.size():
+		return {"status":"pending", "reason":"tree_section_receipt_not_current"}
+	for section_key: Vector3i in required_sections:
+		var receipt_value: Variant = installed_receipts.get(section_key, null)
+		if not receipt_value is Dictionary or String(receipt_value.get("status", "")) != "installed" \
+				or receipt_value.get("sectionKey") != section_key \
+				or int(receipt_value.get("generation", 0)) <= 0 \
+				or String(receipt_value.get("contentManifestDigest", "")).is_empty():
+			return {"status":"pending", "reason":"tree_section_receipt_not_current"}
+	var record_index := -1
+	var record: Dictionary = {}
+	for index in range(prepared_section_value_records.size()):
+		var row: Dictionary = prepared_section_value_records[index]
+		if String(row.get("sourceId", "")) == source_id:
+			record_index = index
+			record = row
+			break
+	if record_index < 0 or String(record.get("recipeSignature", "")).is_empty():
+		return {"status":"pending", "reason":"prepared_tree_record_missing"}
+	var ack: Dictionary = {"sourceRevision":source_revision,
+		"requiredSections":required_sections.duplicate(),
+		"receipts":installed_receipts.duplicate(false)}
+	prepared_section_acknowledgements[int(record.get("artifactGeneration", 0))] = ack
+	var body_ref := record.get("body") as WeakRef
+	var body: StaticBody3D = body_ref.get_ref() as StaticBody3D if body_ref != null else null
+	if not is_instance_valid(body) or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+			or not body.is_inside_tree() \
+			or not (record.get("bodyGlobalTransform", Transform3D.IDENTITY) as Transform3D).is_equal_approx(body.global_transform):
+		return {"status":"pending", "reason":"prepared_tree_body_changed_before_retirement"}
+	_retire_legacy_tree_visual_for_section_owner(body)
+	var frozen_request: Dictionary = record.get("request", {})
+	var frozen_members: Array = record.get("sectionValueMembers", [])
+	var frozen_recipe: Dictionary = record.get("recipeSnapshot", {})
+	remember_published_lod(body, frozen_request, frozen_members, frozen_recipe, true)
+	body.set_meta("tree_visual_state", "section_owned")
+	body.set_meta("visual_source", "chunk_owned_static_section")
+	prepared_section_acknowledgements.erase(int(record.get("artifactGeneration", 0)))
+	prepared_section_value_records.remove_at(record_index)
+	return {"status":"acknowledged", "sourceId":source_id,
+		"sectionCount":required_sections.size(), "visualRetired":true,
+		"gameplayBodyRetained":true}
+
+
+func _retire_legacy_tree_visual_for_section_owner(body: StaticBody3D) -> void:
+	var visual := body.get_node_or_null("GeneratedTreeVisual") as Node3D
+	if visual != null and is_instance_valid(visual):
+		body.remove_child(visual)
+		visual.queue_free()
+	release_collision_visibility_proxy(body)
+	release_horizon_visible_representation(body)
+	release_chunk_static_visual(body)
 
 func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> bool:
 	# This helper is intentionally for pending work only. Callers that already
@@ -1613,6 +1774,22 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		task["foliageBuildComplete"] = true
 		continue_publication_task(task)
 		return
+	if stage == "commit" and section_owned_publication_enabled:
+		var sealed := seal_prepared_section_value_record(task, body)
+		if sealed.get("status") == "ready":
+			var retained := retain_prepared_section_value_record(sealed.record)
+			if retained.get("status") == "retained":
+				body.set_meta("tree_visual_state", "section_candidate_pending")
+				body.set_meta("tree_recipe_signature", String(sealed.record.get(
+					"recipeSignature", "")))
+				body.set_meta("tree_render_lod_tier", String(sealed.record.get("tier", "")))
+				# Renderer resources now live in the sealed value artifact. Drop only
+				# this detached scene graph; keep the gameplay body, its collision,
+				# and any previously accepted per-tree visual until receipt.
+				if visual.get_parent() == null:
+					visual.free()
+				tree_section_values_prepared.emit(body)
+				return
 	commit_published_visual(task, body, visual, request, recipe)
 
 func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3D,

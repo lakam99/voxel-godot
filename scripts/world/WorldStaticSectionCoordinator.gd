@@ -753,8 +753,13 @@ func advance_complete_section_candidate(section_key: Vector3i,
 	_production_candidate_receipts[section_key] = receipt
 	_dirty_source_sections.erase(section_key)
 	_production_candidate_jobs.erase(section_key)
+	var acknowledgement_receipt: Dictionary = receipt.duplicate(true)
+	acknowledgement_receipt.make_read_only()
+	var provider_acknowledgements: Dictionary = _source_roster.acknowledge_section_install(
+		section_key, candidate.get("providerCoverage", []), acknowledgement_receipt)
 	var installed_result := {"status":"installed", "sectionKey":section_key,
-		"generation":int(candidate.get("generation", 0)), "receipt":receipt}
+		"generation":int(candidate.get("generation", 0)), "receipt":receipt,
+		"sourceAcknowledgements":provider_acknowledgements}
 	_reconcile_visible_section_candidate_outcome(section_key,
 		int(candidate.get("generation", 0)), installed_result)
 	return installed_result
@@ -1450,6 +1455,17 @@ func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
 		and int(installed.get("generation", 0)) == generation \
 		and String(installed.get("sourceRevision", "")) == source_revision \
 		and String(installed.get("packetDigest", "")) == digest
+
+
+func installed_section_receipt_is_current(section_key: Vector3i,
+		receipt: Dictionary) -> bool:
+	var candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
+	var current_receipt: Dictionary = _production_candidate_receipts.get(section_key, {})
+	return not candidate.is_empty() and not current_receipt.is_empty() \
+		and int(current_receipt.get("generation", 0)) == int(receipt.get("generation", -1)) \
+		and String(current_receipt.get("contentManifestDigest", "")) \
+			== String(receipt.get("contentManifestDigest", "")) \
+		and _receipt_is_live(candidate, current_receipt)
 
 
 func _promote_active_boundary(current_source_revisions: Dictionary,
