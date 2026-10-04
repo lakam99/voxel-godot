@@ -29,10 +29,11 @@ func _main_with_materials(seed: String) -> Variant:
 
 
 func _capture_parent(seed: String, category: String, prop_id: String,
-		ledger: Object, scan_revision := "") -> Node3D:
+		ledger: Object, revision_authority: Variant, scan_revision := "") -> Node3D:
 	var parent := Node3D.new()
 	root.add_child(parent)
-	var chunk_revision := "ecology-v1:%s:0,0:terrain--1" % seed
+	var chunk_revision := String(revision_authority.call(
+		"_ecology_chunk_source_revision", Vector2i.ZERO))
 	ledger.configure(seed, Vector2i.ZERO, chunk_revision, 0)
 	parent.set_meta("static_ecology_source_value_ledger", ledger)
 	parent.set_meta("ecology_capture_context", {
@@ -51,6 +52,8 @@ func run() -> void:
 	var seed := "realized-prop-contract"
 	var baseline: Variant = _main_with_materials(seed)
 	var captured: Variant = _main_with_materials(seed)
+	var source_revision := String(captured.call(
+		"_ecology_chunk_source_revision", Vector2i.ZERO))
 	var shader_material := ShaderMaterial.new()
 	var shader_member: Dictionary = captured.ecology_render_member("test", BoxMesh.new(),
 		Transform3D.IDENTITY, "unknown_shader", "opaque", shader_material)
@@ -61,7 +64,7 @@ func run() -> void:
 	var baseline_parent := Node3D.new()
 	root.add_child(baseline_parent)
 	var ledger: Object = Ledger.new()
-	var captured_parent := _capture_parent(seed, "ore", "ore", ledger)
+	var captured_parent := _capture_parent(seed, "ore", "ore", ledger, captured)
 	var baseline_rng := RandomNumberGenerator.new()
 	var captured_rng := RandomNumberGenerator.new()
 	baseline_rng.seed = 9371
@@ -109,7 +112,8 @@ func run() -> void:
 		and ore_snapshot.get("categoryProofs", {}).get("ore", {}).get("completeRevision", "").length() == 64)
 
 	var forage_ledger: Object = Ledger.new()
-	var forage_parent := _capture_parent(seed, "forage", "forage", forage_ledger)
+	var forage_parent := _capture_parent(seed, "forage", "forage", forage_ledger,
+		captured)
 	var forage_baseline_rng := RandomNumberGenerator.new()
 	var forage_capture_rng := RandomNumberGenerator.new()
 	forage_baseline_rng.seed = 442
@@ -130,7 +134,7 @@ func run() -> void:
 
 	var underground_ledger: Object = Ledger.new()
 	var underground_parent := _capture_parent(seed, "underground_props", "underground",
-		underground_ledger, "terrain-floor-scan-r7")
+		underground_ledger, captured, "terrain-floor-scan-r7")
 	var underground_rng := RandomNumberGenerator.new()
 	underground_rng.seed = 51
 	captured.make_ore(underground_parent, "underground:ore:4,-8,9",
@@ -158,7 +162,9 @@ func run() -> void:
 	var fallback_main: Variant = _main_with_materials(seed)
 	var fallback_baseline_main: Variant = _main_with_materials(seed)
 	fallback_parent.set_meta("static_ecology_source_value_ledger", fallback_ledger)
-	fallback_ledger.configure(seed, Vector2i.ZERO, "ecology-v1:%s:0,0:terrain--1" % seed, 0)
+	var fallback_source_revision := String(fallback_main.call(
+		"_ecology_chunk_source_revision", Vector2i.ZERO))
+	fallback_ledger.configure(seed, Vector2i.ZERO, fallback_source_revision, 0)
 	fallback_parent.set_meta("ecology_capture_context", {
 		"producer":"surface_spawn", "category":"surface_rocks", "chunkX":0, "chunkZ":0,
 		"terrainRevision":-1, "attemptIndex":0, "sourceCell":Vector3i.ZERO})
@@ -189,7 +195,6 @@ func run() -> void:
 		rock_completion_accepted)
 
 	var removal_ledger: Object = Ledger.new()
-	var source_revision := "ecology-v1:%s:0,0:terrain--1" % seed
 	removal_ledger.configure(seed, Vector2i.ZERO, source_revision, 4)
 	var removal_candidate := {"sourceId":"forage-source", "propId":"durable-forage-id",
 		"kind":"realized_static_prop", "category":"forage", "renderStatus":"ready",
