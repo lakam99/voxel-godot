@@ -13,7 +13,7 @@ class_name WorldStaticSectionCoordinator
 ## on every advance. The census must come from authoritative producer discovery;
 ## the ledger's known contributors alone do not prove completeness.
 ##
-## Current renderer support is opaque instance batches. Section slots resolve to
+## Renderer support is layer-manifest instance batches. Section slots resolve to
 ## independent render-demand owners; source-chunk keys describe immutable
 ## capture coverage and do not pin gameplay chunks after sealing. Producer
 ## revisions and exact contributor census still require authoritative discovery
@@ -166,11 +166,8 @@ func advance_boundary(current_source_revisions: Dictionary,
 			expected_contributors_by_section, current_source_revisions)
 		if census_check.get("status") != "ready":
 			return _abort_active(String(census_check.get("reason", "section_source_census_mismatch")))
-		# First coordinator gate is deliberately single-slot. Installing several
-		# section slots and then discovering a stale later source would require
-		# restoring earlier slots. Do not claim group atomicity without that path.
-		if prepared.replacements.size() != 1:
-			return _unsupported_active("boundary_requires_exactly_one_impacted_section")
+		if prepared.replacements.is_empty():
+			return _abort_active("boundary_has_no_impacted_sections")
 		_active_boundary["candidate"] = prepared
 		_active_boundary["changedRevisions"] = changed_revisions.revisions
 		_active_boundary["census"] = _copy_census_for_replacements(
@@ -417,7 +414,17 @@ func _validate_candidate_census(replacements: Array,
 		expected_contributors_by_section: Dictionary,
 		current_source_revisions: Dictionary) -> Dictionary:
 	if expected_contributors_by_section.size() != replacements.size():
-		return _failed("section_source_census_key_set_mismatch")
+		var candidate_keys: Array[String] = []
+		for replacement_value: Variant in replacements:
+			if replacement_value is Dictionary:
+				candidate_keys.append(str(replacement_value.get("sectionKey", "invalid")))
+		candidate_keys.sort()
+		var census_keys: Array[String] = []
+		for census_key: Variant in expected_contributors_by_section:
+			census_keys.append(str(census_key))
+		census_keys.sort()
+		return _failed("section_source_census_key_set_mismatch:census=%s:candidates=%s" % [
+			",".join(census_keys), ",".join(candidate_keys)])
 	var used_keys: Dictionary = {}
 	for replacement_value: Variant in replacements:
 		if not replacement_value is Dictionary or not replacement_value.get("sectionKey") is Vector3i:
@@ -531,14 +538,22 @@ func _promote_active_boundary(current_source_revisions: Dictionary,
 		expected_contributors_by_section: Dictionary) -> Dictionary:
 	var boundary_id := String(_active_boundary.boundaryId)
 	var candidate: Dictionary = _active_boundary.candidate
-	var replacement: Dictionary = candidate.replacements[0]
-	var section_key: Vector3i = replacement.sectionKey
-	var receipt: Dictionary = _active_boundary.receipts.get(section_key, {})
-	if not _receipt_is_live(replacement, receipt):
-		_active_boundary.receipts.erase(section_key)
-		_active_boundary.replacementIndex = 0
-		return {"status":"pending_owner", "reason":"section_receipt_no_longer_live",
-			"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
+	var replacements: Array = candidate.replacements
+	var receipts: Array[Dictionary] = []
+	var section_keys: Array[Vector3i] = []
+	for replacement_value: Variant in replacements:
+		if not replacement_value is Dictionary:
+			return _abort_active("invalid_prepared_section_replacement")
+		var replacement: Dictionary = replacement_value
+		var section_key: Vector3i = replacement.sectionKey
+		var receipt: Dictionary = _active_boundary.receipts.get(section_key, {})
+		if not _receipt_is_live(replacement, receipt):
+			_active_boundary.receipts.erase(section_key)
+			_active_boundary.replacementIndex = replacements.find(replacement)
+			return {"status":"pending_owner", "reason":"section_receipt_no_longer_live",
+				"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
+		receipts.append(receipt)
+		section_keys.append(section_key)
 	var changed_again := _changed_revision_snapshot(_active_boundary, current_source_revisions)
 	if changed_again.get("status") != "ready":
 		return _abort_active(String(changed_again.get("reason", "stale_source_revision_before_promotion")))
@@ -546,20 +561,22 @@ func _promote_active_boundary(current_source_revisions: Dictionary,
 		expected_contributors_by_section, current_source_revisions)
 	if final_census.get("status") != "ready":
 		return _abort_active(String(final_census.get("reason", "stale_section_source_census_before_promotion")))
-	var receipts: Array[Dictionary] = [receipt]
 	receipts.make_read_only()
 	var accepted: Dictionary = _ledger.accept_installed_candidate(boundary_id,
 		receipts, changed_again.revisions)
 	if accepted.get("status") != "committed":
 		return _abort_active(String(accepted.get("reason", "section_candidate_promotion_failed")))
-	_committed_candidates[section_key] = replacement
-	_installed_receipts[section_key] = receipt
-	_replay_set.erase(section_key)
-	_replay_queue.erase(section_key)
+	for replacement_value: Variant in replacements:
+		var replacement: Dictionary = replacement_value
+		var section_key: Vector3i = replacement.sectionKey
+		_committed_candidates[section_key] = replacement
+		_installed_receipts[section_key] = _active_boundary.receipts[section_key]
+		_replay_set.erase(section_key)
+		_replay_queue.erase(section_key)
 	_active_boundary.clear()
 	return {"status":"committed", "boundaryId":boundary_id,
 		"worldId":_world_id, "changedSourceParts":accepted.changedSourceParts,
-		"sectionKeys":accepted.impactedSectionKeys,
+		"sectionKeys":section_keys,
 		"sourcePartCount":accepted.sourcePartCount}
 
 

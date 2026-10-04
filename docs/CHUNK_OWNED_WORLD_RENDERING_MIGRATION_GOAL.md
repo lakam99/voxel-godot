@@ -165,11 +165,11 @@ not met.
 | Stage | Status | Evidence or remaining exit gate |
 |---|---|---|
 | 0. Source map and baseline | **Complete** | Producer-to-renderer maps, authority/revision/lifecycle audits, and the per-source baseline are recorded in the charter. |
-| 1. Close the candidate contract | **Partial** | The contributor ledger and immutable manifest/snapshot builders exist. Still needs a coordinator-owned expected contributor census, cross-domain/layer completeness, and caller-side live source/owner revalidation. |
-| 2. Section-slot installation | **Partial** | The native GDExtension installs section-keyed opaque candidates under independent render-demand owners and retains the previous root through cancellation. Cross-chunk captured candidates no longer pin gameplay chunks. There is still no normal-world producer callsite or multi-layer install contract; exact source-capture revisions/epochs remain to be added. |
+| 1. Close the candidate contract | **Partial** | The contributor ledger and immutable layered manifest/snapshot builders exist. The coordinator validates the exact contributor census, current source revisions, and live owner receipt set, including a two-section source fixture. Still needs a production-owned all-domain expected contributor census, cross-domain completeness, and caller-side live source/owner revalidation. |
+| 2. Section-slot installation | **Partial** | The native GDExtension installs opaque/cutout section candidates under independent render-demand owners and retains the previous root through cancellation. A spanning source now installs all affected section slots before the coordinator accepts its ledger. Cross-chunk captured candidates do not pin gameplay chunks. Translucent sorting and a normal-world producer callsite remain open; exact source-capture epochs remain to be added. |
 | 3. Integrate smooth terrain | **Not started** | Capture resident authoritative SDF/material data with halo revisions, mesh it through the configured Transvoxel path, then prove terrain visual/edit/collision/fluid parity before retiring the old visual slot. |
-| 4. Cut over construction | **Not started** | A world-owned coordinator must aggregate contributors from concurrent scene jobs; replace per-source production commits only after all affected section replacements and replays are acknowledged. |
-| 5. Admit ecology and static props | **Not started** | Canonical tree recipes, foliage/detail attributes, natural prop visuals and removal/save identity must enter the same complete section candidates; actor simulation remains separate. |
+| 4. Cut over construction | **Not started** | A world-owned coordinator must aggregate contributors from concurrent scene jobs; wire the building producer into it and replace per-source production commits only after all affected section replacements and replays are acknowledged. |
+| 5. Admit ecology and static props | **Not started** | A partial tree/detail source-value ledger exists, but no ecology producer enters section candidates. Canonical tree recipes, foliage/detail attributes, natural prop visuals and removal/save identity must enter the same complete manifests; actor simulation remains separate. |
 | 6. Readiness, performance and legacy retirement | **Not started** | Wire current section receipts into readiness/unload replay; pass headed visual/traversal and representative performance checks; retire old publishers only after parity. |
 
 The independent owner/candidate seam passed 33/33 focused checks at
@@ -863,3 +863,16 @@ overlay, so this proves source capture and renderer installation only; it is
 not visual-parity, traversal, normal-readiness or performance acceptance.
 The canonical architecture charter records the audit, seven stage exits and
 unresolved 240-second full-startup run.
+
+**Layered, multi-section coordinator proof (2026-10-04):** the native slot
+manifest now counts opaque, cutout, and translucent layers (including explicit
+empty layers); alpha-scissor content installs, while nonempty translucent
+content remains rejected until sorting is implemented. The coordinator no
+longer rejects a source update spanning multiple sections: report
+`artifacts/citadel-runtime-integration/native-chunk-packet-multisection-coordinator-verified-20261004/report.json`
+passed 43/43 checks, including two live section-slot receipts before source
+ledger acceptance and incomplete-census rejection. This proves fixture-level
+candidate installation only. Production producers remain unconnected; normal
+game visual, traversal, and performance acceptance remains open. The canonical
+charter records the stale-mid-boundary retry risk and full stage gates at
+`C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.

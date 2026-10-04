@@ -448,6 +448,71 @@ func _run() -> void:
 		and String(incomplete_result.get("reason","" )).begins_with("section_candidate_contributor_census_mismatch:") \
 		and int(retained_coordinator_slot.get("generation",0))==1 \
 		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id))
+	var spanning_boundary_id:="coordinator-boundary-spanning-sections"
+	var spanning_first_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
+	spanning_first_segment["segmentId"]="coordinator-segment-spanning-a"
+	spanning_first_segment.make_read_only()
+	var spanning_second_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
+	spanning_second_segment["segmentId"]="coordinator-segment-spanning-b"
+	spanning_second_segment.make_read_only()
+	var spanning_segments: Array[Dictionary]=[spanning_first_segment,spanning_second_segment]
+	spanning_segments.make_read_only()
+	var spanning_declaration: Dictionary=coordinator_declaration.duplicate(false)
+	spanning_declaration["sourceRevision"]="coordinator-rev-spanning"
+	spanning_declaration["segments"]=spanning_segments
+	spanning_declaration.make_read_only()
+	var spanning_declarations: Array[Dictionary]=[spanning_declaration]
+	spanning_declarations.make_read_only()
+	var spanning_enqueued: Dictionary=coordinator.enqueue_boundary(spanning_boundary_id,
+		spanning_declarations,coordinator_removals)
+	var spanning_first_input: Dictionary=coordinator_input.duplicate(false)
+	spanning_first_input["sourceRevision"]="coordinator-rev-spanning"
+	spanning_first_input["segmentId"]="coordinator-segment-spanning-a"
+	spanning_first_input.make_read_only()
+	var spanning_first_admitted: Dictionary=coordinator.submit_prepared_segment(
+		spanning_boundary_id,spanning_first_input)
+	var spanning_buffer: Array[float]=[]
+	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(30.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
+		spanning_buffer.append(value)
+	spanning_buffer.make_read_only()
+	var spanning_second_input: Dictionary=coordinator_input.duplicate(false)
+	spanning_second_input["sourceRevision"]="coordinator-rev-spanning"
+	spanning_second_input["segmentId"]="coordinator-segment-spanning-b"
+	spanning_second_input["buffer"]=spanning_buffer
+	spanning_second_input.make_read_only()
+	var spanning_second_admitted: Dictionary=coordinator.submit_prepared_segment(
+		spanning_boundary_id,spanning_second_input)
+	var spanning_revisions: Dictionary={coordinator_part_id:"coordinator-rev-spanning"}
+	spanning_revisions.make_read_only()
+	var spanning_census: Dictionary={
+		Vector3i.ZERO:coordinator_contributors,
+		Vector3i(1,0,0):coordinator_contributors}
+	spanning_census.make_read_only()
+	var spanning_install: Dictionary={"status":"pending"}
+	var spanning_turns:=0
+	while spanning_turns<128 and spanning_install.get("status") not in ["committed","failed","unsupported"]:
+		spanning_install=coordinator.advance_boundary(spanning_revisions,
+			spanning_census,coordinator_materials,coordinator_meshes,4)
+		spanning_turns+=1
+	var spanning_slot_a:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i.ZERO)
+	var spanning_slot_b:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i(1,0,0))
+	var spanning_installed_a: Dictionary=section_backend.call("installed_snapshot",spanning_slot_a)
+	var spanning_installed_b: Dictionary=section_backend.call("installed_snapshot",spanning_slot_b)
+	diagnostics["worldCoordinatorSpanningSectionInstall"]={"enqueued":spanning_enqueued,
+		"firstSegment":spanning_first_admitted,"secondSegment":spanning_second_admitted,
+		"lastAdvance":spanning_install,"turns":spanning_turns,
+		"sectionA":spanning_installed_a,"sectionB":spanning_installed_b}
+	_check("world_coordinator_installs_and_promotes_all_sections_for_spanning_source",
+		spanning_enqueued.get("status")=="queued" \
+		and spanning_first_admitted.get("status")=="queued" \
+		and spanning_second_admitted.get("status")=="queued" \
+		and spanning_install.get("status")=="committed" \
+		and spanning_install.get("sectionKeys",[]).size()==2 \
+		and spanning_installed_a.get("status")=="ready" \
+		and spanning_installed_b.get("status")=="ready" \
+		and int(spanning_installed_a.get("generation",0))>1 \
+		and int(spanning_installed_a.get("generation",0))==int(spanning_installed_b.get("generation",0)) \
+		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id))
 	var section_root_id:=int(section_backend_snapshot.get("rootInstanceId",0))
 	var cancelled_candidate: Dictionary=section_candidate.duplicate(false)
 	cancelled_candidate["generation"]=2
