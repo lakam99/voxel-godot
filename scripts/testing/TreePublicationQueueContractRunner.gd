@@ -34,6 +34,44 @@ func run_contract() -> void:
 		"branchCount": worker_recipe.get("branchCount", -1),
 		"foliageCount": worker_recipe.get("foliageClusterCount", -1)
 	})
+	var recipe_input_queue = TreePublicationQueueScript.new()
+	fixture.add_child(recipe_input_queue)
+	recipe_input_queue.publication_service.prewarm_visuals()
+	var recipe_input_body := tree_body("queue-worker-recipe")
+	fixture.add_child(recipe_input_body)
+	var recipe_input_request := request_for("queue-worker-recipe", "broadleaf", "bushy_oak", "forest")
+	recipe_input_request["renderLodTier"] = "near"
+	recipe_input_request["treeWorldPosition"] = recipe_input_body.global_position
+	recipe_input_queue.set_section_owned_publication_enabled(true)
+	recipe_input_queue.recipe_cache.store(
+		recipe_input_queue.publication_service.recipe_cache_key(recipe_input_request), worker_recipe)
+	var recipe_input_queued: bool = recipe_input_queue.enqueue(recipe_input_body, recipe_input_request)
+	var recipe_input_retained := {"status":"retained" if recipe_input_queued else "failed"}
+	var recipe_input_current := recipe_input_queue.tree_section_recipe_input_record_for_body(recipe_input_body)
+	var recipe_input_record: Dictionary = recipe_input_current
+	recipe_input_queue.set_section_owned_publication_enabled(false)
+	add_result("completed_recipe_is_sealed_for_section_compilation_before_visual_publication", \
+		recipe_input_queued and recipe_input_retained.get("status") == "retained" \
+		and recipe_input_record.is_read_only() \
+		and recipe_input_record.get("request", {}).is_read_only() \
+		and recipe_input_record.get("recipeSnapshot", {}).is_read_only() \
+		and recipe_input_record.get("recipeSignature", "") == worker_recipe.get("signature", "") \
+		and recipe_input_record.get("contentRevision", "").length() == 64 \
+		and recipe_input_current.get("contentRevision", "") == recipe_input_record.get("contentRevision", "") \
+		and recipe_input_body.get_node_or_null("GeneratedTreeVisual") == null, {
+		"queuePath":recipe_input_queued,
+		"retainStatus":recipe_input_retained.get("status", ""),
+		"artifactGeneration":recipe_input_record.get("artifactGeneration", 0),
+		"contentRevision":recipe_input_record.get("contentRevision", ""),
+		"visualAlreadyBuilt":recipe_input_body.get_node_or_null("GeneratedTreeVisual") != null
+	})
+	recipe_input_body.position.x += 1.0
+	add_result("section_recipe_input_rejects_moved_owner_before_compile", \
+		recipe_input_queue.tree_section_recipe_input_record_for_body(recipe_input_body).is_empty() \
+		and recipe_input_queue.retain_tree_section_recipe_input_record(recipe_input_record).get("reason", "") == "tree_section_recipe_input_owner_stale", {
+		"lookupAfterMove":recipe_input_queue.tree_section_recipe_input_record_for_body(recipe_input_body).size(),
+		"retainAfterMove":recipe_input_queue.retain_tree_section_recipe_input_record(recipe_input_record).get("reason", "")
+	})
 	var broadleaf := tree_body("queue-broadleaf")
 	var conifer := tree_body("queue-conifer")
 	fixture.add_child(broadleaf)

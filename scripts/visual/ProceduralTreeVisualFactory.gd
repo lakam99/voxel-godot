@@ -239,23 +239,47 @@ func advance_runtime_bole_build(build_state: Dictionary, work_budget := 1) -> bo
 	return advance_continuous_wood_build(build_state, work_budget)
 
 func finish_runtime_bole(recipe: Dictionary, build_state: Dictionary, biome: String) -> MeshInstance3D:
+	var geometry_values := finish_runtime_bole_values(recipe, build_state, biome)
+	if geometry_values.is_empty():
+		return null
+	var bole_visual := MeshInstance3D.new()
+	bole_visual.name = "ProceduralTreeContinuousStructuralWood"
+	bole_visual.mesh = geometry_values.mesh
+	bole_visual.material_override = geometry_values.material
+	_apply_render_policy_values(bole_visual, geometry_values.renderPolicy)
+	for meta_key: Variant in geometry_values.metadata:
+		bole_visual.set_meta(StringName(meta_key), geometry_values.metadata[meta_key])
+	return bole_visual
+
+
+## Finish the runtime bole without creating a scene node. The returned resource
+## and policy values are the same ones consumed by finish_runtime_bole().
+func finish_runtime_bole_values(recipe: Dictionary, build_state: Dictionary,
+		biome: String) -> Dictionary:
 	if bool(build_state.get("headlessVisualProxy", false)):
 		# Even an empty GeometryInstance allocates a renderer RID. The dummy
-		# headless renderer has no mesh RID owner, so return no geometry while the
-		# queue still completes the same bounded logical stage and records the
-		# recipe-derived render statistics on the authoritative tree body.
-		return null
+		# headless renderer has no mesh RID owner, so expose no geometry while the
+		# queue still completes the same bounded logical stage.
+		return {}
 	var mesh_result := finish_continuous_wood_build(build_state)
-	var bole_visual := instantiate_continuous_wood_mesh_result(
-		recipe,
-		mesh_result,
-		biome,
-		RUNTIME_CONTINUOUS_WOOD_RADIAL_SEGMENTS
-	)
-	if bole_visual != null:
-		bole_visual.name = "ProceduralTreeContinuousStructuralWood"
-		bole_visual.set_meta("tree_wood_role", "continuous_bole_and_scaffolds")
-	return bole_visual
+	var mesh := mesh_result.get("mesh", null) as ArrayMesh
+	if mesh == null:
+		return {}
+	var values := {"mesh":mesh,
+		"material":continuous_wood_material(
+			String(recipe.get("architecture", "broadleaf")), biome,
+			maxf(1.0, float(recipe.get("height", 12.0)))),
+		"renderPolicy":recipe_render_policy_values(recipe, 28.0, 2.0),
+		"metadata":{"tree_render_role":"continuous_wood",
+			"tree_wood_role":"continuous_bole_and_scaffolds",
+			"tree_wood_topology":"single_generated_wood_graph_without_segment_caps",
+			"tree_wood_uses_cylinder_instances":false,
+			"tree_wood_segment_count":int(mesh_result.get("segmentCount", 0)),
+			"tree_wood_tube_count":int(mesh_result.get("tubeCount", 0)),
+			"tree_wood_junction_count":int(mesh_result.get("junctionCount", 0)),
+			"tree_wood_radial_segments":RUNTIME_CONTINUOUS_WOOD_RADIAL_SEGMENTS}}
+	values.make_read_only()
+	return values
 
 func instantiate_runtime_distal_branches(
 	recipe: Dictionary,
@@ -331,20 +355,37 @@ func advance_runtime_distal_build(build_state: Dictionary, instance_budget := 48
 	return end_index >= branches.size()
 
 func finish_runtime_distal_build(build_state: Dictionary, recipe: Dictionary, biome: String) -> MultiMeshInstance3D:
-	if bool(build_state.get("headlessVisualProxy", false)):
+	var geometry_values := finish_runtime_distal_build_values(build_state, recipe, biome)
+	if geometry_values.is_empty():
 		return null
-	var multi_mesh := build_state.get("multiMesh", null) as MultiMesh
-	if multi_mesh == null:
-		return null
-	multi_mesh.custom_aabb = recipe_aabb(recipe, 1.5)
 	var instance := MultiMeshInstance3D.new()
 	instance.name = "ProceduralTreeDistalBranches"
-	instance.multimesh = multi_mesh
-	instance.material_override = branch_material(String(recipe.get("architecture", "broadleaf")), biome)
-	apply_recipe_render_policy(instance, recipe, 28.0, 2.0)
-	instance.set_meta("tree_render_role", "branches")
-	instance.set_meta("tree_wood_role", "instanced_distal_branches")
+	instance.multimesh = geometry_values.multiMesh
+	instance.material_override = geometry_values.material
+	_apply_render_policy_values(instance, geometry_values.renderPolicy)
+	for meta_key: Variant in geometry_values.metadata:
+		instance.set_meta(StringName(meta_key), geometry_values.metadata[meta_key])
 	return instance
+
+
+## Finish distal branch instances as resource values without creating a
+## MultiMeshInstance3D. MultiMesh remains a resource and carries exact instance
+## transforms/custom data; scene-node policy is returned separately.
+func finish_runtime_distal_build_values(build_state: Dictionary, recipe: Dictionary,
+		biome: String) -> Dictionary:
+	if bool(build_state.get("headlessVisualProxy", false)):
+		return {}
+	var multi_mesh := build_state.get("multiMesh", null) as MultiMesh
+	if multi_mesh == null:
+		return {}
+	multi_mesh.custom_aabb = recipe_aabb(recipe, 1.5)
+	var values := {"multiMesh":multi_mesh,
+		"material":branch_material(String(recipe.get("architecture", "broadleaf")), biome),
+		"renderPolicy":recipe_render_policy_values(recipe, 28.0, 2.0),
+		"metadata":{"tree_render_role":"branches",
+			"tree_wood_role":"instanced_distal_branches"}}
+	values.make_read_only()
+	return values
 
 func instantiate_branch_instances(
 	recipe: Dictionary,
@@ -910,29 +951,49 @@ func advance_runtime_foliage_build(build_state: Dictionary, instance_budget := 4
 	return end_index >= foliage.size()
 
 func finish_runtime_foliage_build(build_state: Dictionary, recipe: Dictionary, biome: String) -> Node3D:
-	if bool(build_state.get("headlessVisualProxy", false)):
+	var geometry_values := finish_runtime_foliage_build_values(build_state, recipe, biome)
+	if bool(geometry_values.get("headlessVisualProxy", false)):
 		var proxy := Node3D.new()
 		proxy.name = "ProceduralTreeFoliage"
 		proxy.set_meta("tree_render_role", "foliage")
 		proxy.set_meta("tree_foliage_batching", "headless_visual_proxy")
 		proxy.set_meta("tree_headless_visual_proxy", true)
 		return proxy
-	var multi_mesh := build_state.get("multiMesh", null) as MultiMesh
-	if multi_mesh == null:
+	if geometry_values.is_empty():
 		return null
-	multi_mesh.custom_aabb = recipe_aabb(recipe, 3.0)
 	var instance := MultiMeshInstance3D.new()
 	instance.name = "RuntimeFoliage"
-	instance.multimesh = multi_mesh
-	instance.material_override = foliage_material(String(recipe.get("architecture", "broadleaf")), biome)
-	apply_recipe_render_policy(instance, recipe, 30.0, 3.0)
-	instance.set_meta("tree_render_role", "foliage")
-	instance.set_meta("tree_foliage_batching", "single_shared_cluster_mesh")
+	instance.multimesh = geometry_values.multiMesh
+	instance.material_override = geometry_values.material
+	_apply_render_policy_values(instance, geometry_values.renderPolicy)
+	for meta_key: Variant in geometry_values.instanceMetadata:
+		instance.set_meta(StringName(meta_key), geometry_values.instanceMetadata[meta_key])
 	var root := Node3D.new()
 	root.name = "ProceduralTreeFoliage"
-	root.set_meta("tree_foliage_batching", "single_shared_cluster_mesh")
+	for meta_key: Variant in geometry_values.rootMetadata:
+		root.set_meta(StringName(meta_key), geometry_values.rootMetadata[meta_key])
 	root.add_child(instance)
 	return root
+
+
+## Finish runtime foliage as geometry/resource values only. The existing finish
+## method wraps these values in the same root and GeometryInstance nodes.
+func finish_runtime_foliage_build_values(build_state: Dictionary, recipe: Dictionary,
+		biome: String) -> Dictionary:
+	if bool(build_state.get("headlessVisualProxy", false)):
+		return {"headlessVisualProxy":true}
+	var multi_mesh := build_state.get("multiMesh", null) as MultiMesh
+	if multi_mesh == null:
+		return {}
+	multi_mesh.custom_aabb = recipe_aabb(recipe, 3.0)
+	var values := {"multiMesh":multi_mesh,
+		"material":foliage_material(String(recipe.get("architecture", "broadleaf")), biome),
+		"renderPolicy":recipe_render_policy_values(recipe, 30.0, 3.0),
+		"instanceMetadata":{"tree_render_role":"foliage",
+			"tree_foliage_batching":"single_shared_cluster_mesh"},
+		"rootMetadata":{"tree_foliage_batching":"single_shared_cluster_mesh"}}
+	values.make_read_only()
+	return values
 
 func instantiate_runtime_impostor(recipe: Dictionary, biome: String) -> Node3D:
 	# The impostor is only selected beyond the far LOD boundary.  It retains a
@@ -1057,6 +1118,14 @@ static func recipe_casts_shadows(recipe: Dictionary) -> bool:
 			return tier == "near"
 
 func apply_recipe_render_policy(instance: GeometryInstance3D, recipe: Dictionary, fade_margin: float, cull_margin: float) -> void:
+	_apply_render_policy_values(instance,
+		recipe_render_policy_values(recipe, fade_margin, cull_margin))
+
+
+## Return the GeometryInstance settings as values so section-owned consumers can
+## preserve the runtime's visibility and shadow policy without a scene node.
+static func recipe_render_policy_values(recipe: Dictionary, fade_margin: float,
+		cull_margin: float) -> Dictionary:
 	var policy: Dictionary = recipe.get("renderPolicy", {})
 	var visibility_range := maxf(32.0, float(policy.get("visibilityRange", VISIBILITY_RANGE)))
 	var shadow_range := clampf(float(policy.get("shadowRange", visibility_range * 0.5)), 16.0, visibility_range)
@@ -1065,18 +1134,35 @@ func apply_recipe_render_policy(instance: GeometryInstance3D, recipe: Dictionary
 	# Distant foliage contributes disproportionate shadow-map fill but no
 	# nearby gameplay readability. Shadow participation is an actual recipe
 	# policy decision, not merely diagnostic metadata.
-	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if recipe_casts_shadows(recipe) else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	instance.visibility_range_end = visibility_range
-	instance.visibility_range_end_margin = minf(fade_margin, visibility_range * 0.12)
-	instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	instance.extra_cull_margin = cull_margin
 	# Godot's GeometryInstance3D does not expose per-instance shadow-distance
 	# culling. Keep the policy attached for the chunk/LOD owner, rather than
 	# pretending this per-tree renderer already has a distinct shadow mesh.
-	instance.set_meta("tree_shadow_range", shadow_range)
-	instance.set_meta("tree_shadow_policy", String(policy.get("shadowPolicy", "near_only")))
-	instance.set_meta("tree_visibility_range", visibility_range)
-	instance.set_meta("tree_lod_tier", tier)
+	var metadata := {"tree_shadow_range":shadow_range,
+		"tree_shadow_policy":String(policy.get("shadowPolicy", "near_only")),
+		"tree_visibility_range":visibility_range, "tree_lod_tier":tier}
+	metadata.make_read_only()
+	var values := {"castShadow":GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if recipe_casts_shadows(recipe) else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF,
+		"visibilityRangeEnd":visibility_range,
+		"visibilityRangeEndMargin":minf(fade_margin, visibility_range * 0.12),
+		"visibilityRangeFadeMode":GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF,
+		"extraCullMargin":cull_margin, "metadata":metadata}
+	values.make_read_only()
+	return values
+
+
+func _apply_render_policy_values(instance: GeometryInstance3D,
+		values: Dictionary) -> void:
+	instance.cast_shadow = int(values.get("castShadow",
+		GeometryInstance3D.SHADOW_CASTING_SETTING_OFF))
+	instance.visibility_range_end = float(values.get("visibilityRangeEnd", VISIBILITY_RANGE))
+	instance.visibility_range_end_margin = float(values.get("visibilityRangeEndMargin", 0.0))
+	instance.visibility_range_fade_mode = int(values.get("visibilityRangeFadeMode",
+		GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED))
+	instance.extra_cull_margin = float(values.get("extraCullMargin", 0.0))
+	var metadata: Dictionary = values.get("metadata", {})
+	for meta_key: Variant in metadata:
+		instance.set_meta(StringName(meta_key), metadata[meta_key])
 
 func build_foliage_cluster_mesh(variant: int) -> ArrayMesh:
 	var surface := SurfaceTool.new()

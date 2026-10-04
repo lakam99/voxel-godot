@@ -13,6 +13,9 @@ const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnServ
 const TreeRecipeCacheScript := preload("res://scripts/environment/TreeRecipeCache.gd")
 const VisualFactoryScript := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
 const HorizonEcologyTreeBatchScript := preload("res://scripts/world/HorizonEcologyTreeBatch.gd")
+const StaticRenderSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const TREE_SECTION_RECIPE_INPUT_SCHEMA := "tree-section-recipe-input/v1"
+const TREE_SECTION_RECIPE_COMPILER_REVISION := "tree-recipe-section-compiler/v1"
 const MAX_ACTIVE_WORKERS := 2
 # Each visual is assembled across small main-thread stages. This avoids
 # treating a dense tree as one indivisible frame of work while keeping a body
@@ -115,6 +118,11 @@ var published_lod_records: Array[Dictionary] = []
 var prepared_section_value_records: Array[Dictionary] = []
 var prepared_section_acknowledgements := {}
 var prepared_section_generation := 0
+## Recipe inputs are sealed as soon as deterministic worker output arrives,
+## before the legacy per-tree visual stages. The section compiler may consume
+## these values without waiting for GeneratedTreeVisual construction.
+var section_recipe_input_records: Array[Dictionary] = []
+var section_recipe_input_generation := 0
 var section_owned_publication_enabled := false
 var lod_recheck_cursor := 0
 ## Render accounting is updated only at publish/retier/removal boundaries.  It
@@ -237,6 +245,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		"enqueueSequence": enqueue_sequence,
 		"sectionValueMembers": []
 	}
+	body.set_meta("tree_section_recipe_input_expected_generation", enqueue_sequence)
 	# The trunk collision is already owned by the gameplay prop before this
 	# presentation queue is called.  Record that boundary once, then make a
 	# nearby blocker visible immediately with shared geometry while its full
@@ -275,6 +284,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 func cancel_body_publication(body: StaticBody3D) -> Dictionary:
 	if not is_instance_valid(body): return {"status":"failed", "reason":"invalid_tree"}
 	body.set_meta("tree_publication_cancelled", true)
+	_remove_tree_section_recipe_input_record_for_body(body)
 	release_horizon_visible_representation(body)
 	return {"status":"cancelled", "bodyInstanceId":body.get_instance_id()}
 
@@ -671,6 +681,112 @@ func prepared_section_value_record_for_body(body: StaticBody3D) -> Dictionary:
 	return {}
 
 
+func build_tree_section_recipe_input_record(task: Dictionary, body: StaticBody3D,
+		recipe: Dictionary) -> Dictionary:
+	var request_value: Variant = task.get("request", null)
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or bool(body.get_meta("tree_publication_cancelled", false)) \
+			or not request_value is Dictionary or request_value.is_empty() or recipe.is_empty():
+		return {"status":"pending", "reason":"tree_section_recipe_input_authority_missing"}
+	var request: Dictionary = request_value
+	var prop_id := String(request.get("treeId", ""))
+	var seed := String(request.get("worldSeed", ""))
+	var tier := String(request.get("renderLodTier", ""))
+	var position_value: Variant = request.get("treeWorldPosition", null)
+	var transform := body.global_transform
+	if prop_id.is_empty() or seed.is_empty() or tier.is_empty() \
+			or String(body.get_meta("prop_id", "")) != prop_id \
+			or not position_value is Vector3 or not (position_value as Vector3).is_finite() \
+			or not (position_value as Vector3).is_equal_approx(body.global_position) \
+			or not transform.is_finite():
+		return {"status":"pending", "reason":"tree_section_recipe_input_identity_stale"}
+	var normalized_value: Variant = publication_service.normalize_request(request)
+	if not normalized_value is Dictionary or normalized_value.is_empty():
+		return {"status":"pending", "reason":"tree_section_recipe_input_request_invalid"}
+	var normalized: Dictionary = normalized_value
+	var recipe_signature := String(publication_service.runtime_recipe_signature(recipe, normalized))
+	if recipe_signature.is_empty() or recipe_signature != String(recipe.get("signature", "")):
+		return {"status":"pending", "reason":"tree_section_recipe_input_signature_stale"}
+	var frozen_request: Dictionary = _freeze_section_value(normalized)
+	var frozen_recipe: Dictionary = _freeze_section_value(recipe)
+	var content_values := [TREE_SECTION_RECIPE_INPUT_SCHEMA,
+		TREE_SECTION_RECIPE_COMPILER_REVISION, seed, prop_id, tier,
+		recipe_signature, frozen_request, frozen_recipe]
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK \
+			or context.update(var_to_bytes(content_values)) != OK:
+		return {"status":"pending", "reason":"tree_section_recipe_input_digest_failed"}
+	var content_revision := context.finish().hex_encode()
+	section_recipe_input_generation += 1
+	var record := {"schema":TREE_SECTION_RECIPE_INPUT_SCHEMA,
+		"artifactGeneration":section_recipe_input_generation,
+		"producerGeneration":int(task.get("enqueueSequence", 0)),
+		"worldOwnerInstanceId":get_parent().get_instance_id() if get_parent() != null else 0,
+		"worldSeed":seed, "sourceId":"%s:tree:%s" % [seed, prop_id],
+		"propId":prop_id, "body":weakref(body), "bodyInstanceId":body.get_instance_id(),
+		"bodyGlobalTransform":transform,
+		"logicalOwnerCell":StaticRenderSectionGridScript.logical_owner_cell_for_world_position(body.global_position),
+		"request":frozen_request, "recipeSnapshot":frozen_recipe,
+		"recipeSignature":recipe_signature, "renderLodTier":tier,
+		"compilerRevision":TREE_SECTION_RECIPE_COMPILER_REVISION,
+		"contentRevision":content_revision}
+	record.make_read_only()
+	return {"status":"ready", "record":record}
+
+
+func retain_tree_section_recipe_input_record(record: Dictionary) -> Dictionary:
+	if String(record.get("schema", "")) != TREE_SECTION_RECIPE_INPUT_SCHEMA \
+			or not record.is_read_only():
+		return {"status":"failed", "reason":"tree_section_recipe_input_record_invalid"}
+	var body_ref := record.get("body") as WeakRef
+	var body: StaticBody3D = body_ref.get_ref() as StaticBody3D if body_ref != null else null
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+			or (int(body.get_meta("tree_section_recipe_input_expected_generation", 0)) > 0 \
+				and int(record.get("producerGeneration", 0)) != int(body.get_meta("tree_section_recipe_input_expected_generation", 0))) \
+			or not (record.get("bodyGlobalTransform", Transform3D.IDENTITY) as Transform3D).is_equal_approx(body.global_transform) \
+			or String(body.get_meta("prop_id", "")) != String(record.get("propId", "")) \
+			or bool(body.get_meta("tree_publication_cancelled", false)):
+		return {"status":"pending", "reason":"tree_section_recipe_input_owner_stale"}
+	for index in range(section_recipe_input_records.size() - 1, -1, -1):
+		var existing: Dictionary = section_recipe_input_records[index]
+		var existing_ref := existing.get("body") as WeakRef
+		if existing_ref != null and existing_ref.get_ref() == body:
+			section_recipe_input_records.remove_at(index)
+	section_recipe_input_records.append(record)
+	return {"status":"retained", "sourceId":String(record.get("sourceId", "")),
+		"artifactGeneration":int(record.get("artifactGeneration", 0))}
+
+
+func tree_section_recipe_input_record_for_body(body: StaticBody3D) -> Dictionary:
+	if not is_instance_valid(body):
+		return {}
+	for record_value: Variant in section_recipe_input_records:
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value
+		var body_ref := record.get("body") as WeakRef
+		if body_ref == null or body_ref.get_ref() != body \
+				or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+				or (int(body.get_meta("tree_section_recipe_input_expected_generation", 0)) > 0 \
+					and int(record.get("producerGeneration", 0)) != int(body.get_meta("tree_section_recipe_input_expected_generation", 0))) \
+				or String(body.get_meta("prop_id", "")) != String(record.get("propId", "")) \
+				or bool(body.get_meta("tree_publication_cancelled", false)) \
+				or not (record.get("bodyGlobalTransform", Transform3D.IDENTITY) as Transform3D).is_equal_approx(body.global_transform):
+			continue
+		return record
+	return {}
+
+
+func _remove_tree_section_recipe_input_record_for_body(body: StaticBody3D) -> void:
+	for index in range(section_recipe_input_records.size() - 1, -1, -1):
+		var record: Dictionary = section_recipe_input_records[index]
+		var body_ref := record.get("body") as WeakRef
+		if body_ref != null and body_ref.get_ref() == body \
+				and int(record.get("bodyInstanceId", 0)) == body.get_instance_id():
+			section_recipe_input_records.remove_at(index)
+
+
 func seal_prepared_section_value_record(task: Dictionary,
 		body: StaticBody3D) -> Dictionary:
 	var request_value: Variant = task.get("request", null)
@@ -787,6 +903,7 @@ func acknowledge_prepared_tree_section_install(source_id: String,
 	remember_published_lod(body, frozen_request, frozen_members, frozen_recipe, true)
 	body.set_meta("tree_visual_state", "section_owned")
 	body.set_meta("visual_source", "chunk_owned_static_section")
+	_remove_tree_section_recipe_input_record_for_body(body)
 	prepared_section_acknowledgements.erase(int(record.get("artifactGeneration", 0)))
 	prepared_section_value_records.remove_at(record_index)
 	return {"status":"acknowledged", "sourceId":source_id,
@@ -1316,6 +1433,19 @@ func publish_completed_recipes() -> void:
 		)
 
 func enqueue_completed_task(task: Dictionary) -> void:
+	# Seal deterministic section inputs at worker completion, ahead of the legacy
+	# staged node/mesh publisher. The existing publisher remains active as the
+	# visual fallback until the section compiler and native receipts take over.
+	if section_owned_publication_enabled and not task.has("sectionRecipeInputRecord"):
+		var recipe_body: StaticBody3D = _publication_body(task)
+		var recipe_value: Variant = task.get("recipe", null)
+		if recipe_body != null and recipe_value is Dictionary:
+			var sealed := build_tree_section_recipe_input_record(task, recipe_body, recipe_value)
+			if sealed.get("status") == "ready":
+				var record: Dictionary = sealed.get("record", {})
+				var retained := retain_tree_section_recipe_input_record(record)
+				if retained.get("status") == "retained":
+					task["sectionRecipeInputRecord"] = record
 	if not task.has("publicationPosition"):
 		var body: StaticBody3D = _publication_body(task)
 		var request: Dictionary = task.get("request", {})
