@@ -3,6 +3,7 @@ extends SceneTree
 const Adapter := preload("res://scripts/world/EcologySectionValueAdapter.gd")
 const Ledger := preload("res://scripts/world/EcologySourceValueLedger.gd")
 const InstanceAttributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const Partitioner := preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const MeshFingerprint := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Roster := preload("res://scripts/world/StaticSectionSourceRoster.gd")
@@ -17,6 +18,7 @@ class ProductionAuthority extends Node:
 	var removed_props := {}
 	var terrain_revision := 0
 	var chunks: Dictionary = {}
+	var underground_required := true
 	var production_mesh: Mesh = BoxMesh.new()
 	var production_material: Material = StandardMaterial3D.new()
 	var unsupported_flower_material := true
@@ -38,6 +40,9 @@ class ProductionAuthority extends Node:
 
 	func terrain_volume_chunk_revision(_key: Vector2i, _chunk_size: int) -> int:
 		return terrain_revision
+
+	func visible_world_underground_visuals_required() -> bool:
+		return underground_required
 
 var checks := {}
 
@@ -136,6 +141,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var main := ProductionAuthority.new()
 	main.seed_text = "ecology-realized-assembler-contract"
 	main.seed_hash = 83
+	main.underground_required = false
 	root.add_child(main)
 	var provider = Adapter.new()
 	var world_id := "seed:%s:%d" % [main.seed_text, main.seed_hash]
@@ -145,6 +151,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.5, 0.72, 0.42, 1.0)
 	var source_id := "%s:forage:adapter-prop" % main.seed_text
+	var underground_source_id := "%s:underground:adapter-prop" % main.seed_text
 	var prop_ledger: Object = null
 	var prop_chunk: Node3D = null
 	var setup_chunk_keys: Dictionary = {}
@@ -165,9 +172,11 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 			prop_chunk = chunk_owner
 			var mesh_digest := String(MeshFingerprint.inspect(mesh).get("contentDigest", ""))
 			var material_digest := Adapter._material_digest(material)
+			var prop_transform := Transform3D(Basis.IDENTITY, Vector3(2, 0, 2))
 			var candidate := {"sourceId":source_id, "propId":"adapter-prop",
 				"kind":"realized_static_prop", "category":"forage", "sourceKind":"forage",
-				"transform":Transform3D(Basis.IDENTITY, Vector3(2, 0, 2)),
+				"transform":prop_transform,
+				"localBounds":mesh.get_aabb() * prop_transform,
 				"renderStatus":"ready", "renderMembers":[{"memberId":"mushroom_cap",
 					"meshContentDigest":mesh_digest, "materialContentDigest":material_digest,
 					"transform":Transform3D.IDENTITY, "localBounds":mesh.get_aabb(),
@@ -176,6 +185,20 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 					"sourceRevision":source_revision, "terrainRevision":0,
 					"creatorOutputComplete":true}}
 			ledger.record_candidate(candidate)
+			var underground_candidate := {"sourceId":underground_source_id,
+				"propId":"adapter-underground-prop", "kind":"realized_static_prop",
+				"category":"underground_props", "sourceKind":"ore",
+				"transform":prop_transform,
+				"localBounds":mesh.get_aabb() * prop_transform,
+				"renderStatus":"ready", "renderMembers":[{"memberId":"underground_ore",
+					"meshContentDigest":mesh_digest, "materialContentDigest":material_digest,
+					"transform":Transform3D.IDENTITY, "localBounds":mesh.get_aabb(),
+					"materialKey":"forage", "renderLayer":"opaque"}],
+				"provenance":{"producer":"underground_exposed_floor_scan",
+					"chunk":chunk_key, "sourceRevision":source_revision,
+					"terrainRevision":0, "scanRevision":"fixture-floor-scan:0,0",
+					"creatorOutputComplete":true}}
+			ledger.record_candidate(underground_candidate)
 			ledger.record_candidate(_candidate(
 				"%s:detail:0,0:grass:0" % main.seed_text, 3.0, Color.WHITE, "grass"))
 			ledger.record_candidate(_candidate(
@@ -202,6 +225,12 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 				"materialKey":"forage", "renderLayer":"opaque"}
 			resource_binding.make_read_only()
 			resource_map[source_id + "|mushroom_cap"] = resource_binding
+			var underground_resource_binding := {"mesh":mesh, "material":material,
+				"meshContentDigest":String(MeshFingerprint.inspect(mesh).get("contentDigest", "")),
+				"materialContentDigest":Adapter._material_digest(material),
+				"materialKey":"forage", "renderLayer":"opaque"}
+			underground_resource_binding.make_read_only()
+			resource_map[underground_source_id + "|underground_ore"] = underground_resource_binding
 		resource_map.make_read_only()
 		chunk_owner.set_meta("static_ecology_render_resource_bindings", resource_map)
 	var roster := Roster.new()
@@ -212,10 +241,13 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 		world_id, [section_key])
 	var unsupported_detail_ids: Array[String] = [
 		"%s:detail:0,0:flowerBloom:0" % main.seed_text]
-	var unsupported_census_error_ids: Array[String] = []
-	for source_id_value: Variant in unsupported_provider_census.get("unsupportedCandidateIds", []):
-		unsupported_census_error_ids.append(String(source_id_value))
 	main.unsupported_flower_material = false
+	var direct_census := provider.capture_static_section_sources(world_id,
+		[section_key, interleaved_section_key])
+	main.underground_required = true
+	var underground_required_census := provider.capture_static_section_sources(
+		world_id, [section_key, interleaved_section_key])
+	main.underground_required = false
 	var census: Dictionary = roster.capture_sections([section_key, interleaved_section_key])
 	var initial_interleaved_ids: Array = census.get("expectedContributorsBySection", {}) \
 		.get(interleaved_section_key, [])
@@ -311,14 +343,16 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var section_removals: Array = tombstone_census.get("removalsBySection", {}) \
 		.get(section_key, [])
 	main.free()
-	return {"census":census, "expectedSources":expected_sources,
+	return {"census":census, "directCensus":direct_census,
+		"undergroundRequiredCensus":underground_required_census,
+		"undergroundSourceId":underground_source_id,
+		"expectedSources":expected_sources,
 		"interleavedSectionKey":interleaved_section_key,
 		"initialInterleavedIds":initial_interleaved_ids,
 		"interleavedCensus":interleaved_census,
 		"unsupportedCensus":unsupported_census,
 		"unsupportedProviderCensus":unsupported_provider_census,
 		"unsupportedDetailIds":unsupported_detail_ids,
-		"unsupportedCensusErrorIds":unsupported_census_error_ids,
 		"contribution":contribution_result, "assembled":assembled,
 		"sourceId":source_id, "manifestIds":manifest_ids,
 		"exactExpectedIds":exact_expected_ids, "exactManifestIds":exact_manifest_ids,
@@ -665,6 +699,10 @@ func run() -> void:
 		empty_answer.get("status") == "pending")
 	var realized_assembler_result := _run_realized_prop_assembler_contract()
 	var uncommitted_tree_result := _tree_without_committed_queue_geometry_stays_pending()
+	check("tree_membership_census_matches_partitioned_center_owners",
+		_tree_census_center_owner_matches_partitioner())
+	check("surface_detail_census_matches_partitioner_at_section_boundary",
+		_surface_detail_census_owner_matches_partitioner())
 	check("enumerated_tree_without_committed_queue_geometry_stays_pending",
 		uncommitted_tree_result.get("status") == "pending" \
 		and uncommitted_tree_result.get("reason") == "ecology_tree_queue_geometry_not_committed" \
@@ -676,12 +714,34 @@ func run() -> void:
 			realized_assembler_result.get("exactManifestIds", []) \
 		and realized_assembler_result.get("expectedSources", []).has(
 			String(realized_assembler_result.get("sourceId", ""))))
+	check("membership_census_does_not_prepare_section_geometry",
+		realized_assembler_result.get("directCensus", {}).get("status") == "complete" \
+		and realized_assembler_result.get("directCensus", {}).get("preparedSections", {}).is_empty() \
+		and realized_assembler_result.get("directCensus", {}).get("sections", {}).has(Vector3i.ZERO) \
+		and realized_assembler_result.get("directCensus", {}).get("sourceRevisions", {}).has(
+			String(realized_assembler_result.get("sourceId", ""))))
+	var direct_source_revisions: Dictionary = realized_assembler_result.get(
+		"directCensus", {}).get("sourceRevisions", {})
+	var underground_required_revisions: Dictionary = realized_assembler_result.get(
+		"undergroundRequiredCensus", {}).get("sourceRevisions", {})
+	var underground_source_id := String(realized_assembler_result.get(
+		"undergroundSourceId", ""))
+	check("surface_only_census_skips_underground_prop_and_keeps_surface_prop",
+		realized_assembler_result.get("directCensus", {}).get("status") == "complete" \
+		and direct_source_revisions.has(String(realized_assembler_result.get("sourceId", ""))) \
+		and not direct_source_revisions.has(underground_source_id))
+	check("underground_required_census_includes_underground_and_surface_props",
+		realized_assembler_result.get("undergroundRequiredCensus", {}).get("status") == "complete" \
+		and underground_required_revisions.has(String(realized_assembler_result.get("sourceId", ""))) \
+		and underground_required_revisions.has(underground_source_id))
 	check("unsupported_flower_keeps_mixed_grass_flower_roster_pending_with_exact_id",
 		realized_assembler_result.get("unsupportedCensus", {}).get("status") == "pending" \
-		and realized_assembler_result.get("unsupportedDetailIds", []) == \
-			realized_assembler_result.get("unsupportedCensusErrorIds", []) \
+		and realized_assembler_result.get("unsupportedProviderCensus", {}).get("status") == "pending" \
+		and realized_assembler_result.get("unsupportedProviderCensus", {}).get("reason") \
+			== "ecology_surface_detail_candidate_uncompiled" \
 		and realized_assembler_result.get("unsupportedProviderCensus", {}).get(
-			"unsupportedCandidateIds", []) == realized_assembler_result.get("unsupportedDetailIds", []))
+			"sourceId", "") == String(
+				realized_assembler_result.get("unsupportedDetailIds", [""])[0]))
 	check("conflicting_source_revision_cannot_be_silently_omitted_from_census",
 		realized_assembler_result.get("firstConflictMemberAccepted", false) \
 		and realized_assembler_result.get("conflictingRevisionRejected", false))
@@ -732,7 +792,6 @@ func run() -> void:
 		"uncommittedTreeReason":uncommitted_tree_result.get("reason", ""),
 		"uncommittedTreeSourceId":uncommitted_tree_result.get("sourceId", ""),
 		"unsupportedDetailIds":realized_assembler_result.get("unsupportedDetailIds", []),
-		"unsupportedCensusErrorIds":realized_assembler_result.get("unsupportedCensusErrorIds", []),
 		"unsupportedCensusReason":realized_assembler_result.get("unsupportedCensus", {}).get("reason", ""),
 		"exactExpectedIds":realized_assembler_result.get("exactExpectedIds", []),
 		"exactManifestIds":realized_assembler_result.get("exactManifestIds", []),
@@ -801,3 +860,89 @@ func _tree_without_committed_queue_geometry_stays_pending() -> Dictionary:
 	result = provider.capture_static_section_sources(world_id, [section_key])
 	main.free()
 	return result
+
+
+func _tree_census_center_owner_matches_partitioner() -> bool:
+	var mesh := BoxMesh.new()
+	var body := StaticBody3D.new()
+	root.add_child(body)
+	body.position = Vector3(18.0, 2.0, -4.0)
+	var transforms: Array[Transform3D] = [
+		Transform3D(Basis.IDENTITY, Vector3(-20.0, 0.0, 0.0)),
+		Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 0.0)),
+		Transform3D(Basis.IDENTITY, Vector3(20.0, 0.0, 24.0))]
+	var colors: Array[Color] = [Color.WHITE, Color.WHITE, Color.WHITE]
+	var custom_data: Array[Color] = [Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT]
+	transforms.make_read_only()
+	colors.make_read_only()
+	custom_data.make_read_only()
+	var member := {"mesh":mesh, "localTransform":Transform3D.IDENTITY,
+		"transforms":transforms, "colors":colors, "customData":custom_data}
+	member.make_read_only()
+	var members: Array[Dictionary] = [member]
+	members.make_read_only()
+	var publication := {"body":body,
+		"record":{"sectionValueMembers":members}}
+	var actual: Array[Vector3i] = Adapter.new()._tree_census_section_keys(publication)
+	var buffer: Array[float] = []
+	for transform: Transform3D in transforms:
+		buffer.append_array(InstanceAttributes.encode(transform, Color.TRANSPARENT, Color.WHITE))
+	buffer.make_read_only()
+	var input := {"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
+		"sourceId":"tree-census-partition-parity", "sourcePartId":"tree-census-partition-parity",
+		"sourceRevision":"tree-census-r1", "ownerCell":Vector2i.ZERO,
+		"batchKey":"tree-census-partition-batch", "segmentId":"tree-census-segment",
+		"sourceToWorld":body.global_transform, "meshLocalBounds":mesh.get_aabb(),
+		"buffer":buffer, "instanceCount":transforms.size()}
+	input.make_read_only()
+	var inputs: Array[Dictionary] = [input]
+	inputs.make_read_only()
+	var partition := Partitioner.partition(inputs)
+	if partition.get("status") != "ready":
+		return false
+	var expected: Array[Vector3i] = []
+	for output_value: Variant in partition.get("result", {}).get("outputs", []):
+		var key := Vector3i(output_value.get("sectionKey", Vector3i.ZERO))
+		if key not in expected:
+			expected.append(key)
+	actual.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	expected.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	body.free()
+	return actual == expected and expected.size() >= 2
+
+
+func _surface_detail_census_owner_matches_partitioner() -> bool:
+	var mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array([
+		Vector3(0.0, 0.2, 0.0), Vector3(0.2, 0.8, 0.0), Vector3(0.0, 0.8, 0.2)])
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var source_to_world := Transform3D(Basis.IDENTITY, Vector3(-16.0, 0.0, 0.0))
+	var local_transform := Transform3D(Basis.from_euler(Vector3(0.17, 0.31, -0.23)) \
+		.scaled(Vector3(1.3, 0.8, 1.1)), Vector3(31.5, 15.0, -0.5))
+	var expected := Adapter._surface_detail_census_section_key(
+		mesh, source_to_world, local_transform)
+	var buffer: Array[float] = []
+	buffer.append_array(InstanceAttributes.encode(local_transform, Color.TRANSPARENT, Color.WHITE))
+	buffer.make_read_only()
+	var input := {"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
+		"sourceId":"detail-boundary-parity", "sourcePartId":"detail-boundary-parity",
+		"sourceRevision":"detail-boundary-r1", "ownerCell":Vector2i.ZERO,
+		"batchKey":"detail-boundary-batch", "segmentId":"detail-boundary-segment",
+		"sourceToWorld":source_to_world, "meshLocalBounds":mesh.get_aabb(),
+		"buffer":buffer, "instanceCount":1}
+	input.make_read_only()
+	var inputs: Array[Dictionary] = [input]
+	inputs.make_read_only()
+	var partition := Partitioner.partition(inputs)
+	if partition.get("status") != "ready":
+		return false
+	var outputs: Array = partition.get("result", {}).get("outputs", [])
+	return outputs.size() == 1 and Vector3i(outputs[0].get("sectionKey", Vector3i.ZERO)) == expected

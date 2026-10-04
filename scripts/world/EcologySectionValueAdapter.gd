@@ -24,6 +24,9 @@ const REQUIRED_ECOLOGY_CATEGORIES := [
 	"forage",
 	"underground_props"
 ]
+const STATIC_PROP_CATEGORIES := ["surface_rocks", "ore", "forage", "underground_props"]
+const TREE_SECTION_SOURCE_REVISION_SCHEMA := "ecology-tree-section-source/v1"
+const STATIC_PROP_SECTION_SOURCE_REVISION_SCHEMA := "ecology-static-prop-section-source/v1"
 
 const SCHEMA := "ecology-section-value-adapter/v1"
 const PIPELINE_REVISION := "ecology_static_detail_pipeline/v1"
@@ -81,97 +84,143 @@ func capture_static_section_sources(world_id: String,
 	chunk_keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		if a.x != b.x: return a.x < b.x
 		return a.y < b.y)
-	var surface_detail_partitions: Array[Dictionary] = []
-	var static_prop_partitions: Array[Dictionary] = []
 	var source_revisions: Dictionary = {}
 	var members_by_section: Dictionary = {}
 	var tombstone_revision_by_source: Dictionary = {}
 	var authority_rows: Array = []
+	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
+	if not is_instance_valid(main):
+		return _pending("ecology_main_authority_unavailable")
+	var trees_by_prop_id := _current_tree_publications(main)
 	for chunk: Vector2i in chunk_keys:
-		var production := _capture_production_chunk(chunk)
+		var production := _capture_production_chunk(chunk, false)
 		if production.get("status") != "ready":
 			return production
 		var snapshot: Dictionary = production.snapshot
 		var removed_ids: Dictionary = production.get("removedPropIds", {})
+		var chunk_owner_instance_id := int(production.get("chunkOwnerInstanceId", 0))
+		var chunk_to_world: Transform3D = production.get("chunkToWorld", Transform3D.IDENTITY)
+		var chunk_candidates: Variant = snapshot.get("candidates", null)
+		if not chunk_candidates is Array:
+			return _pending("ecology_candidate_membership_snapshot_missing", {"chunk":chunk})
+		var category_missing := _missing_categories(snapshot,
+			bool(production.get("undergroundRequired", true)))
+		if not category_missing.is_empty():
+			return _pending("ecology_static_category_coverage_incomplete", {
+				"chunk":chunk, "missingCategories":category_missing})
+		var scoped_removal_snapshot: Dictionary = production.get("removedSnapshot", {})
+		var removal_identity := String(scoped_removal_snapshot.get("contentIdentity", ""))
+		if removal_identity.is_empty():
+			return _pending("ecology_removed_props_snapshot_identity_missing", {"chunk":chunk})
+		authority_rows.append([[chunk.x, chunk.y], chunk_owner_instance_id,
+			String(snapshot.get("contentRevision", "")),
+			String(snapshot.get("sourceRevision", "")), removal_identity])
 		for candidate_value: Variant in snapshot.get("candidates", []):
 			if not candidate_value is Dictionary:
+				return _pending("ecology_candidate_record_invalid", {"chunk":chunk})
+			var candidate: Dictionary = candidate_value
+			var candidate_kind := String(candidate.get("kind", ""))
+			if candidate_kind == "realized_static_prop" \
+					and String(candidate.get("category", "")) == "underground_props" \
+					and not bool(production.get("undergroundRequired", true)):
 				continue
-			var removed_candidate: Dictionary = candidate_value
-			var removed_prop_id := String(removed_candidate.get("propId", ""))
-			var removed_source_id := String(removed_candidate.get("sourceId", ""))
-			if not removed_prop_id.is_empty() and removed_ids.has(removed_prop_id) \
-					and not removed_source_id.is_empty():
-				tombstone_revision_by_source[removed_source_id] = _value_digest([
-					"ecology-removed-source/v1", world_id, removed_source_id, removed_prop_id])
-		var prepared: Dictionary = prepare_surface_detail(snapshot,
-			production.bindings, production.chunkToWorld, world_id,
-			production.unsupportedDetailTypes,
-			bool(production.get("undergroundRequired", true)), removed_ids)
-		if prepared.get("status") != "prepared" \
-				or not prepared.get("unsupportedCandidateIds", []).is_empty():
-			return _pending("ecology_surface_detail_candidate_unrenderable", {
-				"chunk":chunk,
-				"unsupportedCandidateIds":prepared.get("unsupportedCandidateIds", [])})
-		if not _tree_family_proof_valid(snapshot):
-			return _pending("ecology_tree_family_membership_proof_unavailable", {"chunk":chunk})
-		surface_detail_partitions.append(prepared)
-		var chunk_snapshot: Dictionary = production.snapshot
-		authority_rows.append([[chunk.x, chunk.y],
-			String(chunk_snapshot.get("contentRevision", "")),
-			String(chunk_snapshot.get("sourceRevision", ""))])
-		for output_value: Variant in prepared.get("partition", {}).get("outputs", []):
-			if output_value is Dictionary:
-				if not _append_section_member(members_by_section, source_revisions,
-					Vector3i(output_value.get("sectionKey", Vector3i.ZERO)),
-					String(output_value.get("sourceId", "")),
-					String(output_value.get("sourceRevision", ""))):
-					return _failed("ecology_section_source_revision_conflict")
-		var static_prepared := _prepare_realized_static_props(chunk_snapshot,
-			production.get("resourceBindings", {}), production.chunkToWorld, world_id,
-			bool(production.get("undergroundRequired", true)), removed_ids)
-		if static_prepared.get("status") != "ready":
-			return static_prepared
-		static_prop_partitions.append(static_prepared)
-		for input_value: Variant in static_prepared.get("inputs", []):
-			if input_value is Dictionary:
-				if not _append_section_member(members_by_section, source_revisions,
-					Vector3i(input_value.get("sectionKey", Vector3i.ZERO)),
-					String(input_value.get("sourceId", "")),
-					String(input_value.get("sourceRevision", ""))):
-					return _failed("ecology_section_source_revision_conflict")
-		var snapshot_candidates: Variant = chunk_snapshot.get("candidates", [])
-		for candidate_value: Variant in snapshot_candidates:
-			if not candidate_value is Dictionary \
-					or String(candidate_value.get("kind", "")) != "trees_foliage":
+			var source_id := String(candidate.get("sourceId", ""))
+			var prop_id := String(candidate.get("propId", ""))
+			if source_id.is_empty() or String(candidate.get("contentRevision", "")).is_empty() \
+					or _candidate_digest(candidate) != String(candidate.get("contentRevision", "")):
+				return _pending("ecology_candidate_membership_revision_invalid", {
+					"chunk":chunk, "sourceId":source_id})
+			if not prop_id.is_empty() and removed_ids.has(prop_id):
+				tombstone_revision_by_source[source_id] = _value_digest([
+					"ecology-removed-source/v1", world_id, source_id, prop_id])
 				continue
-			var tree_candidate: Dictionary = candidate_value
-			var tree_prop_id := String(tree_candidate.get("propId", ""))
-			if not tree_prop_id.is_empty() and removed_ids.has(tree_prop_id):
-				continue
-			var tree_capture := _capture_tree_candidate(candidate_value)
-			if tree_capture.get("status") != "ready":
-				return tree_capture
-			for section_key_value: Variant in tree_capture.get("sectionKeys", []):
-				if not _append_section_member(members_by_section, source_revisions,
-					Vector3i(section_key_value), String(tree_capture.get("sourceId", "")),
-					String(tree_capture.get("sourceRevision", ""))):
-					return _failed("ecology_section_source_revision_conflict")
-		for tombstone_value: Variant in chunk_snapshot.get("tombstones", []):
+			var candidate_revision := ""
+			var candidate_sections: Array[Vector3i] = []
+			match candidate_kind:
+				"surface_detail":
+					var transform_value: Variant = candidate.get("transform", null)
+					var bounds_value: Variant = candidate.get("localBounds", null)
+					var detail_mesh_value: Variant = _detail_candidate_mesh_if_current(main, candidate)
+					if not transform_value is Transform3D or not _valid_transform(transform_value) \
+							or not bounds_value is AABB or not _valid_bounds(bounds_value) \
+							or not detail_mesh_value is Mesh:
+						return _pending("ecology_surface_detail_candidate_uncompiled", {
+							"chunk":chunk, "sourceId":source_id})
+					# Match partition ownership from the exact source mesh bounds.
+					# Reversing the producer's transformed AABB is lossy for transformed bounds.
+					candidate_sections.append(_surface_detail_census_section_key(
+						detail_mesh_value as Mesh, chunk_to_world, transform_value))
+					candidate_revision = _value_digest([
+						"ecology-section-member/v1", world_id,
+						String(snapshot.get("sourceRevision", "")),
+						String(candidate.get("contentRevision", ""))])
+				"realized_static_prop":
+					var status := String(candidate.get("renderStatus", ""))
+					var transform_value: Variant = candidate.get("transform", null)
+					var bounds_value: Variant = candidate.get("localBounds", null)
+					var category := String(candidate.get("category", ""))
+					if status != "ready" or category not in STATIC_PROP_CATEGORIES \
+							or not transform_value is Transform3D or not _valid_transform(transform_value) \
+							or not bounds_value is AABB or not _valid_bounds(bounds_value) \
+							or not _static_prop_member_values_valid(candidate) \
+							or not _static_prop_resources_are_renderable(
+								production.get("resourceBindings", {}), candidate):
+						return _pending("ecology_static_prop_candidate_incomplete", {
+							"chunk":chunk, "sourceId":source_id})
+					for member_value: Variant in candidate.get("renderMembers", []):
+						var member: Dictionary = member_value
+						var member_transform: Transform3D = member.get("transform", Transform3D.IDENTITY)
+						var inverse_member_bounds: AABB = member.get("localBounds", AABB())
+						# Producer members store meshBounds * memberTransform. Reverse
+						# that inverse transform before following the runtime instance.
+						var member_mesh_bounds: AABB = member_transform * inverse_member_bounds
+						var member_world_transform: Transform3D = chunk_to_world * transform_value * member_transform
+						var member_world_bounds: AABB = member_world_transform * member_mesh_bounds
+						candidate_sections.append(Grid.key_for_world_position(
+							member_world_bounds.get_center()))
+					candidate_revision = _static_prop_source_revision(world_id, snapshot,
+						candidate)
+				"trees_foliage":
+					if not _tree_family_proof_valid(snapshot):
+						return _pending("ecology_tree_family_membership_proof_unavailable", {"chunk":chunk})
+					var transform_value: Variant = candidate.get("transform", null)
+					var bounds_value: Variant = candidate.get("localBounds", null)
+					if not transform_value is Transform3D or not _valid_transform(transform_value) \
+							or not bounds_value is AABB or not _valid_bounds(bounds_value):
+						return _pending("ecology_tree_membership_bounds_unavailable", {
+							"chunk":chunk, "sourceId":source_id})
+					var tree_prop_id := String(candidate.get("propId", ""))
+					var tree_publication: Dictionary = trees_by_prop_id.get(tree_prop_id, {})
+					var tree_revision := _tree_census_source_revision(candidate,
+						tree_publication)
+					if tree_revision.is_empty():
+						return _pending("ecology_tree_queue_geometry_not_committed", {
+							"chunk":chunk, "sourceId":source_id})
+					candidate_sections = _tree_census_section_keys(tree_publication)
+					if candidate_sections.is_empty():
+						return _pending("ecology_tree_queue_geometry_not_committed", {
+							"chunk":chunk, "sourceId":source_id})
+					candidate_revision = tree_revision
+				"_":
+					return _pending("ecology_candidate_kind_not_censusable", {
+						"chunk":chunk, "sourceId":source_id, "kind":candidate_kind})
+			if candidate_sections.is_empty():
+				return _pending("ecology_candidate_membership_bounds_empty", {
+					"chunk":chunk, "sourceId":source_id})
+			for section_key: Vector3i in candidate_sections:
+				if section_key in sections:
+					if not _append_section_member(members_by_section, source_revisions,
+						section_key, source_id, candidate_revision):
+						return _failed("ecology_section_source_revision_conflict")
+		for tombstone_value: Variant in snapshot.get("tombstones", []):
 			if tombstone_value is Dictionary:
 				var tombstone_source_id := String(tombstone_value.get("sourceId", ""))
 				if not tombstone_source_id.is_empty():
 					tombstone_revision_by_source[tombstone_source_id] = _value_digest([
 						"ecology-tombstone/v1", world_id, tombstone_source_id,
 						String(tombstone_value.get("reason", ""))])
-		var missing := _missing_categories(snapshot,
-			bool(production.get("undergroundRequired", true)))
-		if not missing.is_empty():
-			return _pending("ecology_static_category_coverage_incomplete", {
-				"chunk":chunk, "missingCategories":missing,
-				"surfaceDetailPrepared":prepared,
-				"surfaceDetailPartitions":surface_detail_partitions,
-				"staticPropPartitions":static_prop_partitions,
-				"sectionMembers":members_by_section})
+		if not _production_chunk_owner_is_current(main, chunk, production):
+			return _pending("ecology_chunk_owner_changed_during_census", {"chunk":chunk})
 	var section_rows: Dictionary = {}
 	var removals_by_section: Dictionary = {}
 	var current_by_section: Dictionary = {}
@@ -337,7 +386,7 @@ func capture_static_section_contribution(census: Dictionary,
 			var tree_capture := _capture_tree_candidate(candidate)
 			if tree_capture.get("status") != "ready":
 				return tree_capture
-			var tree_revision := String(tree_capture.get("sourceRevision", ""))
+			var tree_revision := _tree_section_source_revision(candidate, tree_capture)
 			if tree_revision.is_empty():
 				return _pending("ecology_tree_source_revision_missing", {"sourceId":source_id})
 			if represented_sources.has(source_id):
@@ -356,12 +405,13 @@ func capture_static_section_contribution(census: Dictionary,
 				var section_origin := Grid.origin_for_key(section_key)
 				var tree_input := {"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
 					"sourceId":source_id, "sourcePartId":source_id,
-					"sourceRevision":tree_revision,
 					"ownerCell":tree_segment.get("ownerCell", tree_capture.get("ownerCell", Vector2i.ZERO)),
 					"sourceToWorld":Transform3D(Basis.IDENTITY, Vector3(section_origin)),
+					"sourceRevision":tree_revision,
 					"meshLocalBounds":tree_segment.get("meshLocalBounds", AABB()),
 					"batchKey":String(tree_output.get("batchKey", "")),
-					"segmentId":String(tree_output.get("segmentId", "")),
+					"segmentId":"tree-section:" + _value_digest([
+						source_id, tree_revision, String(tree_output.get("segmentId", ""))]),
 					"buffer":tree_segment.get("buffer", []),
 					"instanceCount":int(tree_segment.get("instanceCount", 0))}
 				tree_input.make_read_only()
@@ -467,8 +517,12 @@ func _capture_tree_candidate(candidate: Dictionary) -> Dictionary:
 	var removed_snapshot := RemovedProps.capture_for_ids(main, [prop_id])
 	if not bool(removed_snapshot.get("ok", false)):
 		return _pending("ecology_tree_removed_props_snapshot_unavailable", {"sourceId":source_id})
-	return TreeAdapter.capture_from_queue_record(queue, main, _world_id, body,
-		removed_snapshot)
+	var captured: Dictionary = TreeAdapter.capture_from_queue_record(queue, main, _world_id,
+		body, removed_snapshot)
+	if captured.get("status") == "ready":
+		captured["bodyGlobalTransform"] = body.global_transform
+		captured["bodyInstanceId"] = body.get_instance_id()
+	return captured
 
 
 ## Build section-local instance inputs from the surface-detail records already
@@ -810,7 +864,8 @@ static func _compatibility(producer_material: String, material_key: String,
 	return result
 
 
-func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
+func _capture_production_chunk(chunk_key: Vector2i,
+		include_resource_bindings := true) -> Dictionary:
 	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
 	if not is_instance_valid(main):
 		return _pending("ecology_main_authority_unavailable", {"chunk":chunk_key})
@@ -858,6 +913,24 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 			"snapshotSourceRevision":String(snapshot.get("sourceRevision", "")),
 			"currentSourceRevision":String(main.call("_ecology_chunk_source_revision", chunk_key)),
 			"snapshotValidation":_validate_snapshot(snapshot)})
+	var removed_prop_ids: Dictionary = {}
+	for prop_id_value: Variant in removed_snapshot.get("ids", []):
+		removed_prop_ids[String(prop_id_value)] = true
+	removed_prop_ids.make_read_only()
+	if not include_resource_bindings:
+		var census_resource_bindings: Variant = chunk_node.get_meta(
+			"static_ecology_render_resource_bindings", {})
+		if not census_resource_bindings is Dictionary:
+			return _pending("ecology_static_prop_resource_binding_map_unavailable", {
+				"chunk":chunk_key})
+		return {"status":"ready", "snapshot":snapshot,
+			"chunkToWorld":chunk_node.global_transform,
+			"undergroundRequired":underground_required,
+			"removedPropIds":removed_prop_ids,
+			"removedSnapshot":removed_snapshot,
+			"resourceBindings":census_resource_bindings,
+			"chunkOwnerInstanceId":chunk_node.get_instance_id(),
+			"chunkOwner":weakref(chunk_node)}
 	var bindings: Dictionary = {}
 	var resource_bindings_value: Variant = chunk_node.get_meta(
 		"static_ecology_render_resource_bindings", {})
@@ -928,17 +1001,319 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 	unsupported_detail_types.sort()
 	if not RemovedProps.is_current_for_ids(main, removed_snapshot, candidate_prop_ids):
 		return _pending("ecology_removed_props_changed_during_capture", {"chunk":chunk_key})
-	var removed_prop_ids: Dictionary = {}
-	for prop_id_value: Variant in removed_snapshot.get("ids", []):
-		removed_prop_ids[String(prop_id_value)] = true
-	removed_prop_ids.make_read_only()
 	return {"status":"ready", "snapshot":snapshot, "bindings":bindings,
 		"resourceBindings":resource_bindings,
 		"chunkToWorld":chunk_node.global_transform,
 		"unsupportedDetailTypes":unsupported_detail_types,
 		"undergroundRequired":underground_required,
 		"removedPropIds":removed_prop_ids,
-		"chunkOwnerInstanceId":chunk_node.get_instance_id()}
+		"removedSnapshot":removed_snapshot,
+		"chunkOwnerInstanceId":chunk_node.get_instance_id(),
+		"chunkOwner":weakref(chunk_node)}
+
+
+## Build a census-only view of already committed tree queue records. No mesh
+## fingerprint, instance encoding, or section partition is performed here.
+func _current_tree_publications(main: Object) -> Dictionary:
+	var publications: Dictionary = {}
+	var queue: Variant = main.get("tree_publication_queue")
+	if not is_instance_valid(queue):
+		return publications
+	var records_value: Variant = queue.get("published_lod_records")
+	if not records_value is Array:
+		return publications
+	for record_value: Variant in records_value:
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value
+		var body_reference := record.get("body") as WeakRef
+		var body: Variant = body_reference.get_ref() if body_reference != null else null
+		var request: Variant = record.get("request", {})
+		if not is_instance_valid(body) or not body is StaticBody3D \
+				or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+				or not request is Dictionary:
+			continue
+		var prop_id := String((request as Dictionary).get("treeId", ""))
+		if prop_id.is_empty():
+			continue
+		if publications.has(prop_id):
+			publications[prop_id] = {"ambiguous":true}
+		else:
+			publications[prop_id] = {"record":record, "body":body}
+	return publications
+
+
+func _tree_census_source_revision(candidate: Dictionary,
+		publication: Dictionary) -> String:
+	if publication.is_empty() or bool(publication.get("ambiguous", false)):
+		return ""
+	var record_value: Variant = publication.get("record", null)
+	var body_value: Variant = publication.get("body", null)
+	if not record_value is Dictionary or not body_value is StaticBody3D:
+		return ""
+	var record: Dictionary = record_value
+	var body: StaticBody3D = body_value
+	var request: Variant = record.get("request", {})
+	var members: Variant = record.get("sectionValueMembers", null)
+	var tier := String(record.get("tier", ""))
+	var recipe_signature := String(record.get("recipeSignature", ""))
+	var prop_id := String(candidate.get("propId", ""))
+	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
+	if not is_instance_valid(main) or not request is Dictionary or prop_id.is_empty() \
+			or String((request as Dictionary).get("treeId", "")) != prop_id \
+			or String((request as Dictionary).get("worldSeed", "")) \
+				!= String(main.get("seed_text")) \
+			or String(body.get_meta("prop_id", "")) != prop_id \
+			or not ((request as Dictionary).get("treeWorldPosition", Vector3.INF) is Vector3) \
+			or not ((request as Dictionary).get("treeWorldPosition", Vector3.INF) as Vector3).is_equal_approx(body.global_position) \
+			or bool(record.get("rebuildPending", false)) \
+			or recipe_signature.is_empty() or tier.is_empty() \
+			or tier != String((request as Dictionary).get("renderLodTier", "")) \
+			or tier != String(body.get_meta("tree_render_lod_tier", "")) \
+			or recipe_signature != String(body.get_meta("tree_recipe_signature", "")) \
+			or String(body.get_meta("tree_visual_state", "")) != "published" \
+			or String(body.get_meta("visual_source", "")) != "procedural_tree_recipe" \
+			or not body.is_inside_tree() or body.is_queued_for_deletion() \
+			or not members is Array or not members.is_read_only() or members.is_empty():
+		return ""
+	var bole_count := 0
+	for member_value: Variant in members:
+		if not member_value is Dictionary or not member_value.is_read_only():
+			return ""
+		var member: Dictionary = member_value
+		var role := String(member.get("role", ""))
+		if role == "bole":
+			bole_count += 1
+		if role not in ["bole", "branches", "foliage"] \
+				or not member.get("mesh", null) is Mesh \
+				or not member.get("material", null) is Material \
+				or not member.get("localTransform", null) is Transform3D \
+				or not member.get("transforms", null) is Array \
+				or not member.get("colors", null) is Array \
+				or not member.get("customData", null) is Array:
+			return ""
+	if bole_count != 1:
+		return ""
+	var candidate_revision := String(candidate.get("contentRevision", ""))
+	if candidate_revision.is_empty():
+		return ""
+	var revision := _value_digest([TREE_SECTION_SOURCE_REVISION_SCHEMA, _world_id,
+		String(candidate.get("sourceId", "")), candidate_revision,
+		recipe_signature, tier, body.global_transform, body.get_instance_id()])
+	return revision if not revision.is_empty() else ""
+
+
+func _tree_section_source_revision(candidate: Dictionary,
+		captured: Dictionary) -> String:
+	var producer_revision := String(captured.get("producerRevision", ""))
+	var tier := String(captured.get("renderLodTier", ""))
+	var body_transform: Variant = captured.get("bodyGlobalTransform", null)
+	var body_instance_id := int(captured.get("bodyInstanceId", 0))
+	if producer_revision.is_empty() or tier.is_empty() \
+			or not body_transform is Transform3D or body_instance_id <= 0:
+		return ""
+	var candidate_revision := String(candidate.get("contentRevision", ""))
+	return _value_digest([TREE_SECTION_SOURCE_REVISION_SCHEMA, _world_id,
+		String(candidate.get("sourceId", "")), candidate_revision,
+		producer_revision, tier, body_transform, body_instance_id])
+
+
+## Census section ownership from committed queue values only. This mirrors the
+## shared partitioner's center rule without fingerprinting, encoding attributes,
+## building tree geometry, or invoking TreeAdapter.partition.
+func _tree_census_section_keys(publication: Dictionary) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	var body_value: Variant = publication.get("body", null)
+	var record_value: Variant = publication.get("record", null)
+	if not body_value is StaticBody3D or not record_value is Dictionary:
+		return result
+	var body: StaticBody3D = body_value
+	var record: Dictionary = record_value
+	var members_value: Variant = record.get("sectionValueMembers", null)
+	if not members_value is Array or not members_value.is_read_only():
+		return result
+	for member_value: Variant in members_value:
+		if not member_value is Dictionary:
+			return []
+		var member: Dictionary = member_value
+		var mesh_value: Variant = member.get("mesh", null)
+		var local_transform_value: Variant = member.get("localTransform", null)
+		var transforms_value: Variant = member.get("transforms", null)
+		var colors_value: Variant = member.get("colors", null)
+		var custom_data_value: Variant = member.get("customData", null)
+		if not mesh_value is Mesh or not local_transform_value is Transform3D \
+				or not (local_transform_value as Transform3D).is_finite() \
+				or not transforms_value is Array or not transforms_value.is_read_only() \
+				or not colors_value is Array or not colors_value.is_read_only() \
+				or not custom_data_value is Array or not custom_data_value.is_read_only() \
+				or transforms_value.size() == 0 \
+				or transforms_value.size() != colors_value.size() \
+				or transforms_value.size() != custom_data_value.size():
+			return []
+		var mesh_bounds: AABB = (mesh_value as Mesh).get_aabb()
+		if not _valid_bounds(mesh_bounds):
+			return []
+		for index: int in range(transforms_value.size()):
+			var member_transform_value: Variant = transforms_value[index]
+			if not member_transform_value is Transform3D \
+					or not (member_transform_value as Transform3D).is_finite() \
+					or not colors_value[index] is Color \
+					or not custom_data_value[index] is Color:
+				return []
+			var world_transform: Transform3D = body.global_transform \
+				* (local_transform_value as Transform3D) \
+				* (member_transform_value as Transform3D)
+			var world_bounds: AABB = world_transform * mesh_bounds
+			if not _valid_bounds(world_bounds):
+				return []
+			var section_key := Grid.key_for_world_position(world_bounds.get_center())
+			if section_key not in result:
+				result.append(section_key)
+	return result
+
+
+func _static_prop_source_revision(world_id: String, snapshot: Dictionary,
+		candidate: Dictionary) -> String:
+	var candidate_revision := String(candidate.get("contentRevision", ""))
+	var producer_revision := String(snapshot.get("sourceRevision", ""))
+	if candidate_revision.is_empty() or producer_revision.is_empty():
+		return ""
+	return _value_digest([STATIC_PROP_SECTION_SOURCE_REVISION_SCHEMA,
+		world_id, producer_revision, candidate_revision])
+
+
+func _static_prop_member_values_valid(candidate: Dictionary) -> bool:
+	var members: Variant = candidate.get("renderMembers", null)
+	var body_transform: Variant = candidate.get("transform", null)
+	if not members is Array or members.is_empty() or not body_transform is Transform3D \
+			or not _valid_transform(body_transform):
+		return false
+	var member_ids: Dictionary = {}
+	var union_bounds := AABB()
+	var has_bounds := false
+	for member_value: Variant in members:
+		if not member_value is Dictionary:
+			return false
+		var member: Dictionary = member_value
+		var member_id := String(member.get("memberId", ""))
+		var transform: Variant = member.get("transform", null)
+		var bounds: Variant = member.get("localBounds", null)
+		if member_id.is_empty() or member_ids.has(member_id) \
+				or String(member.get("meshContentDigest", "")).length() != 64 \
+				or String(member.get("materialContentDigest", "")).length() != 64 \
+				or not transform is Transform3D or not _valid_transform(transform) \
+				or not bounds is AABB or not _valid_bounds(bounds) \
+				or String(member.get("materialKey", "")).is_empty() \
+				or String(member.get("renderLayer", "")).is_empty():
+			return false
+		member_ids[member_id] = true
+		var transformed_bounds: AABB = bounds * (body_transform as Transform3D)
+		union_bounds = transformed_bounds if not has_bounds else union_bounds.merge(transformed_bounds)
+		has_bounds = true
+	return has_bounds and union_bounds.is_equal_approx(candidate.get("localBounds", AABB()))
+
+
+## Validate resource availability and declared layer without inspecting resource
+## contents. Fingerprints and stale-resource rejection remain contribution work.
+func _static_prop_resources_are_renderable(resource_bindings: Variant,
+		candidate: Dictionary) -> bool:
+	if not resource_bindings is Dictionary:
+		return false
+	var source_id := String(candidate.get("sourceId", ""))
+	for member_value: Variant in candidate.get("renderMembers", []):
+		if not member_value is Dictionary:
+			return false
+		var member: Dictionary = member_value
+		var member_id := String(member.get("memberId", ""))
+		var binding_value: Variant = resource_bindings.get(source_id + "|" + member_id, null)
+		if not binding_value is Dictionary or not binding_value.is_read_only():
+			return false
+		var mesh_value: Variant = binding_value.get("mesh", null)
+		var material_value: Variant = binding_value.get("material", null)
+		if not mesh_value is Mesh or not material_value is Material \
+				or String(binding_value.get("materialKey", "")) \
+					!= String(member.get("materialKey", "")) \
+				or _supported_ecology_layer(material_value,
+					String(member.get("renderLayer", ""))).is_empty():
+			return false
+	return true
+
+
+func _detail_candidate_mesh_if_current(main: Object, candidate: Dictionary) -> Mesh:
+	if not _detail_candidate_resource_is_current(main, candidate):
+		return null
+	var detail_type := String(candidate.get("detailType", ""))
+	var surface_index := int(candidate.get("surfaceIndex", -1))
+	var mesh: Variant = main.call("detail_mesh_surface", detail_type, surface_index) \
+		if surface_index >= 0 else main.call("detail_mesh", detail_type)
+	return mesh as Mesh if mesh is Mesh else null
+
+
+static func _surface_detail_census_section_key(mesh: Mesh,
+		source_to_world: Transform3D, local_transform: Transform3D) -> Vector3i:
+	return Grid.key_for_world_position(
+		source_to_world * local_transform * mesh.get_aabb().get_center())
+
+
+func _detail_candidate_resource_is_current(main: Object, candidate: Dictionary) -> bool:
+	var detail_type := String(candidate.get("detailType", ""))
+	var material_keys: Variant = candidate.get("materials", null)
+	var render_layers: Variant = candidate.get("renderLayers", null)
+	var mesh_source := String(candidate.get("meshSource", ""))
+	if detail_type.is_empty() or mesh_source.is_empty() \
+			or not material_keys is Array or material_keys.size() != 1 \
+			or not render_layers is Array or render_layers.size() != 1:
+		return false
+	var surface_index := int(candidate.get("surfaceIndex", -1))
+	var mesh: Variant = null
+	var material: Variant = null
+	var material_key := String(material_keys[0])
+	if surface_index >= 0:
+		if not main.has_method("detail_mesh_surface") \
+				or not main.has_method("detail_surface_material") \
+				or not main.has_method("detail_surface_material_key"):
+			return false
+		mesh = main.call("detail_mesh_surface", detail_type, surface_index)
+		material = main.call("detail_surface_material", detail_type, surface_index)
+		if String(main.call("detail_surface_material_key", detail_type,
+				surface_index)) != material_key:
+			return false
+	else:
+		if not main.has_method("detail_mesh") or not main.has_method("detail_material"):
+			return false
+		mesh = main.call("detail_mesh", detail_type)
+		material = main.call("detail_material", detail_type)
+	if not mesh is Mesh or not material is Material:
+		return false
+	if _supported_surface_detail_layer(material, String(render_layers[0])).is_empty():
+		return false
+	if surface_index >= 0 and (mesh as Mesh).get_surface_count() <= 0:
+		return false
+	var bounds_value: Variant = candidate.get("localBounds", null)
+	var transform_value: Variant = candidate.get("transform", null)
+	return bounds_value is AABB and transform_value is Transform3D \
+		and ((mesh as Mesh).get_aabb() * (transform_value as Transform3D)).is_equal_approx(bounds_value)
+
+
+func _production_chunk_owner_is_current(main: Object, chunk_key: Vector2i,
+		production: Dictionary) -> bool:
+	var chunks_value: Variant = main.get("chunks")
+	var owner_reference := production.get("chunkOwner") as WeakRef
+	var captured_owner: Variant = owner_reference.get_ref() if owner_reference != null else null
+	if not chunks_value is Dictionary or not is_instance_valid(captured_owner) \
+			or chunks_value.get(chunk_key, null) != captured_owner \
+			or int(production.get("chunkOwnerInstanceId", 0)) != captured_owner.get_instance_id():
+		return false
+	var current_snapshot: Variant = captured_owner.get_meta("static_ecology_source_value_snapshot", {})
+	var captured_snapshot: Variant = production.get("snapshot", {})
+	if not current_snapshot is Dictionary or not captured_snapshot is Dictionary \
+			or String(current_snapshot.get("contentRevision", "")) \
+				!= String(captured_snapshot.get("contentRevision", "")) \
+			or not RemovedProps.is_current_for_ids(main,
+				production.get("removedSnapshot", {}),
+				production.get("removedSnapshot", {}).get("checkedIds", [])):
+		return false
+	return true
 
 
 func _prepare_realized_static_props(snapshot: Dictionary, resource_bindings_value: Variant,
@@ -1045,8 +1420,7 @@ func _prepare_realized_static_props(snapshot: Dictionary, resource_bindings_valu
 				"sourceSection":Grid.key_for_world_position(chunk_to_world *
 					(body_transform_value * local_member_transform * mesh_bounds.get_center()))})
 		var producer_revision := String(snapshot.get("sourceRevision", ""))
-		var source_revision := _value_digest([SCHEMA, world_id, producer_revision,
-			candidate_revision, resolved_rows])
+		var source_revision := _static_prop_source_revision(world_id, snapshot, candidate)
 		if source_revision.is_empty():
 			return _failed("ecology_static_prop_source_revision_failed", {"sourceId":source_id})
 		if source_revisions.has(source_id) and String(source_revisions[source_id]) != source_revision:
