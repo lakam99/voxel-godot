@@ -1598,6 +1598,7 @@ func packet_publisher_validation_control() -> void:
 	check("packet_publisher_static_only_entry_rejects_geometry_family",not static_only_rejected.ready and static_only_rejected.reason=="physical_packet_static_only_family_present")
 	rejected_root.free()
 	var packet_root := Node3D.new()
+	packet_root.transform = parent.global_transform.affine_inverse() * Transform3D(Basis.IDENTITY,profile.origin)
 	parent.add_child(packet_root)
 	var begun: Dictionary = publisher.begin_physical_group_packet_scene(base_result.base,packet_result.packet,scene_result.blueprint,packet_root,Fixtures.BINDING,
 		{"batchStaticParts":true,"resumableScenePublication":true,"publicationSiteId":Fixtures.BINDING.siteId})

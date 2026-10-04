@@ -118,7 +118,14 @@ func _step(publisher) -> void:
 			instance.name = "ConstructionStaticVisualBatch"
 			instance.multimesh = _mesh
 			instance.material_override = _material
-			publisher.apply_static_visual_render_policy(instance,String(_groups[_keys[_group_index]].get("renderTier","structural")))
+			var group: Dictionary = _groups[_keys[_group_index]]
+			var tier := String(group.get("renderTier","structural"))
+			var owner_cell: Vector2i = group.get("ownerCell",Vector2i.ZERO)
+			var source_part_id := String(group.get("sourcePartId",""))
+			publisher.apply_static_visual_render_policy(instance,tier)
+			instance.set_meta("building_owner_cell",owner_cell)
+			instance.set_meta("building_source_part_id",source_part_id)
+			instance.set_meta("building_source_blueprint",publisher.source_blueprint_id)
 			parent.add_child(instance)
 			publisher.published_nodes.append(instance)
 			publisher.visual_batch_count += 1

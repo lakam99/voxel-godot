@@ -94,10 +94,26 @@ class PreparedPhysicalGroupPacket extends RefCounted:
 	var history_source_id := ""
 	var preparation_usec := 0
 	func matches(base: PreparedPublicationBase, expected_groups: Array[String]) -> bool:
-		return base != null and binding == base.binding and source_id == base.source_id \
-			and history_source_id == base.source_id and group_ids == expected_groups \
-			and binding.is_read_only() and building_entries.is_read_only() and furnishing_entries.is_read_only() \
-			and static_records.is_read_only()
+		if base == null: return false
+		if binding != base.binding or source_id != base.source_id or history_source_id != base.source_id \
+				or group_ids != expected_groups or not binding.is_read_only() \
+				or not building_entries.is_read_only() or not furnishing_entries.is_read_only() \
+				or not static_records.is_read_only(): return false
+		for id: String in building_entries:
+			var entry: Variant = building_entries[id]
+			var spatial: Variant = base.description.parts.get("building:"+id)
+			if not entry is Dictionary or not entry.is_read_only() or not spatial is Dictionary \
+					or not spatial.get("ownerCell") is Vector2i or not spatial.get("bounds") is AABB \
+					or entry.get("ownerCell") != spatial.ownerCell or entry.get("bounds") != spatial.bounds:
+				return false
+		for id: String in furnishing_entries:
+			var entry: Variant = furnishing_entries[id]
+			var spatial: Variant = base.description.parts.get("furnishing:"+id)
+			if not entry is Dictionary or not entry.is_read_only() or not spatial is Dictionary \
+					or not spatial.get("ownerCell") is Vector2i or not spatial.get("bounds") is AABB \
+					or entry.get("ownerCell") != spatial.ownerCell or entry.get("bounds") != spatial.bounds:
+				return false
+		return true
 
 class PreparedHistory extends RefCounted:
 	# Only the compiler constructs this certificate, after isolating and freezing
@@ -427,8 +443,13 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 			var jointed_family: Dictionary = jointed_families[id]
 			if jointed_family.get("binding") != source_binding: return _failed("stale_jointed_paving_member")
 			families["jointed_paving"] = jointed_family
+		var spatial_member: Variant = base.description.parts.get("building:"+id)
+		if not spatial_member is Dictionary or spatial_member.get("sourcePartId") != id \
+				or not spatial_member.get("ownerCell") is Vector2i or not spatial_member.get("bounds") is AABB:
+			return _failed("physical_group_spatial_member_missing")
 		families.make_read_only()
-		var entry := {"id":id,"binding":source_binding,"families":families}
+		var entry := {"id":id,"binding":source_binding,"families":families,
+			"ownerCell":spatial_member.ownerCell,"bounds":spatial_member.bounds}
 		entry.make_read_only()
 		entries[id] = entry
 	for index: int in restored.furnishingPlan.parts.size():
@@ -441,7 +462,12 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 		if not frozen_furnishing is Dictionary: return _failed("physical_group_furnishing_freeze_failed")
 		var furnishing_binding := static_record_binding(frozen_furnishing)
 		if furnishing_binding.is_empty(): return _failed("physical_group_furnishing_record_encoding_failed")
-		var furnishing_entry := {"id":furnishing_id,"binding":furnishing_binding,"record":frozen_furnishing}
+		var spatial_furnishing: Variant = base.description.parts.get("furnishing:"+furnishing_id)
+		if not spatial_furnishing is Dictionary or spatial_furnishing.get("sourcePartId") != furnishing_id \
+				or not spatial_furnishing.get("ownerCell") is Vector2i or not spatial_furnishing.get("bounds") is AABB:
+			return _failed("physical_group_furnishing_spatial_member_missing")
+		var furnishing_entry := {"id":furnishing_id,"binding":furnishing_binding,"record":frozen_furnishing,
+			"ownerCell":spatial_furnishing.ownerCell,"bounds":spatial_furnishing.bounds}
 		furnishing_entry.make_read_only()
 		furnishing_entries[furnishing_id] = furnishing_entry
 	entries.make_read_only()

@@ -395,6 +395,21 @@ func base_and_physical_packet() -> void:
 	check("packet_worker_result_matches_base",packet_taken.status=="consumed" and packet!=null and packet.matches(base,group_ids))
 	check("packet_worker_group_scope_value_keyed",packet!=null and packet.building_entries.has("packet-wall") \
 		and packet.building_entries.has("packet-paving") and packet.building_entries.has("packet-roof"))
+	if packet!=null and packet.building_entries.has("packet-wall"):
+		var wall_entry: Dictionary = packet.building_entries["packet-wall"]
+		var wall_spatial: Dictionary = base.description.parts["building:packet-wall"]
+		check("packet_worker_owner_cell_and_bounds_match_source",wall_entry.get("ownerCell") is Vector2i \
+			and wall_entry.ownerCell==wall_spatial.ownerCell and wall_entry.bounds==wall_spatial.bounds)
+		var old_entries: Dictionary = packet.building_entries
+		var tampered_entries := old_entries.duplicate()
+		var tampered_wall: Dictionary = wall_entry.duplicate()
+		tampered_wall.ownerCell+=Vector2i.ONE
+		tampered_wall.make_read_only()
+		tampered_entries["packet-wall"]=tampered_wall
+		tampered_entries.make_read_only()
+		packet.building_entries=tampered_entries
+		check("packet_worker_rejects_owner_cell_tamper",not packet.matches(base,group_ids))
+		packet.building_entries=old_entries
 	job.request_shutdown()
 	check("packet_worker_external_retirement_accepted",job.retire_external_payload({"base":base,"packet":packet,"navigationSource":navigation_source}))
 	base=null

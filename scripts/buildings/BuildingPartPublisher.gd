@@ -10,6 +10,8 @@ const SurfaceHistoryFieldScript := preload("res://scripts/buildings/SurfaceHisto
 # Existing review consumers access this public constant directly.
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const PublicationPreparation := preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
+const SpatialDependencies := preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
+const ChunkRenderPacketOwnerScript := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 const StaticBatchFlush := preload("res://scripts/buildings/BuildingStaticBatchFlush.gd")
 const MeshBatchUpload := preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublication.gd")
@@ -51,6 +53,8 @@ var static_visual_batches: Dictionary = {}
 var static_visual_collecting := false
 var static_visual_part_transform := Transform3D.IDENTITY
 var static_visual_part_tier := "structural"
+var static_visual_owner_cell := Vector2i.ZERO
+var static_visual_source_part_id := ""
 var static_visual_transform_count := 0
 var static_batch_peak_instances := 0
 var incremental_progress_callback: Callable
@@ -104,6 +108,8 @@ var _prepared_masonry_identity
 var _prepared_surfaces: Dictionary = {}
 var _prepared_surfaces_identity: Dictionary = _prepared_surfaces
 var _physical_packet_families_by_part_id: Dictionary = {}
+var _physical_packet_owner_cells_by_part_id: Dictionary = {}
+var _physical_packet_bindings_by_part_id: Dictionary = {}
 var _physical_packet_mode := false
 var _physical_packet_jointed_artifacts: Dictionary = {}
 # A packet scene is one retained owner. Later packet closures attach to this
@@ -247,9 +253,17 @@ func begin_physical_group_packet_scene(base: PublicationPreparation.PreparedPubl
 	_prepared_static_records=base.static_records
 	_prepared_static_bindings=base.static_record_bindings
 	_physical_packet_families_by_part_id={}
+	var owner_cells: Dictionary = {}
+	var member_bindings: Dictionary = {}
 	for id: String in packet.building_entries:
 		_physical_packet_families_by_part_id[id]=packet.building_entries[id].families
+		owner_cells[id]=packet.building_entries[id].ownerCell
+		member_bindings[id]=packet.building_entries[id].binding
 	_physical_packet_families_by_part_id.make_read_only()
+	owner_cells.make_read_only()
+	member_bindings.make_read_only()
+	_physical_packet_owner_cells_by_part_id=owner_cells
+	_physical_packet_bindings_by_part_id=member_bindings
 	_physical_packet_jointed_artifacts=hydrated_jointed.artifacts
 	_physical_packet_mode=true
 	_physical_packet_session_base=base
@@ -305,8 +319,15 @@ func attach_physical_group_packet_scene(base: PublicationPreparation.PreparedPub
 	var hydrated_jointed := _hydrate_physical_packet_jointed_artifacts(packet,blueprint)
 	if not hydrated_jointed.ready: return hydrated_jointed
 	var families := _physical_packet_families_by_part_id.duplicate()
-	for id: String in packet.building_entries: families[id]=packet.building_entries[id].families
+	var owner_cells := _physical_packet_owner_cells_by_part_id.duplicate()
+	var member_bindings := _physical_packet_bindings_by_part_id.duplicate()
+	for id: String in packet.building_entries:
+		families[id]=packet.building_entries[id].families
+		owner_cells[id]=packet.building_entries[id].ownerCell
+		member_bindings[id]=packet.building_entries[id].binding
 	families.make_read_only()
+	owner_cells.make_read_only()
+	member_bindings.make_read_only()
 	var jointed := _physical_packet_jointed_artifacts.duplicate()
 	for id: String in hydrated_jointed.artifacts: jointed[id]=hydrated_jointed.artifacts[id]
 	jointed.make_read_only()
@@ -314,6 +335,8 @@ func attach_physical_group_packet_scene(base: PublicationPreparation.PreparedPub
 	for id: String in selected: attached[id]=true
 	attached.make_read_only()
 	_physical_packet_families_by_part_id=families
+	_physical_packet_owner_cells_by_part_id=owner_cells
+	_physical_packet_bindings_by_part_id=member_bindings
 	_physical_packet_jointed_artifacts=jointed
 	_physical_packet_attached_part_ids=attached
 	var aperture_hydration := _begin_physical_packet_apertures(blueprint,packet)
@@ -551,6 +574,8 @@ func clear_published() -> void:
 	_prepared_surfaces={}
 	_prepared_surfaces_identity=_prepared_surfaces
 	_physical_packet_families_by_part_id={}
+	_physical_packet_owner_cells_by_part_id={}
+	_physical_packet_bindings_by_part_id={}
 	_physical_packet_jointed_artifacts={}
 	_physical_packet_mode=false
 	_physical_packet_session_base=null
@@ -600,6 +625,8 @@ func clear_published() -> void:
 	static_visual_collecting = false
 	static_visual_part_transform = Transform3D.IDENTITY
 	static_visual_part_tier = "structural"
+	static_visual_owner_cell = Vector2i.ZERO
+	static_visual_source_part_id = ""
 	static_visual_transform_count = 0
 	static_batch_peak_instances = 0
 	incremental_total_parts = 0
@@ -790,6 +817,15 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 func publish_static_part(part, parent: Node3D) -> void:
 	if not _paving_part_valid(part): return
 	if not _masonry_part_valid(part): return
+	var previous_owner_cell := static_visual_owner_cell
+	var previous_source_part_id := static_visual_source_part_id
+	var world_anchor: Vector3 = parent.global_transform * part.position
+	static_visual_owner_cell = _owner_cell_for_anchor(world_anchor)
+	static_visual_source_part_id = String(part.id)
+	if _physical_packet_mode and (not _physical_packet_owner_cells_by_part_id.has(String(part.id)) \
+			or _physical_packet_owner_cells_by_part_id[String(part.id)] != static_visual_owner_cell):
+		_paving_reject("physical_packet_owner_cell_mismatch")
+		return
 	# Static construction records remain the source of visual and collision facts;
 	# this only composes their publication under shared scene nodes. Doors keep
 	# their individual bodies because DoorPortalService owns their interaction and
@@ -836,6 +872,8 @@ func publish_static_part(part, parent: Node3D) -> void:
 		static_visual_collecting = false
 		static_visual_part_transform = Transform3D.IDENTITY
 		static_visual_part_tier = "structural"
+	static_visual_owner_cell = previous_owner_cell
+	static_visual_source_part_id = previous_source_part_id
 
 
 func static_collision_batch(parent: Node3D) -> StaticBody3D:
@@ -1834,10 +1872,14 @@ func add_box_visual(parent: Node3D, size: Vector3, position: Vector3, material: 
 func collect_static_visual_transform(transform: Transform3D, material: Material, custom_data := Color(0.5, 0.5, 0.5, 1.0)) -> void:
 	if material == null:
 		return
-	var key := "%s|%s"%[material.get_instance_id(),static_visual_part_tier]
+	var key := _static_visual_batch_key(material,static_visual_part_tier,static_visual_owner_cell,static_visual_source_part_id)
 	var group: Dictionary = static_visual_batches.get(key, {}) if static_visual_batches.get(key, {}) is Dictionary else {}
 	if group.is_empty():
-		group = {"material": material, "transforms": [], "customData": [], "renderTier":static_visual_part_tier}
+		group = {"material": material, "transforms": [], "customData": [], "renderTier":static_visual_part_tier,
+			"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id}
+	if group.get("ownerCell") != static_visual_owner_cell or String(group.get("sourcePartId","")) != static_visual_source_part_id:
+		_paving_reject("static_visual_batch_owner_cell_mismatch")
+		return
 	var transforms: Array = group.get("transforms", []) as Array
 	var custom_data_values: Array = group.get("customData", []) as Array
 	transforms.append(transform)
@@ -1849,15 +1891,29 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 
 func collect_prepared_static_visual_segment(segment, material: Material) -> void:
 	if material==null or segment.instanceCount==0: return
-	var key := "%s|%s"%[material.get_instance_id(),static_visual_part_tier]
+	var key := _static_visual_batch_key(material,static_visual_part_tier,static_visual_owner_cell,static_visual_source_part_id)
 	var group: Dictionary = static_visual_batches.get(key,{})
-	if group.is_empty(): group={"material":material,"transforms":[],"customData":[],"renderTier":static_visual_part_tier}
+	if group.is_empty(): group={"material":material,"transforms":[],"customData":[],"renderTier":static_visual_part_tier,
+		"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id}
+	if group.get("ownerCell") != static_visual_owner_cell or String(group.get("sourcePartId","")) != static_visual_source_part_id:
+		_paving_reject("prepared_static_batch_owner_cell_mismatch")
+		return
 	if not group.has("preparedSegments"): group.preparedSegments={}
 	group.preparedSegments[group.transforms.size()] = segment
 	group.transforms.append_array(segment.transforms)
 	group.customData.append_array(segment.customData)
 	static_visual_transform_count += segment.instanceCount
 	static_visual_batches[key] = group
+
+static func _static_visual_batch_key(material: Material, tier: String, owner_cell: Vector2i, source_part_id: String) -> String:
+	return "%s|%s|%d,%d|%s" % [material.get_instance_id(),tier,owner_cell.x,owner_cell.y,source_part_id]
+
+func _owner_cell_for_anchor(anchor: Vector3) -> Vector2i:
+	return Vector2i(floori(anchor.x/SpatialDependencies.OWNER_SIZE),floori(anchor.z/SpatialDependencies.OWNER_SIZE))
+
+
+func resolve_chunk_render_packet_backend(owner_cell: Vector2i) -> Dictionary:
+	return ChunkRenderPacketOwnerScript.resolve_current_scene_backend(owner_cell)
 
 
 func static_render_tier_for_part(part) -> String:

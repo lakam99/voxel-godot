@@ -2,6 +2,7 @@ extends "res://scripts/MainDiscoveryFlow.gd"
 
 const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 const ChunkPropSpawnPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
+const ChunkRenderPacketOwnerScript := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 
 var chunk_prop_spawn_queue_turn := 0
 var last_chunk_prop_spawn_key: Variant = null
@@ -1876,6 +1877,7 @@ func create_legacy_terrain_chunk_for_diagnostics(cx: int, cz: int, defer_props :
     chunk.name = "Chunk_%d_%d" % [cx, cz]
     chunk.position = Vector3(cx * CHUNK_SIZE * CELL, 0.0, cz * CHUNK_SIZE * CELL)
     chunk_root.add_child(chunk)
+    ChunkRenderPacketOwnerScript.attach_to_chunk(chunk)
 
     var assets_start: int = monitor.begin_section("chunk_assets") if monitor != null else Time.get_ticks_usec()
     var has_valid_cached_assets := chunk_asset_cache.has(chunk_key) and chunk_asset_cache_entry_valid(chunk_key, chunk_asset_cache[chunk_key])
@@ -1972,6 +1974,7 @@ func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := fal
     chunk.set_meta("terrain_authority", "VoxelTerrain")
     chunk.set_meta("terrain_geometry_owned_by_chunk", false)
     chunk_root.add_child(chunk)
+    ChunkRenderPacketOwnerScript.attach_to_chunk(chunk)
     chunks[chunk_key] = chunk
     if voxel_terrain_runtime != null and voxel_terrain_runtime.has_method("request_gameplay_chunk_publication"):
         voxel_terrain_runtime.call("request_gameplay_chunk_publication", chunk_key)

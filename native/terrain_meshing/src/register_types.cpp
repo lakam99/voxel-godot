@@ -5,6 +5,7 @@
 #include "native_world_backend_adapter.h"
 #include "native_cave_field_adapter.h"
 #include "chunk_static_render_backend.h"
+#include "chunk_render_packet_backend.h"
 
 #include <godot_cpp/godot.hpp>
 
@@ -20,6 +21,7 @@ void initialize_terrain_meshing_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<NativeEffectiveTerrainPage>();
 	ClassDB::register_class<NativeStructureExclusionChunk>();
 	ClassDB::register_class<ChunkStaticRenderBackend>();
+	ClassDB::register_class<ChunkRenderPacketBackend>();
 	register_building_support_kernel();
 }
 

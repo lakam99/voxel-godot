@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Live-game visual acceptance and unified revisioned static render packets remain unimplemented.**
+Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. A revision-bound native chunk packet owner is registered, and building source packets carry owner-cell/bounds metadata; production packet installation, readiness receipts, and live-game acceptance remain open.**
 
 ## Goal
 
@@ -256,6 +256,20 @@ reparenting a completed site batch: the current site job validates its root and
 publication witnesses. On replacement, retain the accepted old packet until the
 new owner confirms installation; on chunk unload, retire its packet while
 preserving source demand needed by still-visible intersecting cells.
+
+**Current worktree progress (2026-10-03):** `ChunkRenderPacketBackend` is
+registered in the native terrain extension with bounded staged packets,
+revision/digest receipts, explicit commit/abort/release, and attachment checks
+against the actual `Chunk_x_z` parent. Streamed chunk containers create this
+owner when the extension is available. Building worker entries now retain and
+validate the authoritative spatial dependency's owner cell and bounds; static
+batch grouping also preserves source-part identity. This is preparatory
+ownership data only: `BuildingStaticBatchFlush` still installs its normal
+site-root batches, and no production building packet yet uses the native owner
+or gates scene readiness on its receipt. Debug and release native builds pass;
+the owned worker contract passes 141 checks and the scene-job packet contract
+passes 606 checks. These synthetic contracts do not prove chunk rendering,
+readiness handoff, or live gameplay.
 
 The approved ordered architecture plan and maturity plan are maintained in the
 separate `voxel-godot-docs` repository at

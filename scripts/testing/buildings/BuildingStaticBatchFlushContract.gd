@@ -87,6 +87,39 @@ func run() -> void:
 	parent.free()
 	var lost: Dictionary = publisher._static_flush.advance(publisher,1)
 	check("parent_loss_fails",lost.status=="failed" and lost.reason=="static_flush_parent_lost")
+	var cell_parent := Node3D.new()
+	root.add_child(cell_parent)
+	var cell_publisher := RecordingPublisher.new()
+	var cell_material := StandardMaterial3D.new()
+	cell_publisher.static_visual_owner_cell=Vector2i(-1,0)
+	cell_publisher.collect_static_visual_transform(Transform3D(Basis.IDENTITY,Vector3(-43.3,0,0)),cell_material)
+	cell_publisher.static_visual_owner_cell=Vector2i.ZERO
+	cell_publisher.collect_static_visual_transform(Transform3D(Basis.IDENTITY,Vector3(0,0,0)),cell_material)
+	cell_publisher.static_visual_source_part_id="wall-a"
+	cell_publisher.collect_static_visual_transform(Transform3D(Basis.IDENTITY,Vector3(1,0,0)),cell_material)
+	cell_publisher.static_visual_source_part_id="wall-b"
+	cell_publisher.collect_static_visual_transform(Transform3D(Basis.IDENTITY,Vector3(2,0,0)),cell_material)
+	var observed_cells: Array[Vector2i]=[]
+	var observed_parts: Array[String]=[]
+	for group: Dictionary in cell_publisher.static_visual_batches.values():
+		observed_cells.append(group.ownerCell)
+		observed_parts.append(String(group.get("sourcePartId","")))
+	check("owner_cell_and_source_part_batches_are_partitioned",cell_publisher.static_visual_batches.size()==4 \
+		and observed_cells.has(Vector2i(-1,0)) and observed_cells.count(Vector2i.ZERO)==3 \
+		and observed_parts.has("wall-a") and observed_parts.has("wall-b"))
+	cell_publisher._begin_static_flush(cell_parent,false)
+	while cell_publisher.has_pending_static_flush(): cell_publisher.advance_static_flush(cell_parent,4000)
+	var installed_cells: Array[Vector2i]=[]
+	var installed_parts: Array[String]=[]
+	for visual: Node in cell_publisher.published_nodes:
+		if visual is MultiMeshInstance3D:
+			installed_cells.append(visual.get_meta("building_owner_cell",Vector2i(99,99)))
+			installed_parts.append(String(visual.get_meta("building_source_part_id","")))
+	check("owner_cell_flush_receipts_retain_partition",installed_cells.size()==4 \
+		and installed_cells.has(Vector2i(-1,0)) and installed_cells.count(Vector2i.ZERO)==3 \
+		and installed_parts.has("wall-a") and installed_parts.has("wall-b"))
+	cell_publisher.clear_published()
+	cell_parent.free()
 	stale_and_pending_controls()
 	failed_preparation_ownership()
 	metadata_cache_controls()
