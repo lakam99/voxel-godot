@@ -92,10 +92,21 @@ func capture_static_section_sources(world_id: String,
 		if production.get("status") != "ready":
 			return production
 		var snapshot: Dictionary = production.snapshot
+		var removed_ids: Dictionary = production.get("removedPropIds", {})
+		for candidate_value: Variant in snapshot.get("candidates", []):
+			if not candidate_value is Dictionary:
+				continue
+			var removed_candidate: Dictionary = candidate_value
+			var removed_prop_id := String(removed_candidate.get("propId", ""))
+			var removed_source_id := String(removed_candidate.get("sourceId", ""))
+			if not removed_prop_id.is_empty() and removed_ids.has(removed_prop_id) \
+					and not removed_source_id.is_empty():
+				tombstone_revision_by_source[removed_source_id] = _value_digest([
+					"ecology-removed-source/v1", world_id, removed_source_id, removed_prop_id])
 		var prepared: Dictionary = prepare_surface_detail(snapshot,
 			production.bindings, production.chunkToWorld, world_id,
 			production.unsupportedDetailTypes,
-			bool(production.get("undergroundRequired", true)))
+			bool(production.get("undergroundRequired", true)), removed_ids)
 		if prepared.get("status") != "prepared" \
 				or not prepared.get("unsupportedCandidateIds", []).is_empty():
 			return _pending("ecology_surface_detail_candidate_unrenderable", {
@@ -117,7 +128,7 @@ func capture_static_section_sources(world_id: String,
 					return _failed("ecology_section_source_revision_conflict")
 		var static_prepared := _prepare_realized_static_props(chunk_snapshot,
 			production.get("resourceBindings", {}), production.chunkToWorld, world_id,
-			bool(production.get("undergroundRequired", true)))
+			bool(production.get("undergroundRequired", true)), removed_ids)
 		if static_prepared.get("status") != "ready":
 			return static_prepared
 		static_prop_partitions.append(static_prepared)
@@ -133,6 +144,10 @@ func capture_static_section_sources(world_id: String,
 			if not candidate_value is Dictionary \
 					or String(candidate_value.get("kind", "")) != "trees_foliage":
 				continue
+			var tree_candidate: Dictionary = candidate_value
+			var tree_prop_id := String(tree_candidate.get("propId", ""))
+			if not tree_prop_id.is_empty() and removed_ids.has(tree_prop_id):
+				continue
 			var tree_capture := _capture_tree_candidate(candidate_value)
 			if tree_capture.get("status") != "ready":
 				return tree_capture
@@ -147,7 +162,6 @@ func capture_static_section_sources(world_id: String,
 				if not tombstone_source_id.is_empty():
 					tombstone_revision_by_source[tombstone_source_id] = _value_digest([
 						"ecology-tombstone/v1", world_id, tombstone_source_id,
-						int(chunk_snapshot.get("removedPropsRevision", -1)),
 						String(tombstone_value.get("reason", ""))])
 		var missing := _missing_categories(snapshot,
 			bool(production.get("undergroundRequired", true)))
@@ -247,10 +261,11 @@ func capture_static_section_contribution(census: Dictionary,
 		var production := _capture_production_chunk(chunk)
 		if production.get("status") != "ready":
 			return production
+		var removed_ids: Dictionary = production.get("removedPropIds", {})
 		var prepared := prepare_surface_detail(production.snapshot,
 			production.bindings, production.chunkToWorld, _world_id,
 			production.unsupportedDetailTypes,
-			bool(production.get("undergroundRequired", true)))
+			bool(production.get("undergroundRequired", true)), removed_ids)
 		if prepared.get("status") != "prepared" \
 				or not prepared.get("unsupportedCandidateIds", []).is_empty():
 			return _pending("ecology_surface_detail_candidate_unrenderable", {
@@ -274,7 +289,7 @@ func capture_static_section_contribution(census: Dictionary,
 				prepared.get("sourceRevisions", {}).get(source_id, ""))
 		var static_prepared := _prepare_realized_static_props(production.snapshot,
 			production.get("resourceBindings", {}), production.chunkToWorld, _world_id,
-			bool(production.get("undergroundRequired", true)))
+			bool(production.get("undergroundRequired", true)), removed_ids)
 		if static_prepared.get("status") != "ready":
 			return static_prepared
 		for input_value: Variant in static_prepared.get("inputs", []):
@@ -314,6 +329,9 @@ func capture_static_section_contribution(census: Dictionary,
 				continue
 			var candidate: Dictionary = candidate_value
 			var source_id := String(candidate.get("sourceId", ""))
+			var prop_id := String(candidate.get("propId", ""))
+			if not prop_id.is_empty() and removed_ids.has(prop_id):
+				continue
 			if not provider_sources.has(source_id):
 				continue
 			var tree_capture := _capture_tree_candidate(candidate)
@@ -446,7 +464,7 @@ func _capture_tree_candidate(candidate: Dictionary) -> Dictionary:
 			break
 	if not is_instance_valid(body):
 		return _pending("ecology_tree_queue_geometry_not_committed", {"sourceId":source_id})
-	var removed_snapshot := RemovedProps.capture(main)
+	var removed_snapshot := RemovedProps.capture_for_ids(main, [prop_id])
 	if not bool(removed_snapshot.get("ok", false)):
 		return _pending("ecology_tree_removed_props_snapshot_unavailable", {"sourceId":source_id})
 	return TreeAdapter.capture_from_queue_record(queue, main, _world_id, body,
@@ -461,7 +479,7 @@ func _capture_tree_candidate(candidate: Dictionary) -> Dictionary:
 static func prepare_surface_detail(snapshot: Dictionary, binding_by_source: Dictionary,
 		chunk_to_world := Transform3D.IDENTITY, world_id := "",
 		unsupported_detail_types: Array[String] = [],
-		underground_required := true) -> Dictionary:
+		underground_required := true, removed_prop_ids: Dictionary = {}) -> Dictionary:
 	var validation := _validate_snapshot(snapshot)
 	if validation.get("status") != "ready":
 		return validation
@@ -490,6 +508,9 @@ static func prepare_surface_detail(snapshot: Dictionary, binding_by_source: Dict
 		if not candidate_value is Dictionary:
 			return _failed("invalid_ecology_candidate")
 		var candidate: Dictionary = candidate_value
+		var prop_id := String(candidate.get("propId", ""))
+		if not prop_id.is_empty() and removed_prop_ids.has(prop_id):
+			continue
 		if String(candidate.get("kind", "")) != "surface_detail":
 			continue
 		var source_id := String(candidate.get("sourceId", ""))
@@ -519,7 +540,7 @@ static func prepare_surface_detail(snapshot: Dictionary, binding_by_source: Dict
 			continue
 		var bound_candidate_revision := _value_digest([
 			"ecology-section-member/v1", world_id, source_revision,
-			int(snapshot.get("removedPropsRevision", -1)), candidate_revision])
+			candidate_revision])
 		if bound_candidate_revision.is_empty():
 			return _failed("surface_detail_bound_revision_failed")
 		var binding_key := _binding_key(mesh_source, String(material_values[0]))
@@ -803,6 +824,16 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 	if not snapshot_value is Dictionary:
 		return _pending("ecology_chunk_source_snapshot_missing_or_stale", {"chunk":chunk_key})
 	var snapshot: Dictionary = snapshot_value
+	var candidate_prop_ids: Array[String] = []
+	for candidate_value: Variant in snapshot.get("candidates", []):
+		if not candidate_value is Dictionary:
+			continue
+		var candidate_prop_id := String(candidate_value.get("propId", ""))
+		if not candidate_prop_id.is_empty() and candidate_prop_id not in candidate_prop_ids:
+			candidate_prop_ids.append(candidate_prop_id)
+	var removed_snapshot := RemovedProps.capture_for_ids(main, candidate_prop_ids)
+	if not bool(removed_snapshot.get("ok", false)):
+		return _pending("ecology_removed_props_snapshot_unavailable", {"chunk":chunk_key})
 	var underground_required := true
 	if main.has_method("visible_world_underground_visuals_required"):
 		underground_required = bool(main.call("visible_world_underground_visuals_required"))
@@ -818,8 +849,7 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 			or int(snapshot.get("producerOwnerInstanceId", 0)) != chunk_node.get_instance_id() \
 			or String(snapshot.get("worldSeed", "")) != String(main.get("seed_text")) \
 			or String(snapshot.get("sourceRevision", "")) != String(main.call(
-				"_ecology_chunk_source_revision", chunk_key)) \
-			or int(snapshot.get("removedPropsRevision", -1)) != int(main.get("removed_props_revision")):
+				"_ecology_chunk_source_revision", chunk_key)):
 		return _pending("ecology_chunk_source_snapshot_revision_stale", {"chunk":chunk_key,
 			"snapshotProducerOwnerInstanceId":int(snapshot.get("producerOwnerInstanceId", 0)),
 			"currentProducerOwnerInstanceId":chunk_node.get_instance_id(),
@@ -896,17 +926,24 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 			detail_bindings[binding_identity] = true
 	bindings.make_read_only()
 	unsupported_detail_types.sort()
+	if not RemovedProps.is_current_for_ids(main, removed_snapshot, candidate_prop_ids):
+		return _pending("ecology_removed_props_changed_during_capture", {"chunk":chunk_key})
+	var removed_prop_ids: Dictionary = {}
+	for prop_id_value: Variant in removed_snapshot.get("ids", []):
+		removed_prop_ids[String(prop_id_value)] = true
+	removed_prop_ids.make_read_only()
 	return {"status":"ready", "snapshot":snapshot, "bindings":bindings,
 		"resourceBindings":resource_bindings,
 		"chunkToWorld":chunk_node.global_transform,
 		"unsupportedDetailTypes":unsupported_detail_types,
 		"undergroundRequired":underground_required,
+		"removedPropIds":removed_prop_ids,
 		"chunkOwnerInstanceId":chunk_node.get_instance_id()}
 
 
 func _prepare_realized_static_props(snapshot: Dictionary, resource_bindings_value: Variant,
 		chunk_to_world: Transform3D, world_id: String,
-		underground_required := true) -> Dictionary:
+		underground_required := true, removed_prop_ids: Dictionary = {}) -> Dictionary:
 	if not resource_bindings_value is Dictionary or not resource_bindings_value.is_read_only():
 		return _pending("ecology_static_prop_resource_binding_map_unsealed", {
 			"chunk":snapshot.get("chunk", Vector2i.ZERO)})
@@ -922,6 +959,9 @@ func _prepare_realized_static_props(snapshot: Dictionary, resource_bindings_valu
 			continue
 		var candidate: Dictionary = candidate_value
 		var source_id := String(candidate.get("sourceId", ""))
+		var prop_id := String(candidate.get("propId", ""))
+		if not prop_id.is_empty() and removed_prop_ids.has(prop_id):
+			continue
 		if String(candidate.get("category", "")) == "underground_props" \
 				and not underground_required:
 			continue
@@ -1006,7 +1046,7 @@ func _prepare_realized_static_props(snapshot: Dictionary, resource_bindings_valu
 					(body_transform_value * local_member_transform * mesh_bounds.get_center()))})
 		var producer_revision := String(snapshot.get("sourceRevision", ""))
 		var source_revision := _value_digest([SCHEMA, world_id, producer_revision,
-			int(snapshot.get("removedPropsRevision", -1)), candidate_revision, resolved_rows])
+			candidate_revision, resolved_rows])
 		if source_revision.is_empty():
 			return _failed("ecology_static_prop_source_revision_failed", {"sourceId":source_id})
 		if source_revisions.has(source_id) and String(source_revisions[source_id]) != source_revision:

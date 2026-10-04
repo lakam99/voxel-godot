@@ -44,10 +44,11 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 	if not is_instance_valid(queue) or not queue is QueueScript \
 			or not is_instance_valid(main) or not is_instance_valid(body):
 		return _pending("tree_capture_authority_missing")
-	if world_id.strip_edges().is_empty() or not bool(removed_snapshot.get("ok", false)) \
-			or not RemovedProps.is_current(main, removed_snapshot):
-		return _pending("tree_removed_props_snapshot_stale")
 	var prop_id := String(body.get_meta("prop_id", ""))
+	if world_id.strip_edges().is_empty() or prop_id.is_empty() \
+			or not bool(removed_snapshot.get("ok", false)) \
+			or not RemovedProps.is_current_for_ids(main, removed_snapshot, [prop_id]):
+		return _pending("tree_removed_props_snapshot_stale")
 	var seed := String(removed_snapshot.get("seed", ""))
 	if prop_id.is_empty() or seed.is_empty():
 		return _pending("tree_stable_identity_missing")
@@ -57,8 +58,7 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 		return {"status":"empty", "reason":"tree_authoritative_tombstone",
 			"schema":SCHEMA, "worldId":world_id, "sourceId":source_id,
 			"sourcePartId":source_id, "sourceRevision":_tombstone_revision(
-				world_id, source_id, int(removed_snapshot.get("revision", -1))),
-			"removedPropsRevision":int(removed_snapshot.get("revision", -1))}
+				world_id, source_id, prop_id), "propId":prop_id}
 	if not body.is_inside_tree() or body.is_queued_for_deletion() \
 			or bool(body.get_meta("tree_publication_cancelled", false)) \
 			or String(body.get_meta("tree_visual_state", "")) != "published" \
@@ -128,7 +128,7 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 			{"sourceId":source_id})
 	var owner_cell := Grid.logical_owner_cell_for_world_position(body.global_position)
 	var captured := _prepare_members(body, source_id, world_id, seed, expected_signature,
-		int(removed_snapshot.get("revision", -1)), owner_cell, tier, members)
+		owner_cell, tier, members)
 	if captured.get("status") != "ready":
 		return captured
 	return captured
@@ -208,7 +208,7 @@ static func _validate_recipe_members(recipe: Dictionary, members: Dictionary) ->
 
 
 static func _prepare_members(body: StaticBody3D, source_id: String, world_id: String,
-		seed: String, recipe_signature: String, removed_revision: int, owner_cell: Vector2i,
+		seed: String, recipe_signature: String, owner_cell: Vector2i,
 		tier: String, members: Dictionary) -> Dictionary:
 	var member_rows: Array[Dictionary] = []
 	var compatibility_by_key := {}
@@ -305,7 +305,7 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	material_bindings.make_read_only()
 	var inputs: Array[Dictionary] = []
 	var source_revision := _source_revision(world_id, seed, source_id,
-		recipe_signature, removed_revision, tier, owner_cell, body.global_transform, member_rows)
+		recipe_signature, tier, owner_cell, body.global_transform, member_rows)
 	if source_revision.is_empty():
 		return _pending("tree_source_revision_failed", {"sourceId":source_id})
 	for row_value: Variant in member_rows:
@@ -341,7 +341,7 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	return {"status":"ready", "schema":SCHEMA, "worldId":world_id,
 		"sourceId":source_id, "sourcePartId":source_id,
 		"sourceRevision":source_revision, "producerRevision":recipe_signature,
-		"removedPropsRevision":removed_revision, "ownerCell":owner_cell,
+		"ownerCell":owner_cell,
 		"bodyInstanceId":body.get_instance_id(), "renderLodTier":tier,
 		"memberRows":member_rows, "inputs":inputs, "partition":partition,
 		"sectionKeys":section_keys, "compatibilityByKey":compatibility_by_key,
@@ -408,10 +408,10 @@ static func _digest_value_supported(value: Variant) -> bool:
 
 
 static func _source_revision(world_id: String, seed: String, source_id: String,
-		recipe_signature: String, removed_revision: int, tier: String,
+		recipe_signature: String, tier: String,
 		owner_cell: Vector2i, source_to_world: Transform3D, rows: Array[Dictionary]) -> String:
 	var parts: Array = [SCHEMA, world_id, seed, source_id, recipe_signature,
-		removed_revision, tier, owner_cell, source_to_world]
+		tier, owner_cell, source_to_world]
 	for row: Dictionary in rows:
 		parts.append([row.role, row.meshContentDigest,
 			row.materialContentDigest, row.compatibilityKey,
@@ -423,9 +423,9 @@ static func _source_revision(world_id: String, seed: String, source_id: String,
 	return context.finish().hex_encode()
 
 
-static func _tombstone_revision(world_id: String, source_id: String, removed_revision: int) -> String:
+static func _tombstone_revision(world_id: String, source_id: String, prop_id: String) -> String:
 	return Marshalls.raw_to_base64(var_to_bytes([SCHEMA, world_id, source_id,
-		removed_revision, "removed"])).sha256_text()
+		prop_id, "removed"])).sha256_text()
 
 
 static func _valid_transform(value: Transform3D) -> bool:

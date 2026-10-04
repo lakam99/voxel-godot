@@ -182,6 +182,9 @@ func run() -> void:
 	var captured := _make_capture(queue, authority, body, recipe, world_id)
 	var queue_capture := Adapter.capture_from_queue_record(queue, authority,
 		world_id, body, RemovedProps.capture(authority))
+	authority.removed_props["unrelated-prop-from-another-chunk"] = true
+	authority.removed_props_revision += 1
+	var unrelated_removal_capture := _make_capture(queue, authority, body, recipe, world_id)
 	var partition: Dictionary = captured.get("partition", {})
 	var expected_instances := 3 # one bole, one branch, one foliage cluster
 	check("exact_queue_acknowledged_recipe_membership_partitions_every_draw_instance",
@@ -193,6 +196,9 @@ func run() -> void:
 		queue_capture.get("status") == "ready" \
 		and queue_capture.get("sourceRevision", "") == captured.get("sourceRevision", "") \
 		and queue_capture.get("inputs", []).size() == captured.get("inputs", []).size())
+	check("unrelated_durable_removal_does_not_revise_tree_geometry",
+		unrelated_removal_capture.get("status") == "ready" \
+		and unrelated_removal_capture.get("sourceRevision", "") == captured.get("sourceRevision", ""))
 	check("branch_and_foliage_custom_data_survive_shared_20_float_abi",
 		captured.get("status") == "ready" \
 		and captured.get("inputs", []).all(func(input: Dictionary) -> bool:

@@ -8,6 +8,7 @@ const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Roster := preload("res://scripts/world/StaticSectionSourceRoster.gd")
 const Assembler := preload("res://scripts/world/WorldStaticSectionCandidateAssembler.gd")
 const TreeQueue := preload("res://scripts/environment/TreePublicationQueue.gd")
+const RemovedProps := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 
 class ProductionAuthority extends Node:
 	var seed_text := "ecology-production-contract"
@@ -70,9 +71,10 @@ func _candidate(source_id: String, x: float, instance_color: Color,
 
 
 func _snapshot(rows: Array, seed := "ecology-adapter-contract",
-		producer_revision := "detail-producer-revision-1") -> Dictionary:
+		producer_revision := "detail-producer-revision-1",
+		chunk_key := Vector2i.ZERO) -> Dictionary:
 	var ledger = Ledger.new()
-	ledger.configure(seed, Vector2i.ZERO, producer_revision, 0)
+	ledger.configure(seed, chunk_key, producer_revision, 0)
 	for row: Dictionary in rows:
 		if not ledger.record_candidate(row):
 			return {}
@@ -218,6 +220,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var initial_interleaved_ids: Array = census.get("expectedContributorsBySection", {}) \
 		.get(interleaved_section_key, [])
 	var interleaved_census: Dictionary = roster.capture_sections([interleaved_section_key])
+	var latest_after_initial_census: Dictionary = provider._latest_by_section.duplicate(true)
 	var expected_sources: Array = census.get("expectedContributorsBySection", {}) \
 		.get(section_key, [])
 	var contribution_result: Dictionary = provider.capture_static_section_contribution(
@@ -253,6 +256,23 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var translucent_census: Dictionary = roster.capture_sections([section_key])
 	var translucent_layer_fails_closed := Adapter._supported_ecology_layer(material, "opaque").is_empty()
 	material.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+	main.removed_props["adapter-prop"] = true
+	main.removed_props_revision += 1
+	var dynamic_removal_census: Dictionary = roster.capture_sections(
+		[section_key, interleaved_section_key])
+	var dynamic_removals: Array = dynamic_removal_census.get("removalsBySection", {}) \
+		.get(section_key, [])
+	var dynamic_expected: Array = dynamic_removal_census.get(
+		"expectedContributorsBySection", {}).get(section_key, [])
+	var unaffected_revisions_stable := true
+	for unaffected_source_id_value: Variant in expected_sources:
+		var unaffected_source_id := String(unaffected_source_id_value)
+		if unaffected_source_id == source_id:
+			continue
+		if not census.get("sourceRevisions", {}).has(unaffected_source_id) \
+				or String(census.sourceRevisions[unaffected_source_id]) != String(
+					dynamic_removal_census.get("sourceRevisions", {}).get(unaffected_source_id, "")):
+			unaffected_revisions_stable = false
 	main.removed_props_revision = 1
 	prop_ledger = Ledger.new()
 	prop_ledger.configure(main.seed_text, Vector2i.ZERO,
@@ -286,6 +306,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 		other_snapshot.erase("contentRevision")
 		other_snapshot["contentRevision"] = Adapter._value_digest(other_snapshot)
 		owner.set_meta("static_ecology_source_value_snapshot", other_snapshot)
+	provider._latest_by_section = latest_after_initial_census.duplicate(true)
 	var tombstone_census: Dictionary = roster.capture_sections([section_key])
 	var section_removals: Array = tombstone_census.get("removalsBySection", {}) \
 		.get(section_key, [])
@@ -306,6 +327,11 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 		"staleResourceContribution":stale_resource_contribution,
 		"translucentCensus":translucent_census,
 		"translucentLayerFailsClosed":translucent_layer_fails_closed,
+		"dynamicRemovalCensus":dynamic_removal_census,
+		"dynamicRemovalSourceId":source_id,
+		"dynamicRemovalRows":dynamic_removals,
+		"dynamicExpectedSources":dynamic_expected,
+		"unaffectedRevisionsStable":unaffected_revisions_stable,
 		"tombstoneCensus":tombstone_census, "sectionRemovals":section_removals,
 		"tombstoneReason":String(tombstone_census.get("reason", ""))}
 
@@ -524,12 +550,54 @@ func run() -> void:
 			replacement_owner.get_instance_id())
 	production_authority.chunks[Vector2i.ZERO] = chunk_owner
 	replacement_owner.free()
+	production_authority.removed_props["unrelated-removed-prop"] = true
 	production_authority.removed_props_revision += 1
-	var stale_retry := production_provider.capture_static_section_contribution(
-		synthetic_complete_census, Vector3i.ZERO)
-	check("source_revision_change_keeps_contribution_retryable_until_recaptured",
-		stale_retry.get("status") == "pending" \
-		and stale_retry.get("reason") == "ecology_chunk_source_snapshot_revision_stale")
+	var scoped_removal := RemovedProps.capture_for_ids(production_authority,
+		["unrelated-removed-prop", "local-prop"])
+	production_authority.removed_props["another-unrelated-prop"] = true
+	var scoped_unrelated_current := RemovedProps.is_current_for_ids(production_authority,
+		scoped_removal, ["local-prop", "unrelated-removed-prop"])
+	production_authority.removed_props.erase("unrelated-removed-prop")
+	var scoped_affected_stale := not RemovedProps.is_current_for_ids(production_authority,
+		scoped_removal, ["local-prop", "unrelated-removed-prop"])
+	production_authority.removed_props["unrelated-removed-prop"] = true
+	check("bounded_removal_snapshot_tracks_only_requested_source_ids",
+		bool(scoped_removal.get("ok", false)) \
+		and scoped_removal.get("scope") == "requested_ids" \
+		and scoped_removal.get("ids") == ["unrelated-removed-prop"] \
+		and scoped_unrelated_current and scoped_affected_stale)
+	var unrelated_removal_capture: Dictionary = production_provider._capture_production_chunk(
+		Vector2i.ZERO)
+	var second_chunk_owner := Node3D.new()
+	production_authority.add_child(second_chunk_owner)
+	production_authority.chunks[Vector2i(1, 0)] = second_chunk_owner
+	var second_chunk_snapshot := _snapshot([], production_authority.seed_text,
+		production_authority._ecology_chunk_source_revision(Vector2i(1, 0)), Vector2i(1, 0))
+	second_chunk_snapshot["producerOwnerInstanceId"] = second_chunk_owner.get_instance_id()
+	second_chunk_owner.set_meta("static_ecology_source_value_snapshot", second_chunk_snapshot)
+	var second_chunk_capture: Dictionary = production_provider._capture_production_chunk(
+		Vector2i(1, 0))
+	check("unrelated_durable_removal_keeps_resident_chunk_snapshot_current",
+		unrelated_removal_capture.get("status") == "ready" \
+		and unrelated_removal_capture.get("snapshot", {}).get("contentRevision", "") \
+			== original_content_revision \
+		and second_chunk_capture.get("status") == "ready" \
+		and second_chunk_capture.get("snapshot", {}).get("contentRevision", "") \
+			== second_chunk_snapshot.get("contentRevision", ""))
+	var removal_aware_candidate := _candidate(
+		"ecology-projection-contract:detail:0,0:grass:removed", 5.0, Color.WHITE)
+	removal_aware_candidate["propId"] = "removed-prop-in-this-chunk"
+	var removal_snapshot := _snapshot([removal_aware_candidate],
+		"ecology-projection-contract", "ecology-v2:ecology-projection-contract:0,0:static-props-v1")
+	var removal_snapshot_before := Adapter.prepare_surface_detail(removal_snapshot,
+		_bindings(), Transform3D.IDENTITY, "world:ecology-projection-contract")
+	var removal_snapshot_after := Adapter.prepare_surface_detail(removal_snapshot,
+		_bindings(), Transform3D.IDENTITY, "world:ecology-projection-contract", [], true,
+		{"removed-prop-in-this-chunk":true})
+	check("durable_local_removal_projects_candidate_out_with_stable_source_identity",
+		removal_snapshot_before.get("partition", {}).get("inputInstanceCount", -1) == 1 \
+		and removal_snapshot_after.get("partition", {}).get("inputInstanceCount", -1) == 0 \
+		and removal_snapshot_after.get("sourceRevisions", {}).is_empty())
 	production_authority.queue_free()
 	var provider = Adapter.new()
 	provider.configure("world:ecology-adapter-contract")
@@ -634,6 +702,15 @@ func run() -> void:
 		and realized_assembler_result.get("sectionRemovals", []).size() == 1 \
 		and realized_assembler_result.get("sectionRemovals", [])[0].get("sourcePartId") \
 			== String(realized_assembler_result.get("sourceId", "")))
+	check("dynamic_harvest_projection_removes_only_the_exact_section_source",
+		realized_assembler_result.get("dynamicRemovalCensus", {}).get("status") == "complete" \
+		and not realized_assembler_result.get("dynamicExpectedSources", []).has(
+			realized_assembler_result.get("dynamicRemovalSourceId", "")) \
+		and realized_assembler_result.get("dynamicRemovalRows", []).any(
+			func(row: Dictionary) -> bool:
+				return String(row.get("sourcePartId", "")) == String(
+					realized_assembler_result.get("dynamicRemovalSourceId", ""))) \
+		and realized_assembler_result.get("unaffectedRevisionsStable", false))
 	check("section_removal_history_survives_interleaved_partial_census",
 		realized_assembler_result.get("interleavedCensus", {}).get("status") == "complete" \
 		and realized_assembler_result.get("interleavedCensus", {}).get(

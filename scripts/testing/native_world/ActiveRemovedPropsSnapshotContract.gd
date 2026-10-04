@@ -20,6 +20,20 @@ func run() -> void:
 	check("capture_ready", bool(captured.get("ok", false)))
 	check("sorted_parent_child_unicode", captured.get("ids") == ["rock:child1", "tree:parent", "é-tree"])
 	check("initial_current", SnapshotScript.is_current(main, captured))
+	var scoped := SnapshotScript.capture_for_ids(main, ["tree:parent", "not-removed"])
+	check("scoped_capture_contains_only_matching_requested_tombstones",
+		bool(scoped.get("ok", false)) and scoped.get("scope") == "requested_ids" \
+		and scoped.get("checkedIds") == ["not-removed", "tree:parent"] \
+		and scoped.get("ids") == ["tree:parent"] \
+		and SnapshotScript.is_current_for_ids(main, scoped, ["tree:parent", "not-removed"]))
+	main.removed_props["unrelated:prop"] = true
+	check("scoped_snapshot_ignores_unrelated_removed_prop",
+		SnapshotScript.is_current_for_ids(main, scoped, ["tree:parent", "not-removed"]))
+	main.removed_props.erase("unrelated:prop")
+	main.removed_props.erase("tree:parent")
+	check("scoped_snapshot_rejects_changed_candidate_removal",
+		not SnapshotScript.is_current_for_ids(main, scoped, ["tree:parent", "not-removed"]))
+	main.removed_props["tree:parent"] = true
 	main.restore_removed_props(captured.ids)
 	check("same_content_restore_invalidates", not SnapshotScript.is_current(main, captured))
 	captured = SnapshotScript.capture(main)
