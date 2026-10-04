@@ -2185,13 +2185,14 @@ func request_gameplay_chunk_republication(chunk_key: Vector2i) -> void:
 		notify_navigation_chunk_unloaded(chunk_key)
 	queue_pending_gameplay_chunk(chunk_key)
 
-func release_gameplay_chunk(chunk_key: Vector2i) -> void:
-	if retained_gameplay_chunks.has(chunk_key) or startup_auxiliary_publication_chunks.has(chunk_key): return
+func release_gameplay_chunk(chunk_key: Vector2i) -> bool:
+	if retained_gameplay_chunks.has(chunk_key) or startup_auxiliary_publication_chunks.has(chunk_key): return false
 	desired_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunk_order.erase(chunk_key)
 	if published_gameplay_chunks.erase(chunk_key):
 		notify_navigation_chunk_unloaded(chunk_key)
+	return true
 
 func queue_pending_gameplay_chunk(chunk_key: Vector2i) -> void:
 	if pending_gameplay_chunks.has(chunk_key):

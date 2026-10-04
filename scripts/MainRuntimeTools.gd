@@ -568,7 +568,10 @@ func update_voxel_authority_chunks(force: bool) -> void:
         var key: Vector2i = key_value
         if needed.has(key):
             continue
-        retire_voxel_authority_chunk(key)
+        if not retire_voxel_authority_chunk(key):
+            if monitor != null:
+                monitor.increment_counter("chunk_retirement_deferred_owner_demand")
+            continue
         retired_chunks += 1
     if monitor != null:
         monitor.end_section("streaming_chunk_retirement", unload_start)
@@ -1989,13 +1992,16 @@ func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := fal
         monitor.increment_counter("chunks_created")
         monitor.end_section("chunk_create", create_start)
 
+## Retire only after the terrain authority confirms no retained publication owns this cell.
 func retire_voxel_authority_chunk(chunk_key: Vector2i) -> bool:
     if not chunks.has(chunk_key):
         return false
     var chunk := chunks[chunk_key] as Node3D
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime) \
         and voxel_terrain_runtime.has_method("release_gameplay_chunk"):
-        voxel_terrain_runtime.call("release_gameplay_chunk", chunk_key)
+        var release_result: Variant = voxel_terrain_runtime.call("release_gameplay_chunk", chunk_key)
+        if typeof(release_result) != TYPE_BOOL or not bool(release_result):
+            return false
     if is_instance_valid(chunk):
         chunk.queue_free()
     chunks.erase(chunk_key)

@@ -12,6 +12,8 @@ cli(async () => {
     'scripts/Main.gd',
     'scripts/MainRuntimeTools.gd',
     'scripts/MainPlaytestTools.gd',
+    'scripts/terrain/VoxelTerrainRuntime.gd',
+    'scripts/terrain/VoxelTerrainSiteGate.gd',
     'scripts/world/ChunkRenderPacketOwner.gd',
     'scripts/buildings/BuildingInstanceBuffer.gd',
     'scripts/buildings/BuildingPartPublisher.gd',
@@ -60,9 +62,12 @@ cli(async () => {
     && checks.main_runtime_creates_chunk_owned_native_backend === true
     && checks.main_runtime_admits_and_requests_production_chunk === true
     && checks.main_runtime_releases_backend_before_unregistering_chunk === true
-    && checks.main_runtime_chunk_retirement_frees_native_owner === true,
+    && checks.main_runtime_chunk_retirement_frees_native_owner === true
+    && checks.main_runtime_preserves_retained_terrain_owner === true
+    && checks.main_runtime_preserves_startup_auxiliary_terrain_owner === true
+    && checks.main_runtime_retires_owner_after_dependencies_release === true,
   'Native chunk packet lifecycle contract failed.');
   return { reportPath: path.join(c.run, 'report.json'), checks,
     nativeSourceSha256: sourceSha,
-    evidence: 'Production building flush/replay through the native packet backend, plus MainRuntimeTools chunk creation/retirement with stubbed terrain admission; no generated-world or gameplay acceptance.' };
+    evidence: 'Production building flush/replay through the native packet backend, plus Main.gd chunk creation/retirement with actual VoxelTerrainRuntime demand bookkeeping and a stubbed site gate; no generated-world or gameplay acceptance.' };
 });

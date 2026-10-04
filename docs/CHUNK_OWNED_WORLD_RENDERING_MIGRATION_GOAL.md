@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Worker-prepared, single-owner-cell building batches now have packet installation, revision-exact readiness, stale-packet retirement, per-advance bounded chunk-unload replay, and site-teardown release in code. Packet release now preserves its receipt until acknowledgement. Source-verified native GDExtension contracts cover packet lifecycle and the `Main.gd` chunk-container creation/retirement seam; the latter uses stubbed terrain admission. Actual `VoxelTerrainRuntime` replay through the resident streamer, source artifact memory, cross-cell fragments, and live-game acceptance remain open.**
+Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Worker-prepared, single-owner-cell building batches now have packet installation, revision-exact readiness, stale-packet retirement, per-advance bounded chunk-unload replay, and site-teardown release in code. Packet release now preserves its receipt until acknowledgement. Source-verified native GDExtension contracts cover packet lifecycle and the `Main.gd` chunk-container creation/retirement seam; its focused fixture uses actual `VoxelTerrainRuntime` demand/release bookkeeping with a stubbed site gate. Resident streamer-scheduled packet replay, source artifact memory, cross-cell fragments, and live-game acceptance remain open.**
 
 ## Goal
 
@@ -256,16 +256,17 @@ and recreation, resident building packet replay, and acknowledged release. Its
 launch verifies the loaded debug DLL's build manifest names the exact current
 C++ source hash. This proves the production building flush/replay protocol
 against native packet nodes; it does not yet exercise `MainRuntimeTools` terrain
-chunk streaming selection or `VoxelTerrainRuntime` admission/release. A follow-up
-16-check contract now extends the real `Main.gd` chain, creates a chunk through
+streaming selection or admission through the real terrain site gate. A follow-up
+19-check contract now extends the real `Main.gd` chain, creates a chunk through
 `create_voxel_authority_chunk_container`, verifies the native packet owner and
 deferred prop request, then retires it through the production chunk-retirement
-helper and confirms terrain release is called before registry removal and owner
-destruction. The fixture stubs terrain admission, so it does not yet prove the
-actual `VoxelTerrainRuntime` or resident Citadel scheduler replaying the packet
-after streamer-driven unload/reload. Cross-cell ownership and live gameplay also
-remain open. The repeatable command is
-`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-main-runtime-seam-final2`;
+helper. It uses actual `VoxelTerrainRuntime` demand maps and `release_gameplay_chunk`
+with a ready stub site gate; it confirms release precedes registry removal and
+owner destruction, and retained/startup-auxiliary demand prevents deletion until
+released. It does not run `VoxelTerrainRuntime.setup()` or prove resident Citadel
+scheduler replay after streamer-driven unload/reload. Cross-cell ownership and
+live gameplay also remain open. The repeatable command is
+`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-vxl-runtime-retirement-final2`;
 its report is `report.json`, and the watchdog recorded exit 0, clean shutdown,
 and authoritative zero owned-process members. Source artifact memory still lacks an aggregate budget. Replay recipes reference the same
 immutable segment buffers retained by prepared masonry/surface or physical-family

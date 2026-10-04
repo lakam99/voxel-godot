@@ -3,6 +3,7 @@ extends SceneTree
 const PacketOwner = preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 const InstanceBuffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
 const BuildingPublisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
+const VoxelTerrainRuntime = preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 const OWNER_CELL := Vector2i(0,0)
 const SOURCE_ID := "native-contract:wall"
 const SOURCE_REVISION := "revision-1"
@@ -18,19 +19,10 @@ class MainRuntimeHarness extends "res://scripts/Main.gd":
 	func _process(_delta: float) -> void: pass
 	func _physics_process(_delta: float) -> void: pass
 
-class TerrainRuntimeAdmissionStub extends Node3D:
-	var registry: Node
-	var requested: Array[Vector2i]=[]
-	var released_while_registered := false
-	var released_with_backend := false
-	func admit_gameplay_chunk(_cell: Vector2i) -> Dictionary:
+class AdmissionGateStub extends RefCounted:
+	func request_cells(_bounds: Rect2i) -> Dictionary:
 		return {"status":"ready"}
-	func request_gameplay_chunk_publication(cell: Vector2i) -> void:
-		requested.append(cell)
-	func release_gameplay_chunk(cell: Vector2i) -> void:
-		released_while_registered = registry.get("chunks").has(cell)
-		var chunk: Node3D = registry.get("chunks").get(cell) as Node3D
-		released_with_backend = is_instance_valid(chunk) and chunk.has_node("ChunkRenderPacketBackend")
+	func stop() -> void: pass
 
 class PacketBuildingPublisher extends BuildingPublisher:
 	func validate_static_flush_source() -> bool: return true
@@ -147,16 +139,16 @@ func _run() -> void:
 	chunk_root.name="ChunkRoot"
 	main.add_child(chunk_root)
 	main.chunk_root=chunk_root
-	var terrain_stub := TerrainRuntimeAdmissionStub.new()
-	terrain_stub.name="TerrainRuntimeAdmissionStub"
-	terrain_stub.registry=main
-	main.add_child(terrain_stub)
-	main.voxel_terrain_runtime=terrain_stub
+	var terrain_runtime := VoxelTerrainRuntime.new()
+	terrain_runtime.main=main
+	terrain_runtime.site_gate=AdmissionGateStub.new()
+	main.add_child(terrain_runtime)
+	main.voxel_terrain_runtime=terrain_runtime
 	main.create_voxel_authority_chunk_container(OWNER_CELL.x,OWNER_CELL.y,true)
 	var streamed_chunk: Node3D=main.chunks.get(OWNER_CELL) as Node3D
 	var prop_state: Variant=main.pending_chunk_prop_spawns.get(OWNER_CELL)
 	var state_chunk: Node3D=prop_state.get("chunk") as Node3D if prop_state is Dictionary else null
-	diagnostics["mainRuntimeCreation"]={"requested":terrain_stub.requested,
+	diagnostics["mainRuntimeCreation"]={"terrainPending":terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL),
 		"chunks":main.chunks.keys(),"pendingPropKeys":main.pending_chunk_prop_spawns.keys(),
 		"propStateType":type_string(typeof(prop_state)),
 		"propChunkValid":is_instance_valid(state_chunk),
@@ -165,14 +157,32 @@ func _run() -> void:
 	_check("main_runtime_creates_chunk_owned_native_backend",is_instance_valid(streamed_chunk) \
 		and streamed_chunk.get_parent()==chunk_root \
 		and streamed_chunk.has_node("ChunkRenderPacketBackend"))
-	_check("main_runtime_admits_and_requests_production_chunk",terrain_stub.requested==[OWNER_CELL] \
+	_check("main_runtime_admits_and_requests_production_chunk",terrain_runtime.site_gate!=null \
+		and terrain_runtime.desired_gameplay_chunks.has(OWNER_CELL) \
+		and terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL) \
 		and is_instance_valid(state_chunk) and state_chunk.get_instance_id()==streamed_chunk.get_instance_id())
 	var retired:=main.retire_voxel_authority_chunk(OWNER_CELL)
 	_check("main_runtime_releases_backend_before_unregistering_chunk",retired \
-		and terrain_stub.released_while_registered and terrain_stub.released_with_backend \
+		and not terrain_runtime.desired_gameplay_chunks.has(OWNER_CELL) \
+		and not terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL) \
 		and not main.chunks.has(OWNER_CELL) and streamed_chunk.is_queued_for_deletion())
 	await process_frame
 	_check("main_runtime_chunk_retirement_frees_native_owner",not is_instance_valid(streamed_chunk))
+	main.create_voxel_authority_chunk_container(OWNER_CELL.x,OWNER_CELL.y,true)
+	var retained_chunk: Node3D=main.chunks.get(OWNER_CELL) as Node3D
+	terrain_runtime.retained_gameplay_chunks[OWNER_CELL]=true
+	var retained_retire:=main.retire_voxel_authority_chunk(OWNER_CELL)
+	_check("main_runtime_preserves_retained_terrain_owner",not retained_retire \
+		and main.chunks.get(OWNER_CELL)==retained_chunk and is_instance_valid(retained_chunk) \
+		and not retained_chunk.is_queued_for_deletion())
+	terrain_runtime.retained_gameplay_chunks.erase(OWNER_CELL)
+	terrain_runtime.startup_auxiliary_publication_chunks[OWNER_CELL]=true
+	var auxiliary_retire:=main.retire_voxel_authority_chunk(OWNER_CELL)
+	_check("main_runtime_preserves_startup_auxiliary_terrain_owner",not auxiliary_retire \
+		and main.chunks.get(OWNER_CELL)==retained_chunk and is_instance_valid(retained_chunk) \
+		and not retained_chunk.is_queued_for_deletion())
+	terrain_runtime.startup_auxiliary_publication_chunks.erase(OWNER_CELL)
+	_check("main_runtime_retires_owner_after_dependencies_release",main.retire_voxel_authority_chunk(OWNER_CELL))
 	_finish(not checks.values().has(false),"")
 	parent.free()
 
