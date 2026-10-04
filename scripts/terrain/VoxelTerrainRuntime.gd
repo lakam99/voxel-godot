@@ -9,6 +9,7 @@ const SITE_GATE_SCRIPT := preload("res://scripts/terrain/VoxelTerrainSiteGate.gd
 const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
 const NPC_CONSTANTS_SCRIPT := preload("res://scripts/npc_ai/NpcConstants.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
+const TERRAIN_SECTION_SHADOW_PUBLISHER := preload("res://scripts/terrain/TerrainSectionShadowPublisher.gd")
 
 const CELL := 1.35
 const GAME_CHUNK_SIZE := 28
@@ -101,6 +102,7 @@ var startup_auxiliary_cleanup_requested := false
 var startup_auxiliary_cleanup_frames_remaining := 0
 var startup_auxiliary_viewers_created := 0
 var site_gate
+var terrain_section_shadow_publisher
 var retained_gameplay_chunks: Dictionary = {}
 var retained_chunk_viewers: Dictionary = {}
 var retained_viewer_groups: Dictionary = {}
@@ -693,6 +695,10 @@ func setup(main_node) -> Dictionary:
 	material.shader = TERRAIN_SHADER
 	terrain.material_override = material
 	add_child(terrain)
+	terrain_section_shadow_publisher = TERRAIN_SECTION_SHADOW_PUBLISHER.new()
+	var shadow_setup: Dictionary = terrain_section_shadow_publisher.setup(self)
+	if shadow_setup.get("status") != "ready":
+		return {"ok":false, "reason":"terrain_section_shadow_publisher_setup_failed", "detail":shadow_setup}
 	site_gate = SITE_GATE_SCRIPT.new()
 	site_gate.setup(self,terrain,main.structure_system.citadel_terrain_admission,main.world_generation_system)
 
@@ -1405,6 +1411,8 @@ func _process(delta: float) -> void:
 			_retire_mesh_preparation_viewer()
 			return
 		if site_gate != null: site_gate.advance()
+		if terrain_section_shadow_publisher != null:
+			terrain_section_shadow_publisher.advance()
 		observe_native_viewer_workload()
 		update_viewer_position()
 		update_viewer_distance(delta)
@@ -1426,6 +1434,8 @@ func _physics_process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	if terrain_section_shadow_publisher != null:
+		terrain_section_shadow_publisher.shutdown()
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	_retire_mesh_preparation_viewer()
@@ -1435,6 +1445,9 @@ func _exit_tree() -> void:
 
 func begin_shutdown() -> void:
 	authority_ready = false
+	if terrain_section_shadow_publisher != null:
+		terrain_section_shadow_publisher.shutdown()
+		terrain_section_shadow_publisher = null
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	clear_foreground_collision_demand()
@@ -1817,6 +1830,18 @@ func on_mesh_block_exited(block_position: Vector3i) -> void:
 	visible_mesh_block_revision_changed.emit(block_position, mesh_publication_serial)
 	mesh_block_revisions.erase(block_position)
 	invalidate_gameplay_publications_for_mesh_block(block_position)
+
+
+func request_terrain_section_shadow_install(block_position: Vector3i) -> Dictionary:
+	if not authority_ready or terrain_section_shadow_publisher == null:
+		return {"status":"failed", "reason":"terrain_section_shadow_publisher_unavailable"}
+	return terrain_section_shadow_publisher.request(block_position)
+
+
+func poll_terrain_section_shadow_install(ticket: int) -> Dictionary:
+	if terrain_section_shadow_publisher == null:
+		return {"status":"failed", "reason":"terrain_section_shadow_publisher_unavailable"}
+	return terrain_section_shadow_publisher.poll(ticket)
 
 
 func visible_mesh_source_identity() -> String:

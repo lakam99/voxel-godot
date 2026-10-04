@@ -876,3 +876,18 @@ candidate installation only. Production producers remain unconnected; normal
 game visual, traversal, and performance acceptance remains open. The canonical
 charter records the stale-mid-boundary retry risk and full stage gates at
 `C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
+
+**Runtime-owned terrain shadow producer (2026-10-04):** `VoxelTerrainRuntime`
+now owns the bounded capture/build/install queue; `PlaytestRunner` only requests
+and polls the production API. The focused headed command
+`node tools/run-playtest.mjs --only resident_terrain_section_capture --seed section-shadow-runtime-queue-20261004-r3 --visible true`
+passed the live source capture and native renderer receipt through that queue.
+It encountered an all-air neighbor as `empty`, then installed the surface block;
+the local mesh bounds remained within its expected 16-cell block. The VoxelTerrain
+visual and collision remain active. The screenshot is behind the startup loading
+overlay, so this proves renderer installation but not visual parity or traversal.
+This remains a terrain-only shadow path without the full section contributor
+census; seam parity, post-unload revision checks, edit/collision/fluid/light
+parity, replay, performance, and later building and ecology cutovers remain open.
+Canonical stage record:
+`C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
