@@ -1,18 +1,47 @@
 extends "res://scripts/MainInteractionFlow.gd"
 
 const LocalLightRigScript := preload("res://scripts/LocalLightRig.gd")
+const OrdinaryStructureBlockVisualRecipeScript := preload(
+    "res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 
 func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key: String, rotation := Vector3.ZERO) -> MeshInstance3D:
+    var shared_resources := OrdinaryStructureBlockVisualRecipeScript.resolve_shared_resources(
+        self, material_key)
+    if shared_resources.get("status") != "ready":
+        push_error("Block visual resource resolution failed: %s" % String(
+            shared_resources.get("reason", "unknown")))
+        return null
     var mesh_instance := MeshInstance3D.new()
     mesh_instance.name = "BlockVisual_%s" % material_key
-    mesh_instance.mesh = block_visual_mesh(material_key)
-    mesh_instance.material_override = block_visual_material(material_key)
+    mesh_instance.mesh = shared_resources.mesh
+    mesh_instance.material_override = shared_resources.material
     mesh_instance.position = offset
     mesh_instance.rotation = rotation
     mesh_instance.scale = size
     mesh_instance.cast_shadow = block_shadow_policy(material_key)
     mesh_instance.set_meta("visual_role", "block")
     mesh_instance.set_meta("material_key", material_key)
+    parent.add_child(mesh_instance)
+    return mesh_instance
+
+func add_ordinary_structure_recipe_visual(parent: Node3D,
+        member_recipe: Dictionary) -> MeshInstance3D:
+    if member_recipe.get("status") != "ready" \
+            or not member_recipe.get("mesh") is Mesh \
+            or not member_recipe.get("material") is Material \
+            or not member_recipe.get("meshLocalTransform") is Transform3D:
+        return null
+    var mesh_instance := MeshInstance3D.new()
+    var material_key := String(member_recipe.get("blockType", ""))
+    mesh_instance.name = "BlockVisual_%s" % material_key
+    mesh_instance.mesh = member_recipe.mesh
+    mesh_instance.material_override = member_recipe.material
+    mesh_instance.transform = member_recipe.meshLocalTransform
+    mesh_instance.cast_shadow = block_shadow_policy(material_key)
+    mesh_instance.set_meta("visual_role", "block")
+    mesh_instance.set_meta("material_key", material_key)
+    mesh_instance.set_meta("ordinary_structure_recipe_content_digest",
+        String(member_recipe.get("contentDigest", "")))
     parent.add_child(mesh_instance)
     return mesh_instance
 
@@ -830,14 +859,23 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         if options.has(visual_key):
             body.set_meta(visual_key, options.get(visual_key))
 
+    var ordinary_recipe_visual := {}
+    if bool(options.get("generated", false)) and not bool(options.get("player_placed", false)) \
+            and not generated_visual_source_id.is_empty() \
+            and OrdinaryStructureBlockVisualRecipeScript.SUPPORTED_BLOCK_TYPES.has(block_type):
+        ordinary_recipe_visual = OrdinaryStructureBlockVisualRecipeScript.resolve_member(
+            self, block_type, cell, options)
+
     var profile := block_collision_profile(block_type)
     var mesh_size: Vector3 = profile.get("size", Vector3.ONE * CELL * 0.96)
     var mesh_offset: Vector3 = profile.get("offset", Vector3.ZERO)
     var collider_size := mesh_size
     var collider_offset := mesh_offset
-    if block_type == "cobblestonePath":
-        mesh_size = Vector3(CELL * 0.96, CELL * 0.045, CELL * 0.96)
-        mesh_offset.y = 0.0
+    var base_visual_shape := OrdinaryStructureBlockVisualRecipeScript.resolve_base_shape(
+        self, block_type)
+    if base_visual_shape.get("status") == "ready":
+        mesh_size = base_visual_shape.size
+        mesh_offset = base_visual_shape.offset
     elif block_type == "door":
         mesh_size = Vector3(CELL * 0.92, CELL * 1.72, CELL * 0.16)
         mesh_offset.y = CELL * 0.38
@@ -890,7 +928,18 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
     collider_size = mesh_size
     collider_offset = mesh_offset
 
-    if options.has("roofRole") and (block_type == "woodBlock" or block_type == "stoneBlock"):
+    var ordinary_recipe_visual_installed := false
+    if ordinary_recipe_visual.get("status") == "ready":
+        var ordinary_visual := add_ordinary_structure_recipe_visual(body,
+            ordinary_recipe_visual)
+        if is_instance_valid(ordinary_visual):
+            body.set_meta("ordinary_structure_recipe_content_digest",
+                String(ordinary_visual.get_meta(
+                    "ordinary_structure_recipe_content_digest", "")))
+            ordinary_recipe_visual_installed = true
+    if ordinary_recipe_visual_installed:
+        pass
+    elif options.has("roofRole") and (block_type == "woodBlock" or block_type == "stoneBlock"):
         add_roof_block_visual(body, block_type, options)
     elif block_type == "workbench":
         add_workbench_visual(body)

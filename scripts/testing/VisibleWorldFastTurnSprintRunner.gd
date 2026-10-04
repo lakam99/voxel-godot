@@ -1041,11 +1041,20 @@ func _trace_sample(label: String) -> Dictionary:
         int(requests.get("player", 0)), String(main.get("seed_text")),
         String(runtime.call("visible_mesh_world_revision"))) \
         if is_instance_valid(controller) and is_instance_valid(runtime) else {}
+    var pending_limit := mini(16, int(full.get("pendingCount", 0)))
     var pending_representations: Array = controller.call("pending_representation_diagnostics",
         "player", int(requests.get("player", 0)), String(main.get("seed_text")),
-        String(runtime.call("visible_mesh_world_revision")), 6) \
+        String(runtime.call("visible_mesh_world_revision")), pending_limit) \
         if is_instance_valid(controller) and is_instance_valid(runtime) \
         and int(full.get("pendingCount", 0)) > 0 else []
+    # Preserve complete bounded evidence for a failed post-traversal view. The
+    # producer/queue walk is deliberately limited to terminal checkpoints so
+    # the live movement samples do not pay for repeated scene scans.
+    if label == "new_streamed_area":
+        for pending_row: Dictionary in pending_representations:
+            if String(pending_row.get("kind", "")) == "trees_foliage":
+                pending_row["treeProducer"] = _tree_timeout_producer(
+                    pending_row, String(main.get("seed_text")))
     var advance: Dictionary = main.get("visible_world_demand_last_advance")
     var view_center: Vector2 = main.get("visible_world_view_center_cells")
     var observer_cell := Vector2(player_body.global_position.x / 1.35,
@@ -1064,6 +1073,7 @@ func _trace_sample(label: String) -> Dictionary:
             "viewRevision": full.get("viewRevision", 0),
             "visualDemandRevision": full.get("visualDemandRevision", 0)},
         "pendingRepresentations": pending_representations,
+        "pendingRepresentationLimit": pending_limit,
         "queue": full.get("queue", {}), "coverageLag": full.get("coverageLag", 0.0),
         "observerCell": [observer_cell.x, observer_cell.y],
         "viewCenterCells": [view_center.x, view_center.y],

@@ -981,3 +981,26 @@ volume/fluid revisions, and produced a current proof without stale/cancelled
 state. This does not explain the earlier 134-attempt/117.9-second outlier; no
 queue-priority change is justified yet. See the canonical charter's cold
 fluid-proof queue diagnostic record.
+
+The fast-turn diagnostic now retains every pending row (up to 16) and exact
+tree producer/queue state at its terminal streamed-area checkpoint. On the
+known seed, seven pending trees had live bodies and prepared recipes but had
+remained in the completed publication queue at `renderStage=root` for about 40
+seconds; queue state was 239 completed, 87 published, no active workers and one
+staged tree task. This is evidence of per-tree publication backlog, not missing
+capture. Minecraft's section compiler emits every render layer for one section
+as one scheduled result, reinforcing that the remedy belongs in section-owned
+static publication rather than a larger per-tree cap. See the canonical
+charter's tree backlog follow-up.
+
+Stage 4 now also resolves the ordinary generated base-block mesh, material and
+local transform through the same recipe in `MainChunkTerrain.create_block`
+and section capture. Its producer, adapter, provider and whole-section
+assembler contracts passed 16/16, 16/16, 15/15 and 8/8; the headed synthetic
+native-install fixture passed 9/9. A post-edit tutorial-free Main-scene run
+retained a ready initial view and rapid-turn view, with matching before/after
+screenshots, but still stopped at 42.67 m on the generated-prop
+`blocked_capsule_probe`; after sprint eight tree candidates were pending. This
+is continuity evidence, not generated-building candidate parity, receipt-based
+retirement, traversal acceptance, or performance acceptance. Stages remain
+partial; see the linked canonical charter record for commands and artifacts.

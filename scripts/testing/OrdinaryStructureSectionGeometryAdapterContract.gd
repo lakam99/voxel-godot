@@ -5,9 +5,38 @@ const Adapter := preload("res://scripts/world/OrdinaryStructureSectionGeometryAd
 const Partitioner := preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const SnapshotBuilder := preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 
-class FixtureWorld extends Node:
+
+func _visual_recipe_input(block_type: String, options: Dictionary) -> Dictionary:
+	var sealed_options: Dictionary = StructureSystemScript._sealed_ordinary_visual_value(options)
+	var result := {"schema":"ordinary-structure-visual-recipe-input/v1",
+		"blockType":block_type, "options":sealed_options,
+		"digest":StructureSystemScript._ordinary_visual_recipe_digest(block_type, sealed_options)}
+	result.make_read_only()
+	return result
+
+class FixtureWorld extends Node3D:
+	var CELL := 1.0
 	var blocks: Dictionary = {}
 	var seed_text := "ordinary-section-geometry-contract"
+	var block_root: Node3D
+	var meshes: Dictionary = {}
+	var materials: Dictionary = {}
+
+	func _init() -> void:
+		block_root = self
+		materials = {"stoneBlock":StandardMaterial3D.new(),
+			"woodBlock":StandardMaterial3D.new(), "cobblestonePath":StandardMaterial3D.new()}
+
+	func block_visual_mesh(_key: String) -> Mesh:
+		if not meshes.has("base"):
+			meshes.base = BoxMesh.new()
+		return meshes.base
+
+	func block_visual_material(key: String) -> Material:
+		return materials.get(key, materials.stoneBlock)
+
+	func block_collision_profile(_block_type: String) -> Dictionary:
+		return {"size":Vector3.ONE * CELL * 0.96, "offset":Vector3.ZERO}
 
 var checks: Array[Dictionary] = []
 
@@ -44,21 +73,72 @@ func run() -> void:
 	var repeated: Dictionary = Adapter.capture_block(structures, world, source_id, cell)
 	check("unchanged_source_and_geometry_keep_revision",
 		captured.get("sourceRevision", "") == repeated.get("sourceRevision", ""), repeated)
-	var visual_owner: MeshInstance3D = (captured.geometry as WeakRef).get_ref()
-	var original_color := (visual_owner.material_override as StandardMaterial3D).albedo_color
-	(visual_owner.material_override as StandardMaterial3D).albedo_color = Color(0.25, 0.75, 0.5)
+	var original_recipe: Dictionary = structures.ordinary_visual_sources[source_id] \
+		.get("visualRecipeInputs", {}).get(cell, {})
+	var updated_recipe := _visual_recipe_input("stoneBlock", {"generatedTier":"ruin"})
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = updated_recipe
+	structures.ordinary_visual_sources[source_id].revision += 1
+	var changed_recipe: Dictionary = Adapter.capture_block(structures, world, source_id, cell)
+	check("producer_recipe_input_digest_participates_in_geometry_source_revision",
+		changed_recipe.get("status") == "ready"
+		and changed_recipe.get("sourceRevision", "") != captured.get("sourceRevision", "")
+		and changed_recipe.get("sourceInput", {}).get("visualRecipeDigest", "") \
+			== updated_recipe.get("digest", "")
+		and changed_recipe.get("manifest", {}).get("visualRecipeDigest", "") \
+			== updated_recipe.get("digest", ""), changed_recipe)
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = original_recipe
+	structures.ordinary_visual_sources[source_id].revision += 1
+	var mutable_recipe: Dictionary = updated_recipe.duplicate(true)
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = mutable_recipe
+	var mutable_rejected := Adapter.capture_block(structures, world, source_id, cell)
+	check("mutable_recipe_manifest_is_rejected_before_capture",
+		mutable_rejected.get("status") == "pending"
+		and mutable_rejected.get("reason") == "ordinary_geometry_visual_recipe_manifest_stale",
+		mutable_rejected)
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = original_recipe
+	structures.ordinary_visual_sources[source_id].revision += 1
+	var recipe_material := captured.material as StandardMaterial3D
+	var original_color := recipe_material.albedo_color
+	recipe_material.albedo_color = Color(0.25, 0.75, 0.5)
 	var changed_material: Dictionary = Adapter.capture_block(structures, world, source_id, cell)
-	(visual_owner.material_override as StandardMaterial3D).albedo_color = original_color
+	recipe_material.albedo_color = original_color
 	check("material_change_fences_the_prepared_revision",
 		changed_material.get("status") == "ready"
-		and changed_material.get("sourceRevision", "") != captured.get("sourceRevision", ""),
+		and changed_material.get("sourceRevision", "") != captured.get("sourceRevision", "")
+		and captured.get("geometry") == null,
 		changed_material)
+	var building_shader_material := ShaderMaterial.new()
+	building_shader_material.shader = load("res://resources/visual/building_material.gdshader") as Shader
+	building_shader_material.set_shader_parameter("base_color", Color(0.52, 0.57, 0.54))
+	building_shader_material.set_shader_parameter("accent_color", Color(0.33, 0.37, 0.35))
+	world.materials["woodBlock"] = building_shader_material
+	var shader_cell := Vector3i(-3, 6, 15)
+	var shader_body := _make_body(source_id, shader_cell, "woodBlock")
+	shader_body.position = Vector3(shader_cell)
+	world.add_child(shader_body)
+	world.blocks[shader_cell] = shader_body
+	structures.ordinary_visual_sources[source_id].expected[shader_cell] = "woodBlock"
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[shader_cell] = \
+		_visual_recipe_input("woodBlock", {})
+	structures.ordinary_visual_sources[source_id].revision += 1
+	var shader_capture: Dictionary = Adapter.capture_block(structures, world, source_id, shader_cell)
+	var shader_revision := String(shader_capture.get("sourceRevision", ""))
+	building_shader_material.set_shader_parameter("base_color", Color(0.66, 0.42, 0.22))
+	var shader_changed: Dictionary = Adapter.capture_block(structures, world, source_id, shader_cell)
+	check("opaque_building_shader_enters_packets_and_uniform_changes_fence_revision",
+		shader_capture.get("status") == "ready"
+		and shader_capture.get("sourceInput", {}).get("renderLayer", "") == "opaque"
+		and shader_capture.get("material", null) == building_shader_material
+		and not shader_revision.is_empty()
+		and shader_changed.get("status") == "ready"
+		and String(shader_changed.get("sourceRevision", "")) != shader_revision,
+		shader_capture)
 	var source_capture: Dictionary = Adapter.capture_source(structures, world, source_id)
 	check("source_completion_requires_each_expected_mesh_member",
 		source_capture.get("status") == "complete"
 		and source_capture.get("coverageScope") == "one_structure_source"
-		and int(source_capture.get("expectedCellCount", -1)) == 1
-		and int(source_capture.get("memberCount", -1)) == 1, source_capture)
+		and int(source_capture.get("expectedCellCount", -1)) == 2
+		and int(source_capture.get("memberCount", -1)) == 2, source_capture)
 	var inputs: Array[Dictionary] = [captured.sourceInput]
 	inputs.make_read_only()
 	var partition: Dictionary = Partitioner.partition(inputs)
@@ -90,9 +170,12 @@ func run() -> void:
 			"colliderPresent":collider.get_parent() == body})
 	var unsupported_cell := Vector3i(-2, 5, 16)
 	var unsupported_body := _make_body(source_id, unsupported_cell, "chest")
+	unsupported_body.position = Vector3(unsupported_cell)
 	world.add_child(unsupported_body)
 	world.blocks[unsupported_cell] = unsupported_body
 	structures.ordinary_visual_sources[source_id].expected[unsupported_cell] = "chest"
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[unsupported_cell] = \
+		_visual_recipe_input("chest", {})
 	structures.ordinary_visual_sources[source_id].revision += 1
 	var excluded: Dictionary = Adapter.capture_block(structures, world, source_id, unsupported_cell)
 	check("interactive_block_stays_pending_for_its_gameplay_owner",
@@ -106,6 +189,8 @@ func run() -> void:
 		incomplete_source)
 	var missing_cell := Vector3i(-1, 5, 16)
 	structures.ordinary_visual_sources[source_id].expected[missing_cell] = "woodBlock"
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[missing_cell] = \
+		_visual_recipe_input("woodBlock", {})
 	structures.ordinary_visual_sources[source_id].revision += 1
 	var missing: Dictionary = Adapter.capture_block(structures, world, source_id, missing_cell)
 	check("expected_but_unpublished_member_is_pending_not_empty",
@@ -113,6 +198,7 @@ func run() -> void:
 		and missing.get("reason") == "ordinary_geometry_live_source_body_unavailable", missing)
 	var multi_cell := Vector3i(-3, 6, 16)
 	var extra_mesh_body := _make_body(source_id, multi_cell, "woodBlock")
+	extra_mesh_body.position = Vector3(multi_cell)
 	var second_mesh := MeshInstance3D.new()
 	second_mesh.mesh = BoxMesh.new()
 	second_mesh.material_override = StandardMaterial3D.new()
@@ -120,24 +206,26 @@ func run() -> void:
 	world.add_child(extra_mesh_body)
 	world.blocks[multi_cell] = extra_mesh_body
 	structures.ordinary_visual_sources[source_id].expected[multi_cell] = "woodBlock"
+	structures.ordinary_visual_sources[source_id].visualRecipeInputs[multi_cell] = \
+		_visual_recipe_input("woodBlock", {"roofRole":"roof_surface"})
 	structures.ordinary_visual_sources[source_id].revision += 1
 	var multiple: Dictionary = Adapter.capture_block(structures, world, source_id, multi_cell)
 	check("multi_mesh_accents_remain_pending_until_complete_adapter_exists",
 		multiple.get("status") == "pending"
-		and multiple.get("reason") == "ordinary_geometry_requires_single_static_mesh", multiple)
+		and multiple.get("reason") == "ordinary_block_visual_option_not_supported", multiple)
 	extra_mesh_body.remove_child(second_mesh)
 	second_mesh.free()
 	structures.generated_visual_block_removed(body)
 	var removed: Dictionary = Adapter.capture_block(structures, world, source_id, cell)
 	var removed_source: Dictionary = Adapter.capture_source(structures, world, source_id)
-	check("durable_tombstone_is_explicit_source_removal",
+	check("durable_tombstone_is_explicit_source_removal_and_other_unsupported_member_stays_pending",
 		removed.get("status") == "empty"
 		and removed_source.get("status") == "pending"
-		and removed_source.get("reason") == "ordinary_geometry_block_type_not_migrated",
+		and removed_source.get("reason") == "ordinary_block_visual_option_not_supported",
 		removed_source)
 	var changed_mesh: Dictionary = Adapter.capture_block(structures, world, source_id, multi_cell)
-	check("unsupported_payload_does_not_mutate_static_body_collision",
-		changed_mesh.get("status") == "ready"
+	check("unsupported_recipe_does_not_mutate_static_body_collision",
+		changed_mesh.get("status") == "pending"
 		and collider.get_parent() == body and body.get_parent() == world,
 		{"status":changed_mesh.get("status", ""), "colliderPresent":collider.get_parent() == body})
 	var passed := true

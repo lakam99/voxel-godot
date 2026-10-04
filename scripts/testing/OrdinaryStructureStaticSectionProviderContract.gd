@@ -4,8 +4,18 @@ const ProviderScript := preload("res://scripts/world/OrdinaryStructureStaticSect
 const Adapter := preload("res://scripts/world/OrdinaryStructureSectionGeometryAdapter.gd")
 const SourceRosterScript := preload("res://scripts/world/StaticSectionSourceRoster.gd")
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const StructureScript := preload("res://scripts/StructureSystem.gd")
 
-class FixtureMain extends Node:
+
+func _visual_recipe_input(block_type: String, options: Dictionary = {}) -> Dictionary:
+	var sealed_options: Dictionary = StructureScript._sealed_ordinary_visual_value(options)
+	var result := {"schema":"ordinary-structure-visual-recipe-input/v1",
+		"blockType":block_type, "options":sealed_options,
+		"digest":StructureScript._ordinary_visual_recipe_digest(block_type, sealed_options)}
+	result.make_read_only()
+	return result
+
+class FixtureMain extends Node3D:
 	var CELL := 1.35
 	var TOWN_REGION_CELLS := 64
 	var STRUCTURE_REGION_CELLS := 128
@@ -13,6 +23,24 @@ class FixtureMain extends Node:
 	var seed_text := "ordinary-static-provider-contract"
 	var town_region_cache: Dictionary = {}
 	var blocks: Dictionary = {}
+	var block_root: Node3D
+	var meshes: Dictionary = {}
+	var materials: Dictionary = {"stoneBlock":StandardMaterial3D.new(),
+		"woodBlock":StandardMaterial3D.new(), "cobblestonePath":StandardMaterial3D.new()}
+
+	func _init() -> void:
+		block_root = self
+
+	func block_visual_mesh(_key: String) -> Mesh:
+		if not meshes.has("base"):
+			meshes.base = BoxMesh.new()
+		return meshes.base
+
+	func block_visual_material(key: String) -> Material:
+		return materials.get(key, materials.stoneBlock)
+
+	func block_collision_profile(_block_type: String) -> Dictionary:
+		return {"size":Vector3.ONE * CELL * 0.96, "offset":Vector3.ZERO}
 
 
 class FixtureStructure extends RefCounted:
@@ -74,6 +102,7 @@ func run() -> void:
 	world.blocks[cell] = body
 	system.ordinary_visual_sources[source_id] = {
 		"completed":true, "expected":{cell:"stoneBlock"},
+		"visualRecipeInputs":{cell:_visual_recipe_input("stoneBlock")},
 		"omitted":{}, "failed":{}, "revision":2}
 	var provider := ProviderScript.new()
 	var configured: Dictionary = provider.configure("seed:ordinary-provider", system, world)
@@ -81,10 +110,15 @@ func run() -> void:
 	var first := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
 	var section_row: Dictionary = first.get("sections", {}).get(Vector3i.ZERO, {})
 	var prepared: Dictionary = first.get("preparedSections", {}).get(Vector3i.ZERO, {})
+	var prepared_inputs: Array = prepared.get("inputs", [])
+	var prepared_input: Dictionary = prepared_inputs[0] if not prepared_inputs.is_empty() \
+		and prepared_inputs[0] is Dictionary else {}
 	check("section_census_is_complete_and_geometry_is_bound_to_source_revision",
 		first.get("status") == "complete" and section_row.get("status") == "complete"
 		and section_row.get("sourcePartIds", []).size() == 1
 		and prepared.get("inputs", []).size() == 1
+		and String(prepared_input.get("visualRecipeDigest", "")).length() == 64
+		and prepared_input.get("visualRecipeInput", {}).is_read_only()
 		and prepared.get("declarations", []).size() == 1
 		and prepared.get("preparedSegments", []).size() == 1
 		and prepared.get("resourceBindings", {}).size() == 1,
@@ -136,6 +170,8 @@ func run() -> void:
 	world.add_child(boundary_body)
 	world.blocks[boundary_cell] = boundary_body
 	system.ordinary_visual_sources[source_id].expected[boundary_cell] = "stoneBlock"
+	system.ordinary_visual_sources[source_id].visualRecipeInputs[boundary_cell] = \
+		_visual_recipe_input("stoneBlock")
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var boundary_sections := _capture_sections_until_settled(provider,
@@ -178,8 +214,12 @@ func run() -> void:
 	var boundary_empty_row: Dictionary = boundary_removal.get("sections", {}).get(Vector3i(1, 0, 0), {})
 	provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(boundary_empty_row.get("coverageRevision", "")))
-	var mesh_instance := body.get_child(0) as MeshInstance3D
-	mesh_instance.position.x = world.CELL * 1.1
+	var out_of_bounds_options := {"world_x":float(cell.x) * world.CELL + world.CELL * 1.1}
+	var out_of_bounds_position := Vector3(out_of_bounds_options.world_x,
+		float(cell.y) * world.CELL, float(cell.z) * world.CELL)
+	body.position = out_of_bounds_position
+	system.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = \
+		_visual_recipe_input("stoneBlock", out_of_bounds_options)
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var excessive_support := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
@@ -187,7 +227,9 @@ func run() -> void:
 		excessive_support.get("status") == "pending"
 		and String(excessive_support.get("reason", "")) == "ordinary_geometry_horizontal_support_exceeds_section_query",
 		excessive_support)
-	mesh_instance.position.x = 0.0
+	body.position = Vector3(cell) * world.CELL
+	system.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = \
+		_visual_recipe_input("stoneBlock")
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var restored := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
@@ -207,6 +249,8 @@ func run() -> void:
 	world.add_child(chest)
 	world.blocks[unsupported_cell] = chest
 	system.ordinary_visual_sources[source_id].expected[unsupported_cell] = "chest"
+	system.ordinary_visual_sources[source_id].visualRecipeInputs[unsupported_cell] = \
+		_visual_recipe_input("chest")
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var unsupported: Dictionary = _capture_until_pending(provider, "seed:ordinary-provider", Vector3i.ZERO)

@@ -47,6 +47,7 @@ func run() -> void:
 	body.set_meta("block_type", "stoneBlock")
 	body.set_meta("generated", true)
 	body.set_meta("generated_visual_source_id", source_id)
+	body.set_meta("roofRole", "slope")
 	var mesh := MeshInstance3D.new()
 	mesh.mesh = BoxMesh.new()
 	body.add_child(mesh)
@@ -54,8 +55,25 @@ func run() -> void:
 	world.blocks[cell] = body
 	source._begin_ordinary_visual_source(source_id)
 	source.active_structure_visual_source_id = source_id
-	source._record_ordinary_visual_block(cell, "stoneBlock", body)
+	var visual_options := {"roofRole":"slope", "roofEdge":{"x":-1, "z":0}}
+	source._record_ordinary_visual_block(cell, "stoneBlock", body, visual_options)
 	source.active_structure_visual_source_id = ""
+	var source_row: Dictionary = source.ordinary_visual_sources.get(source_id, {})
+	var recipe_input: Dictionary = source_row.get("visualRecipeInputs", {}).get(cell, {})
+	var recipe_source_revision := int(source_row.get("revision", -1))
+	check("producer_seals_complete_visual_recipe_options_into_source_manifest",
+		recipe_input.get("schema") == "ordinary-structure-visual-recipe-input/v1"
+		and recipe_input.get("blockType") == "stoneBlock"
+		and recipe_input.get("options", {}).get("roofRole") == "slope"
+		and recipe_input.get("options", {}).get("roofEdge", {}).get("x") == -1
+		and recipe_input.get("options", {}).is_read_only()
+		and recipe_input.get("options", {}).get("roofEdge", {}).is_read_only()
+		and String(recipe_input.get("digest", "")).length() == 64, recipe_input)
+	source.active_structure_visual_source_id = source_id
+	source._record_ordinary_visual_block(cell, "stoneBlock", body, visual_options)
+	source.active_structure_visual_source_id = ""
+	check("identical_recipe_input_does_not_advance_source_revision",
+		int(source_row.get("revision", -1)) == recipe_source_revision, recipe_input)
 	var pending: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("emitted_live_block_waits_for_producer_completion",
 		pending.status == "pending" and pending.pendingSourceIds.has(source_id), pending)
@@ -63,7 +81,9 @@ func run() -> void:
 	var complete: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("completed_emission_has_exact_installed_candidate",
 		complete.status == "described" and complete.candidateCount == 1
-		and complete.candidates[0].owner == body and complete.candidates[0].installed, complete)
+		and complete.candidates[0].owner == body and complete.candidates[0].installed
+		and complete.candidates[0].visualRecipeInput.get("digest", "") \
+			== recipe_input.get("digest", ""), complete)
 	var repeated: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("unchanged_source_revision_is_stable",
 		complete.sourceRevision == repeated.sourceRevision, repeated)

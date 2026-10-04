@@ -240,10 +240,16 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		var discovered: Dictionary = capture.advance(DISCOVERY_ATOMS_PER_TURN, 3000)
 		if discovered.get("status") == "pending":
 			var reason := String(discovered.get("reason", "ordinary_section_discovery_budget"))
-			return _pending(reason, {
-			"section":job.section, "stage":String(discovered.get("stage", "discover")),
+			var pending_detail := {
+				"section":job.section,
+				"stage":String(discovered.get("stage", "discover")),
 				"cursor":int(discovered.get("cursor", 0)),
-				"restart":reason != "ordinary_visual_capture_budget"})
+				"restart":reason != "ordinary_visual_capture_budget"}
+			for detail_key in ["sourceId", "sourceCount", "candidateCount",
+					"pendingSourceIds", "retryable", "phaseUsec"]:
+				if discovered.has(detail_key):
+					pending_detail[detail_key] = discovered[detail_key]
+			return _pending(reason, pending_detail)
 		if discovered.get("status") == "failed":
 			return _failed(String(discovered.get("reason", "ordinary_section_discovery_failed")))
 		if discovered.get("status") != "described":

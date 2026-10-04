@@ -1,16 +1,18 @@
 extends RefCounted
 class_name OrdinaryStructureSectionGeometryAdapter
 
-## Copies one already-published ordinary structure block into the value input
-## shape used by ChunkStaticRenderSectionInstancePartitioner. It never creates
-## a visual and never changes the source body's collision or gameplay state.
-## This is deliberately a partial producer adapter: a caller must keep a
-## section pending while any ordinary member is outside the allowlist.
+## Resolves a generated ordinary structure block from its sealed producer
+## recipe into the value input shape used by ChunkStaticRenderSectionInstancePartitioner.
+## The live body remains the gameplay/collision owner and must agree with the
+## recipe transform. This is deliberately partial: unsupported visual recipes
+## keep the section pending until their complete layer/instance recipes exist.
 
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const MeshFingerprint := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const SnapshotBuilder := preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
+const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
+const BUILDING_MATERIAL_SHADER_PATH := "res://resources/visual/building_material.gdshader"
 
 const ALLOWED_BLOCK_TYPES: Array[String] = ["cobblestonePath", "stoneBlock", "woodBlock"]
 const SCHEMA := "ordinary-static-geometry-source/v1"
@@ -40,6 +42,20 @@ static func capture_block(structure_system: Object, main: Object,
 	if not expected_value is Dictionary or not expected_value.has(cell):
 		return _failed("ordinary_geometry_cell_not_in_source_manifest")
 	var block_type := String(expected_value[cell])
+	var recipe_inputs_value: Variant = source.get("visualRecipeInputs", {})
+	if not recipe_inputs_value is Dictionary:
+		return _pending("ordinary_geometry_visual_recipe_manifest_missing")
+	var recipe_input: Dictionary = recipe_inputs_value.get(cell, {})
+	var recipe_options: Variant = recipe_input.get("options")
+	var recipe_digest := String(recipe_input.get("digest", ""))
+	if not recipe_input.is_read_only() \
+			or recipe_input.get("schema") != "ordinary-structure-visual-recipe-input/v1" \
+			or String(recipe_input.get("blockType", "")) != block_type \
+			or not recipe_options is Dictionary or not recipe_options.is_read_only() \
+			or recipe_digest.is_empty() \
+			or recipe_digest != _visual_recipe_digest(block_type, recipe_options):
+		return _pending("ordinary_geometry_visual_recipe_manifest_stale", {
+			"sourceId":source_id, "cell":cell, "blockType":block_type})
 	var durable_id := String(structure_system.call("_ordinary_visual_block_key", source_id, cell, block_type))
 	if removed_value.has(durable_id):
 		return {"status":"empty", "reason":"ordinary_geometry_durably_removed",
@@ -51,48 +67,45 @@ static func capture_block(structure_system: Object, main: Object,
 	if not _valid_body(body, source_id, cell, block_type):
 		return _pending("ordinary_geometry_live_source_body_unavailable", {
 			"sourceId":source_id, "cell":cell})
-	if _has_special_visual_metadata(body):
-		return _pending("ordinary_geometry_visual_options_not_migrated", {
+	var recipe := VisualRecipe.resolve_member(main, block_type, cell, recipe_options)
+	if recipe.get("status") != "ready":
+		if recipe.get("status") == "failed":
+			return _failed(String(recipe.get("reason", "ordinary_geometry_visual_recipe_failed")))
+		return _pending(String(recipe.get("reason", "ordinary_geometry_visual_recipe_pending")), {
 			"sourceId":source_id, "cell":cell, "blockType":block_type})
-	var meshes: Array[MeshInstance3D] = []
-	var unsupported_visual := false
-	unsupported_visual = _collect_geometry(body, meshes, unsupported_visual)
-	if unsupported_visual or meshes.size() != 1:
-		return _pending("ordinary_geometry_requires_single_static_mesh", {
-			"sourceId":source_id, "cell":cell, "meshCount":meshes.size()})
-	var mesh_instance := meshes[0]
-	if not mesh_instance.visible or not mesh_instance.is_visible_in_tree() \
-			or mesh_instance.mesh == null or mesh_instance.material_override == null:
-		return _pending("ordinary_geometry_mesh_or_material_unavailable", {
+	var mesh := recipe.get("mesh") as Mesh
+	var material := recipe.get("material") as Material
+	var expected_transform: Transform3D = recipe.sourceToWorld
+	if not _transform_matches(body.global_transform, expected_transform):
+		return _pending("ordinary_geometry_live_body_transform_disagrees_with_recipe", {
 			"sourceId":source_id, "cell":cell})
-	if mesh_instance.mesh.get_surface_count() != 1:
+	if not is_instance_valid(mesh) or not is_instance_valid(material):
+		return _pending("ordinary_geometry_recipe_mesh_or_material_unavailable", {
+			"sourceId":source_id, "cell":cell})
+	if mesh.get_surface_count() != 1:
 		return _pending("ordinary_geometry_multisurface_material_not_migrated", {
 			"sourceId":source_id, "cell":cell,
-			"surfaceCount":mesh_instance.mesh.get_surface_count()})
-	if not mesh_instance.material_override is StandardMaterial3D:
-		return _pending("ordinary_geometry_material_type_not_migrated", {
+			"surfaceCount":mesh.get_surface_count()})
+	var material_identity := _material_identity(material)
+	if material_identity.is_empty():
+		return _pending("ordinary_geometry_material_fingerprint_unavailable", {
 			"sourceId":source_id, "cell":cell,
-			"materialClass":mesh_instance.material_override.get_class()})
-	var standard_material := mesh_instance.material_override as StandardMaterial3D
-	if standard_material.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED \
-			or standard_material.albedo_color.a < 0.999:
+			"materialClass":material.get_class()})
+	if not _material_is_opaque(material):
 		return _pending("ordinary_geometry_nonopaque_material_not_migrated", {
-			"sourceId":source_id, "cell":cell})
-	var mesh_identity := MeshFingerprint.inspect(mesh_instance.mesh)
+			"sourceId":source_id, "cell":cell,
+			"materialClass":material.get_class()})
+	var mesh_identity := MeshFingerprint.inspect(mesh)
 	if mesh_identity.get("status") != "ready":
 		return _pending("ordinary_geometry_mesh_fingerprint_unavailable", {
 			"sourceId":source_id, "cell":cell,
 			"reason":String(mesh_identity.get("reason", ""))})
-	var material_identity := _material_identity(mesh_instance.material_override)
-	if material_identity.is_empty():
-		return _pending("ordinary_geometry_material_fingerprint_unavailable", {
-			"sourceId":source_id, "cell":cell})
-	var mesh_bounds := mesh_instance.mesh.get_aabb()
+	var mesh_bounds: AABB = recipe.meshLocalBounds
 	if not _valid_bounds(mesh_bounds):
 		return _pending("ordinary_geometry_mesh_bounds_invalid", {
 			"sourceId":source_id, "cell":cell})
 	var cell_size := float(main.get("CELL"))
-	var world_bounds: AABB = mesh_instance.global_transform * mesh_bounds
+	var world_bounds: AABB = recipe.worldBounds
 	var cell_origin := Vector3(cell) * cell_size
 	var support := Vector3.ONE * (cell_size * MAX_HORIZONTAL_SUPPORT_CELLS)
 	if not is_finite(cell_size) or cell_size <= 0.0 \
@@ -105,8 +118,9 @@ static func capture_block(structure_system: Object, main: Object,
 			"cellOrigin":cell_origin, "maxHorizontalSupport":support.x})
 	var part_id := _source_part_id(source_id, cell)
 	var source_revision := _revision(source, source_id, cell, block_type,
-		body.global_transform, mesh_instance.transform,
-		String(mesh_identity.contentDigest), material_identity.digest)
+		expected_transform, recipe.meshLocalTransform,
+		String(mesh_identity.contentDigest), material_identity.digest,
+		String(recipe.contentDigest) + recipe_digest)
 	if source_revision.is_empty():
 		return _failed("ordinary_geometry_revision_hash_failed")
 	var mesh_key: String = "ordinary-mesh:" + String(mesh_identity.contentDigest)
@@ -129,7 +143,7 @@ static func capture_block(structure_system: Object, main: Object,
 	compatibility.make_read_only()
 	var segment_id := part_id + ":mesh"
 	var buffer: Array[float] = []
-	for value: float in Attributes.encode(mesh_instance.transform, Color.WHITE, Color.WHITE):
+	for value: float in Attributes.encode(recipe.meshLocalTransform, Color.WHITE, Color.WHITE):
 		buffer.append(value)
 	buffer.make_read_only()
 	var instance_input: Dictionary = {
@@ -139,9 +153,11 @@ static func capture_block(structure_system: Object, main: Object,
 		"sourcePartId":part_id,
 		"authoritySourceId":source_id,
 		"sourceRevision":source_revision,
+		"visualRecipeDigest":recipe_digest,
+		"visualRecipeInput":recipe_input,
 		"segmentId":segment_id,
 		"ownerCell":Grid.logical_owner_cell_for_world_position(body.global_position),
-		"sourceToWorld":body.global_transform,
+		"sourceToWorld":expected_transform,
 		"batchKey":batch_key,
 		"meshKey":mesh_key,
 		"meshContentDigest":String(mesh_identity.contentDigest),
@@ -162,14 +178,15 @@ static func capture_block(structure_system: Object, main: Object,
 	var manifest_row: Dictionary = {"sourcePartId":part_id,
 		"sourceRevision":source_revision, "sourceId":source_id,
 		"cell":cell, "blockType":block_type,
+		"visualRecipeDigest":recipe_digest,
 		"meshDigest":String(mesh_identity.contentDigest),
 		"materialDigest":material_identity.digest}
 	manifest_row.make_read_only()
 	return {"status":"ready", "sourceInput":instance_input,
 		"manifest":manifest_row, "compatibility":compatibility,
-		"mesh":mesh_instance.mesh,
-		"material":mesh_instance.material_override,
-		"body":weakref(body), "geometry":weakref(mesh_instance),
+		"mesh":mesh,
+		"material":material,
+		"body":weakref(body), "geometry":null,
 		"sourcePartId":part_id, "sourceRevision":source_revision,
 		"meshDigest":String(mesh_identity.contentDigest),
 		"materialDigest":material_identity.digest}
@@ -256,42 +273,72 @@ static func _valid_body(body: Node3D, source_id: String, cell: Vector3i,
 		and String(body.get_meta("block_type", "")) == block_type
 
 
-static func _has_special_visual_metadata(body: Node3D) -> bool:
-	for key in ["roofRole", "roofAxis", "roofSide", "roofMaterial", "roofTrimMaterial",
-			"roofEdgeX", "roofEdgeZ", "roofAccent", "accentRole", "windowAxis",
-			"windowSide", "cornerX", "cornerZ", "fenceAxis"]:
-		if body.has_meta(key): return true
-	return false
-
-
-static func _collect_geometry(node: Node, meshes: Array[MeshInstance3D],
-		unsupported_visual: bool) -> bool:
-	for child_value: Variant in node.get_children():
-		if not child_value is Node: continue
-		var child := child_value as Node
-		if child is MeshInstance3D:
-			meshes.append(child as MeshInstance3D)
-		elif child is GeometryInstance3D or child is Light3D or child is Area3D:
-			unsupported_visual = true
-		unsupported_visual = _collect_geometry(child, meshes, unsupported_visual)
-	return unsupported_visual
+static func _transform_matches(actual: Transform3D, expected: Transform3D) -> bool:
+	return actual.origin.distance_squared_to(expected.origin) <= 0.000001 \
+		and actual.basis.x.distance_squared_to(expected.basis.x) <= 0.000001 \
+		and actual.basis.y.distance_squared_to(expected.basis.y) <= 0.000001 \
+		and actual.basis.z.distance_squared_to(expected.basis.z) <= 0.000001
 
 
 static func _revision(source: Dictionary, source_id: String, cell: Vector3i,
 		block_type: String, body_transform: Transform3D, mesh_transform: Transform3D,
-		mesh_digest: String, material_digest: String) -> String:
+		mesh_digest: String, material_digest: String, recipe_digest: String) -> String:
 	var context := HashingContext.new()
 	if context.start(HashingContext.HASH_SHA256) != OK:
 		return ""
 	var payload := [SCHEMA, source_id, int(source.get("revision", -1)), cell, block_type,
-		body_transform, mesh_transform, mesh_digest, material_digest]
+		body_transform, mesh_transform, mesh_digest, material_digest, recipe_digest]
 	if context.update(var_to_bytes(payload)) != OK:
+		return ""
+	return context.finish().hex_encode()
+
+
+static func _visual_recipe_digest(block_type: String, options: Dictionary) -> String:
+	if block_type.is_empty() or not options.is_read_only():
+		return ""
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK \
+			or context.update(var_to_bytes([
+				"ordinary-structure-visual-recipe-input/v1", block_type, options])) != OK:
 		return ""
 	return context.finish().hex_encode()
 
 
 static func _material_identity(material: Material) -> Dictionary:
 	if not is_instance_valid(material): return {}
+	if material is ShaderMaterial:
+		var shader_material := material as ShaderMaterial
+		var shader := shader_material.shader
+		if not is_instance_valid(shader) or shader.resource_path != BUILDING_MATERIAL_SHADER_PATH:
+			return {}
+		var shader_code := shader.code
+		if shader_code.is_empty() or shader_code.contains("ALPHA") \
+				or shader_code.contains("blend_"):
+			return {}
+		var uniforms: Array = []
+		for uniform_value: Variant in shader.get_shader_uniform_list():
+			if not uniform_value is Dictionary:
+				return {}
+			var uniform: Dictionary = uniform_value
+			var name := String(uniform.get("name", ""))
+			if name.is_empty(): continue
+			var value: Variant = shader_material.get_shader_parameter(name)
+			if value is Resource or value is Object or value is Callable:
+				return {}
+			uniforms.append([name, value])
+		uniforms.sort_custom(func(a: Array, b: Array) -> bool:
+			return String(a[0]) < String(b[0]))
+		var shader_context := HashingContext.new()
+		if shader_context.start(HashingContext.HASH_SHA256) != OK \
+				or shader_context.update(var_to_bytes([
+					"opaque-building-shader/v1", BUILDING_MATERIAL_SHADER_PATH,
+					shader_code, uniforms])) != OK:
+			return {}
+		return {"digest":shader_context.finish().hex_encode(),
+			"materialClass":"ShaderMaterial", "shaderPath":BUILDING_MATERIAL_SHADER_PATH,
+			"uniforms":uniforms}
+	if not material is StandardMaterial3D:
+		return {}
 	var properties: Array = []
 	for property: Dictionary in material.get_property_list():
 		var name := String(property.get("name", ""))
@@ -310,6 +357,21 @@ static func _material_identity(material: Material) -> Dictionary:
 			or context.update(var_to_bytes([material.get_class(), properties])) != OK:
 		return {}
 	return {"digest":context.finish().hex_encode()}
+
+
+static func _material_is_opaque(material: Material) -> bool:
+	if material is StandardMaterial3D:
+		var standard := material as StandardMaterial3D
+		return standard.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED \
+			and standard.albedo_color.a >= 0.999
+	if material is ShaderMaterial:
+		var shader := (material as ShaderMaterial).shader
+		if not is_instance_valid(shader) or shader.resource_path != BUILDING_MATERIAL_SHADER_PATH:
+			return false
+		var code := shader.code
+		return not code.is_empty() and not code.contains("ALPHA") \
+			and not code.contains("blend_")
+	return false
 
 
 static func _valid_bounds(bounds: AABB) -> bool:

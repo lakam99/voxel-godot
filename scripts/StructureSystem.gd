@@ -188,6 +188,15 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
             var cell: Vector3i=cell_value
             if not bounds.has_point(Vector2i(cell.x,cell.z)): continue
             var block_type:=String(expected[cell])
+            var recipe_inputs: Variant = source.get("visualRecipeInputs", {})
+            var visual_recipe: Dictionary = recipe_inputs.get(cell, {}) \
+                if recipe_inputs is Dictionary else {}
+            if visual_recipe.is_empty() or visual_recipe.get("schema") \
+                    != "ordinary-structure-visual-recipe-input/v1" \
+                    or String(visual_recipe.get("blockType", "")) != block_type:
+                pending_ids.append("%s:visual_recipe_missing:%d,%d,%d" % [
+                    source_id, cell.x, cell.y, cell.z])
+                continue
             var durable_id:=_ordinary_visual_block_key(source_id,cell,block_type)
             if removed_generated_structure_blocks.has(durable_id): continue
             var body:=live_blocks.get(cell) as Node3D
@@ -200,7 +209,8 @@ func region_ordinary_visual_source(bounds: Rect2i) -> Dictionary:
             renderable_usec+=Time.get_ticks_usec()-renderable_started_usec
             var candidate_id: String="ordinary:%s:%d,%d,%d:%s" % [source_id,cell.x,cell.y,cell.z,block_type]
             candidates.append({"candidateId":candidate_id,"positionXZ":Vector2(float(cell.x)+0.5,float(cell.z)+0.5),
-                "cell":cell,"owner":body,"representation":representation,"installed":is_instance_valid(representation)})
+                "cell":cell,"blockType":block_type,"visualRecipeInput":visual_recipe,
+                "owner":body,"representation":representation,"installed":is_instance_valid(representation)})
             bindings.append([candidate_id,body.get_instance_id() if is_instance_valid(body) else 0,
                 representation.get_instance_id() if is_instance_valid(representation) else 0])
     if candidates.size()>100000:
@@ -273,7 +283,8 @@ func _ordinary_visual_block_key(source_id: String, cell: Vector3i, block_type: S
 func _begin_ordinary_visual_source(source_id: String) -> void:
     if source_id.is_empty(): return
     if not ordinary_visual_sources.has(source_id):
-        ordinary_visual_sources[source_id]={"completed":false,"expected":{},"omitted":{},"failed":{},"revision":1}
+        ordinary_visual_sources[source_id]={"completed":false,"expected":{},"visualRecipeInputs":{},
+            "omitted":{},"failed":{},"revision":1}
         ordinary_visual_revision+=1
 
 func _complete_ordinary_visual_source(source_id: String) -> void:
@@ -285,21 +296,40 @@ func _complete_ordinary_visual_source(source_id: String) -> void:
         source.revision=int(source.get("revision",0))+1
         ordinary_visual_revision+=1
 
-func _record_ordinary_visual_block(cell: Vector3i, block_type: String, output: Node3D) -> void:
+func _record_ordinary_visual_block(cell: Vector3i, block_type: String, output: Node3D,
+        visual_options: Dictionary = {}) -> void:
     var source_id:=active_structure_visual_source_id
     if source_id.is_empty(): return
     _begin_ordinary_visual_source(source_id)
     var source: Dictionary=ordinary_visual_sources[source_id]
     var expected: Dictionary=source.expected
+    var recipe_inputs: Dictionary=source.get("visualRecipeInputs", {})
+    if not recipe_inputs is Dictionary:
+        recipe_inputs={}
+        source.visualRecipeInputs=recipe_inputs
     var omitted: Dictionary=source.omitted
     var failed: Dictionary=source.failed
     var key:=_ordinary_visual_block_key(source_id,cell,block_type)
+    var sealed_options: Dictionary = _sealed_ordinary_visual_value(visual_options)
+    var recipe_digest := _ordinary_visual_recipe_digest(block_type, sealed_options)
+    var current_recipe: Dictionary = recipe_inputs.get(cell, {})
+    var recipe_changed := String(current_recipe.get("digest", "")) != recipe_digest
     var accepted:=is_instance_valid(output) and bool(output.get_meta("generated",false)) \
         and String(output.get_meta("generated_visual_source_id",""))==source_id
     if accepted:
         var actual_type:=String(output.get_meta("block_type",""))
         if expected.get(cell,"")!=actual_type:
             expected[cell]=actual_type
+            source.revision=int(source.get("revision",0))+1
+            ordinary_visual_revision+=1
+        if recipe_digest.is_empty():
+            failed[key] = true
+            return
+        if recipe_changed:
+            var recipe_input := {"schema":"ordinary-structure-visual-recipe-input/v1",
+                "blockType":block_type, "options":sealed_options, "digest":recipe_digest}
+            recipe_input.make_read_only()
+            recipe_inputs[cell] = recipe_input
             source.revision=int(source.get("revision",0))+1
             ordinary_visual_revision+=1
         omitted.erase(key)
@@ -311,10 +341,37 @@ func _record_ordinary_visual_block(cell: Vector3i, block_type: String, output: N
             ordinary_visual_revision+=1
         failed.erase(key)
     else:
+        recipe_inputs.erase(cell)
         if not failed.has(key):
             failed[key]=true
             source.revision=int(source.get("revision",0))+1
             ordinary_visual_revision+=1
+
+static func _sealed_ordinary_visual_value(value: Variant) -> Variant:
+    if value is Dictionary:
+        var result: Dictionary = {}
+        for key: Variant in value:
+            result[key] = _sealed_ordinary_visual_value(value[key])
+        result.make_read_only()
+        return result
+    if value is Array:
+        var result: Array = []
+        for item: Variant in value:
+            result.append(_sealed_ordinary_visual_value(item))
+        result.make_read_only()
+        return result
+    return value
+
+static func _ordinary_visual_recipe_digest(block_type: String, options: Dictionary) -> String:
+    if block_type.is_empty() or not options.is_read_only():
+        return ""
+    var context := HashingContext.new()
+    if context.start(HashingContext.HASH_SHA256) != OK:
+        return ""
+    if context.update(var_to_bytes(["ordinary-structure-visual-recipe-input/v1",
+            block_type, options])) != OK:
+        return ""
+    return context.finish().hex_encode()
 
 func generated_visual_block_removed(body: Node3D) -> void:
     if not is_instance_valid(body) or not bool(body.get_meta("generated",false)): return
@@ -2513,7 +2570,7 @@ func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, bloc
     var cell:=Vector3i(cell_x, cell_y, cell_z)
     if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
     var block = main.create_block(cell, block_type, options)
-    _record_ordinary_visual_block(cell,block_type,block)
+    _record_ordinary_visual_block(cell,block_type,block,options)
 
 func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionary = {}) -> void:
     if defer_structure_ops:
@@ -2535,7 +2592,7 @@ func place_path(cell_x: int, cell_z: int, level: float, extra_options: Dictionar
     var cell:=Vector3i(cell_x, cell_y, cell_z)
     if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
     var block = main.create_block(cell, "cobblestonePath", options)
-    _record_ordinary_visual_block(cell,"cobblestonePath",block)
+    _record_ordinary_visual_block(cell,"cobblestonePath",block,options)
     if block:
         generated_path_count += 1
 
@@ -2561,7 +2618,7 @@ func place_utility(cell_x: int, cell_z: int, level: float, block_type: String, e
     var cell:=Vector3i(cell_x, cell_y, cell_z)
     if active_structure_visual_source_id!="": options["generatedVisualSourceId"]=active_structure_visual_source_id
     var block = main.create_block(cell, block_type, options)
-    _record_ordinary_visual_block(cell,block_type,block)
+    _record_ordinary_visual_block(cell,block_type,block,options)
     if block:
         generated_utility_count += 1
     return block
@@ -2590,7 +2647,7 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
             group_z -= 1
     var group_id := "door-group:%d,%d,%d:%d" % [group_x, cell_y, group_z, side]
     var cell:=Vector3i(cell_x, cell_y, cell_z)
-    var block = main.create_block(cell, "door", {
+    var door_options := {
         "generated": true,
         "generatedVisualSourceId": active_structure_visual_source_id,
         "world_y": world_y,
@@ -2605,8 +2662,9 @@ func place_door(cell_x: int, cell_z: int, level: float, side: int, secondary: bo
         "door": true,
         "accentRole": "doorFrame",
         "doorTrimMaterial": "trimWood"
-    })
-    _record_ordinary_visual_block(cell,"door",block)
+    }
+    var block = main.create_block(cell, "door", door_options)
+    _record_ordinary_visual_block(cell,"door",block,door_options)
     if block:
         generated_door_count += 1
 
