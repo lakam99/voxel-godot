@@ -659,6 +659,8 @@ static func _validate_snapshot(snapshot: Dictionary) -> Dictionary:
 	# sealed its digest. Freshness is checked against the live source authority,
 	# never accepted from this advisory marker.
 	snapshot_copy.erase("status")
+	# Runtime ownership is validated separately from deterministic content.
+	snapshot_copy.erase("producerOwnerInstanceId")
 	if expected_snapshot_revision != _value_digest(snapshot_copy):
 		return _failed("ecology_snapshot_revision_mismatch")
 	return {"status":"ready"}
@@ -813,11 +815,14 @@ func _capture_production_chunk(chunk_key: Vector2i) -> Dictionary:
 	if _validate_snapshot(snapshot).get("status") != "ready" \
 			or _world_id != expected_world_id \
 			or snapshot.get("chunk") != chunk_key \
+			or int(snapshot.get("producerOwnerInstanceId", 0)) != chunk_node.get_instance_id() \
 			or String(snapshot.get("worldSeed", "")) != String(main.get("seed_text")) \
 			or String(snapshot.get("sourceRevision", "")) != String(main.call(
 				"_ecology_chunk_source_revision", chunk_key)) \
 			or int(snapshot.get("removedPropsRevision", -1)) != int(main.get("removed_props_revision")):
 		return _pending("ecology_chunk_source_snapshot_revision_stale", {"chunk":chunk_key,
+			"snapshotProducerOwnerInstanceId":int(snapshot.get("producerOwnerInstanceId", 0)),
+			"currentProducerOwnerInstanceId":chunk_node.get_instance_id(),
 			"snapshotRemovedPropsRevision":int(snapshot.get("removedPropsRevision", -1)),
 			"currentRemovedPropsRevision":int(main.get("removed_props_revision")),
 			"snapshotSourceRevision":String(snapshot.get("sourceRevision", "")),

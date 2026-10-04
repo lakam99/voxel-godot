@@ -14,6 +14,7 @@ class ProductionAuthority extends Node:
 	var seed_hash := 31
 	var removed_props_revision := 0
 	var removed_props := {}
+	var terrain_revision := 0
 	var chunks: Dictionary = {}
 	var production_mesh: Mesh = BoxMesh.new()
 	var production_material: Material = StandardMaterial3D.new()
@@ -32,7 +33,10 @@ class ProductionAuthority extends Node:
 		return production_material
 
 	func _ecology_chunk_source_revision(key: Vector2i) -> String:
-		return "ecology-v1:%s:%d,%d:terrain-0" % [seed_text, key.x, key.y]
+		return "ecology-v2:%s:%d,%d:static-props-v1" % [seed_text, key.x, key.y]
+
+	func terrain_volume_chunk_revision(_key: Vector2i, _chunk_size: int) -> int:
+		return terrain_revision
 
 var checks := {}
 
@@ -186,6 +190,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 			"producerComplete":true})
 		var snapshot: Dictionary = ledger.snapshot()
 		snapshot["status"] = "ready"
+		snapshot["producerOwnerInstanceId"] = chunk_owner.get_instance_id()
 		chunk_owner.set_meta("static_ecology_source_value_snapshot", snapshot)
 		var resource_map: Dictionary = {}
 		if chunk_key == Vector2i.ZERO:
@@ -270,6 +275,7 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 		"producerComplete":true})
 	var tombstone_snapshot: Dictionary = prop_ledger.snapshot()
 	tombstone_snapshot["status"] = "ready"
+	tombstone_snapshot["producerOwnerInstanceId"] = prop_chunk.get_instance_id()
 	prop_chunk.set_meta("static_ecology_source_value_snapshot", tombstone_snapshot)
 	for key_value: Variant in main.chunks:
 		var owner: Node3D = main.chunks[key_value]
@@ -351,6 +357,26 @@ func run() -> void:
 	check("source_ids_and_content_revisions_are_retained",
 		prepared.get("candidateIds", []).size() == 2 \
 		and prepared.get("sourceRevisions", {}).size() == 2)
+	var stable_producer_revision := "ecology-v2:reload-contract:0,0:static-props-v1"
+	var initial_owner_ledger = Ledger.new()
+	initial_owner_ledger.configure("reload-contract", Vector2i.ZERO,
+		stable_producer_revision, 0, 0)
+	initial_owner_ledger.record_candidate(_candidate(
+		"reload-contract:detail:0,0:grass:0", 1.0, Color.WHITE))
+	var initial_owner_snapshot: Dictionary = initial_owner_ledger.snapshot()
+	var reloaded_owner_ledger = Ledger.new()
+	reloaded_owner_ledger.configure("reload-contract", Vector2i.ZERO,
+		stable_producer_revision, 0, 1)
+	reloaded_owner_ledger.record_candidate(_candidate(
+		"reload-contract:detail:0,0:grass:0", 2.0, Color.WHITE))
+	var reloaded_owner_snapshot: Dictionary = reloaded_owner_ledger.snapshot()
+	check("stable_producer_identity_allows_changed_reloaded_content_revision",
+		initial_owner_snapshot.get("sourceRevision", "") == \
+			reloaded_owner_snapshot.get("sourceRevision", "") \
+		and initial_owner_snapshot.get("terrainRevision", -1) != \
+			reloaded_owner_snapshot.get("terrainRevision", -1) \
+		and initial_owner_snapshot.get("contentRevision", "") != \
+			reloaded_owner_snapshot.get("contentRevision", ""))
 	var tombstone_ledger = Ledger.new()
 	tombstone_ledger.configure("ecology-tombstone-contract", Vector2i.ZERO,
 		"ecology-source-r1", 6)
@@ -450,6 +476,7 @@ func run() -> void:
 	production_snapshot["contentRevision"] = ""
 	production_snapshot.erase("contentRevision")
 	production_snapshot["contentRevision"] = Adapter._value_digest(production_snapshot)
+	production_snapshot["producerOwnerInstanceId"] = chunk_owner.get_instance_id()
 	chunk_owner.set_meta("static_ecology_source_value_snapshot", production_snapshot)
 	root.add_child(production_authority)
 	var production_provider = Adapter.new()
@@ -475,6 +502,28 @@ func run() -> void:
 		and incomplete_contribution.get("missingCategories", []).has("ore") \
 		and incomplete_contribution.get("missingCategories", []).has("forage") \
 		and incomplete_contribution.get("missingCategories", []).has("underground_props"))
+	var original_content_revision := String(production_snapshot.get("contentRevision", ""))
+	production_authority.terrain_revision += 1
+	var terrain_edit_capture: Dictionary = production_provider._capture_production_chunk(Vector2i.ZERO)
+	check("terrain_edit_keeps_installed_physical_ecology_snapshot_current",
+		production_authority.terrain_volume_chunk_revision(Vector2i.ZERO, 28) == 1 \
+		and terrain_edit_capture.get("status") == "ready" \
+		and String(terrain_edit_capture.get("snapshot", {}).get("contentRevision", "")) == original_content_revision \
+		and production_authority._ecology_chunk_source_revision(Vector2i.ZERO) == \
+			String(production_snapshot.get("sourceRevision", "")))
+	var replacement_owner := Node3D.new()
+	production_authority.add_child(replacement_owner)
+	replacement_owner.set_meta("static_ecology_source_value_snapshot", production_snapshot.duplicate(true))
+	production_authority.chunks[Vector2i.ZERO] = replacement_owner
+	var replaced_owner_capture: Dictionary = production_provider._capture_production_chunk(Vector2i.ZERO)
+	check("copied_ecology_snapshot_is_rejected_for_replacement_chunk_owner",
+		replaced_owner_capture.get("status") == "pending" \
+		and int(replaced_owner_capture.get("snapshotProducerOwnerInstanceId", 0)) == \
+			chunk_owner.get_instance_id() \
+		and int(replaced_owner_capture.get("currentProducerOwnerInstanceId", 0)) == \
+			replacement_owner.get_instance_id())
+	production_authority.chunks[Vector2i.ZERO] = chunk_owner
+	replacement_owner.free()
 	production_authority.removed_props_revision += 1
 	var stale_retry := production_provider.capture_static_section_contribution(
 		synthetic_complete_census, Vector3i.ZERO)
@@ -664,6 +713,7 @@ func _tree_without_committed_queue_geometry_stays_pending() -> Dictionary:
 			"producerComplete":true})
 		var snapshot: Dictionary = ledger.snapshot()
 		snapshot["status"] = "ready"
+		snapshot["producerOwnerInstanceId"] = owner.get_instance_id()
 		owner.set_meta("static_ecology_source_value_snapshot", snapshot)
 		var resource_bindings := {}
 		resource_bindings.make_read_only()

@@ -3267,6 +3267,7 @@ func _finalize_ecology_source_values(state: Dictionary) -> void:
         _ecology_chunk_source_revision(key) else "stale"
     var chunk := valid_node3d_from_variant(state.get("chunk"))
     if chunk != null and is_instance_valid(chunk):
+        snapshot["producerOwnerInstanceId"] = chunk.get_instance_id()
         chunk.remove_meta("static_ecology_source_value_ledger")
         chunk.set_meta("static_ecology_source_value_snapshot", snapshot.duplicate(true))
 
@@ -3292,13 +3293,14 @@ func _publish_surface_ecology_source_values(state: Dictionary) -> void:
     var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
     snapshot["status"] = "ready" if String(snapshot.get("sourceRevision", "")) == \
         _ecology_chunk_source_revision(key) else "stale"
+    snapshot["producerOwnerInstanceId"] = chunk.get_instance_id()
     chunk.set_meta("static_ecology_source_value_snapshot", snapshot.duplicate(true))
 
 func _ecology_chunk_source_revision(key: Vector2i) -> String:
-    var terrain_revision := -1
-    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
-        terrain_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
-    return "ecology-v1:%s:%d,%d:terrain-%d" % [seed_text, key.x, key.y, terrain_revision]
+    # Physical ecology source identity follows its chunk producer owner and
+    # content snapshot, not terrain edits. Terrain provenance is retained in
+    # the snapshot and the section candidate carries terrain's own revision.
+    return "ecology-v2:%s:%d,%d:static-props-v1" % [seed_text, key.x, key.y]
 
 func process_chunk_prop_spawn_state(
     state: Dictionary,
