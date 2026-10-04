@@ -9,6 +9,7 @@ const SectionGrid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const TerrainRuntime := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 const TerrainVolume := preload("res://scripts/TerrainVolumeService.gd")
 const WorldGeneration := preload("res://scripts/WorldGenerationSystem.gd")
+const SourceRoster := preload("res://scripts/world/StaticSectionSourceRoster.gd")
 
 
 class FixtureCoordinator extends "res://scripts/world/WorldStaticSectionCoordinator.gd":
@@ -103,6 +104,16 @@ class EmptySectionProvider extends RefCounted:
 		return {"status":"ready", "contribution":contribution}
 
 
+class StaleSnapshotProvider extends RefCounted:
+	func capture_static_section_sources(_world_id: String, _sections: Array) -> Dictionary:
+		return {"status":"pending", "retryable":true,
+			"reason":"ecology_chunk_source_snapshot_revision_stale",
+			"chunk":Vector2i(2, -1), "snapshotRemovedPropsRevision":3,
+			"currentRemovedPropsRevision":3, "snapshotSourceRevision":"terrain-5",
+			"currentSourceRevision":"terrain-6",
+			"snapshotValidation":{"status":"ready", "reason":""}}
+
+
 var checks: Array[Dictionary] = []
 
 
@@ -112,6 +123,21 @@ func _initialize() -> void:
 
 func run() -> void:
 	var world_id := "seed:visible-section-demand-contract:1"
+	var stale_roster := SourceRoster.new()
+	var stale_provider := StaleSnapshotProvider.new()
+	stale_roster.bind_world(world_id + ":stale-snapshot", ["ecology_and_static_props"])
+	stale_roster.register_provider("ecology_and_static_props", stale_provider,
+		"capture_static_section_sources")
+	var stale_census: Dictionary = stale_roster.capture_sections([Vector3i.ZERO])
+	var stale_details: Dictionary = stale_census.get("providerDetails", {})
+	check("pending_provider_wrapper_preserves_nested_reason_and_bounded_revision_details",
+		stale_census.get("status") == "pending"
+			and stale_census.get("reason") == "static_source_provider_pending"
+			and stale_census.get("providerReason") == "ecology_chunk_source_snapshot_revision_stale"
+			and stale_details.get("snapshotSourceRevision") == "terrain-5"
+			and stale_details.get("currentSourceRevision") == "terrain-6"
+			and stale_details.get("snapshotValidationStatus") == "ready",
+		stale_census)
 	var required: Array[String] = ["terrain", "ecology"]
 	required.make_read_only()
 	var coordinator = FixtureCoordinator.new()
@@ -213,6 +239,47 @@ func run() -> void:
 		{"request":revision_request, "selected":selected_recompile,
 			"demand":refreshed_demand,
 			"previousCandidateRetained":priority_coordinator._production_candidates_by_section.get(edited_section) == installed_candidate})
+	var saturated_coordinator = FixtureCoordinator.new()
+	saturated_coordinator.configure(world_id + ":urgent-saturated-queue")
+	for index in range(1000):
+		saturated_coordinator.request_visible_section_demand(
+			Vector3i(index, 1, 0), 1, float(index + 1))
+	var saturated_key := Vector3i(2000, 1, 0)
+	var saturated_candidate := {"sectionKey":saturated_key, "generation":12}
+	saturated_coordinator._production_candidates_by_section[saturated_key] = saturated_candidate
+	saturated_coordinator.request_visible_section_demand(saturated_key, 1, 999999.0)
+	var saturated_state: Dictionary = saturated_coordinator._visible_section_demands[saturated_key]
+	saturated_state["stage"] = "installed"
+	saturated_state["installedGeneration"] = 12
+	saturated_state["queued"] = false
+	saturated_coordinator._visible_section_demands[saturated_key] = saturated_state
+	saturated_coordinator.invalidate_visible_section_source(saturated_key,
+		"terrain", "terrain:installed:fixture", "revision-2")
+	var urgent_head := saturated_coordinator.has_urgent_visible_section_recompile()
+	var saturated_selection := saturated_coordinator._take_next_visible_section_demand(true)
+	check("urgent_installed_replacement_preempts_saturated_fifo_with_bounded_scan",
+		urgent_head and saturated_selection.get("status") == "ready"
+			and saturated_selection.get("sectionKey") == saturated_key
+			and saturated_coordinator._production_candidates_by_section.get(saturated_key)
+				== saturated_candidate
+			and saturated_coordinator._visible_section_demand_count > 0,
+		{"urgentHead":urgent_head, "selection":saturated_selection,
+			"remainingQueueCount":saturated_coordinator._visible_section_demand_count,
+			"pendingDemandCount":saturated_coordinator._visible_section_demands.size()})
+	var bounded_admission_details: Dictionary = Coordinator._visible_section_admission_details({
+		"status":"pending", "providerId":"ecology_and_static_props",
+		"reason":"static_source_provider_pending",
+		"providerReason":"ecology_chunk_source_snapshot_revision_stale",
+		"providerDetails":{"chunk":Vector2i(2, -1), "snapshotRemovedPropsRevision":3,
+			"currentRemovedPropsRevision":3, "snapshotSourceRevision":"old",
+			"currentSourceRevision":"new", "snapshotValidationStatus":"ready"},
+		"unboundedPayload":PackedByteArray([1, 2, 3])})
+	check("provider_stale_revision_details_are_retained_as_bounded_scalar_telemetry",
+		bounded_admission_details.get("providerReason") == "ecology_chunk_source_snapshot_revision_stale"
+			and bounded_admission_details.get("snapshotSourceRevision") == "old"
+			and bounded_admission_details.get("currentSourceRevision") == "new"
+			and bounded_admission_details.get("snapshotValidationStatus") == "ready"
+			and not bounded_admission_details.has("unboundedPayload"), bounded_admission_details)
 	var demand: Dictionary = coordinator.request_visible_section_demand(section_far, 11, 900.0)
 	check("native_mesh_section_demand_enters_retryable_coordinator_queue",
 		configured.get("status") == "ready" and roster_configured.get("status") == "ready"

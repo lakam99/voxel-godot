@@ -326,12 +326,13 @@ func refresh_visible_section_demand_priorities(camera_position: Vector3,
 ## queue window, prioritizes nearby first-time sections, and grants at most two
 ## nearer recompiles before giving an initial section its turn. Pending providers
 ## stay queued with delayed retries instead of rescanning every section each frame.
-func advance_visible_section_candidate_demands(max_attempts := 1) -> Dictionary:
+func advance_visible_section_candidate_demands(max_attempts := 1,
+		urgent_only := false) -> Dictionary:
 	if max_attempts < 1 or max_attempts > 4:
 		return _failed("invalid_visible_section_candidate_attempt_budget")
 	var results: Array[Dictionary] = []
 	for _attempt_index in range(max_attempts):
-		var selected: Dictionary = _take_next_visible_section_demand()
+		var selected: Dictionary = _take_next_visible_section_demand(urgent_only)
 		if selected.get("status") != "ready":
 			break
 		var section_key: Vector3i = selected.sectionKey
@@ -342,6 +343,7 @@ func advance_visible_section_candidate_demands(max_attempts := 1) -> Dictionary:
 		state["attempts"] = int(state.get("attempts", 0)) + 1
 		state["lastReason"] = String(admission.get("reason", ""))
 		state["lastStatus"] = String(admission.get("status", "failed"))
+		state["lastAdmissionDetails"] = _visible_section_admission_details(admission)
 		if admission.get("status") == "queued":
 			state["stage"] = "candidate_queued"
 			state["candidateGeneration"] = _production_candidate_generation
@@ -368,7 +370,21 @@ func advance_visible_section_candidate_demands(max_attempts := 1) -> Dictionary:
 		"pendingDemandCount":_visible_section_demands.size(), "results":results}
 
 
-func _take_next_visible_section_demand() -> Dictionary:
+func has_urgent_visible_section_recompile() -> bool:
+	if _visible_section_demand_count <= 0 or _visible_section_demand_queue.is_empty():
+		return false
+	var queued: Dictionary = _visible_section_demand_queue[_visible_section_demand_head]
+	var section_key: Vector3i = queued.get("sectionKey", Vector3i.ZERO)
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	return not state.is_empty() and state.get("stage") == "waiting" \
+		and bool(state.get("queued", false)) \
+		and bool(state.get("urgentRecompile", false)) \
+		and int(state.get("nextAttemptFrame", 0)) <= Engine.get_process_frames() \
+		and int(state.get("queueToken", -1)) == int(queued.get("queueToken", -2)) \
+		and _production_candidates_by_section.has(section_key)
+
+
+func _take_next_visible_section_demand(urgent_only := false) -> Dictionary:
 	if _visible_section_demand_count <= 0:
 		return {"status":"idle"}
 	var current_frame := Engine.get_process_frames()
@@ -409,7 +425,9 @@ func _take_next_visible_section_demand() -> Dictionary:
 		if bool(row.state.get("urgentRecompile", false)):
 			urgent_recompiles.append(row)
 	var urgent_recompile: Dictionary = _closest_visible_demand(urgent_recompiles)
-	if not urgent_recompile.is_empty():
+	if urgent_only:
+		selected = urgent_recompile
+	elif not urgent_recompile.is_empty():
 		selected = urgent_recompile
 		_visible_section_recompile_quota = maxi(0, _visible_section_recompile_quota - 1)
 	elif not recompile.is_empty() and (initial.is_empty() \
@@ -439,6 +457,28 @@ func _closest_visible_demand(rows: Array[Dictionary]) -> Dictionary:
 	return selected
 
 
+static func _visible_section_admission_details(admission: Dictionary) -> Dictionary:
+	var result := {}
+	for key in ["providerId", "chunk", "snapshotRemovedPropsRevision",
+			"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision"]:
+		if admission.has(key):
+			result[key] = admission[key]
+	if admission.has("providerReason"):
+		result["providerReason"] = String(admission.get("providerReason", ""))
+	var provider_details: Variant = admission.get("providerDetails", {})
+	if provider_details is Dictionary:
+		for key in ["chunk", "snapshotRemovedPropsRevision", "currentRemovedPropsRevision",
+				"snapshotSourceRevision", "currentSourceRevision",
+				"snapshotValidationStatus", "snapshotValidationReason"]:
+			if provider_details.has(key):
+				result[key] = provider_details[key]
+	var validation_value: Variant = admission.get("snapshotValidation", null)
+	if validation_value is Dictionary:
+		result["snapshotValidationStatus"] = String(validation_value.get("status", ""))
+		result["snapshotValidationReason"] = String(validation_value.get("reason", ""))
+	return result
+
+
 func _enqueue_visible_section_demand(section_key: Vector3i, state: Dictionary) -> void:
 	if bool(state.get("queued", false)):
 		return
@@ -455,10 +495,18 @@ func _enqueue_visible_section_demand(section_key: Vector3i, state: Dictionary) -
 		_visible_section_demand_tail = _visible_section_demand_count
 	_visible_section_demand_queue_token += 1
 	var queue_token := _visible_section_demand_queue_token
-	_visible_section_demand_queue[_visible_section_demand_tail] = {
-		"sectionKey":section_key, "queueToken":queue_token}
-	_visible_section_demand_tail = (_visible_section_demand_tail + 1) \
-		% _visible_section_demand_queue.size()
+	var queued_row := {"sectionKey":section_key, "queueToken":queue_token}
+	if bool(state.get("urgentRecompile", false)):
+		_visible_section_demand_head = posmod(_visible_section_demand_head - 1,
+			_visible_section_demand_queue.size())
+		_visible_section_demand_queue[_visible_section_demand_head] = queued_row
+		if _visible_section_demand_count == 0:
+			_visible_section_demand_tail = (_visible_section_demand_head + 1) \
+				% _visible_section_demand_queue.size()
+	else:
+		_visible_section_demand_queue[_visible_section_demand_tail] = queued_row
+		_visible_section_demand_tail = (_visible_section_demand_tail + 1) \
+			% _visible_section_demand_queue.size()
 	_visible_section_demand_count += 1
 	state["queued"] = true
 	state["queueToken"] = queue_token

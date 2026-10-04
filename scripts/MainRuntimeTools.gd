@@ -632,6 +632,27 @@ func update_voxel_authority_chunks(force: bool) -> void:
         gameplay_publication_lane = -1
         gameplay_publication_deadline_usec = 0
     npc_navigation_publication_permitted = true
+    var urgent_section_admission_advanced := false
+    if shared_gameplay_schedule and gameplay_publication_lane == 2 \
+            and world_static_section_coordinator != null \
+            and world_static_section_coordinator.has_method("has_urgent_visible_section_recompile") \
+            and bool(world_static_section_coordinator.call("has_urgent_visible_section_recompile")) \
+            and world_static_section_coordinator.has_method("advance_visible_section_candidate_demands"):
+        # Reserve this lane's first bounded capture opportunity for an installed
+        # visible section that needs replacement. Ordinary structure/prop work
+        # still uses the same frame deadline, but cannot consume the whole lane
+        # before stale visible geometry gets a chance to be rebuilt.
+        var urgent_admission_started := Time.get_ticks_usec()
+        var urgent_admission: Dictionary = world_static_section_coordinator.call(
+            "advance_visible_section_candidate_demands", 1, true)
+        urgent_section_admission_advanced = int(urgent_admission.get("attemptCount", 0)) > 0
+        if monitor != null:
+            monitor.observe_external_duration("whole_section_urgent_recompile_capture",
+                float(Time.get_ticks_usec() - urgent_admission_started) / 1000.0)
+            monitor.observe_gauge("whole_section_urgent_recompile_demand_count",
+                int(urgent_admission.get("pendingDemandCount", 0)))
+            if urgent_admission.get("status") == "failed":
+                monitor.increment_counter("whole_section_urgent_recompile_capture_failure")
     # Claim the Citadel's existing bounded share before broad streaming demand can
     # consume the whole frame envelope. The terrain child calls the same method
     # later, but the frame token admits exactly one claim. This preserves the
@@ -728,7 +749,8 @@ func update_voxel_authority_chunks(force: bool) -> void:
             priority_origin = player.camera.global_position
         world_static_section_coordinator.call(
             "refresh_visible_section_demand_priorities", priority_origin, 16)
-    if not force and deferred_time_available and world_static_section_coordinator != null \
+    if not force and deferred_time_available and not urgent_section_admission_advanced \
+            and world_static_section_coordinator != null \
             and world_static_section_coordinator.has_method("advance_visible_section_candidate_demands"):
         var remaining_before_section_capture := gameplay_publication_deadline_usec - Time.get_ticks_usec()
         if not shared_gameplay_schedule or remaining_before_section_capture > 2000:

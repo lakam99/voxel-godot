@@ -108,9 +108,22 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 		var provider: Dictionary = raw
 		var coverage_status := String(provider.get("status", ""))
 		if coverage_status == "pending":
+			var provider_details := {}
+			for detail_key in ["chunk", "snapshotRemovedPropsRevision",
+					"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision"]:
+				if provider.has(detail_key):
+					provider_details[detail_key] = provider[detail_key]
+			var validation_value: Variant = provider.get("snapshotValidation", {})
+			if validation_value is Dictionary:
+				provider_details["snapshotValidationStatus"] = String(
+					validation_value.get("status", ""))
+				provider_details["snapshotValidationReason"] = String(
+					validation_value.get("reason", ""))
+			provider_details.make_read_only()
 			return _pending("static_source_provider_pending", {
 				"providerId":provider_id,
-				"reason":String(provider.get("reason", "coverage_pending")),
+				"providerReason":String(provider.get("reason", "coverage_pending")),
+				"providerDetails":provider_details,
 				"retryable":bool(provider.get("retryable", true))
 			})
 		if coverage_status != "complete" or String(provider.get("worldId", "")) != _world_id:

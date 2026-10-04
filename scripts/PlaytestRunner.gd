@@ -1015,6 +1015,8 @@ func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
     var installed_candidate: Dictionary = {}
     var receipt: Dictionary = {}
     var installed_after_edit := false
+    var coordinator_attempts_before := int(coordinator.get("_visible_section_demand_attempts"))
+    var max_target_demand_attempts := 0
     for frame_index in range(3600):
         await get_tree().process_frame
         if not is_instance_valid(coordinator) or not is_instance_valid(terrain_runtime):
@@ -1027,6 +1029,8 @@ func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
             and pending_core.is_empty()
         var demands: Dictionary = coordinator.get("_visible_section_demands")
         demand_state = demands.get(section_key, {}) if demands is Dictionary else {}
+        max_target_demand_attempts = maxi(max_target_demand_attempts,
+            int(demand_state.get("attempts", 0)))
         var candidates: Dictionary = coordinator.get("_production_candidates_by_section")
         installed_candidate = candidates.get(section_key, {}) if candidates is Dictionary else {}
         var receipts: Dictionary = coordinator.get("_production_candidate_receipts")
@@ -1074,10 +1078,19 @@ func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
         "installedManifestDigest":String(installed_candidate.get("contentManifestDigest", "")),
         "demandStage":String(demand_state.get("stage", "missing")),
         "demandLastReason":String(demand_state.get("lastReason", "")),
+        "demandLastAdmissionDetails":demand_state.get("lastAdmissionDetails", {}).duplicate(true),
         "demandLastInstallReason":String(demand_state.get("lastInstallReason", "")),
         "demandLastInstallStatus":String(demand_state.get("lastInstallStatus", "")),
-        "demandTerrainRevision":demand_state.get("terrainRevision", ""),
-        "targetMeshBlockRevision":int(terrain_runtime.get("mesh_block_revisions").get(section_key, 0)),
+		"demandTerrainRevision":demand_state.get("terrainRevision", ""),
+		"demandUrgentRecompile":bool(demand_state.get("urgentRecompile", false)),
+		"demandQueued":bool(demand_state.get("queued", false)),
+		"demandAttempts":int(demand_state.get("attempts", 0)),
+		"maxTargetDemandAttempts":max_target_demand_attempts,
+		"coordinatorAdmissionAttemptDelta":maxi(0,
+			int(coordinator.get("_visible_section_demand_attempts")) - coordinator_attempts_before),
+		"coordinatorQueueCount":int(coordinator.get("_visible_section_demand_count")),
+		"coordinatorPendingDemandCount":(coordinator.get("_visible_section_demands") as Dictionary).size(),
+		"targetMeshBlockRevision":int(terrain_runtime.get("mesh_block_revisions").get(section_key, 0)),
         "receiptLive":bool(coordinator.call("_receipt_is_live", installed_candidate, receipt)) \
             if not installed_candidate.is_empty() else false,
         "saveDeltaContainsEditedCell":delta_contains_target,
