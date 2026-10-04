@@ -1,6 +1,7 @@
 #include "chunk_render_packet_backend.h"
 
 #include <godot_cpp/classes/geometry_instance3d.hpp>
+#include <godot_cpp/classes/hashing_context.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 using namespace godot;
@@ -19,6 +21,66 @@ constexpr int64_t FLOAT_BYTES = 4;
 
 bool tier_supported(const String &p_tier) {
 	return p_tier == "silhouette" || p_tier == "structural" || p_tier == "detail" || p_tier == "horizon";
+}
+
+int64_t packed_mesh_array_bytes(const Variant &p_value) {
+	switch (p_value.get_type()) {
+		case Variant::NIL: return 0;
+		case Variant::PACKED_BYTE_ARRAY: { const PackedByteArray array = p_value; return static_cast<int64_t>(array.size()); }
+		case Variant::PACKED_INT32_ARRAY: { const PackedInt32Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(int32_t); }
+		case Variant::PACKED_INT64_ARRAY: { const PackedInt64Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(int64_t); }
+		case Variant::PACKED_FLOAT32_ARRAY: { const PackedFloat32Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(float); }
+		case Variant::PACKED_FLOAT64_ARRAY: { const PackedFloat64Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(double); }
+		case Variant::PACKED_VECTOR2_ARRAY: { const PackedVector2Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(Vector2); }
+		case Variant::PACKED_VECTOR3_ARRAY: { const PackedVector3Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(Vector3); }
+		case Variant::PACKED_VECTOR4_ARRAY: { const PackedVector4Array array = p_value; return static_cast<int64_t>(array.size()) * sizeof(Vector4); }
+		case Variant::PACKED_COLOR_ARRAY: { const PackedColorArray array = p_value; return static_cast<int64_t>(array.size()) * sizeof(Color); }
+		default: return -1;
+	}
+}
+
+int64_t mesh_surface_payload_bytes(const Ref<Mesh> &p_mesh) {
+	if (p_mesh.is_null()) return -1;
+	const int32_t surface_count = p_mesh->get_surface_count();
+	if (surface_count < 1) return -1;
+	int64_t total_bytes = 0;
+	bool has_vertices = false;
+	for (int32_t surface = 0; surface < surface_count; ++surface) {
+		const Array arrays = p_mesh->surface_get_arrays(surface);
+		if (arrays.size() <= Mesh::ARRAY_VERTEX) return -1;
+		const Variant vertices = arrays[Mesh::ARRAY_VERTEX];
+		if (vertices.get_type() != Variant::PACKED_VECTOR3_ARRAY || PackedVector3Array(vertices).is_empty()) return -1;
+		has_vertices = true;
+		for (int32_t index = 0; index < arrays.size(); ++index) {
+			const int64_t bytes = packed_mesh_array_bytes(arrays[index]);
+			if (bytes < 0 || total_bytes > std::numeric_limits<int64_t>::max() - bytes) return -1;
+			total_bytes += bytes;
+		}
+	}
+	return has_vertices && total_bytes > 0 ? total_bytes : -1;
+}
+
+bool mesh_surface_fingerprint(const Ref<Mesh> &p_mesh, int64_t &r_payload_bytes,
+		String &r_digest) {
+	const int64_t bytes = mesh_surface_payload_bytes(p_mesh);
+	if (bytes < 0) return false;
+	Array fingerprint_payload;
+	fingerprint_payload.push_back(String("chunk-render-mesh-content/v1"));
+	fingerprint_payload.push_back(p_mesh->get_aabb());
+	const int32_t surface_count = p_mesh->get_surface_count();
+	fingerprint_payload.push_back(surface_count);
+	for (int32_t surface = 0; surface < surface_count; ++surface) {
+		fingerprint_payload.push_back(surface);
+		fingerprint_payload.push_back(p_mesh->call("surface_get_primitive_type", surface));
+		fingerprint_payload.push_back(p_mesh->surface_get_arrays(surface));
+	}
+	const PackedByteArray payload_bytes = UtilityFunctions::var_to_bytes(fingerprint_payload);
+	Ref<HashingContext> context;
+	context.instantiate();
+	if (context->start(HashingContext::HASH_SHA256) != OK || context->update(payload_bytes) != OK) return false;
+	r_payload_bytes = bytes;
+	r_digest = context->finish().hex_encode();
+	return r_digest.length() == 64;
 }
 
 bool transform_finite(const Transform3D &p_transform) {
@@ -58,9 +120,9 @@ Node3D *ChunkRenderPacketBackend::_node3d_for_id(uint64_t p_object_id) const {
 	return Object::cast_to<Node3D>(ObjectDB::get_instance(p_object_id));
 }
 
-int64_t ChunkRenderPacketBackend::_installed_buffer_bytes() const {
+int64_t ChunkRenderPacketBackend::_installed_payload_bytes() const {
 	int64_t result = 0;
-	for (const auto &entry : _installed) result += entry.second.buffer_bytes;
+	for (const auto &entry : _installed) result += entry.second.payload_bytes;
 	return result;
 }
 
@@ -80,28 +142,37 @@ bool ChunkRenderPacketBackend::_stage_matches(const StagedPacket &p_packet, int6
 }
 
 void ChunkRenderPacketBackend::_free_staging_root(StagedPacket &r_packet) {
-	_retire_root(r_packet.root_instance_id);
+	_retire_root(r_packet.root_instance_id, r_packet.reserved_bytes);
 	r_packet.root = nullptr;
 	r_packet.root_instance_id = 0;
 }
 
-void ChunkRenderPacketBackend::_retire_root(uint64_t p_root_id) {
+void ChunkRenderPacketBackend::_retire_root(uint64_t p_root_id, int64_t p_payload_bytes) {
 	Node3D *root = _node3d_for_id(p_root_id);
 	if (root == nullptr) return;
+	if (_retiring_payload_by_root.count(p_root_id)) return;
+	const int64_t retained_bytes = std::max<int64_t>(0, p_payload_bytes);
+	_retiring_payload_by_root[p_root_id] = retained_bytes;
+	_retiring_payload_bytes += retained_bytes;
 	root->set_visible(false);
-	Callable exiting = callable_mp(this, &ChunkRenderPacketBackend::_on_retired_root_exiting);
+	Callable exiting = callable_mp(this, &ChunkRenderPacketBackend::_on_retired_root_exiting).bind(static_cast<int64_t>(p_root_id));
 	if (!root->is_connected("tree_exiting", exiting)) root->connect("tree_exiting", exiting, Object::CONNECT_ONE_SHOT);
 	root->queue_free();
 	_retiring_roots++;
 }
 
-void ChunkRenderPacketBackend::_on_retired_root_exiting() {
+void ChunkRenderPacketBackend::_on_retired_root_exiting(uint64_t p_root_id) {
 	_retiring_roots = std::max<int64_t>(0, _retiring_roots - 1);
+	auto found = _retiring_payload_by_root.find(p_root_id);
+	if (found != _retiring_payload_by_root.end()) {
+		_retiring_payload_bytes = std::max<int64_t>(0, _retiring_payload_bytes - found->second);
+		_retiring_payload_by_root.erase(found);
+	}
 }
 
 void ChunkRenderPacketBackend::_release_stage(std::map<std::string, StagedPacket>::iterator p_it) {
 	if (p_it == _staged.end()) return;
-	_staged_buffer_bytes = std::max<int64_t>(0, _staged_buffer_bytes - p_it->second.reserved_bytes);
+	_staged_payload_bytes = std::max<int64_t>(0, _staged_payload_bytes - p_it->second.reserved_bytes);
 	_free_staging_root(p_it->second);
 	_staged.erase(p_it);
 }
@@ -197,7 +268,15 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 		if (existing.id == p_batch_id) return _status("failed", "duplicate_batch_id");
 	}
 	const int64_t instances = p_buffer.size() / FLOATS_PER_INSTANCE;
-	const int64_t bytes = static_cast<int64_t>(p_buffer.size()) * FLOAT_BYTES;
+	const int64_t buffer_bytes = static_cast<int64_t>(p_buffer.size()) * FLOAT_BYTES;
+	Ref<Resource> duplicated_resource = p_mesh->duplicate(true);
+	Ref<Mesh> owned_mesh = duplicated_resource;
+	if (owned_mesh.is_null()) return _status("failed", "mesh_payload_snapshot_failed");
+	int64_t mesh_bytes = 0;
+	String mesh_digest;
+	if (!mesh_surface_fingerprint(owned_mesh, mesh_bytes, mesh_digest)) return _status("failed", "mesh_surface_payload_unmeasurable");
+	if (buffer_bytes > std::numeric_limits<int64_t>::max() - mesh_bytes) return _status("failed", "batch_payload_size_overflow");
+	const int64_t payload_bytes = buffer_bytes + mesh_bytes;
 	for (int64_t index = 0; index < p_buffer.size(); ++index) {
 		if (!std::isfinite(p_buffer[index])) return _status("failed", "non_finite_instance_buffer_value");
 	}
@@ -205,16 +284,18 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 			packet.instance_count + instances > packet.expected_instance_count) {
 		return _status("failed", "packet_expected_count_exceeded");
 	}
-	if (packet.reserved_bytes + bytes > MAX_PACKET_BUFFER_BYTES ||
-			_staged_buffer_bytes + bytes > MAX_STAGED_BUFFER_BYTES ||
-			_installed_buffer_bytes() + _staged_buffer_bytes + bytes > MAX_RESIDENT_BUFFER_BYTES) {
-		return _status("backpressure", "staged_packet_buffer_capacity");
+	if (packet.reserved_bytes + payload_bytes > MAX_PACKET_BUFFER_BYTES ||
+			_staged_payload_bytes + payload_bytes > MAX_STAGED_BUFFER_BYTES ||
+			_installed_payload_bytes() + _staged_payload_bytes + _retiring_payload_bytes + payload_bytes > MAX_RESIDENT_BUFFER_BYTES) {
+		return _status("backpressure", "staged_packet_payload_capacity");
 	}
 	Batch batch;
 	batch.id = p_batch_id;
-	batch.mesh = p_mesh;
+	batch.mesh = owned_mesh;
 	batch.material = p_material;
 	batch.buffer = p_buffer;
+	batch.mesh_payload_bytes = mesh_bytes;
+	batch.mesh_content_digest = mesh_digest;
 	batch.bounds = p_bounds;
 	batch.render_tier = p_render_tier;
 	batch.cast_shadows = p_cast_shadows;
@@ -222,14 +303,17 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 	batch.fade_margin = p_fade_margin;
 	packet.batches.push_back(std::move(batch));
 	packet.instance_count += instances;
-	packet.buffer_bytes += bytes;
-	packet.reserved_bytes += bytes;
-	_staged_buffer_bytes += bytes;
+	packet.buffer_bytes += buffer_bytes;
+	packet.mesh_payload_bytes += mesh_bytes;
+	packet.reserved_bytes += payload_bytes;
+	_staged_payload_bytes += payload_bytes;
 	Dictionary result = _status("accepted");
 	result["batchId"] = p_batch_id;
 	result["acceptedBatches"] = static_cast<int64_t>(packet.batches.size());
 	result["acceptedInstances"] = packet.instance_count;
-	result["stagedBytes"] = packet.buffer_bytes;
+	result["stagedBufferBytes"] = packet.buffer_bytes;
+	result["stagedMeshPayloadBytes"] = packet.mesh_payload_bytes;
+	result["stagedPayloadBytes"] = packet.reserved_bytes;
 	return result;
 }
 
@@ -254,6 +338,14 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 			return _status("failed", packet.failure_reason);
 		}
 		Batch &batch = packet.batches[packet.upload_cursor];
+		int64_t current_mesh_bytes = 0;
+		String current_mesh_digest;
+		if (!mesh_surface_fingerprint(batch.mesh, current_mesh_bytes, current_mesh_digest) ||
+				current_mesh_bytes != batch.mesh_payload_bytes || current_mesh_digest != batch.mesh_content_digest) {
+			packet.state = "failed";
+			packet.failure_reason = "mesh_content_changed_after_admission";
+			return _status("failed", packet.failure_reason);
+		}
 		Ref<MultiMesh> multi;
 		multi.instantiate();
 		multi->set_transform_format(MultiMesh::TRANSFORM_3D);
@@ -282,6 +374,7 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		receipt["instanceId"] = static_cast<int64_t>(instance->get_instance_id());
 		receipt["multimeshId"] = static_cast<int64_t>(multi->get_instance_id());
 		receipt["meshId"] = static_cast<int64_t>(batch.mesh->get_instance_id());
+		receipt["meshContentDigest"] = batch.mesh_content_digest;
 		receipt["materialId"] = batch.material.is_valid() ? static_cast<int64_t>(batch.material->get_instance_id()) : 0;
 		receipt["bounds"] = batch.bounds;
 		receipt["renderTier"] = batch.render_tier;
@@ -290,6 +383,8 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		receipt["fadeMargin"] = batch.fade_margin;
 		receipt["instanceCount"] = batch.buffer.size() / FLOATS_PER_INSTANCE;
 		receipt["bufferBytes"] = static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
+		receipt["meshPayloadBytes"] = batch.mesh_payload_bytes;
+		receipt["payloadBytes"] = int64_t(receipt["bufferBytes"]) + batch.mesh_payload_bytes;
 		packet.batch_receipts.push_back(receipt);
 		packet.buffer_bytes -= static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
 		batch.buffer.clear();
@@ -302,6 +397,8 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 	result["expectedBatches"] = packet.expected_batch_count;
 	result["units"] = units;
 	result["stagedBufferBytes"] = packet.buffer_bytes;
+	result["stagedMeshPayloadBytes"] = packet.mesh_payload_bytes;
+	result["stagedPayloadBytes"] = packet.reserved_bytes;
 	return result;
 }
 
@@ -335,15 +432,20 @@ Dictionary ChunkRenderPacketBackend::commit_packet(const String &p_source_id, in
 	replacement.root_instance_id = staged.root_instance_id;
 	replacement.batch_receipts = staged.batch_receipts;
 	replacement.instance_count = staged.instance_count;
-	for (const Dictionary &receipt : replacement.batch_receipts) replacement.buffer_bytes += int64_t(receipt.get("bufferBytes", 0));
+	for (const Dictionary &receipt : replacement.batch_receipts) {
+		replacement.buffer_bytes += int64_t(receipt.get("bufferBytes", 0));
+		replacement.mesh_payload_bytes += int64_t(receipt.get("meshPayloadBytes", 0));
+		replacement.payload_bytes += int64_t(receipt.get("payloadBytes", 0));
+	}
 	staging_root->set_visible(true);
 	const uint64_t old_root_id = old != _installed.end() ? old->second.root_instance_id : 0;
+	const int64_t old_payload_bytes = old != _installed.end() ? old->second.payload_bytes : 0;
 	_installed[_key(p_source_id)] = replacement;
 	staged.root = nullptr;
 	staged.root_instance_id = 0;
-	_staged_buffer_bytes = std::max<int64_t>(0, _staged_buffer_bytes - staged.reserved_bytes);
+	_staged_payload_bytes = std::max<int64_t>(0, _staged_payload_bytes - staged.reserved_bytes);
 	_staged.erase(found);
-	_retire_root(old_root_id);
+	_retire_root(old_root_id, old_payload_bytes);
 	return _installed_snapshot(_installed.find(_key(p_source_id))->second);
 }
 
@@ -360,7 +462,7 @@ Dictionary ChunkRenderPacketBackend::release_packet(const String &p_source_id, i
 	auto installed = _installed.find(key);
 	if (installed == _installed.end()) return _status("released");
 	if (installed->second.generation != p_generation) return _status("failed", "installed_generation_mismatch");
-	_retire_root(installed->second.root_instance_id);
+	_retire_root(installed->second.root_instance_id, installed->second.payload_bytes);
 	_installed.erase(installed);
 	return _status("released");
 }
@@ -404,6 +506,13 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 				multi->get_mesh().is_null() || static_cast<int64_t>(multi->get_mesh()->get_instance_id()) != int64_t(expected.get("meshId", 0))) {
 			return _status("stale", "installed_batch_resource_replaced");
 		}
+		int64_t current_mesh_bytes = 0;
+		String current_mesh_digest;
+		if (!mesh_surface_fingerprint(multi->get_mesh(), current_mesh_bytes, current_mesh_digest) ||
+				current_mesh_bytes != int64_t(expected.get("meshPayloadBytes", -1)) ||
+				current_mesh_digest != String(expected.get("meshContentDigest", ""))) {
+			return _status("stale", "installed_mesh_content_changed");
+		}
 		Ref<Material> material = instance->get_material_override();
 		const int64_t material_id = material.is_valid() ? static_cast<int64_t>(material->get_instance_id()) : 0;
 		const Variant actual_bounds = instance->get_meta("packet_bounds", Variant());
@@ -432,6 +541,8 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 	result["expectedBatchCount"] = static_cast<int64_t>(p_packet.batch_receipts.size());
 	result["instanceCount"] = p_packet.instance_count;
 	result["bufferBytes"] = p_packet.buffer_bytes;
+	result["meshPayloadBytes"] = p_packet.mesh_payload_bytes;
+	result["payloadBytes"] = p_packet.payload_bytes;
 	Array batches;
 	for (const Dictionary &receipt : p_packet.batch_receipts) batches.push_back(receipt);
 	result["batches"] = batches;
@@ -458,19 +569,27 @@ Dictionary ChunkRenderPacketBackend::metrics() const {
 	int64_t installed_batches = 0;
 	int64_t installed_instances = 0;
 	int64_t installed_bytes = 0;
+	int64_t installed_buffer_bytes = 0;
+	int64_t installed_mesh_bytes = 0;
 	int64_t staged_packets = 0;
 	int64_t staged_batches = 0;
 	int64_t staged_instances = 0;
+	int64_t staged_buffer_bytes = 0;
+	int64_t staged_mesh_bytes = 0;
 	for (const auto &entry : _installed) {
 		installed_packets++;
 		installed_batches += entry.second.batch_receipts.size();
 		installed_instances += entry.second.instance_count;
-		installed_bytes += entry.second.buffer_bytes;
+		installed_bytes += entry.second.payload_bytes;
+		installed_buffer_bytes += entry.second.buffer_bytes;
+		installed_mesh_bytes += entry.second.mesh_payload_bytes;
 	}
 	for (const auto &entry : _staged) {
 		staged_packets++;
 		staged_batches += entry.second.batches.size();
 		staged_instances += entry.second.instance_count;
+		staged_buffer_bytes += entry.second.buffer_bytes;
+		staged_mesh_bytes += entry.second.mesh_payload_bytes;
 	}
 	Dictionary result;
 	result["installedPackets"] = installed_packets;
@@ -480,7 +599,13 @@ Dictionary ChunkRenderPacketBackend::metrics() const {
 	result["stagedPackets"] = staged_packets;
 	result["stagedBatches"] = staged_batches;
 	result["stagedInstances"] = staged_instances;
-	result["stagedBufferBytes"] = _staged_buffer_bytes;
+	result["stagedBufferBytes"] = staged_buffer_bytes;
+	result["stagedMeshPayloadBytes"] = staged_mesh_bytes;
+	result["stagedPayloadBytes"] = _staged_payload_bytes;
+	result["retiringPayloadBytes"] = _retiring_payload_bytes;
+	result["residentPayloadBytes"] = installed_bytes + _staged_payload_bytes + _retiring_payload_bytes;
+	result["installedInstanceBufferBytes"] = installed_buffer_bytes;
+	result["installedMeshPayloadBytes"] = installed_mesh_bytes;
 	result["retiringRoots"] = _retiring_roots;
 	result["maxBatchInstances"] = MAX_BATCH_INSTANCES;
 	result["maxPacketBatches"] = MAX_PACKET_BATCHES;

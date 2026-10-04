@@ -323,6 +323,7 @@ static func _contributors_for_section(section_key: Vector3i, source_groups: Dict
 			var batch := {"materialKey":String(compatibility.materialKey),
 				"renderTier":String(compatibility.renderTier),
 				"meshKey":String(compatibility.meshResourceKey),
+				"meshContentDigest":String(compatibility.meshContentDigest),
 				"pipelineRevision":String(compatibility.pipelineRevision),
 				"renderLayer":String(compatibility.renderLayer),
 				"transparencySortPolicy":String(compatibility.translucentSortPolicy),
@@ -350,6 +351,7 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 	var material_key := String(value.get("materialKey", ""))
 	var render_tier := String(value.get("renderTier", ""))
 	var mesh_resource_key := String(value.get("meshResourceKey", ""))
+	var mesh_content_digest := String(value.get("meshContentDigest", ""))
 	var mesh_key := String(value.get("meshKey", ""))
 	var pipeline_revision := String(value.get("pipelineRevision", ""))
 	var render_layer := String(value.get("renderLayer", ""))
@@ -359,6 +361,8 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 	var visibility_end: Variant = value.get("visibilityRangeEnd")
 	var fade_margin: Variant = value.get("fadeMargin")
 	if material_key.is_empty() or render_tier.is_empty() or mesh_resource_key.is_empty() \
+			or mesh_content_digest.length() != 64 \
+			or not mesh_content_digest.is_valid_hex_number(false) \
 			or pipeline_revision.is_empty() or mesh_key != "%s|pipeline=%s|layer=%s|sort=%s" % [
 				mesh_resource_key, pipeline_revision, render_layer, sort_policy] \
 			or render_layer != "opaque" or sort_policy != "none" \
@@ -368,7 +372,7 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 			or visibility_end < 0.0 or fade_margin < 0.0:
 		return false
 	var mesh_bounds: AABB = mesh_bounds_value
-	var canonical := JSON.stringify([material_key, render_tier, mesh_key, cast_shadows,
+	var canonical := JSON.stringify([material_key, render_tier, mesh_key, mesh_content_digest, cast_shadows,
 		visibility_end, fade_margin, mesh_bounds.position.x, mesh_bounds.position.y,
 		mesh_bounds.position.z, mesh_bounds.size.x, mesh_bounds.size.y,
 		mesh_bounds.size.z])

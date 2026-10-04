@@ -75,6 +75,7 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 			var material_key := String(batch.get("materialKey", ""))
 			var render_tier := String(batch.get("renderTier", ""))
 			var mesh_key := String(batch.get("meshKey", ""))
+			var mesh_content_digest := String(batch.get("meshContentDigest", ""))
 			var pipeline_revision := String(batch.get("pipelineRevision", ""))
 			var render_layer := String(batch.get("renderLayer", ""))
 			var transparency_sort_policy := String(batch.get("transparencySortPolicy", ""))
@@ -83,6 +84,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 			var visibility_end: Variant = batch.get("visibilityRangeEnd")
 			var fade_margin: Variant = batch.get("fadeMargin")
 			if material_key.is_empty() or render_tier.is_empty() or mesh_key.is_empty() \
+					or mesh_content_digest.length() != 64 \
+					or not mesh_content_digest.is_valid_hex_number(false) \
 					or pipeline_revision.is_empty() \
 					or render_layer not in ["opaque", "cutout", "translucent"] \
 					or (render_layer in ["opaque", "cutout"] and transparency_sort_policy != "none") \
@@ -94,6 +97,7 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 				return _failed("invalid_batch_compatibility_key")
 			var mesh_local_bounds: AABB = mesh_local_bounds_value
 			var batch_key := _compatible_batch_key(material_key, render_tier, mesh_key,
+				mesh_content_digest,
 				pipeline_revision, render_layer, transparency_sort_policy,
 				cast_shadows, visibility_end, fade_margin, mesh_local_bounds)
 			var segments_value: Variant = batch.get("segments")
@@ -105,6 +109,7 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 			if not batch_map.has(batch_key):
 				batch_map[batch_key] = {"batchKey":batch_key, "materialKey":material_key,
 					"renderTier":render_tier, "meshKey":mesh_key,
+					"meshContentDigest":mesh_content_digest,
 					"meshLocalBounds":mesh_local_bounds,
 					"pipelineRevision":pipeline_revision, "renderLayer":render_layer,
 					"transparencySortPolicy":transparency_sort_policy,
@@ -453,10 +458,10 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 
 
 static func _compatible_batch_key(material_key: String, render_tier: String,
-		mesh_key: String, pipeline_revision: String, render_layer: String,
+	mesh_key: String, mesh_content_digest: String, pipeline_revision: String, render_layer: String,
 		transparency_sort_policy: String, cast_shadows: bool,
 		visibility_end: float, fade_margin: float, mesh_local_bounds: AABB) -> String:
-	var canonical := JSON.stringify([material_key, render_tier, mesh_key,
+	var canonical := JSON.stringify([material_key, render_tier, mesh_key, mesh_content_digest,
 		pipeline_revision, render_layer, transparency_sort_policy, cast_shadows,
 		visibility_end, fade_margin, mesh_local_bounds.position.x,
 		mesh_local_bounds.position.y, mesh_local_bounds.position.z,

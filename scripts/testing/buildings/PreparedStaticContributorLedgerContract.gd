@@ -2,6 +2,7 @@ extends SceneTree
 
 const Ledger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const TEST_MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 var checks: Dictionary = {}
 
@@ -183,6 +184,7 @@ func _declaration(part_id: String, source_id: String, revision: String,
 	for segment_id: String in segment_ids:
 		var segment := {"segmentId":segment_id, "materialKey":"wood_oak",
 			"renderTier":"structural", "meshKey":"unit-box-v1",
+			"meshContentDigest":TEST_MESH_DIGEST,
 			"meshLocalBounds":_unit_box_bounds(),
 			"pipelineRevision":"building-static-v1", "renderLayer":"opaque",
 			"translucentSortPolicy":"none", "castShadows":true,
@@ -216,6 +218,7 @@ func _segment(part_id: String, source_id: String, revision: String,
 		"sourceRevision":revision, "segmentId":segment_id, "buffer":buffer,
 		"instanceCount":local_x.size(), "materialKey":"wood_oak",
 		"renderTier":"structural", "meshKey":"unit-box-v1",
+		"meshContentDigest":TEST_MESH_DIGEST,
 		"meshLocalBounds":_unit_box_bounds(),
 		"pipelineRevision":"building-static-v1", "renderLayer":"opaque",
 		"translucentSortPolicy":"none", "castShadows":true,
@@ -234,7 +237,7 @@ func _encode(transform: Transform3D) -> Array[float]:
 
 func _compatibility_key(pipeline_revision := "building-static-v1") -> String:
 	var section_mesh_key := "unit-box-v1|pipeline=%s|layer=opaque|sort=none" % pipeline_revision
-	return "section-batch:" + JSON.stringify(["wood_oak", "structural", section_mesh_key,
+	return "section-batch:" + JSON.stringify(["wood_oak", "structural", section_mesh_key, TEST_MESH_DIGEST,
 		true, 240.0, 18.0, -0.5, -0.5, -0.5, 1.0, 1.0, 1.0]).sha256_text()
 
 

@@ -8,6 +8,7 @@ extends RefCounted
 
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
+const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const SNAPSHOT_ENVELOPE_SCHEMA := "prepared-static-section-snapshot-envelope/v1"
 
 
@@ -89,11 +90,16 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		var mesh_key := String(batch.get("meshKey", ""))
 		var material: Variant = material_bindings.get(material_key)
 		var mesh: Variant = mesh_bindings.get(mesh_key)
+		var mesh_digest := String(batch.get("meshContentDigest", ""))
 		var segments_value: Variant = batch.get("segments")
 		if material_key.is_empty() or mesh_key.is_empty() \
 				or not material is Material or not mesh is Mesh \
 				or not segments_value is Array or not segments_value.is_read_only():
 			return _failed("section_render_resource_binding_missing")
+		var mesh_identity: Dictionary = MeshFingerprint.inspect(mesh)
+		if mesh_identity.get("status") != "ready" \
+				or String(mesh_identity.get("contentDigest", "")) != mesh_digest:
+			return _failed("section_mesh_binding_content_digest_mismatch")
 		for segment_value: Variant in segments_value:
 			if not segment_value is Dictionary or not segment_value.is_read_only():
 				return _failed("mutable_or_invalid_section_segment")

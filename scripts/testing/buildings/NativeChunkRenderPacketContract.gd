@@ -8,6 +8,7 @@ const StaticRenderSectionGrid = preload("res://scripts/world/StaticRenderSection
 const StaticSectionSnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const StaticSectionInstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const StaticContributorLedger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
+const StaticMeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const WorldStaticSectionCoordinator = preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const OWNER_CELL := Vector2i(0,0)
 const SOURCE_ID := "native-contract:wall"
@@ -114,6 +115,7 @@ func _run() -> void:
 	terrain_surface_arrays[Mesh.ARRAY_NORMAL]=PackedVector3Array([
 		Vector3.BACK,Vector3.BACK,Vector3.BACK])
 	section_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,terrain_surface_arrays)
+	var section_mesh_identity: Dictionary=StaticMeshFingerprint.inspect(section_mesh)
 	var section_buffer: Array[float]=[]
 	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
 		section_buffer.append(value)
@@ -125,7 +127,8 @@ func _run() -> void:
 	var section_pipeline:="native-section-v1"
 	var section_segment_declaration: Dictionary={"segmentId":"native-section-source-segment",
 		"materialKey":section_material_key,"renderTier":section_tier,
-		"meshKey":section_resource_mesh_key,"meshLocalBounds":section_bounds,
+		"meshKey":section_resource_mesh_key,"meshContentDigest":section_mesh_identity.contentDigest,
+		"meshLocalBounds":section_bounds,
 		"pipelineRevision":section_pipeline,"renderLayer":"opaque",
 		"translucentSortPolicy":"none","castShadows":true,
 		"visibilityRangeEnd":240.0,"fadeMargin":18.0}
@@ -148,7 +151,8 @@ func _run() -> void:
 		"sourceId":"native-section-source","sourceRevision":"native-section-rev-1",
 		"segmentId":"native-section-source-segment","buffer":section_buffer,
 		"instanceCount":1,"materialKey":section_material_key,"renderTier":section_tier,
-		"meshKey":section_resource_mesh_key,"meshLocalBounds":section_bounds,
+		"meshKey":section_resource_mesh_key,"meshContentDigest":section_mesh_identity.contentDigest,
+		"meshLocalBounds":section_bounds,
 		"pipelineRevision":section_pipeline,"renderLayer":"opaque",
 		"translucentSortPolicy":"none","castShadows":true,
 		"visibilityRangeEnd":240.0,"fadeMargin":18.0}
@@ -164,7 +168,26 @@ func _run() -> void:
 	var section_bindings_started: Dictionary=PacketOwner.begin_static_section_install(section_candidate,
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
 	var section_backend: Node=section_bindings_started.get("backend") as Node
+	var mismatch_arrays: Array=section_mesh.surface_get_arrays(0)
+	var mismatch_vertices: PackedVector3Array=mismatch_arrays[Mesh.ARRAY_VERTEX]
+	mismatch_vertices[0]+=Vector3(0.125,0.0,0.0)
+	mismatch_arrays[Mesh.ARRAY_VERTEX]=mismatch_vertices
+	var mismatch_mesh:=ArrayMesh.new()
+	mismatch_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,mismatch_arrays)
+	var rejected_mesh_session:=StaticSectionInstallSession.new()
+	var rejected_mesh_binding: Dictionary=rejected_mesh_session.begin(section_backend,
+		section_bindings_started.chunk,section_candidate,{"native-section-material":section_material},
+		{"unit-box-v1":mismatch_mesh})
+	_check("section_candidate_rejects_mesh_binding_with_different_content",
+		rejected_mesh_binding.get("status")=="failed" \
+		and rejected_mesh_binding.get("reason")=="section_mesh_binding_content_digest_mismatch")
 	var section_session: Variant=section_bindings_started.get("session")
+	var section_mesh_expected: Mesh=section_mesh.duplicate(true) as Mesh
+	var section_append_result: Dictionary={"status":"not_started"}
+	if section_session is RefCounted:
+		section_append_result=section_session.advance(1)
+	if section_append_result.get("status")=="pending" and section_append_result.get("stage")=="append":
+		section_mesh.clear_surfaces()
 	var section_result: Dictionary={"status":section_bindings_started.get("status","failed")}
 	var section_turns:=0
 	while section_session is RefCounted and section_session.state not in ["installed","failed","cancelled"] \
@@ -192,9 +215,17 @@ func _run() -> void:
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
 		and section_promoted.get("status")=="committed")
 	_check("native_section_slot_installs_transvoxel_shaped_array_mesh",
-		section_mesh.get_surface_count()==1 \
-		and section_mesh.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
-		and _has_installed_mesh(section_backend,section_mesh))
+		section_mesh_expected.get_surface_count()==1 \
+		and section_mesh_expected.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
+		and section_mesh.get_surface_count()==0 \
+		and _has_installed_mesh(section_backend,section_mesh_expected))
+	var expected_mesh_payload_bytes: int=_mesh_payload_bytes(section_mesh_expected)
+	var backend_metrics: Dictionary=section_backend.call("metrics")
+	_check("native_mesh_surface_payload_bytes_are_reserved_and_reported",
+		int(section_backend_snapshot.get("meshPayloadBytes",-1))==expected_mesh_payload_bytes \
+		and int(section_backend_snapshot.get("payloadBytes",-1))==expected_mesh_payload_bytes+64 \
+		and int(backend_metrics.get("installedMeshPayloadBytes",-1))==expected_mesh_payload_bytes \
+		and int(backend_metrics.get("residentPayloadBytes",-1))>=int(section_backend_snapshot.payloadBytes))
 	var coordinator := WorldStaticSectionCoordinator.new()
 	var coordinator_world := "native-section-coordinator-contract-world"
 	var coordinator_source_id := "coordinator-building-source"
@@ -234,7 +265,7 @@ func _run() -> void:
 	coordinator_census.make_read_only()
 	var coordinator_materials: Dictionary={section_material_key:section_material}
 	coordinator_materials.make_read_only()
-	var coordinator_meshes: Dictionary={section_resource_mesh_key:section_mesh}
+	var coordinator_meshes: Dictionary={section_resource_mesh_key:section_mesh_expected}
 	coordinator_meshes.make_read_only()
 	var coordinator_install: Dictionary={"status":"pending"}
 	var coordinator_turns:=0
@@ -299,22 +330,28 @@ func _run() -> void:
 		section_snapshot,String(cancelled_candidate.worldId),int(cancelled_candidate.generation),cancelled_candidate.sectionKey)
 	cancelled_candidate.make_read_only()
 	var cancelled_started: Dictionary=PacketOwner.begin_static_section_install(cancelled_candidate,
-		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
 	var cancelled_session: Variant=cancelled_started.get("session")
+	var cancelled_append: Dictionary=cancelled_session.advance(1) \
+		if cancelled_session is RefCounted else {"status":"missing"}
 	var cancel_receipt: Dictionary=cancelled_session.cancel() if cancelled_session is RefCounted else {"status":"missing"}
 	var retained_after_cancel: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
+	var overlap_metrics: Dictionary=section_backend.call("metrics")
 	_check("cancelled_section_replacement_keeps_previous_native_root_visible",
-		cancel_receipt.get("status")=="cancelled" \
+		cancelled_append.get("stage")=="append" and cancel_receipt.get("status")=="cancelled" \
 		and retained_after_cancel.get("status")=="ready" \
 		and int(retained_after_cancel.get("generation",0))==1 \
-		and int(retained_after_cancel.get("rootInstanceId",0))==section_root_id)
+		and int(retained_after_cancel.get("rootInstanceId",0))==section_root_id \
+		and int(overlap_metrics.get("installedMeshPayloadBytes",0))>0 \
+		and int(overlap_metrics.get("retiringPayloadBytes",0))>=int(section_backend_snapshot.get("payloadBytes",0)) \
+		and int(overlap_metrics.get("residentPayloadBytes",0))>=int(section_backend_snapshot.get("payloadBytes",0))*2)
 	var stale_section_start: Dictionary=PacketOwner.begin_static_section_install(section_candidate,
-		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
 	_check("native_section_slot_rejects_reused_generation",
 		stale_section_start.get("status")=="failed" \
 		and stale_section_start.get("reason")=="stale_section_slot_generation")
 	var owner_swap_started: Dictionary=PacketOwner.begin_static_section_install(cancelled_candidate,
-		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
 	var owner_swap_session: Variant=owner_swap_started.get("session")
 	var previous_section_owner: Variant=scene.static_section_render_owners[OWNER_CELL]
 	var replacement_registry_chunk:=Node3D.new()
@@ -341,7 +378,7 @@ func _run() -> void:
 		cross_chunk_snapshot,String(cross_chunk_candidate.worldId),int(cross_chunk_candidate.generation),cross_chunk_candidate.sectionKey)
 	cross_chunk_candidate.make_read_only()
 	var cross_chunk_start: Dictionary=PacketOwner.begin_static_section_install(cross_chunk_candidate,
-		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
 	var cross_chunk_session: Variant=cross_chunk_start.get("session")
 	var cross_chunk_cancel: Dictionary=cross_chunk_session.cancel() \
 		if cross_chunk_session is RefCounted else {"status":"missing"}
@@ -624,12 +661,29 @@ func _install(backend: Node, generation: int) -> bool:
 func _has_installed_mesh(root_node: Node, expected: Mesh) -> bool:
 	if root_node is MultiMeshInstance3D:
 		var instance := root_node as MultiMeshInstance3D
-		if instance.multimesh != null and instance.multimesh.mesh == expected \
-				and instance.is_visible_in_tree():
-			return true
+		if instance.multimesh != null and instance.multimesh.mesh != expected \
+				and instance.multimesh.mesh.get_surface_count()==expected.get_surface_count() \
+				and instance.multimesh.mesh.surface_get_primitive_type(0)==expected.surface_get_primitive_type(0) \
+				and instance.multimesh.mesh.surface_get_arrays(0)==expected.surface_get_arrays(0) \
+				and instance.is_visible_in_tree(): return true
 	for child: Node in root_node.get_children():
 		if _has_installed_mesh(child,expected): return true
 	return false
+
+
+func _mesh_payload_bytes(mesh: Mesh) -> int:
+	var total:=0
+	for surface_index in range(mesh.get_surface_count()):
+		for array_value: Variant in mesh.surface_get_arrays(surface_index):
+			if array_value is PackedByteArray or array_value is PackedInt32Array \
+					or array_value is PackedInt64Array or array_value is PackedFloat32Array \
+					or array_value is PackedFloat64Array or array_value is PackedVector2Array \
+					or array_value is PackedVector3Array or array_value is PackedVector4Array \
+					or array_value is PackedColorArray:
+				total+=array_value.to_byte_array().size()
+			elif array_value != null:
+				return -1
+	return total
 
 
 func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:
@@ -644,7 +698,7 @@ func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:
 
 func _finish(passed: bool, reason: String) -> void:
 	var report := {"schema":"native_chunk_render_packet_contract/v1",
-		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section cancellation retains the old root; ArrayMesh triangle resource is installed in native section slot; no generated-world/live-gameplay acceptance",
+		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section manifest binds actual ArrayMesh content digest and rejects mismatched resource binding; native upload owns a content-preserving mesh snapshot with CPU mesh-array accounting; canceled replacement retains old root through replacement; no generated-world/live-gameplay acceptance",
 		"checks":checks,"diagnostics":diagnostics,"passed":passed,"reason":reason}
 	var path := OS.get_environment("NATIVE_CHUNK_PACKET_REPORT")
 	if not path.is_empty():

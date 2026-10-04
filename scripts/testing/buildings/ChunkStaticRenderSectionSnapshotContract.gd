@@ -3,6 +3,7 @@ extends SceneTree
 
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Snapshot = preload("res://scripts/world/ChunkStaticRenderSectionSnapshot.gd")
+const TEST_MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 
 var checks: Dictionary = {}
@@ -124,6 +125,7 @@ func _batch(material: String, tier: String, mesh_key: String, shadows: bool,
 		sealed_segments.append(segment)
 	sealed_segments.make_read_only()
 	var batch := {"materialKey":material, "renderTier":tier, "meshKey":mesh_key,
+		"meshContentDigest":TEST_MESH_DIGEST,
 		"pipelineRevision":pipeline_revision, "renderLayer":render_layer,
 		"transparencySortPolicy":sort_policy,
 		"meshLocalBounds":mesh_local_bounds,
@@ -183,7 +185,7 @@ func _batch_key(material: String, tier: String, mesh_key: String, shadows: bool,
 		sort_policy := "none", pipeline_revision := "building_static_pipeline/v1",
 		mesh_local_bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)) -> String:
 	return "section-batch:" + JSON.stringify([
-		material, tier, mesh_key, pipeline_revision, render_layer, sort_policy,
+		material, tier, mesh_key, TEST_MESH_DIGEST, pipeline_revision, render_layer, sort_policy,
 		shadows, visibility, fade, mesh_local_bounds.position.x,
 		mesh_local_bounds.position.y, mesh_local_bounds.position.z,
 		mesh_local_bounds.size.x, mesh_local_bounds.size.y,

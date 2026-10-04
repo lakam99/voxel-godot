@@ -804,7 +804,7 @@ traversal or gameplay performance claim follows from this probe.
 |---|---|---|
 | 0. Map authorities and baseline | Complete | Producer-to-renderer, revisions, ownership, collision, interactions, unload/replay and save paths documented. |
 | 1. Shared candidate and producer census | Partial | Ledger and coordinator contract exist; wire a world-lifetime producer roster and authoritative census into normal gameplay. |
-| 2. Native section install lifecycle | Partial | 34/34 native contract checks pass, including a triangle `ArrayMesh` under the real section owner; production callers, mesh-payload byte budgets, multi-layer policies and exact per-source capture epochs remain. |
+| 2. Native section install lifecycle | Partial | Native contract passes with a triangle `ArrayMesh`, manifest-bound mesh-content digest, mismatch rejection, copied immutable payload, CPU mesh-array/instance-buffer accounting, and old-root retention; production section callers, full layer policies, GPU memory accounting and exact per-source capture epochs remain. |
 | 3. Smooth terrain | Not started | Capture/revision/halo and install receipt path through the configured Transvoxel mesher, then prove collision, edits, seams, fluids and replacement. |
 | 4. Generated buildings | Not started | Replace per-source final publication with complete section candidates; preserve structure gameplay authority, removals, replay and readiness. |
 | 5. Trees, flora and static props | Not started | Admit canonical deterministic prepared outputs, visual attributes, harvesting/removal and save/reload into shared candidates. |
@@ -812,3 +812,21 @@ traversal or gameplay performance claim follows from this probe.
 
 Do not advance a stage based on this coordinator contract. The overall goal
 remains active.
+
+**Mesh-bound candidate and native payload gate (2026-10-04):** added
+`StaticRenderMeshFingerprint` and included its schema'd surface digest in
+section batch compatibility and candidate manifests. `NativeStaticSectionInstallSession`
+checks the resolved Mesh against the candidate digest before native admission;
+the C++ packet backend snapshots the mesh resource and rechecks its content
+before upload and receipt. The backend tracks packed mesh-array payload bytes
+with instance-buffer bytes across staged, installed and retiring roots, and
+retirement is idempotent. These are estimated CPU-side payload bytes; they do
+not represent RenderingServer/GPU allocation. The latest owned native run
+passed at
+`artifacts/citadel-runtime-integration/native-chunk-packet-manifest-mesh-digest-final-rerun-20261004/report.json`.
+The builder, ledger and snapshot contract reports also pass at the adjacent
+`*-mesh-content-digest-*` artifact directories. The native run uses synthetic
+triangle and building fixtures. It demonstrates a real GDExtension install
+and wrong-binding rejection, not a live production producer cutover or terrain
+capture. Stages 1–2 remain partial; headed generated-world, traversal and
+runtime-performance gates are still open.

@@ -7,10 +7,20 @@
 #include <godot_cpp/classes/multi_mesh_instance3d.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/variant/aabb.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_float64_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_int64_array.hpp>
+#include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <godot_cpp/variant/packed_vector4_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
+#include <godot_cpp/variant/variant.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
 #include <cstdint>
@@ -37,6 +47,8 @@ class ChunkRenderPacketBackend : public Node3D {
 		Ref<Mesh> mesh;
 		Ref<Material> material;
 		PackedFloat32Array buffer;
+		int64_t mesh_payload_bytes = 0;
+		String mesh_content_digest;
 		AABB bounds;
 		String render_tier;
 		bool cast_shadows = true;
@@ -55,6 +67,8 @@ class ChunkRenderPacketBackend : public Node3D {
 		std::vector<Dictionary> batch_receipts;
 		int64_t instance_count = 0;
 		int64_t buffer_bytes = 0;
+		int64_t mesh_payload_bytes = 0;
+		int64_t payload_bytes = 0;
 	};
 
 	struct StagedPacket {
@@ -68,6 +82,7 @@ class ChunkRenderPacketBackend : public Node3D {
 		int64_t expected_instance_count = 0;
 		int64_t instance_count = 0;
 		int64_t buffer_bytes = 0;
+		int64_t mesh_payload_bytes = 0;
 		int64_t reserved_bytes = 0;
 		int32_t upload_cursor = 0;
 		String state = "collecting";
@@ -80,18 +95,20 @@ class ChunkRenderPacketBackend : public Node3D {
 
 	std::map<std::string, InstalledPacket> _installed;
 	std::map<std::string, StagedPacket> _staged;
-	int64_t _staged_buffer_bytes = 0;
+	int64_t _staged_payload_bytes = 0;
 	int64_t _retiring_roots = 0;
+	int64_t _retiring_payload_bytes = 0;
+	std::map<uint64_t, int64_t> _retiring_payload_by_root;
 
 	static std::string _key(const String &p_source_id);
 	Dictionary _status(const String &p_status, const String &p_reason = "") const;
 	Node3D *_node3d_for_id(uint64_t p_object_id) const;
-	int64_t _installed_buffer_bytes() const;
+	int64_t _installed_payload_bytes() const;
 	bool _owner_cell_matches_parent(const Vector2i &p_owner_cell) const;
 	bool _stage_matches(const StagedPacket &p_packet, int64_t p_generation) const;
 	void _free_staging_root(StagedPacket &r_packet);
-	void _retire_root(uint64_t p_root_id);
-	void _on_retired_root_exiting();
+	void _retire_root(uint64_t p_root_id, int64_t p_payload_bytes = 0);
+	void _on_retired_root_exiting(uint64_t p_root_id);
 	void _release_stage(std::map<std::string, StagedPacket>::iterator p_it);
 	Dictionary _batch_snapshot(const Batch &p_batch, int32_t p_index,
 		MultiMeshInstance3D *p_instance) const;

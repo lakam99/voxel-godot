@@ -106,14 +106,16 @@ func _run() -> void:
 
 
 func _compatibility(material: String, tier: String, mesh: String) -> Dictionary:
+	const MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)
 	var mesh_key := "%s|pipeline=%s|layer=opaque|sort=none" % [mesh, "building-static-v1"]
-	var canonical := JSON.stringify([material, tier, mesh_key, true, 240.0, 18.0,
+	var canonical := JSON.stringify([material, tier, mesh_key, MESH_DIGEST, true, 240.0, 18.0,
 		bounds.position.x, bounds.position.y, bounds.position.z,
 		bounds.size.x, bounds.size.y, bounds.size.z])
 	var key := "section-batch:" + canonical.sha256_text()
 	var value := {"materialKey":material, "renderTier":tier,
-		"meshResourceKey":mesh, "meshKey":mesh_key, "meshLocalBounds":bounds,
+		"meshResourceKey":mesh, "meshKey":mesh_key, "meshContentDigest":MESH_DIGEST,
+		"meshLocalBounds":bounds,
 		"pipelineRevision":"building-static-v1", "renderLayer":"opaque",
 		"translucentSortPolicy":"none", "castShadows":true,
 		"visibilityRangeEnd":240.0, "fadeMargin":18.0,

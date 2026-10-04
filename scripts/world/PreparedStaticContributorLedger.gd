@@ -443,6 +443,7 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var material_key := String(value.get("materialKey", ""))
 	var render_tier := String(value.get("renderTier", ""))
 	var mesh_key := String(value.get("meshKey", ""))
+	var mesh_content_digest := String(value.get("meshContentDigest", ""))
 	var mesh_bounds_value: Variant = value.get("meshLocalBounds")
 	var pipeline_revision := String(value.get("pipelineRevision", ""))
 	var render_layer := String(value.get("renderLayer", ""))
@@ -453,6 +454,8 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	# BuildingPartPublisher's prepared unit-box path is explicitly hard opaque.
 	# Other layer/sort policies need their own ordered layer compiler contract.
 	if material_key.is_empty() or render_tier.is_empty() or mesh_key.is_empty() \
+			or mesh_content_digest.length() != 64 \
+			or not mesh_content_digest.is_valid_hex_number(false) \
 			or not mesh_bounds_value is AABB or not _valid_bounds(mesh_bounds_value) \
 			or pipeline_revision.is_empty() or render_layer != "opaque" \
 			or translucent_sort_policy != "none" \
@@ -466,7 +469,7 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var section_mesh_key := "%s|pipeline=%s|layer=%s|sort=%s" % [mesh_key,
 		pipeline_revision, render_layer, translucent_sort_policy]
 	var mesh_local_bounds: AABB = mesh_bounds_value
-	var canonical := JSON.stringify([material_key, render_tier, section_mesh_key, cast_shadows,
+	var canonical := JSON.stringify([material_key, render_tier, section_mesh_key, mesh_content_digest, cast_shadows,
 		visibility_end, fade_margin, mesh_local_bounds.position.x, mesh_local_bounds.position.y,
 		mesh_local_bounds.position.z, mesh_local_bounds.size.x, mesh_local_bounds.size.y,
 		mesh_local_bounds.size.z])
@@ -476,6 +479,7 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 		return {}
 	var result := {"materialKey":material_key, "renderTier":render_tier,
 		"meshResourceKey":mesh_key, "meshKey":section_mesh_key,
+		"meshContentDigest":mesh_content_digest,
 		"meshLocalBounds":mesh_local_bounds,
 		"pipelineRevision":pipeline_revision, "renderLayer":render_layer,
 		"translucentSortPolicy":translucent_sort_policy, "castShadows":cast_shadows,
