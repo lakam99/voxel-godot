@@ -722,3 +722,21 @@ gate is to make a production contributor boundary collect and replace complete
 affected section slots while preserving chunk-unload replay. Terrain,
 foliage, detail and props then need admission into the same section manifest
 before claiming the shared renderer cutover.
+
+**Installed Voxel Tools API reflection (2026-10-04):**
+`node tools/run-voxel-tools-api-reflection.mjs` passed with no validation
+errors. The loaded debug DLL SHA-256 is
+`b24cc4eb8d22c27ce5babf1cf23190571d4acca9b2d215cf9c9adf00614bfc97`; the
+binary has no product-version metadata and this repository does not pin its
+upstream revision. ClassDB exposes `VoxelMesher.build_mesh(VoxelBuffer,
+materials, additional_data)`, `VoxelTerrain.mesh_block_entered/exited`, and
+`is_area_meshed`, but no application-level API for retrieving the installed
+visual mesh or acknowledging a replacement. A mesh-block signal or processed
+area is not proof of visible geometry or section ownership. This reflects only
+the installed public ClassDB surface and does not rule out private native hooks.
+Terrain candidate work should capture immutable padded voxel buffers from the
+authoritative terrain source and use the configured Transvoxel mesher; edits,
+neighbor sample revisions, collision parity, fluids, and materials must be
+included before retiring the current Voxel Tools visual. Minecraft 26.2's
+compiler/dispatcher informs candidate completeness and replacement lifetime,
+not the smooth terrain mesher itself.
