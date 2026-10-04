@@ -15,6 +15,7 @@ extends RefCounted
 ## the same boundary token and revision checks.
 
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
+const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 
 var _committed: Dictionary = {}
 var _committed_partition: Dictionary = {}
@@ -167,7 +168,8 @@ func pending_partition_inputs(boundary_id: String) -> Dictionary:
 	return result
 
 
-func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary) -> Dictionary:
+func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary,
+		world_id: String, candidate_generation: int) -> Dictionary:
 	if _pending.is_empty() or boundary_id != String(_pending.get("boundaryId", "")):
 		return _failed("boundary_not_current")
 	var revision_check := _validate_current_source_revisions(current_source_revisions)
@@ -175,6 +177,8 @@ func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary)
 		return revision_check
 	if not _prepared_candidate.is_empty():
 		return _failed("boundary_candidate_already_prepared")
+	if world_id.strip_edges().is_empty() or candidate_generation <= 0:
+		return _failed("invalid_section_candidate_identity")
 	var declared_inputs := _partition_inputs_for(_pending.get("declarations", {}))
 	if declared_inputs.get("status") != "ready":
 		return declared_inputs
@@ -210,23 +214,34 @@ func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary)
 	var impacts := _impacted_sections_for(partitioned.result, _committed_partition, changed)
 	if impacts.get("status") != "ready":
 		return impacts
+	var impacted_keys := _readonly_vector3i(impacts.sections)
+	var replacements := SnapshotBuilder.build_replacements(partitioned.result,
+		inputs_result.compatibilityByKey, impacted_keys, candidate_generation, world_id)
+	if replacements.get("status") != "ready":
+		return _failed("section_replacement_build_failed:" + String(replacements.get("reason", "unknown")))
 	var candidate := {"boundaryId":boundary_id,
 		"nextCommitted":next_readonly,
 		"partition":partitioned.result,
-		"impactedSectionKeys":_readonly_vector3i(impacts.sections),
+		"impactedSectionKeys":impacted_keys,
+		"worldId":world_id,
+		"generation":candidate_generation,
+		"replacements":replacements.replacements,
 		"changedSourceParts":_readonly_strings(changed),
 		"compatibilityByKey":inputs_result.compatibilityByKey}
 	_prepared_candidate = candidate
 	return {"status":"prepared", "boundaryId":boundary_id,
 		"changedSourceParts":candidate.changedSourceParts,
 		"impactedSectionKeys":candidate.impactedSectionKeys,
+		"worldId":candidate.worldId,
+		"generation":candidate.generation,
+		"replacements":candidate.replacements,
 		"candidateSourcePartCount":candidate.nextCommitted.size(),
 		"compatibilityByKey":candidate.compatibilityByKey,
 		"partition":candidate.partition}
 
 
-func accept_installed_candidate(boundary_id: String, section_candidates: Array,
-		section_receipts: Array, current_source_revisions: Dictionary) -> Dictionary:
+func accept_installed_candidate(boundary_id: String, section_receipts: Array,
+		current_source_revisions: Dictionary) -> Dictionary:
 	if _pending.is_empty() or boundary_id != String(_pending.get("boundaryId", "")) \
 			or _prepared_candidate.is_empty() \
 			or boundary_id != String(_prepared_candidate.get("boundaryId", "")):
@@ -234,47 +249,39 @@ func accept_installed_candidate(boundary_id: String, section_candidates: Array,
 	var revision_check := _validate_current_source_revisions(current_source_revisions)
 	if revision_check.get("status") != "ready":
 		return revision_check
-	if not section_candidates.is_read_only() or not section_receipts.is_read_only():
-		return _failed("mutable_section_candidates_or_receipts")
-	var expected_keys: Array = _prepared_candidate.impactedSectionKeys
-	if section_candidates.size() != expected_keys.size() \
-			or section_receipts.size() != expected_keys.size():
+	if not section_receipts.is_read_only():
+		return _failed("mutable_section_receipts")
+	var expected_replacements: Array = _prepared_candidate.replacements
+	if section_receipts.size() != expected_replacements.size():
 		return _failed("installed_section_set_mismatch")
-	var candidate_by_key: Dictionary = {}
-	for candidate_value: Variant in section_candidates:
-		if not candidate_value is Dictionary or not candidate_value.is_read_only():
-			return _failed("mutable_or_invalid_section_candidate")
-		var candidate: Dictionary = candidate_value
-		var section_key: Variant = candidate.get("sectionKey")
-		var world_id := String(candidate.get("worldId", ""))
-		var generation: Variant = candidate.get("generation")
-		var digest := String(candidate.get("contentManifestDigest", ""))
-		var snapshot: Variant = candidate.get("snapshot")
-		if not section_key is Vector3i or world_id.is_empty() \
-				or not generation is int or generation <= 0 or digest.is_empty() \
-				or not snapshot is Dictionary or not snapshot.is_read_only() \
-				or snapshot.get("sectionKey") != section_key \
-				or candidate_by_key.has(section_key):
-			return _failed("invalid_or_duplicate_section_candidate")
-		candidate_by_key[section_key] = candidate
+	var replacement_by_key: Dictionary = {}
+	for replacement_value: Variant in expected_replacements:
+		if not replacement_value is Dictionary or not replacement_value.is_read_only():
+			return _failed("invalid_bound_section_replacement")
+		var replacement: Dictionary = replacement_value
+		var replacement_key: Variant = replacement.get("sectionKey")
+		if not replacement_key is Vector3i or replacement_by_key.has(replacement_key):
+			return _failed("invalid_or_duplicate_bound_section_replacement")
+		replacement_by_key[replacement_key] = replacement
 	for receipt_value: Variant in section_receipts:
 		if not receipt_value is Dictionary or not receipt_value.is_read_only():
 			return _failed("mutable_or_invalid_section_receipt")
 		var receipt: Dictionary = receipt_value
 		var section_key: Variant = receipt.get("sectionKey")
-		if not section_key is Vector3i or not expected_keys.has(section_key):
+		if not section_key is Vector3i:
 			return _failed("unexpected_or_duplicate_section_receipt")
-		var candidate_value: Variant = candidate_by_key.get(section_key)
-		if not candidate_value is Dictionary:
+		var replacement_value: Variant = replacement_by_key.get(section_key)
+		if not replacement_value is Dictionary:
 			return _failed("unexpected_or_duplicate_section_receipt")
-		var candidate: Dictionary = candidate_value
+		var replacement: Dictionary = replacement_value
 		if receipt.get("status") != "installed" \
-				or int(receipt.get("generation", 0)) != int(candidate.generation) \
+				or String(receipt.get("worldId", "")) != String(replacement.worldId) \
+				or int(receipt.get("generation", 0)) != int(replacement.generation) \
 				or String(receipt.get("contentManifestDigest", "")) \
-					!= String(candidate.contentManifestDigest):
+					!= String(replacement.contentManifestDigest):
 			return _failed("section_receipt_does_not_match_candidate")
-		candidate_by_key.erase(section_key)
-	if not candidate_by_key.is_empty():
+		replacement_by_key.erase(section_key)
+	if not replacement_by_key.is_empty():
 		return _failed("missing_section_install_receipt")
 	# Promotion happens only after the full impacted section set has matching
 	# install receipts. Callers must source these receipts from live section-slot

@@ -24,12 +24,27 @@ func _run() -> void:
 	var accepted_a: Dictionary = ledger.accept_prepared_segment("boundary-1",
 		_segment("part-a", "source-a", "rev-1", "seg-a", [0.0, 1.0]))
 	var current_initial := _revisions({"part-a":"rev-1", "part-b":"rev-1"})
-	var initial_prepared: Dictionary = ledger.prepare_boundary("boundary-1", current_initial)
+	var initial_prepared: Dictionary = ledger.prepare_boundary("boundary-1", current_initial,
+		"ledger-contract-world", 1)
 	var initial_install := _mock_install_set(initial_prepared)
+	var replacement_envelopes: Array = initial_prepared.get("replacements", [])
+	var replacements_are_bound := replacement_envelopes.size() == 2
+	for replacement_value: Variant in replacement_envelopes:
+		if not replacement_value is Dictionary or not replacement_value.is_read_only():
+			replacements_are_bound = false
+			continue
+		var replacement: Dictionary = replacement_value
+		var snapshot: Variant = replacement.get("snapshot")
+		if String(replacement.get("worldId", "")) != "ledger-contract-world" \
+				or int(replacement.get("generation", 0)) != 1 \
+				or not snapshot is Dictionary or not snapshot.is_read_only() \
+				or snapshot.get("sectionKey") != replacement.get("sectionKey"):
+			replacements_are_bound = false
+	checks["ledger_binds_exact_prepared_section_replacements_before_install"] = replacements_are_bound
 	var premature_receipts: Array = [initial_install.receipts[0]]
 	premature_receipts.make_read_only()
 	var premature_commit: Dictionary = ledger.accept_installed_candidate("boundary-1",
-		initial_install.candidates, premature_receipts, current_initial)
+		premature_receipts, current_initial)
 	var mismatched_receipts: Array = initial_install.receipts.duplicate()
 	var mismatched_receipt: Dictionary = initial_install.receipts[0].duplicate(false)
 	mismatched_receipt["contentManifestDigest"] = "wrong-section-content"
@@ -37,10 +52,21 @@ func _run() -> void:
 	mismatched_receipts[0] = mismatched_receipt
 	mismatched_receipts.make_read_only()
 	var digest_mismatch_commit: Dictionary = ledger.accept_installed_candidate("boundary-1",
-		initial_install.candidates, mismatched_receipts, current_initial)
+		mismatched_receipts, current_initial)
 	var no_promotion_before_full_install := ledger.committed_source_part_ids().is_empty()
+	var wrong_world_receipts: Array = initial_install.receipts.duplicate()
+	var wrong_world_receipt: Dictionary = initial_install.receipts[0].duplicate(false)
+	wrong_world_receipt["worldId"] = "different-world"
+	wrong_world_receipt.make_read_only()
+	wrong_world_receipts[0] = wrong_world_receipt
+	wrong_world_receipts.make_read_only()
+	var wrong_world_commit: Dictionary = ledger.accept_installed_candidate("boundary-1",
+		wrong_world_receipts, current_initial)
+	checks["ledger_rejects_receipts_from_another_world_epoch"] = \
+		wrong_world_commit.get("reason") == "section_receipt_does_not_match_candidate" \
+		and ledger.committed_source_part_ids().is_empty()
 	var initial_commit: Dictionary = ledger.accept_installed_candidate("boundary-1",
-		initial_install.candidates, initial_install.receipts, current_initial)
+		initial_install.receipts, current_initial)
 	checks["incremental_flush_inputs_commit_as_one_deterministic_source_specific_snapshot"] = \
 		accepted_b.get("status") == "accepted" and accepted_a.get("status") == "accepted" \
 		and initial_prepared.get("status") == "prepared" \
@@ -77,7 +103,8 @@ func _run() -> void:
 	var accepted_new: Dictionary = ledger.accept_prepared_segment("boundary-2",
 		_segment("part-a", "source-a", "rev-2", "seg-new", [0.0]))
 	var wrong_current := _revisions({"part-a":"rev-2", "part-b":"rev-1"})
-	var stale_result: Dictionary = ledger.prepare_boundary("boundary-2", wrong_current)
+	var stale_result: Dictionary = ledger.prepare_boundary("boundary-2", wrong_current,
+		"ledger-contract-world", 2)
 	checks["stale_revision_rejects_whole_replace_remove_transaction"] = \
 		begun_replace.get("status") == "ready" and accepted_new.get("status") == "accepted" \
 		and stale_result.get("reason") == "stale_source_revision" \
@@ -91,7 +118,8 @@ func _run() -> void:
 	var begun_replace_again: Dictionary = ledger.begin_boundary("boundary-3", _array([replacement]), _array([removal]))
 	ledger.accept_prepared_segment("boundary-3", _segment("part-a", "source-a", "rev-2", "seg-new", [0.0]))
 	var proper_current := _revisions({"part-a":"rev-2", "part-b":"rev-2"})
-	var replace_remove_prepared: Dictionary = ledger.prepare_boundary("boundary-3", proper_current)
+	var replace_remove_prepared: Dictionary = ledger.prepare_boundary("boundary-3", proper_current,
+		"ledger-contract-world", 2)
 	var stale_install_current := _revisions({"part-a":"rev-2", "part-b":"rev-1"})
 	var stale_install: Dictionary = _accept_mock_install(ledger,
 		replace_remove_prepared, stale_install_current)
@@ -118,7 +146,8 @@ func _run() -> void:
 	ledger.accept_prepared_segment("boundary-4",
 		_segment("part-a", "source-a-recreated", "rev-3", "seg-recreated", [0.0]))
 	var reidentify_current := _revisions({"part-a":"rev-3"})
-	var reidentify_prepared: Dictionary = ledger.prepare_boundary("boundary-4", reidentify_current)
+	var reidentify_prepared: Dictionary = ledger.prepare_boundary("boundary-4", reidentify_current,
+		"ledger-contract-world", 3)
 	var reidentify_commit: Dictionary = _accept_mock_install(ledger,
 		reidentify_prepared, reidentify_current)
 	checks["stable_source_part_tracks_old_and_new_sections_when_producer_source_id_changes"] = \
@@ -227,27 +256,20 @@ func _accept_mock_install(ledger, prepared: Dictionary, current_source_revisions
 		return prepared
 	var install_set := _mock_install_set(prepared)
 	return ledger.accept_installed_candidate(String(prepared.boundaryId),
-		install_set.candidates, install_set.receipts, current_source_revisions)
+		install_set.receipts, current_source_revisions)
 
 
 func _mock_install_set(prepared: Dictionary) -> Dictionary:
-	var candidates: Array[Dictionary] = []
 	var receipts: Array[Dictionary] = []
-	for section_key: Vector3i in prepared.get("impactedSectionKeys", []):
-		var digest := "contract-only:%s:%s" % [String(prepared.boundaryId), str(section_key)]
-		var snapshot := {"sectionKey":section_key, "contributors":[], "batches":[]}
-		snapshot.make_read_only()
-		var candidate := {"sectionKey":section_key, "worldId":"ledger-contract-world",
-			"generation":1, "contentManifestDigest":digest, "snapshot":snapshot}
-		candidate.make_read_only()
-		candidates.append(candidate)
-		var receipt := {"status":"installed", "sectionKey":section_key,
-			"generation":1, "contentManifestDigest":digest}
+	for replacement: Dictionary in prepared.get("replacements", []):
+		var receipt := {"status":"installed", "sectionKey":replacement.sectionKey,
+			"worldId":replacement.worldId,
+			"generation":replacement.generation,
+			"contentManifestDigest":replacement.contentManifestDigest}
 		receipt.make_read_only()
 		receipts.append(receipt)
-	candidates.make_read_only()
 	receipts.make_read_only()
-	return {"candidates":candidates, "receipts":receipts}
+	return {"receipts":receipts}
 
 
 func _resource_input_is_rejected() -> bool:
@@ -284,7 +306,8 @@ func _incomplete_preserves(ledger) -> bool:
 	if ledger.begin_boundary("incomplete", _array([declaration]), _array([])).status != "ready":
 		return false
 	ledger.accept_prepared_segment("incomplete", _segment("part-a", "source-a", "rev-3", "one", [0.0]))
-	var result: Dictionary = ledger.prepare_boundary("incomplete", _revisions({"part-a":"rev-3"}))
+	var result: Dictionary = ledger.prepare_boundary("incomplete", _revisions({"part-a":"rev-3"}),
+		"ledger-contract-world", 4)
 	var after_inputs: Dictionary = ledger.committed_partition_inputs()
 	ledger.abort_boundary("incomplete")
 	return result.get("reason") == "boundary_incomplete" \

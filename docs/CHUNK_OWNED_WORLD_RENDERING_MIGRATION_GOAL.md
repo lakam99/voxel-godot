@@ -2,6 +2,14 @@
 
 Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Worker-prepared, single-owner-cell building batches now have packet installation, revision-exact readiness, stale-packet retirement, per-advance bounded chunk-unload replay, and site-teardown release in code. Packet release now preserves its receipt until acknowledgement. Source-verified native GDExtension contracts cover packet lifecycle and the `Main.gd` chunk-container creation/retirement seam; its focused fixture uses actual `VoxelTerrainRuntime` demand/release bookkeeping with a stubbed site gate. Resident streamer-scheduled packet replay, source artifact memory, cross-cell fragments, and live-game acceptance remain open.**
 
+The canonical architecture charter and staged exit gates are maintained in the
+documentation repository at
+`C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
+It maps terrain, building, tree/foliage, static prop, save, unload/replay and
+gameplay ownership paths and defines the shared section manifest/layer,
+revision, replacement and old-content-retention contract. Treat it as the
+controlling migration plan alongside the implementation evidence below.
+
 ## Goal
 
 Migrate the presentation of static, non-mob world content to chunk-owned render
@@ -669,19 +677,23 @@ GPU completion, or live visual behavior.
 **Ledger prepare/install/promote gate (2026-10-04):** applying Minecraft's
 old-section-retained-until-candidate-complete rule exposed that
 `PreparedStaticContributorLedger.commit_boundary()` promoted its memory state
-before a renderer receipt could exist. It is now split into
-`prepare_boundary()` and `accept_installed_candidate()`: preparation computes
-the next full partition and impacted section set while preserving the current
-committed ledger; promotion requires one read-only section candidate and a
-matching installed receipt for every impacted key, with the source revision
-set checked again at acceptance. Incomplete receipt sets, content-digest
-mismatches, and revisions that go stale after preparation are rejected while
-the prior committed ledger remains active. The 17-check watchdog contract
-passed at
-`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-section-install-gate-v3-20261003/report.json`.
-Its install receipts are contract fixtures, not calls to a live section owner;
-the production caller must query and revalidate each actual slot's world,
-generation, digest, owner chunk/backend identity, and residency dependencies
-immediately before promotion. This gate prepares the real section cutover but
-does not yet wire `BuildingStaticBatchFlush` (currently per source/material/tier
-packet) or the natural detail/tree producers into section slots.
+before a renderer receipt could exist. `prepare_boundary()` now binds the
+world ID and candidate generation, builds and retains the exact immutable
+replacement snapshots from its own validated partition and impacted-section
+set, and exposes those envelopes to the installer. `accept_installed_candidate()`
+no longer accepts caller-supplied candidate envelopes: it accepts receipts and
+matches each against the replacements already held by the ledger, while
+revalidating the exact source revision set. Partial receipts, wrong digests,
+wrong world epochs, and stale revisions leave the prior committed ledger active.
+The focused 19-check contract passed at
+`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-bound-candidate-20261004b/report.json`;
+the 16-check snapshot-builder contract passed at
+`artifacts/citadel-runtime-integration/prepared-static-section-snapshot-builder-bound-candidate-20261004/report.json`.
+These remain data contracts with mock receipt dictionaries, not a section-slot
+or GPU-install proof. The receipts are still forgeable by an untrusted caller;
+the future production owner must query its live backend, verify world/session,
+generation, digest, owner chunk/backend identity and residency dependencies,
+and only then pass the verified receipts for promotion. The production flush
+still installs per source/material/tier packets, and terrain, foliage, details
+and props remain outside any shared section slot. Stage 1 is therefore in
+progress; production cutover and live renderer acceptance remain open.
