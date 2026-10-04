@@ -460,7 +460,8 @@ func _closest_visible_demand(rows: Array[Dictionary]) -> Dictionary:
 static func _visible_section_admission_details(admission: Dictionary) -> Dictionary:
 	var result := {}
 	for key in ["providerId", "chunk", "snapshotRemovedPropsRevision",
-			"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision"]:
+			"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision",
+			"requestedSection", "ownedSection", "sourcePartId"]:
 		if admission.has(key):
 			result[key] = admission[key]
 	if admission.has("providerReason"):
@@ -556,25 +557,48 @@ func assemble_and_submit_complete_section_candidate(section_key: Vector3i,
 		candidate_generation: int) -> Dictionary:
 	if candidate_generation <= 0:
 		return _failed("invalid_complete_section_candidate_generation")
+	var phase_usec := {}
+	var phase_started_usec := Time.get_ticks_usec()
 	var census: Dictionary = capture_authoritative_source_census([section_key])
+	phase_usec["census"] = Time.get_ticks_usec() - phase_started_usec
+	var census_provider_times: Variant = census.get("providerPhaseUsec", {})
+	if census_provider_times is Dictionary:
+		for provider_id_value: Variant in census_provider_times:
+			phase_usec["census_provider_" + String(provider_id_value)] = int(
+				census_provider_times[provider_id_value])
 	if census.get("status") != "complete":
-		return census
+		return _with_candidate_phase_timings(census, phase_usec)
+	phase_started_usec = Time.get_ticks_usec()
 	var captured: Dictionary = _source_roster.capture_section_contributions(
 		census, section_key)
+	phase_usec["contributions"] = Time.get_ticks_usec() - phase_started_usec
 	if captured.get("status") != "complete":
-		return captured
+		return _with_candidate_phase_timings(captured, phase_usec)
+	phase_started_usec = Time.get_ticks_usec()
 	var assembled: Dictionary = CandidateAssembler.assemble(census, section_key,
 		captured.get("contributions", []), candidate_generation)
+	phase_usec["assembly"] = Time.get_ticks_usec() - phase_started_usec
 	if assembled.get("status") != "ready":
-		return assembled
+		return _with_candidate_phase_timings(assembled, phase_usec)
+	phase_started_usec = Time.get_ticks_usec()
 	var admitted: Dictionary = submit_complete_section_candidate(assembled.candidate)
+	phase_usec["submit_and_revalidate"] = Time.get_ticks_usec() - phase_started_usec
 	if admitted.get("status") != "queued":
-		return admitted
-	return {"status":"queued", "sectionKey":section_key,
+		return _with_candidate_phase_timings(admitted, phase_usec)
+	return _with_candidate_phase_timings({"status":"queued", "sectionKey":section_key,
 		"generation":candidate_generation, "censusDigest":String(census.censusDigest),
 		"contentManifestDigest":String(assembled.contentManifestDigest),
 		"providerCount":int(assembled.providerCount),
-		"sourceCount":int(assembled.sourceCount), "inputCount":int(assembled.inputCount)}
+		"sourceCount":int(assembled.sourceCount), "inputCount":int(assembled.inputCount)},
+		phase_usec)
+
+
+func _with_candidate_phase_timings(result: Dictionary, phase_usec: Dictionary) -> Dictionary:
+	var timed := result.duplicate(false)
+	var frozen_phases := phase_usec.duplicate(false)
+	frozen_phases.make_read_only()
+	timed["phaseUsec"] = frozen_phases
+	return timed
 
 
 ## Admit one complete cross-domain section snapshot. This path does not merge

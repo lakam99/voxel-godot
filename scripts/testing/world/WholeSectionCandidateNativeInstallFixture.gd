@@ -177,6 +177,9 @@ func _run() -> void:
 	var first_admission: Dictionary = coordinator.assemble_and_submit_complete_section_candidate(
 		SECTION, 1)
 	var first_candidate: Dictionary = coordinator._production_candidate_jobs.get(SECTION, {}).get("candidate", {})
+	_check("candidate_admission_exposes_phase_timings",
+		_candidate_phase_timings_are_complete(first_admission),
+		first_admission.get("phaseUsec", {}))
 	_check("production_candidate_enters_native_install_session",
 		first_admission.get("status") == "queued", first_admission)
 	if first_admission.get("status") != "queued":
@@ -285,6 +288,17 @@ func _run() -> void:
 		"replayQueued":replay_queue_count, "replayOutcome":replay_outcome,
 		"generation":replay_live.get("generation", 0)})
 	_finish()
+
+
+func _candidate_phase_timings_are_complete(admission: Dictionary) -> bool:
+	var phases: Variant = admission.get("phaseUsec", null)
+	if not phases is Dictionary:
+		return false
+	for name in ["census", "contributions", "assembly", "submit_and_revalidate"]:
+		var elapsed: Variant = phases.get(name, null)
+		if not elapsed is int or elapsed < 0:
+			return false
+	return true
 
 
 func _advance_coordinator_to_install() -> Dictionary:

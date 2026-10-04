@@ -64,6 +64,19 @@ func unregister_provider(provider_id: String, authority_owner: Object) -> Dictio
 ## Every provider must answer every requested section. A zero-member answer is
 ## accepted only as an explicit revisioned `empty` coverage record.
 func capture_sections(requested_sections: Array) -> Dictionary:
+	var provider_phase_usec := {}
+	var result := _capture_sections_impl(requested_sections, provider_phase_usec)
+	var profiled := result.duplicate(false)
+	var frozen_provider_timings := provider_phase_usec.duplicate(false)
+	frozen_provider_timings.make_read_only()
+	profiled["providerPhaseUsec"] = frozen_provider_timings
+	if result.is_read_only():
+		profiled.make_read_only()
+	return profiled
+
+
+func _capture_sections_impl(requested_sections: Array,
+		provider_phase_usec: Dictionary) -> Dictionary:
 	if _world_id.is_empty() or _required_provider_ids.is_empty():
 		return _pending("static_source_roster_unconfigured")
 	var sections: Array[Vector3i] = []
@@ -102,7 +115,9 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 		var method := String(registration.captureMethod)
 		if not owner.has_method(method):
 			return _failed("static_source_provider_method_removed", {"providerId":provider_id})
+		var provider_started_usec := Time.get_ticks_usec()
 		var raw: Variant = owner.call(method, _world_id, callback_sections)
+		provider_phase_usec[provider_id] = Time.get_ticks_usec() - provider_started_usec
 		if not raw is Dictionary:
 			return _failed("static_source_provider_returned_non_dictionary", {"providerId":provider_id})
 		var provider: Dictionary = raw

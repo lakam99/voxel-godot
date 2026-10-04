@@ -762,6 +762,22 @@ func update_voxel_authority_chunks(force: bool) -> void:
                     float(Time.get_ticks_usec() - demand_admission_started) / 1000.0)
                 monitor.observe_gauge("whole_section_candidate_visible_demand_count",
                     int(demand_admission.get("pendingDemandCount", 0)))
+                var candidate_results: Variant = demand_admission.get("results", [])
+                if candidate_results is Array:
+                    for result_value: Variant in candidate_results:
+                        if not result_value is Dictionary:
+                            continue
+                        var admission_value: Variant = result_value.get("admission", {})
+                        if not admission_value is Dictionary:
+                            continue
+                        var phase_values: Variant = admission_value.get("phaseUsec", {})
+                        if not phase_values is Dictionary:
+                            continue
+                        for phase_value: Variant in phase_values:
+                            var phase_name := String(phase_value)
+                            monitor.observe_external_duration(
+                                "whole_section_candidate_phase_" + phase_name,
+                                float(phase_values[phase_value]) / 1000.0)
                 if demand_admission.get("status") == "failed":
                     monitor.increment_counter("whole_section_candidate_capture_failure")
     if not force and world_static_section_coordinator != null \

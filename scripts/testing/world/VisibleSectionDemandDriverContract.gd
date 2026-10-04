@@ -138,6 +138,16 @@ func run() -> void:
 			and stale_details.get("currentSourceRevision") == "terrain-6"
 			and stale_details.get("snapshotValidationStatus") == "ready",
 		stale_census)
+	var adjacent_admission_details := Coordinator._visible_section_admission_details({
+		"reason":"whole_section_candidate_owns_adjacent_section",
+		"requestedSection":Vector3i(-1, 1, 0),
+		"ownedSection":Vector3i(-1, 1, 1),
+		"sourcePartId":"fixture:crossing-source"})
+	check("pending_adjacent_section_admission_keeps_exact_source_identity",
+		adjacent_admission_details.get("requestedSection") == Vector3i(-1, 1, 0)
+		and adjacent_admission_details.get("ownedSection") == Vector3i(-1, 1, 1)
+		and adjacent_admission_details.get("sourcePartId") == "fixture:crossing-source",
+		adjacent_admission_details)
 	var required: Array[String] = ["terrain", "ecology"]
 	required.make_read_only()
 	var coordinator = FixtureCoordinator.new()
