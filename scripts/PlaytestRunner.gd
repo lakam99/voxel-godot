@@ -217,6 +217,17 @@ func test_resident_terrain_section_capture() -> void:
     var sample_count := 19 * 19 * 19
     var section_revisions: Array = capture.get("sectionRevisions", [])
     var current: bool = runtime.call("resident_terrain_capture_is_current", capture)
+    var authority_current: bool = runtime.call("terrain_capture_authority_is_current", capture)
+    var saved_mesh_revision: int = int(runtime.mesh_block_revisions.get(block, -1))
+    var saved_mesh_receipt: bool = bool(runtime.published_mesh_blocks.get(block, false))
+    runtime.mesh_block_revisions.erase(block)
+    runtime.published_mesh_blocks.erase(block)
+    var resident_check_after_source_retirement: bool = runtime.call("resident_terrain_capture_is_current", capture)
+    var authority_after_source_retirement: bool = runtime.call("terrain_capture_authority_is_current", capture)
+    if saved_mesh_revision >= 0:
+        runtime.mesh_block_revisions[block] = saved_mesh_revision
+    if saved_mesh_receipt:
+        runtime.published_mesh_blocks[block] = true
     var tampered := capture.duplicate(false)
     var tampered_sdf := sdf.duplicate()
     if not tampered_sdf.is_empty():
@@ -224,18 +235,25 @@ func test_resident_terrain_section_capture() -> void:
     tampered["sdf16Le"] = tampered_sdf
     tampered.make_read_only()
     var tamper_rejected: bool = not runtime.call("resident_terrain_capture_is_current", tampered)
+    var authority_tamper_rejected: bool = not runtime.call("terrain_capture_authority_is_current", tampered)
     var passed: bool = capture.is_read_only() and capture.get("captureIsTerrainOnly") == true \
         and capture.get("block") == block and capture.get("size") == Vector3i(19, 19, 19) \
         and int(capture.get("sampleCount", 0)) == sample_count \
         and sdf.size() == sample_count * 2 and indices.size() == sample_count \
         and data5.size() == sample_count and String(capture.get("payloadDigest", "")).length() == 64 \
-        and section_revisions.size() == 27 and current and tamper_rejected
+        and section_revisions.size() == 27 and current and authority_current \
+        and not resident_check_after_source_retirement and authority_after_source_retirement \
+        and tamper_rejected and authority_tamper_rejected
     add_result("resident_terrain_section_capture", passed, JSON.stringify({
         "block":block, "sampleCount":sample_count, "sdfBytes":sdf.size(),
         "indicesBytes":indices.size(), "data5Bytes":data5.size(),
         "sectionRevisionCount":section_revisions.size(),
         "payloadDigest":capture.get("payloadDigest"), "currentAtReceipt":current,
+        "authorityCurrentAtReceipt":authority_current,
+        "residentCheckRejectedAfterRegistryRetirement":not resident_check_after_source_retirement,
+        "authoritySurvivedSyntheticSourceRetirement":authority_after_source_retirement,
         "tamperedPayloadRejected":tamper_rejected,
+        "authorityTamperedPayloadRejected":authority_tamper_rejected,
         "terrainOnly":capture.get("captureIsTerrainOnly"),
         "renderAuthorityRetained":"VoxelTerrainRuntime"}))
     if passed:

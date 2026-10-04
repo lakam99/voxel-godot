@@ -1913,6 +1913,7 @@ func capture_resident_terrain_mesh_block(block_position: Vector3i) -> Dictionary
 		"worldRevision":visible_mesh_world_revision(), "sourceRevision":visible_mesh_source_revision(block_position),
 		"terrainInstanceId":terrain.get_instance_id(), "generatorInstanceId":generator.get_instance_id() if is_instance_valid(generator) else 0,
 		"seed":configured_seed, "block":block_position, "origin":origin,
+		"authorityIdentity":_terrain_capture_authority_identity(),
 		"size":Vector3i.ONE * size, "sectionRevisions":sections.revisions,
 		"sectionRevisionDigest":String(sections.revisionDigest),
 		"meshMaterialRevision":_terrain_capture_mesher_material_revision(),
@@ -1956,6 +1957,53 @@ func resident_terrain_capture_is_current(capture: Dictionary) -> bool:
 	var sections := _terrain_capture_section_revisions(service, origin_value, size_value)
 	return sections.get("status") == "ready" \
 		and String(sections.get("revisionDigest", "")) == String(capture.get("sectionRevisionDigest", ""))
+
+
+## Validate a sealed source value after the Voxel Tools mesh block has unloaded.
+## Residency proves that capture was legal; the immutable payload plus world and
+## intersecting authority revisions prove that it is still current.
+func terrain_capture_authority_is_current(capture: Dictionary) -> bool:
+	if not capture.is_read_only() or String(capture.get("schema", "")) != "resident-terrain-mesh-block/v1" \
+			or not authority_ready or terrain == null or not is_instance_valid(terrain) \
+			or not terrain.is_inside_tree():
+		return false
+	var block_value: Variant = capture.get("block")
+	var origin_value: Variant = capture.get("origin")
+	var size_value: Variant = capture.get("size")
+	if not block_value is Vector3i or not origin_value is Vector3i or not size_value is Vector3i:
+		return false
+	var sdf_value: Variant = capture.get("sdf16Le")
+	var indices_value: Variant = capture.get("indices8")
+	var data5_value: Variant = capture.get("data5_8")
+	if not sdf_value is PackedByteArray or not indices_value is PackedByteArray \
+			or not data5_value is PackedByteArray \
+			or _terrain_capture_payload_digest(sdf_value, indices_value, data5_value) \
+				!= String(capture.get("payloadDigest", "")):
+		return false
+	if String(capture.get("sourceIdentity", "")) != visible_mesh_source_identity() \
+			or String(capture.get("authorityIdentity", "")) != _terrain_capture_authority_identity() \
+			or String(capture.get("worldRevision", "")) != visible_mesh_world_revision() \
+			or int(capture.get("terrainInstanceId", 0)) != terrain.get_instance_id() \
+			or int(capture.get("generatorInstanceId", 0)) != generator.get_instance_id() \
+			or String(capture.get("meshMaterialRevision", "")) != _terrain_capture_mesher_material_revision():
+		return false
+	var service = volume_service()
+	if service == null:
+		return false
+	var sections := _terrain_capture_section_revisions(service, origin_value, size_value)
+	return sections.get("status") == "ready" \
+		and String(sections.get("revisionDigest", "")) == String(capture.get("sectionRevisionDigest", ""))
+
+
+func _terrain_capture_authority_identity() -> String:
+	if terrain == null or not is_instance_valid(terrain) or generator == null \
+			or not is_instance_valid(generator):
+		return ""
+	var service = volume_service()
+	if service == null or not service is Object:
+		return ""
+	return "%s:%d:%d:%d:%d" % [configured_seed, collision_owner_generation,
+		terrain.get_instance_id(), generator.get_instance_id(), service.get_instance_id()]
 
 
 func _resident_terrain_capture_state(block_position: Vector3i) -> Dictionary:

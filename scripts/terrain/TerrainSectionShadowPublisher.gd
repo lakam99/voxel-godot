@@ -80,12 +80,12 @@ func advance() -> Dictionary:
 		return {"status":"pending", "stage":"candidate_build", "block":block}
 	if _active.stage == "candidate_build":
 		var capture: Dictionary = _active.capture
-		if not _runtime.resident_terrain_capture_is_current(capture):
+		if not _runtime.terrain_capture_authority_is_current(capture):
 			return _finish({"status":"failed", "reason":"terrain_capture_stale_before_mesh_build"})
 		var candidate_result := _build_candidate(capture)
 		if candidate_result.get("status") != "ready":
 			return _finish(candidate_result)
-		if not _runtime.resident_terrain_capture_is_current(capture):
+		if not _runtime.terrain_capture_authority_is_current(capture):
 			return _finish({"status":"failed", "reason":"terrain_capture_stale_before_install"})
 		var installation: Dictionary = PacketOwner.begin_static_section_install(
 			candidate_result.candidate, candidate_result.materials, candidate_result.meshes)
@@ -104,7 +104,7 @@ func advance() -> Dictionary:
 	if _active.stage == "renderer_install":
 		var capture: Dictionary = _active.capture
 		var session = _active.session
-		if not _runtime.resident_terrain_capture_is_current(capture):
+		if not _runtime.terrain_capture_authority_is_current(capture):
 			session.cancel()
 			return _finish({"status":"failed", "reason":"terrain_capture_stale_during_install"})
 		if session.state == "installed":

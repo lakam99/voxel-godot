@@ -883,12 +883,15 @@ and polls the production API. The focused headed command
 `node tools/run-playtest.mjs --only resident_terrain_section_capture --seed section-shadow-runtime-queue-20261004-r3 --visible true`
 passed the live source capture and native renderer receipt through that queue.
 It encountered an all-air neighbor as `empty`, then installed the surface block;
-the local mesh bounds remained within its expected 16-cell block. The VoxelTerrain
-visual and collision remain active. The screenshot is behind the startup loading
+the local mesh bounds remained within its expected 16-cell block. A synthetic
+registry-retirement contract check showed the residency validator reject the
+sealed snapshot while the authority validator still accepted it; this does not
+simulate native Voxel Tools unload/reload. The VoxelTerrain visual and collision
+remain active. The screenshot is behind the startup loading
 overlay, so this proves renderer installation but not visual parity or traversal.
 This remains a terrain-only shadow path without the full section contributor
-census; seam parity, post-unload revision checks, edit/collision/fluid/light
-parity, replay, performance, and later building and ecology cutovers remain open.
+census; seam parity, real unload/reload and replay, edit/collision/fluid/light
+parity, performance, and later building and ecology cutovers remain open.
 Canonical stage record:
 `C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
 
