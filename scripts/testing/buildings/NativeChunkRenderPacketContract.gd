@@ -472,7 +472,7 @@ func _run() -> void:
 	var spanning_first_admitted: Dictionary=coordinator.submit_prepared_segment(
 		spanning_boundary_id,spanning_first_input)
 	var spanning_buffer: Array[float]=[]
-	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(30.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
+	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(50.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
 		spanning_buffer.append(value)
 	spanning_buffer.make_read_only()
 	var spanning_second_input: Dictionary=coordinator_input.duplicate(false)
@@ -486,7 +486,7 @@ func _run() -> void:
 	spanning_revisions.make_read_only()
 	var spanning_census: Dictionary={
 		Vector3i.ZERO:coordinator_contributors,
-		Vector3i(1,0,0):coordinator_contributors}
+		Vector3i(2,0,0):coordinator_contributors}
 	spanning_census.make_read_only()
 	var spanning_install: Dictionary={"status":"pending"}
 	var spanning_turns:=0
@@ -495,13 +495,17 @@ func _run() -> void:
 			spanning_census,coordinator_materials,coordinator_meshes,4)
 		spanning_turns+=1
 	var spanning_slot_a:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i.ZERO)
-	var spanning_slot_b:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i(1,0,0))
+	var spanning_slot_b:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i(2,0,0))
 	var spanning_installed_a: Dictionary=section_backend.call("installed_snapshot",spanning_slot_a)
-	var spanning_installed_b: Dictionary=section_backend.call("installed_snapshot",spanning_slot_b)
+	var spanning_owner_b: Dictionary=PacketOwner.resolve_existing_static_section_backend(Vector2i(1,0))
+	var spanning_backend_b: Node=spanning_owner_b.get("backend") as Node
+	var spanning_installed_b: Dictionary=spanning_backend_b.call("installed_snapshot",spanning_slot_b) \
+		if is_instance_valid(spanning_backend_b) else {"status":"missing_backend"}
 	diagnostics["worldCoordinatorSpanningSectionInstall"]={"enqueued":spanning_enqueued,
 		"firstSegment":spanning_first_admitted,"secondSegment":spanning_second_admitted,
 		"lastAdvance":spanning_install,"turns":spanning_turns,
-		"sectionA":spanning_installed_a,"sectionB":spanning_installed_b}
+		"sectionA":spanning_installed_a,"ownerB":spanning_owner_b,
+		"sectionB":spanning_installed_b}
 	_check("world_coordinator_installs_and_promotes_all_sections_for_spanning_source",
 		spanning_enqueued.get("status")=="queued" \
 		and spanning_first_admitted.get("status")=="queued" \
@@ -510,6 +514,8 @@ func _run() -> void:
 		and spanning_install.get("sectionKeys",[]).size()==2 \
 		and spanning_installed_a.get("status")=="ready" \
 		and spanning_installed_b.get("status")=="ready" \
+		and spanning_owner_b.get("status")=="ready" \
+		and spanning_backend_b.get_parent()!=section_backend.get_parent() \
 		and int(spanning_installed_a.get("generation",0))>1 \
 		and int(spanning_installed_a.get("generation",0))==int(spanning_installed_b.get("generation",0)) \
 		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id))
