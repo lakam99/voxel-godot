@@ -161,7 +161,7 @@ func _run() -> void:
 		and terrain_runtime.desired_gameplay_chunks.has(OWNER_CELL) \
 		and terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL) \
 		and is_instance_valid(state_chunk) and state_chunk.get_instance_id()==streamed_chunk.get_instance_id())
-	var retired:=main.retire_voxel_authority_chunk(OWNER_CELL)
+	var retired:=main.retire_streamed_chunk_container(OWNER_CELL)
 	_check("main_runtime_releases_backend_before_unregistering_chunk",retired \
 		and not terrain_runtime.desired_gameplay_chunks.has(OWNER_CELL) \
 		and not terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL) \
@@ -171,18 +171,18 @@ func _run() -> void:
 	main.create_voxel_authority_chunk_container(OWNER_CELL.x,OWNER_CELL.y,true)
 	var retained_chunk: Node3D=main.chunks.get(OWNER_CELL) as Node3D
 	terrain_runtime.retained_gameplay_chunks[OWNER_CELL]=true
-	var retained_retire:=main.retire_voxel_authority_chunk(OWNER_CELL)
+	var retained_retire:=main.retire_streamed_chunk_container(OWNER_CELL)
 	_check("main_runtime_preserves_retained_terrain_owner",not retained_retire \
 		and main.chunks.get(OWNER_CELL)==retained_chunk and is_instance_valid(retained_chunk) \
 		and not retained_chunk.is_queued_for_deletion())
 	terrain_runtime.retained_gameplay_chunks.erase(OWNER_CELL)
 	terrain_runtime.startup_auxiliary_publication_chunks[OWNER_CELL]=true
-	var auxiliary_retire:=main.retire_voxel_authority_chunk(OWNER_CELL)
+	var auxiliary_retire:=main.retire_streamed_chunk_container(OWNER_CELL)
 	_check("main_runtime_preserves_startup_auxiliary_terrain_owner",not auxiliary_retire \
 		and main.chunks.get(OWNER_CELL)==retained_chunk and is_instance_valid(retained_chunk) \
 		and not retained_chunk.is_queued_for_deletion())
 	terrain_runtime.startup_auxiliary_publication_chunks.erase(OWNER_CELL)
-	_check("main_runtime_retires_owner_after_dependencies_release",main.retire_voxel_authority_chunk(OWNER_CELL))
+	_check("main_runtime_retires_owner_after_dependencies_release",main.retire_streamed_chunk_container(OWNER_CELL))
 	_finish(not checks.values().has(false),"")
 	parent.free()
 

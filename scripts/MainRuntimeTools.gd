@@ -440,13 +440,7 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
     var unload_start: int = monitor.begin_section("chunk_unload") if monitor != null else Time.get_ticks_usec()
     for key in chunks.keys():
         if not needed.has(key):
-            if voxel_terrain_authority_active() and voxel_terrain_runtime.has_method("release_gameplay_chunk"):
-                voxel_terrain_runtime.call("release_gameplay_chunk", key)
-            elif npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
-                npc_system.notify_navigation_chunk_unloaded(key)
-            chunks[key].queue_free()
-            chunks.erase(key)
-            if monitor != null:
+            if retire_streamed_chunk_container(key) and monitor != null:
                 monitor.increment_counter("chunks_unloaded")
     prune_stale_pending_chunk_loads(needed)
     prune_stale_pending_chunk_collision_refreshes(needed)
@@ -568,7 +562,7 @@ func update_voxel_authority_chunks(force: bool) -> void:
         var key: Vector2i = key_value
         if needed.has(key):
             continue
-        if not retire_voxel_authority_chunk(key):
+        if not retire_streamed_chunk_container(key):
             if monitor != null:
                 monitor.increment_counter("chunk_retirement_deferred_owner_demand")
             continue
@@ -1993,7 +1987,7 @@ func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := fal
         monitor.end_section("chunk_create", create_start)
 
 ## Retire only after the terrain authority confirms no retained publication owns this cell.
-func retire_voxel_authority_chunk(chunk_key: Vector2i) -> bool:
+func retire_streamed_chunk_container(chunk_key: Vector2i) -> bool:
     if not chunks.has(chunk_key):
         return false
     var chunk := chunks[chunk_key] as Node3D
@@ -2002,6 +1996,8 @@ func retire_voxel_authority_chunk(chunk_key: Vector2i) -> bool:
         var release_result: Variant = voxel_terrain_runtime.call("release_gameplay_chunk", chunk_key)
         if typeof(release_result) != TYPE_BOOL or not bool(release_result):
             return false
+    elif npc_system and npc_system.has_method("notify_navigation_chunk_unloaded"):
+        npc_system.notify_navigation_chunk_unloaded(chunk_key)
     if is_instance_valid(chunk):
         chunk.queue_free()
     chunks.erase(chunk_key)

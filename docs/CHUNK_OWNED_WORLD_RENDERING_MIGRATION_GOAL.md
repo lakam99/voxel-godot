@@ -266,7 +266,7 @@ owner destruction, and retained/startup-auxiliary demand prevents deletion until
 released. It does not run `VoxelTerrainRuntime.setup()` or prove resident Citadel
 scheduler replay after streamer-driven unload/reload. Cross-cell ownership and
 live gameplay also remain open. The repeatable command is
-`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-vxl-runtime-retirement-final2`;
+`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-streamed-owner-retirement`;
 its report is `report.json`, and the watchdog recorded exit 0, clean shutdown,
 and authoritative zero owned-process members. Source artifact memory still lacks an aggregate budget. Replay recipes reference the same
 immutable segment buffers retained by prepared masonry/surface or physical-family
