@@ -4,6 +4,7 @@ extends SceneTree
 const MainScript := preload("res://scripts/Main.gd")
 const Structures := preload("res://scripts/StructureSystem.gd")
 const Admission := preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const EcologyLedger := preload("res://scripts/world/EcologySourceValueLedger.gd")
 const CHUNK := Vector2i.ZERO
 const EXPECTED_ATTEMPTS := 53
 
@@ -319,6 +320,9 @@ func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
 	main.setup_biome_environment_catalog()
+	for material_key in ["detailGrass", "detailFlower", "detailReed", "detailPebble",
+			"detailSnow", "detailLeaf", "detailScrub"]:
+		main.materials[material_key] = StandardMaterial3D.new()
 	var structures := Structures.new()
 	structures.main = main
 	structures.regional_source_generation = 1
@@ -394,6 +398,103 @@ func run() -> void:
 		final_batches[String(key)] = rows
 	if JSON.stringify(replay_batches) != JSON.stringify(final_batches):
 		failures.append("final ordered batch transforms")
+	var ledger_state: Dictionary = state
+	ledger_state["detailBatches"] = production_batches.duplicate(true)
+	ledger_state["detailBatchKeys"] = production_batches.keys()
+	ledger_state["detailBatchIndex"] = 0
+	if not main.process_chunk_detail_batch_spawn_state(ledger_state, -1.0, 0):
+		failures.append("production detail batch capture did not finish")
+	var ledger = ledger_state.get("ecologySourceLedger")
+	var ecology_snapshot: Dictionary = ledger.call("snapshot") if ledger != null else {}
+	var expected_instance_count := 0
+	for transforms_value in production_batches.values():
+		expected_instance_count += (transforms_value as Array).size()
+	var candidates: Array = ecology_snapshot.get("candidates", [])
+	if candidates.size() != expected_instance_count:
+		failures.append("producer ledger instance count")
+	var expected_by_id := {}
+	for detail_type_value in production_batches.keys():
+		var detail_type := String(detail_type_value)
+		var transforms: Array = production_batches[detail_type_value]
+		for index in range(transforms.size()):
+			var source_id := "%s:detail:%d,%d:%s:%d" % [main.seed_text, CHUNK.x, CHUNK.y, detail_type, index]
+			expected_by_id[source_id] = transforms[index]
+	for candidate_value in candidates:
+		var candidate: Dictionary = candidate_value
+		var source_id := String(candidate.get("sourceId", ""))
+		if not expected_by_id.has(source_id):
+			failures.append("producer ledger emitted unknown detail source ID")
+			break
+		var expected_transform: Transform3D = expected_by_id[source_id]
+		var expected_bounds: AABB = main.detail_mesh(String(candidate.get("detailType", ""))).get_aabb() * expected_transform
+		var actual_bounds: AABB = candidate.get("localBounds", AABB())
+		if transform_bits(candidate.get("transform", Transform3D())) != transform_bits(expected_transform) \
+				or String(candidate.get("contentRevision", "")).is_empty() \
+				or not actual_bounds.is_equal_approx(expected_bounds):
+			failures.append("producer ledger detail transform/bounds mismatch: %s" % source_id)
+			break
+	var replay_chunk := Node3D.new()
+	var replay_state: Dictionary = main.begin_chunk_prop_spawn_state(replay_chunk, CHUNK.x, CHUNK.y)
+	for detail_type_value in production_batches.keys():
+		main.record_chunk_detail_source_values(replay_chunk, CHUNK.x, CHUNK.y,
+			String(detail_type_value), production_batches[detail_type_value])
+	var replay_snapshot: Dictionary = replay_state.ecologySourceLedger.call("snapshot")
+	if String(ecology_snapshot.get("contentRevision", "")) != \
+			String(replay_snapshot.get("contentRevision", "")):
+		failures.append("producer ledger changed across chunk recreation")
+	if String(ecology_snapshot.get("scope", "")) != "partial_static_ecology_producer_values" \
+			or not (ecology_snapshot.get("limitations", []) as Array).has("surface rocks, ore, forage, wildlife, and underground props are not captured"):
+		failures.append("producer ledger omitted its partial-coverage declaration")
+	if String(ecology_snapshot.get("lifetime", "")) != \
+			"streamed_chunk_owner; regenerated from seed and durable removals after unload":
+		failures.append("producer ledger lifetime is not explicit")
+	main._finalize_ecology_source_values(ledger_state)
+	if not chunk.has_meta("static_ecology_source_value_snapshot") \
+			or chunk.has_meta("static_ecology_source_value_ledger"):
+		failures.append("snapshot was not transferred to bounded chunk ownership")
+	var tombstone_ledger = EcologyLedger.new()
+	tombstone_ledger.configure(main.seed_text, CHUNK, "tombstone-contract", 0)
+	if not candidates.is_empty():
+		var tombstone_candidate: Dictionary = candidates[0].duplicate(true)
+		tombstone_candidate["sourceId"] = "harvest-contract-prop"
+		tombstone_candidate["propId"] = "harvest-contract-prop"
+		tombstone_ledger.record_candidate(tombstone_candidate)
+	tombstone_ledger.apply_removed_props({"harvest-contract-prop": true}, 7)
+	var tombstone_snapshot: Dictionary = tombstone_ledger.snapshot()
+	if tombstone_snapshot.candidates.size() != 0 or tombstone_snapshot.tombstones.size() != 1 \
+			or tombstone_snapshot.removedPropsRevision != 7:
+		failures.append("durable removal did not become a tombstone")
+	var tree_records := []
+	for _replay_index in range(2):
+		var tree_chunk := Node3D.new()
+		root.add_child(tree_chunk)
+		var tree_state: Dictionary = main.begin_chunk_prop_spawn_state(tree_chunk, 3, 5)
+		var tree_rng := RandomNumberGenerator.new()
+		tree_rng.seed = 781223
+		main.make_tree(tree_chunk, "%s:16,24:0" % main.seed_text,
+			Vector3(2.0, 8.0, 3.0), "forest", tree_rng, Vector2i(16, 24))
+		var tree_snapshot: Dictionary = tree_state.ecologySourceLedger.call("snapshot")
+		tree_records.append(tree_snapshot)
+		var tree_candidates: Array = tree_snapshot.get("candidates", [])
+		if tree_candidates.size() != 1:
+			failures.append("tree producer did not capture one visual source")
+		else:
+			var tree_candidate: Dictionary = tree_candidates[0]
+			var expected_prop_id := "%s:16,24:0" % main.seed_text
+			var tree_bounds: AABB = tree_candidate.get("localBounds", AABB())
+			if String(tree_candidate.get("sourceId", "")) != "%s:tree:%s" % [main.seed_text, expected_prop_id] \
+					or String(tree_candidate.get("visualId", "")) != "procedural-tree:%s" % expected_prop_id \
+					or int(tree_candidate.get("recipeVersion", 0)) != 2 \
+					or tree_bounds.size.x <= 0.0 or tree_bounds.size.y <= 0.0 or tree_bounds.size.z <= 0.0 \
+					or not tree_candidate.has("runtimeSpec"):
+				failures.append("tree visual identity, recipe inputs, or bounds changed")
+			if tree_candidate.has("collision") or tree_candidate.has("interaction"):
+				failures.append("tree render record duplicates gameplay authority")
+		tree_chunk.free()
+	if tree_records.size() == 2 and String(tree_records[0].get("contentRevision", "")) != \
+			String(tree_records[1].get("contentRevision", "")):
+		failures.append("tree producer values changed across chunk recreation")
+	replay_chunk.free()
 	var native_baseline: Dictionary = compare_native_case(main, CHUNK, native_facts,
 		direct_rows, str(production_rng.state))
 	for failure in native_baseline.failures:
@@ -420,6 +521,13 @@ func run() -> void:
 		"attemptsExpected": EXPECTED_ATTEMPTS, "attemptsCompared": checked,
 		"branchCounts": branch_counts, "batchTypes": final_batches.keys(),
 		"nativeBaseline": native_baseline,
+		"ecologySourceValueLedger": {"candidateCount": candidates.size(),
+			"recreationRevisionMatches": String(ecology_snapshot.get("contentRevision", "")) == String(replay_snapshot.get("contentRevision", "")),
+			"tombstoneCount": tombstone_snapshot.get("tombstones", []).size(),
+			"treeRecreationRevisionMatches": tree_records.size() == 2 and String(tree_records[0].get("contentRevision", "")) == String(tree_records[1].get("contentRevision", "")),
+			"snapshotLifetime": ecology_snapshot.get("lifetime", ""),
+			"scope": ecology_snapshot.get("scope", ""),
+			"contentRevision": ecology_snapshot.get("contentRevision", "")},
 		"variationCase": variation_case, "blockedCase": blocked_case, "flowerCase": flower_case,
 		"finalRngState": str(production_rng.state), "failures": failures.slice(0, 30)}
 	var path := OS.get_environment("DETAIL_ORDERED_PARITY_REPORT")

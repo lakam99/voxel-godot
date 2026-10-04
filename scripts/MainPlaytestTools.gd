@@ -7,6 +7,7 @@ const ChunkPropVisualManifestScript := preload("res://scripts/world/ChunkPropVis
 const HorizonChunkPropManifestCacheScript := preload("res://scripts/world/HorizonChunkPropManifestCache.gd")
 const PhysicalChunkPropManifestCacheScript := preload("res://scripts/world/PhysicalChunkPropManifestCache.gd")
 const DetailBatchVisualReceiptPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
+const EcologySourceValueLedgerScript := preload("res://scripts/world/EcologySourceValueLedger.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
 signal rock_published(body: StaticBody3D, collider: CollisionShape3D)
@@ -3015,6 +3016,13 @@ func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary
     underground_rng.seed = hash_string("%s:underground-props:%d,%d" % [seed_text, cx, cz])
     var detail_rng := RandomNumberGenerator.new()
     detail_rng.seed = hash_string("%s:details:%d,%d" % [seed_text, cx, cz])
+    var source_ledger = EcologySourceValueLedgerScript.new()
+    source_ledger.configure(seed_text, Vector2i(cx, cz),
+        _ecology_chunk_source_revision(Vector2i(cx, cz)),
+        int(removed_props_revision))
+    if chunk != null and is_instance_valid(chunk):
+        chunk.remove_meta("static_ecology_source_value_snapshot")
+        chunk.set_meta("static_ecology_source_value_ledger", source_ledger)
     return {
         "chunk": chunk,
         "cx": cx,
@@ -3038,8 +3046,43 @@ func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary
         "detailBatches": {},
         "detailBatchKeys": [],
         "detailBatchIndex": 0,
-        "detailBatchRoot": null
+        "detailBatchRoot": null,
+        "ecologySourceLedger": source_ledger
     }
+
+func _record_ecology_source_value(chunk: Node, candidate: Dictionary) -> bool:
+    if chunk == null or not is_instance_valid(chunk):
+        return false
+    var ledger = chunk.get_meta("static_ecology_source_value_ledger", null)
+    if ledger == null or not ledger.has_method("record_candidate"):
+        return false
+    var prop_id := String(candidate.get("propId", ""))
+    if not prop_id.is_empty() and removed_props.has(prop_id):
+        var source_id := String(candidate.get("sourceId", ""))
+        return bool(ledger.call("record_tombstone", source_id, "removed_props"))
+    return bool(ledger.call("record_candidate", candidate))
+
+func _finalize_ecology_source_values(state: Dictionary) -> void:
+    var ledger = state.get("ecologySourceLedger")
+    if ledger == null or not ledger.has_method("snapshot"):
+        return
+    var removed: Dictionary = removed_props if removed_props is Dictionary else {}
+    if ledger.has_method("apply_removed_props"):
+        ledger.call("apply_removed_props", removed, int(removed_props_revision))
+    var snapshot: Dictionary = ledger.call("snapshot")
+    var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+    snapshot["status"] = "ready" if String(snapshot.get("sourceRevision", "")) == \
+        _ecology_chunk_source_revision(key) else "stale"
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
+    if chunk != null and is_instance_valid(chunk):
+        chunk.remove_meta("static_ecology_source_value_ledger")
+        chunk.set_meta("static_ecology_source_value_snapshot", snapshot.duplicate(true))
+
+func _ecology_chunk_source_revision(key: Vector2i) -> String:
+    var terrain_revision := -1
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
+        terrain_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
+    return "ecology-v1:%s:%d,%d:terrain-%d" % [seed_text, key.x, key.y, terrain_revision]
 
 func process_chunk_prop_spawn_state(
     state: Dictionary,
@@ -3106,6 +3149,7 @@ func process_chunk_prop_spawn_state(
                 seed_text, int(get("seed_hash")), chunk.get_instance_id()
             ])
         if bool(chunk.get_meta("horizon_visual_only", false)):
+            _finalize_ecology_source_values(state)
             return true
         if not process_underground_chunk_prop_spawn_state(state, prop_attempt_budget, time_budget_ms, start_usec):
             return false
@@ -3117,6 +3161,7 @@ func process_chunk_prop_spawn_state(
         completed_chunk.set_meta("chunk_prop_candidate_source_revision", "%s:%d:%d" % [
             seed_text, int(get("seed_hash")), completed_chunk.get_instance_id()
         ])
+    _finalize_ecology_source_values(state)
     return true
 
 
@@ -3715,6 +3760,8 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
         var transforms: Array = batches.get(detail_type_variant, [])
         if not transforms.is_empty():
             var batch_start: int = runtime_perf_monitor.begin_section("chunk_detail_batch_spawn") if runtime_perf_monitor != null else Time.get_ticks_usec()
+            record_chunk_detail_source_values(chunk, int(state.get("cx", 0)),
+                int(state.get("cz", 0)), String(detail_type_variant), transforms)
             spawn_detail_batch(root, String(detail_type_variant), transforms)
             var published_batch := root.get_child(root.get_child_count() - 1) as MultiMeshInstance3D
             expected_batches.append({"detailType": String(detail_type_variant),
@@ -3728,6 +3775,56 @@ func process_chunk_detail_batch_spawn_state(state: Dictionary, time_budget_ms :=
     state["detailBatchIndex"] = batch_index
     chunk.set_meta("visual_detail_expected_batches", expected_batches.duplicate(true))
     return true
+
+func record_chunk_detail_source_values(chunk: Node3D, cx: int, cz: int,
+        detail_type: String, transforms: Array) -> void:
+    if chunk == null or not is_instance_valid(chunk) or detail_type.is_empty():
+        return
+    var mesh := detail_mesh(detail_type)
+    if mesh == null:
+        return
+    var material_keys: Array[String] = []
+    match detail_type:
+        "flowerStem":
+            material_keys = ["detailGrass"]
+        "flowerBloom":
+            material_keys = ["detailFlower"]
+        "grass":
+            material_keys = ["detailGrass"]
+        "reed":
+            material_keys = ["detailReed"]
+        "pebble":
+            material_keys = ["detailPebble"]
+        "snowClump":
+            material_keys = ["detailSnow"]
+        "leafLitter":
+            material_keys = ["detailLeaf"]
+        _:
+            material_keys = ["detailScrub"]
+    var layer := "opaque"
+    if detail_type in ["grass", "reed", "scrub", "flowerStem", "flowerBloom"]:
+        layer = "alpha_scissor"
+    for index in range(transforms.size()):
+        var transform_value: Variant = transforms[index]
+        if not transform_value is Transform3D:
+            continue
+        var transform: Transform3D = transform_value
+        var local_bounds: AABB = mesh.get_aabb() * transform
+        var candidate := {
+            "sourceId": "%s:detail:%d,%d:%s:%d" % [seed_text, cx, cz, detail_type, index],
+            "kind": "surface_detail",
+            "detailType": detail_type,
+            "renderLayers": [layer],
+            "materials": material_keys.duplicate(),
+            "meshSource": "procedural_detail:%s" % detail_type,
+            "transform": transform,
+            "instanceColor": detail_instance_color(detail_type, transform, index),
+            "customData": Color(detail_instance_phase(detail_type, transform, index), 0.0, 0.0, 1.0),
+            "localBounds": local_bounds,
+            "shadowCasting": "off",
+            "visibilityRangeEnd": detail_visibility_range(detail_type)
+        }
+        _record_ecology_source_value(chunk, candidate)
 
 func begin_chunk_detail_attempt(state: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
     var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
@@ -4385,6 +4482,27 @@ func make_tree(
         canopy_radius + exclusion_margin
     ):
         return null
+    if not runtime_spec.is_empty():
+        var height := float(spec.get("height", legacy_height))
+        canopy_radius = maxf(0.1, float(spec.get("canopy_radius", 1.8)))
+        var architecture := String(runtime_spec.get("architecture", "broadleaf"))
+        var tree_transform := Transform3D(Basis(Vector3.UP, float(spec.get("rotation", 0.0))), position)
+        _record_ecology_source_value(parent, {
+            "sourceId": "%s:tree:%s" % [seed_text, prop_id],
+            "propId": prop_id,
+            "visualId": "procedural-tree:%s" % prop_id,
+            "recipeVersion": 2,
+            "kind": "trees_foliage",
+            "renderLayers": ["opaque_branches", "alpha_scissor_foliage"],
+            "materials": ["procedural_tree_bark:%s:%s" % [architecture, biome],
+                "procedural_tree_foliage:%s:%s" % [architecture, biome]],
+            "meshSource": "procedural_tree_recipe:v2",
+            "runtimeSpec": runtime_spec.duplicate(true),
+            "legacySpec": spec.duplicate(true),
+            "transform": tree_transform,
+            "localBounds": AABB(Vector3(-canopy_radius, 0.0, -canopy_radius),
+                Vector3(canopy_radius * 2.0, height, canopy_radius * 2.0))
+        })
     return _publish_tree_body(parent, prop_id, position, biome, spec, runtime_spec)
 
 ## Publishes an already generated request without ecology/RNG or natural-prop
