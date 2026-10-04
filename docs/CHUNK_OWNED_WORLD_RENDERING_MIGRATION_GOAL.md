@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority, static-source/readiness, and render-demand-owned section-slot seams are present. The section owner is independent of gameplay chunk lifetime, and the native GDExtension accepts immutable cross-chunk capture coverage while preserving the prior installed root through cancellation. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt/lifecycle evidence; worker-prepared, single-owner-cell building batches retain per-source packet installation and replay. No ordinary terrain/building/tree/prop producer yet publishes a complete shared section candidate. Exact source-capture epochs, mesh-payload budgets, multi-layer policies, producer census integration, and all live gameplay/visual/performance gates remain open.**
+Status: **Active; chunk-priority, static-source/readiness, and render-demand-owned section-slot seams are present. A world-lifetime section source roster is now owned by MainCore and gates coordinator admission, but none of its required terrain/building/ecology providers is yet registered in normal gameplay. The native GDExtension accepts immutable cross-chunk capture coverage while preserving the prior installed root through cancellation. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt/lifecycle evidence; worker-prepared, single-owner-cell building batches retain per-source packet installation and replay. No ordinary terrain/building/tree/prop producer yet publishes a complete shared section candidate. Exact source-capture epochs, mesh-payload budgets, multi-layer policies, complete producer census integration, and all live gameplay/visual/performance gates remain open.**
 
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository at
@@ -803,8 +803,8 @@ traversal or gameplay performance claim follows from this probe.
 | Stage | Status | Evidence / remaining exit gate |
 |---|---|---|
 | 0. Map authorities and baseline | Complete | Producer-to-renderer, revisions, ownership, collision, interactions, unload/replay and save paths documented. |
-| 1. Shared candidate and producer census | Partial | Ledger and coordinator contract exist; wire a world-lifetime producer roster and authoritative census into normal gameplay. |
-| 2. Native section install lifecycle | Partial | Native contract passes with a triangle `ArrayMesh`, manifest-bound mesh-content digest, mismatch rejection, copied immutable payload, CPU mesh-array/instance-buffer accounting, and old-root retention; production section callers, full layer policies, GPU memory accounting and exact per-source capture epochs remain. |
+| 1. Shared candidate and producer census | Partial | `StaticSectionSourceRoster` unions explicit per-provider/per-section complete or empty coverage and source revisions; `MainCore` owns the coordinator/required-domain roster. No production domain providers are registered yet. The roster-backed admission path refuses multi-section boundaries until atomic or rollback-safe cross-section promotion exists. |
+| 2. Native section install lifecycle | Partial | Native contract passes with a roster-gated single-section candidate installed through the actual native section renderer; missing/omitted coverage and malformed revision keys are refused, a changed revision cancels staged work, and a provider becoming pending cancels active single-section work while preserving the old slot. This remains fixture-provider evidence: normal-world producers, full layer policies, GPU memory accounting and exact per-source capture epochs remain. |
 | 3. Smooth terrain | Partial | A headed Main-scene probe captures live resident 19³ SDF/material bytes with 27 intersecting 3D section revisions, runs configured Transvoxel, and installs one terrain-only candidate through the independent native section owner. This is a shadow install only; no complete source census, visual parity, edit replacement, collision/fluid/light parity or Voxel Tools visual retirement is proven. |
 | 4. Generated buildings | Not started | Replace per-source final publication with complete section candidates; preserve structure gameplay authority, removals, replay and readiness. |
 | 5. Trees, flora and static props | Not started | Admit canonical deterministic prepared outputs, visual attributes, harvesting/removal and save/reload into shared candidates. |
@@ -812,6 +812,32 @@ traversal or gameplay performance claim follows from this probe.
 
 Do not advance a stage based on this coordinator contract. The overall goal
 remains active.
+
+**World-lifetime source roster admission (2026-10-04, r14):** added
+`StaticSectionSourceRoster` and made `WorldStaticSectionCoordinator` expose a
+roster-gated install path. `MainCore` owns the coordinator for the seeded world
+and declares four required domains: terrain, ordinary structures, blueprint
+buildings, and ecology/static props. The census unions explicit per-section
+complete/empty coverage and source revisions; missing providers and missing
+section answers stay pending/failed. A changed census digest cancels staged
+work. Review found that cancelling a multi-section boundary after one slot
+committed cannot restore that old slot. The roster path now rejects
+multi-section boundaries until promotion is atomic or rollback-safe. If a
+provider becomes pending during active single-section staging, it cancels that
+staging and reports `requiresResubmit`. Revision keys and values must be
+strings. The native contract installed a single-section candidate through the
+native renderer using fixture providers, rejected missing/omitted coverage,
+changed a source revision mid-install, and confirmed the existing slot stayed
+installed. It also exercises exact revision-to-membership schema validation.
+Report:
+`artifacts/citadel-runtime-integration/native-chunk-packet-source-roster-20261004-r14/report.json`.
+This proves coordinator-to-native-renderer
+admission mechanics only: no production producer is registered, no world
+section is yet complete, and no headed visual/traversal/performance gate was
+run. Stages 1–6 remain open; the next migration step is to connect an
+authoritative producer provider without treating streaming demand or readiness
+manifests as source authority, then implement safe cross-section promotion
+before admitting sources spanning multiple sections.
 
 **Mesh-bound candidate and native payload gate (2026-10-04):** added
 `StaticRenderMeshFingerprint` and included its schema'd surface digest in

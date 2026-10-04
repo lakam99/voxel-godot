@@ -23,8 +23,10 @@ const LedgerScript = preload("res://scripts/world/PreparedStaticContributorLedge
 const PacketOwner = preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 const InstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const SourceRoster = preload("res://scripts/world/StaticSectionSourceRoster.gd")
 
 var _ledger = LedgerScript.new()
+var _source_roster = SourceRoster.new()
 var _world_id := ""
 var _boundary_queue: Array[Dictionary] = []
 var _active_boundary: Dictionary = {}
@@ -34,6 +36,7 @@ var _installed_receipts: Dictionary = {}
 var _replay_queue: Array[Vector3i] = []
 var _replay_set: Dictionary = {}
 var _active_replay: Dictionary = {}
+var _census_digest_by_boundary: Dictionary = {}
 
 
 func configure(world_id: String) -> Dictionary:
@@ -48,6 +51,72 @@ func configure(world_id: String) -> Dictionary:
 	return {"status":"ready", "worldId":_world_id}
 
 
+func configure_source_roster(required_provider_ids: Array[String]) -> Dictionary:
+	if _world_id.is_empty():
+		return _failed("world_static_section_coordinator_unconfigured")
+	return _source_roster.bind_world(_world_id, required_provider_ids)
+
+
+func register_source_provider(provider_id: String, authority_owner: Object,
+		capture_method: String) -> Dictionary:
+	return _source_roster.register_provider(provider_id, authority_owner, capture_method)
+
+
+func unregister_source_provider(provider_id: String, authority_owner: Object) -> Dictionary:
+	return _source_roster.unregister_provider(provider_id, authority_owner)
+
+
+func capture_authoritative_source_census(section_keys: Array) -> Dictionary:
+	return _source_roster.capture_sections(section_keys)
+
+
+## Production admission path: recapture the complete authority roster on every
+## frame of a staged install, and abort the old boundary if provider owner,
+## authority revision, or exact membership changes mid-install.
+func advance_boundary_from_roster(section_keys: Array,
+		material_bindings: Dictionary, mesh_bindings: Dictionary,
+		max_upload_units := 1) -> Dictionary:
+	if section_keys.size() != 1:
+		return _failed("roster_boundary_requires_single_section_until_atomic_promotion")
+	var census: Dictionary = _source_roster.capture_sections(section_keys)
+	if census.get("status") != "complete":
+		var active_boundary_id := String(_active_boundary.get("boundaryId", ""))
+		if not active_boundary_id.is_empty() and _census_digest_by_boundary.has(active_boundary_id):
+			var cancelled := cancel_boundary(active_boundary_id)
+			return {"status":"failed", "stage":"source_census",
+				"reason":String(census.get("reason", "source_census_unavailable")),
+				"providerId":String(census.get("providerId", "")),
+				"retryable":bool(census.get("retryable", false)),
+				"boundaryId":active_boundary_id,
+				"cancelled":cancelled.get("status") == "cancelled",
+				"requiresResubmit":true}
+		return {"status":String(census.get("status", "failed")),
+			"stage":"source_census", "reason":String(census.get("reason", "source_census_unavailable")),
+			"retryable":bool(census.get("retryable", false)),
+			"providerId":String(census.get("providerId", ""))}
+	var boundary_id := String(_active_boundary.get("boundaryId", ""))
+	if boundary_id.is_empty() and not _boundary_queue.is_empty():
+		boundary_id = String(_boundary_queue[0].get("boundaryId", ""))
+	if boundary_id.is_empty():
+		return {"status":"idle", "worldId":_world_id}
+	var census_digest := String(census.get("censusDigest", ""))
+	var previous_digest := String(_census_digest_by_boundary.get(boundary_id, ""))
+	if not previous_digest.is_empty() and previous_digest != census_digest:
+		cancel_boundary(boundary_id)
+		_census_digest_by_boundary.erase(boundary_id)
+		return {"status":"failed", "stage":"source_census",
+			"reason":"authoritative_source_census_changed_during_boundary",
+			"boundaryId":boundary_id, "retryable":false, "requiresResubmit":true}
+	_census_digest_by_boundary[boundary_id] = census_digest
+	var result: Dictionary = advance_boundary(
+		census.sourceRevisions, census.expectedContributorsBySection,
+		material_bindings, mesh_bindings, max_upload_units)
+	result["censusDigest"] = census_digest
+	if String(result.get("status", "")) in ["committed", "failed", "cancelled"]:
+		_census_digest_by_boundary.erase(boundary_id)
+	return result
+
+
 ## Rebind after the caller has cancelled/retired every install and replay
 ## session and removed this coordinator's installed section slots from the old
 ## world. The coordinator cannot retire renderer resources on the caller's
@@ -60,10 +129,12 @@ func reset_for_world(world_id: String) -> Dictionary:
 		return _failed("world_reset_has_pending_section_work")
 	_world_id = world_id
 	_ledger = LedgerScript.new()
+	_source_roster = SourceRoster.new()
 	_generation = 0
 	_committed_candidates.clear()
 	_installed_receipts.clear()
 	_replay_set.clear()
+	_census_digest_by_boundary.clear()
 	return {"status":"ready", "worldId":_world_id}
 
 
@@ -115,10 +186,12 @@ func cancel_boundary(boundary_id: String) -> Dictionary:
 			session.cancel()
 		_ledger.abort_boundary(boundary_id)
 		_active_boundary.clear()
+		_census_digest_by_boundary.erase(boundary_id)
 		return {"status":"cancelled", "boundaryId":boundary_id}
 	for index in range(_boundary_queue.size()):
 		if String(_boundary_queue[index].get("boundaryId", "")) == boundary_id:
 			_boundary_queue.remove_at(index)
+			_census_digest_by_boundary.erase(boundary_id)
 			return {"status":"cancelled", "boundaryId":boundary_id}
 	return _failed("boundary_not_pending")
 

@@ -56,6 +56,35 @@ class PacketBuildingPublisher extends BuildingPublisher:
 class FixturePart extends RefCounted:
 	var id := "native-wall"
 
+class SourceCensusProvider extends RefCounted:
+	var provider_id := ""
+	var source_part_id := ""
+	var source_revision := ""
+	var authority_revision := "authority-1"
+	var coverage_state := "normal"
+	var include_invalid_revision_key := false
+
+	func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+		if coverage_state == "pending":
+			return {"status":"pending", "worldId":world_id,
+				"reason":"fixture_provider_pending", "retryable":true}
+		var sections: Dictionary = {}
+		var source_revisions: Dictionary = {}
+		for section_key in section_keys:
+			if coverage_state == "omit_section": continue
+			var source_ids: Array[String] = []
+			if section_key == Vector3i.ZERO and not source_part_id.is_empty():
+				source_ids.append(source_part_id)
+				source_revisions[source_part_id] = source_revision
+			sections[section_key] = {"status":"empty" if source_ids.is_empty() else "complete",
+				"coverageRevision":authority_revision+":"+str(section_key),
+				"sourcePartIds":source_ids}
+		if include_invalid_revision_key:
+			source_revisions[Vector3i.ZERO] = "invalid-key-revision"
+		return {"status":"complete", "worldId":world_id,
+			"authorityRevision":authority_revision,
+			"sourceRevisions":source_revisions, "sections":sections}
+
 func _initialize() -> void:
 	call_deferred("_run")
 
@@ -358,6 +387,36 @@ func _run() -> void:
 	var coordinator_revision := "coordinator-rev-1"
 	var coordinator_boundary_id := "coordinator-boundary-1"
 	var coordinator_configured: Dictionary=coordinator.configure(coordinator_world)
+	var required_source_providers: Array[String]=["terrain", "ordinary_structures",
+		"blueprint_buildings", "ecology_and_static_props"]
+	required_source_providers.make_read_only()
+	var roster_configured: Dictionary=coordinator.configure_source_roster(required_source_providers)
+	var missing_roster_census: Dictionary=coordinator.capture_authoritative_source_census([Vector3i.ZERO])
+	var source_providers: Array=[]
+	for provider_id in required_source_providers:
+		var provider := SourceCensusProvider.new()
+		provider.provider_id = provider_id
+		if provider_id == "ordinary_structures":
+			provider.source_part_id = coordinator_part_id
+			provider.source_revision = coordinator_revision
+		source_providers.append(provider)
+		coordinator.register_source_provider(provider_id,provider,"capture_static_section_sources")
+	var roster_snapshot: Dictionary=coordinator.capture_authoritative_source_census([Vector3i.ZERO])
+	var invalid_revision_provider: SourceCensusProvider=source_providers[1]
+	invalid_revision_provider.include_invalid_revision_key=true
+	var invalid_revision_census: Dictionary=coordinator.capture_authoritative_source_census([Vector3i.ZERO])
+	invalid_revision_provider.include_invalid_revision_key=false
+	var multi_section_admission: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO,Vector3i(1,0,0)],{}, {},1)
+	var empty_provider: SourceCensusProvider=source_providers[0]
+	empty_provider.coverage_state="omit_section"
+	var omitted_section_census: Dictionary=coordinator.capture_authoritative_source_census([Vector3i.ZERO])
+	empty_provider.coverage_state="normal"
+	diagnostics["worldCoordinatorSourceRoster"]={"configured":roster_configured,
+		"missingProvider":missing_roster_census,"complete":roster_snapshot,
+		"omittedSection":omitted_section_census,
+		"invalidRevisionKey":invalid_revision_census,
+		"multiSectionAdmission":multi_section_admission}
 	var coordinator_declaration_segment: Dictionary=section_segment_declaration.duplicate(false)
 	coordinator_declaration_segment["segmentId"]="coordinator-segment-1"
 	coordinator_declaration_segment.make_read_only()
@@ -382,12 +441,6 @@ func _run() -> void:
 	coordinator_input.make_read_only()
 	var coordinator_segment_admitted: Dictionary=coordinator.submit_prepared_segment(
 		coordinator_boundary_id,coordinator_input)
-	var coordinator_revisions: Dictionary={coordinator_part_id:coordinator_revision}
-	coordinator_revisions.make_read_only()
-	var coordinator_contributors: Array[String]=[coordinator_part_id]
-	coordinator_contributors.make_read_only()
-	var coordinator_census: Dictionary={Vector3i.ZERO:coordinator_contributors}
-	coordinator_census.make_read_only()
 	var coordinator_materials: Dictionary={section_material_key:section_material}
 	coordinator_materials.make_read_only()
 	var coordinator_meshes: Dictionary={section_resource_mesh_key:section_mesh_expected}
@@ -395,8 +448,8 @@ func _run() -> void:
 	var coordinator_install: Dictionary={"status":"pending"}
 	var coordinator_turns:=0
 	while coordinator_turns<64 and coordinator_install.get("status") not in ["committed","failed","unsupported"]:
-		coordinator_install=coordinator.advance_boundary(coordinator_revisions,
-			coordinator_census,coordinator_materials,coordinator_meshes,4)
+		coordinator_install=coordinator.advance_boundary_from_roster([Vector3i.ZERO],
+			coordinator_materials,coordinator_meshes,4)
 		coordinator_turns+=1
 	var coordinator_slot_id:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i.ZERO)
 	var coordinator_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",coordinator_slot_id)
@@ -406,6 +459,17 @@ func _run() -> void:
 		"status":coordinator.status(),"backend":coordinator_backend_snapshot}
 	_check("world_coordinator_candidate_installs_and_promotes_through_native_renderer",
 		coordinator_configured.get("status")=="ready" \
+		and roster_configured.get("status")=="ready" \
+		and missing_roster_census.get("status")=="pending" \
+		and missing_roster_census.get("reason")=="static_source_provider_missing" \
+		and roster_snapshot.get("status")=="complete" \
+		and roster_snapshot.expectedContributorsBySection.get(Vector3i.ZERO,[]).size()==1 \
+		and invalid_revision_census.get("status")=="failed" \
+		and invalid_revision_census.get("reason")=="invalid_static_source_revision_entry" \
+		and multi_section_admission.get("status")=="failed" \
+		and multi_section_admission.get("reason")=="roster_boundary_requires_single_section_until_atomic_promotion" \
+		and omitted_section_census.get("status")=="failed" \
+		and omitted_section_census.get("reason")=="incomplete_static_source_provider_snapshot" \
 		and coordinator_enqueued.get("status")=="queued" \
 		and coordinator_segment_admitted.get("status")=="queued" \
 		and coordinator_install.get("status")=="committed" \
@@ -414,6 +478,87 @@ func _run() -> void:
 		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id) \
 		and section_backend.call("receipt_installed",coordinator_slot_id,1,
 			"%s:1" % coordinator_world,String(coordinator_backend_snapshot.get("packetDigest",""))))
+	var roster_replace_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
+	roster_replace_segment["segmentId"]="coordinator-segment-census-stale"
+	roster_replace_segment.make_read_only()
+	var roster_replace_segments: Array[Dictionary]=[roster_replace_segment]
+	roster_replace_segments.make_read_only()
+	var roster_replace_declaration: Dictionary=coordinator_declaration.duplicate(false)
+	roster_replace_declaration["sourceRevision"]="coordinator-rev-2"
+	roster_replace_declaration["segments"]=roster_replace_segments
+	roster_replace_declaration.make_read_only()
+	var roster_replace_declarations: Array[Dictionary]=[roster_replace_declaration]
+	roster_replace_declarations.make_read_only()
+	var roster_stale_boundary:="coordinator-boundary-stale-roster"
+	var roster_stale_enqueue: Dictionary=coordinator.enqueue_boundary(roster_stale_boundary,
+		roster_replace_declarations,coordinator_removals)
+	var roster_replace_input: Dictionary=coordinator_input.duplicate(false)
+	roster_replace_input["sourceRevision"]="coordinator-rev-2"
+	roster_replace_input["segmentId"]="coordinator-segment-census-stale"
+	roster_replace_input.make_read_only()
+	var roster_stale_segment_admitted: Dictionary=coordinator.submit_prepared_segment(
+		roster_stale_boundary,roster_replace_input)
+	for provider in source_providers:
+		if provider.provider_id=="ordinary_structures":
+			provider.source_revision="coordinator-rev-2"
+	var roster_stale_first_advance: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO],coordinator_materials,coordinator_meshes,1)
+	for provider in source_providers:
+		if provider.provider_id=="ordinary_structures":
+			provider.source_revision="coordinator-rev-3"
+	var roster_stale_second_advance: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO],coordinator_materials,coordinator_meshes,1)
+	var retained_roster_slot: Dictionary=section_backend.call("installed_snapshot",coordinator_slot_id)
+	for provider in source_providers:
+		if provider.provider_id=="ordinary_structures":
+			provider.source_revision=coordinator_revision
+	diagnostics["worldCoordinatorStaleRoster"]={"enqueued":roster_stale_enqueue,
+		"segmentAdmitted":roster_stale_segment_admitted,"firstAdvance":roster_stale_first_advance,
+		"staleAdvance":roster_stale_second_advance,"retainedSlot":retained_roster_slot}
+	_check("world_coordinator_aborts_stale_roster_boundary_and_retains_current_slot",
+		roster_stale_enqueue.get("status")=="queued" \
+		and roster_stale_segment_admitted.get("status")=="queued" \
+		and roster_stale_first_advance.get("status")=="pending" \
+		and roster_stale_second_advance.get("status")=="failed" \
+		and roster_stale_second_advance.get("reason")=="authoritative_source_census_changed_during_boundary" \
+		and bool(roster_stale_second_advance.get("requiresResubmit",false)) \
+		and int(retained_roster_slot.get("generation",0))==1)
+	var pending_boundary_id:="coordinator-boundary-provider-pending"
+	var pending_enqueue: Dictionary=coordinator.enqueue_boundary(pending_boundary_id,
+		roster_replace_declarations,coordinator_removals)
+	var pending_segment_admitted: Dictionary=coordinator.submit_prepared_segment(
+		pending_boundary_id,roster_replace_input)
+	for provider in source_providers:
+		if provider.provider_id=="ordinary_structures":
+			provider.source_revision="coordinator-rev-2"
+	var pending_boundary_first: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO],coordinator_materials,coordinator_meshes,1)
+	var pending_boundary_second: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO],coordinator_materials,coordinator_meshes,1)
+	for provider in source_providers:
+		if provider.provider_id=="ecology_and_static_props":
+			provider.coverage_state="pending"
+	var provider_pending_advance: Dictionary=coordinator.advance_boundary_from_roster(
+		[Vector3i.ZERO],coordinator_materials,coordinator_meshes,1)
+	var retained_pending_slot: Dictionary=section_backend.call("installed_snapshot",coordinator_slot_id)
+	for provider in source_providers:
+		if provider.provider_id=="ecology_and_static_props":
+			provider.coverage_state="normal"
+		if provider.provider_id=="ordinary_structures":
+			provider.source_revision=coordinator_revision
+	diagnostics["worldCoordinatorPendingProvider"]={"enqueued":pending_enqueue,
+		"segmentAdmitted":pending_segment_admitted,"firstAdvance":pending_boundary_first,
+		"secondAdvance":pending_boundary_second,"pendingAdvance":provider_pending_advance,
+		"retainedSlot":retained_pending_slot}
+	_check("world_coordinator_cancels_active_single_section_when_provider_becomes_pending",
+		pending_enqueue.get("status")=="queued" \
+		and pending_segment_admitted.get("status")=="queued" \
+		and pending_boundary_first.get("status")=="pending" \
+		and pending_boundary_second.get("status") in ["pending", "pending_owner"] \
+		and provider_pending_advance.get("status")=="failed" \
+		and provider_pending_advance.get("requiresResubmit",false) \
+		and provider_pending_advance.get("cancelled",false) \
+		and int(retained_pending_slot.get("generation",0))==1)
 	var stale_declaration_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
 	stale_declaration_segment["segmentId"]="coordinator-segment-2"
 	stale_declaration_segment.make_read_only()
@@ -457,6 +602,8 @@ func _run() -> void:
 	spanning_second_segment.make_read_only()
 	var spanning_segments: Array[Dictionary]=[spanning_first_segment,spanning_second_segment]
 	spanning_segments.make_read_only()
+	var coordinator_contributors: Array[String]=[coordinator_part_id]
+	coordinator_contributors.make_read_only()
 	var spanning_declaration: Dictionary=coordinator_declaration.duplicate(false)
 	spanning_declaration["sourceRevision"]="coordinator-rev-spanning"
 	spanning_declaration["segments"]=spanning_segments

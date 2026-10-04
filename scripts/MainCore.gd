@@ -22,6 +22,7 @@ const VisibleWorldDemandControllerScript := preload("res://scripts/world/Visible
 const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologySource.gd")
 const VoxelTerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const GeneratedStructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
+const WorldStaticSectionCoordinatorScript := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
@@ -179,6 +180,10 @@ var terrain_meshing_service
 var world_edit_followup_queue
 var last_destroy_target_metrics := {}
 var structure_system
+## World-lifetime owner for section candidates and their authoritative census.
+## Required producer domains intentionally remain pending until each real
+## authority is connected; legacy visual publishers remain active meanwhile.
+var world_static_section_coordinator = WorldStaticSectionCoordinatorScript.new()
 var subsurface_system
 var utility_system
 var save_system
@@ -2846,6 +2851,17 @@ func setup_game_systems() -> void:
     subsurface_system.setup(self)
     structure_system = StructureSystemScript.new()
     structure_system.setup(self)
+    var static_sections_world_id := "seed:%s:%d" % [seed_text, seed_hash]
+    var section_world_result: Dictionary = world_static_section_coordinator.configure(static_sections_world_id)
+    if section_world_result.get("status") != "ready":
+        push_error("Static section coordinator setup failed: %s" % section_world_result)
+    else:
+        var static_source_domains: Array[String] = ["terrain", "ordinary_structures",
+            "blueprint_buildings", "ecology_and_static_props"]
+        static_source_domains.make_read_only()
+        var roster_result: Dictionary = world_static_section_coordinator.configure_source_roster(static_source_domains)
+        if roster_result.get("status") != "ready":
+            push_error("Static section source roster setup failed: %s" % roster_result)
     utility_system = UtilityBlockSystemScript.new()
     utility_system.setup(inventory_system)
     equipment_system = EquipmentSystemScript.new(ItemCatalogScript.ITEMS, inventory_system)
