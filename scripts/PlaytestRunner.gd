@@ -1119,9 +1119,14 @@ func _exercise_exact_ecology_source_install(coordinator: Object,
         "expectedSection":section_key}
     var census: Dictionary = {}
     var census_attempts := 0
+    var fluid_probe_samples: Array[Dictionary] = []
     while is_inside_tree() and is_instance_valid(coordinator):
         census = coordinator.call("capture_authoritative_source_census", [section_key])
         census_attempts += 1
+        if census_attempts == 1 or census_attempts % 10 == 0 \
+                or census.get("status") != "pending":
+            fluid_probe_samples.append(_terrain_fluid_probe_diagnostic_snapshot(
+                terrain_runtime, section_key, String(census.get("status", "missing_status"))))
         if census.get("status") != "pending":
             break
         var pending_rows: Dictionary = _production_provider_census_diagnostics(
@@ -1136,6 +1141,7 @@ func _exercise_exact_ecology_source_install(coordinator: Object,
     result["censusAttempts"] = census_attempts
     result["censusStatus"] = String(census.get("status", "missing_status"))
     result["censusReason"] = String(census.get("reason", ""))
+    result["terrainFluidProbeSamples"] = fluid_probe_samples
     result["censusProviderDiagnostics"] = _production_provider_census_diagnostics(
         section_key, String(census.get("worldId", coordinator.get("_world_id"))),
         coordinator)
@@ -1243,6 +1249,40 @@ func _exercise_exact_ecology_source_install(coordinator: Object,
     result["stage"] = "complete" if bool(result.passed) else "native_receipt"
     result["reason"] = "" if bool(result.passed) else "exact_ecology_source_receipt_mismatch"
     return result
+
+
+func _terrain_fluid_probe_diagnostic_snapshot(runtime: Object,
+        section_key: Vector3i, census_status: String) -> Dictionary:
+    if not is_instance_valid(runtime):
+        return {"sectionKey":section_key, "censusStatus":census_status,
+            "runtimeStatus":"unavailable"}
+    var queue_value: Variant = runtime.get("terrain_section_fluid_probe_queue")
+    var queue: Array = queue_value if queue_value is Array else []
+    var state_map_value: Variant = runtime.get("terrain_section_fluid_probe_states")
+    var state_map: Dictionary = state_map_value if state_map_value is Dictionary else {}
+    var state_value: Variant = state_map.get(section_key, {})
+    var state: Dictionary = state_value if state_value is Dictionary else {}
+    var payload_size_value: Variant = state.get("payloadSize", Vector3i.ZERO)
+    var payload_size: Vector3i = payload_size_value if payload_size_value is Vector3i else Vector3i.ZERO
+    var payload_cells := payload_size.x * payload_size.y * payload_size.z
+    var service: Variant = runtime.call("volume_service") \
+        if runtime.has_method("volume_service") else null
+    var active_proof_map: Variant = runtime.get("terrain_section_fluid_proofs")
+    var proof_map: Dictionary = active_proof_map if active_proof_map is Dictionary else {}
+    var proof_value: Variant = proof_map.get(section_key, {})
+    var proof: Dictionary = proof_value if proof_value is Dictionary else {}
+    return {"sectionKey":section_key, "censusStatus":census_status,
+        "queueLength":queue.size(), "queueIndex":queue.find(section_key),
+        "activeProbe":not state.is_empty(), "phase":String(state.get("phase", "")),
+        "cellsProcessed":int(state.get("cellsProcessed", 0)),
+        "payloadCellCount":payload_cells,
+        "startedVolumeRevision":int(state.get("volumeRevision", -1)),
+        "startedFluidRevision":int(state.get("fluidRevision", -1)),
+        "currentVolumeRevision":int(service.get("revision")) if is_instance_valid(service) else -1,
+        "currentFluidRevision":int(service.get("fluid_revision")) if is_instance_valid(service) else -1,
+        "stale":bool(state.get("stale", false)),
+        "cancelled":bool(state.get("cancelled", false)),
+        "proofCurrent":not proof.is_empty()}
 
 
 func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
