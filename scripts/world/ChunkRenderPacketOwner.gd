@@ -3,6 +3,8 @@ class_name ChunkRenderPacketOwner
 
 const BACKEND_CLASS := "ChunkRenderPacketBackend"
 const BACKEND_NODE := "ChunkRenderPacketBackend"
+const SectionInstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
+const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 
 
 static func attach_to_chunk(chunk: Node3D) -> Dictionary:
@@ -39,6 +41,24 @@ static func resolve_existing_scene_backend(owner_cell: Vector2i) -> Dictionary:
 	var backend := chunk.get_node_or_null(BACKEND_NODE) as Node3D
 	if backend == null: return {"status":"pending","reason":"chunk_packet_backend_not_attached","ownerCell":owner_cell}
 	return {"status":"ready","backend":backend,"chunk":chunk,"ownerCell":owner_cell}
+
+
+static func begin_static_section_install(candidate: Dictionary,
+		material_bindings: Dictionary, mesh_bindings: Dictionary) -> Dictionary:
+	if not candidate.is_read_only() or not candidate.get("sectionKey") is Vector3i:
+		return {"status":"failed", "reason":"invalid_section_candidate_header"}
+	var owner_cell: Vector2i = SectionGrid.chunk_key_for_section(candidate.sectionKey)
+	var owner := resolve_current_scene_backend(owner_cell)
+	if owner.get("status") != "ready":
+		return owner
+	var session = SectionInstallSession.new()
+	var begun: Dictionary = session.begin(owner.backend, owner.chunk, candidate,
+		material_bindings, mesh_bindings)
+	if begun.get("status") != "begun":
+		return begun
+	return {"status":"ready", "session":session,
+		"backend":owner.backend, "chunk":owner.chunk, "ownerCell":owner_cell,
+		"candidate":begun}
 
 
 static func _resolve_current_scene_chunk(owner_cell: Vector2i) -> Dictionary:

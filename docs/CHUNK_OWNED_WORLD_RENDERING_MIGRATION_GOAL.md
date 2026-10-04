@@ -691,11 +691,34 @@ focused 20-check contract passed at
 `artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-slot-generation-20261004/report.json`;
 the 16-check snapshot-builder contract passed at
 `artifacts/citadel-runtime-integration/prepared-static-section-snapshot-builder-bound-candidate-20261004/report.json`.
-These remain data contracts with mock receipt dictionaries, not a section-slot
-or GPU-install proof. The receipts are still forgeable by an untrusted caller;
-the future production owner must query its live backend, verify world/session,
-generation, digest, owner chunk/backend identity and residency dependencies,
-and only then pass the verified receipts for promotion. The production flush
-still installs per source/material/tier packets, and terrain, foliage, details
-and props remain outside any shared section slot. Stage 1 is therefore in
-progress; production cutover and live renderer acceptance remain open.
+The ledger and snapshot-builder reports are data contracts with mock receipt
+dictionaries. Their receipts are still forgeable by an untrusted caller; the
+production owner must query its live backend, verify world/session, generation,
+digest, owner chunk/backend identity and residency dependencies, and only then
+pass the verified receipts for promotion. The production flush still installs
+per source/material/tier packets, and terrain, foliage, details and props
+remain outside any shared section slot. Stage 1 is in progress; full production
+cutover remains open.
+
+**Section-slot renderer bridge (2026-10-04):**
+`NativeStaticSectionInstallSession` consumes a ledger-bound immutable section
+envelope, verifies its manifest digest, resource/layer bindings and exact
+content counts, and installs its multi-batch root under the canonical streamed-
+chunk owner through `ChunkRenderPacketBackend`. Slot identity includes the
+world epoch and 3D section key. The native contract built a candidate through
+the actual ledger, partitioner and snapshot builder, installed it through the
+native GDExtension, and promoted from the backend-verified receipt. It also
+proved staged cancellation retains the previous root, reused generations are
+rejected, and unpinned cross-chunk dependencies fail closed. The 28-check
+runner passed at
+`artifacts/citadel-runtime-integration/native-chunk-packet-ledger-bound-section-install-20261004/report.json`.
+This is the first renderer-install proof, not a production producer cutover:
+the existing `BuildingStaticBatchFlush` still commits one packet per
+source/material/tier group, the section session currently admits opaque content
+only, and no producer supplies section resource bindings or dependency pins in
+normal gameplay. It proves native node/resource installation rather than
+GPU-fence completion, generated-world parity, or headed visual behavior. Next
+gate is to make a production contributor boundary collect and replace complete
+affected section slots while preserving chunk-unload replay. Terrain,
+foliage, detail and props then need admission into the same section manifest
+before claiming the shared renderer cutover.
