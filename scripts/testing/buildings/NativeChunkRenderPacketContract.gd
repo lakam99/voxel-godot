@@ -10,6 +10,8 @@ const StaticSectionInstallSession = preload("res://scripts/world/NativeStaticSec
 const StaticContributorLedger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
 const StaticMeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const WorldStaticSectionCoordinator = preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
+const CitadelPublicationPlan = preload("res://scripts/world/CitadelPublicationPlan.gd")
+const CitadelPublicationService = preload("res://scripts/world/CitadelPublicationService.gd")
 const OWNER_CELL := Vector2i(0,0)
 const SOURCE_ID := "native-contract:wall"
 const SOURCE_REVISION := "revision-1"
@@ -85,6 +87,14 @@ class SourceCensusProvider extends RefCounted:
 			"authorityRevision":authority_revision,
 			"sourceRevisions":source_revisions, "sections":sections}
 
+class EmptyCitadelAdmission extends RefCounted:
+	func stats() -> Dictionary:
+		return {"generation":7,"worldSeed":"section-census-contract"}
+	func request_bounds(_bounds: Rect2i) -> Dictionary:
+		return {"status":"ready"}
+	func source_state(_region: Vector2i) -> Dictionary:
+		return {"status":"absent","reason":"source_not_requested"}
+
 func _initialize() -> void:
 	call_deferred("_run")
 
@@ -94,6 +104,7 @@ func _check(name: String, value: bool) -> void:
 
 
 func _run() -> void:
+	_test_citadel_section_membership_query()
 	if not ClassDB.class_exists("ChunkRenderPacketBackend"):
 		_finish(false,"native_chunk_render_packet_backend_missing")
 		return
@@ -982,6 +993,54 @@ func _run() -> void:
 	_check("main_runtime_retires_owner_after_dependencies_release",main.retire_streamed_chunk_container(OWNER_CELL))
 	_finish(not checks.values().has(false),"")
 	parent.free()
+
+
+func _test_citadel_section_membership_query() -> void:
+	var plan = CitadelPublicationPlan.new()
+	var low := {"memberId":"negative-low","groupId":"group-low",
+		"bounds":AABB(Vector3(-22.0,1.0,-2.0),Vector3(2.0,2.0,4.0)),"visual":true}
+	var high := {"memberId":"negative-high","groupId":"group-high",
+		"bounds":AABB(Vector3(-22.0,50.0,-2.0),Vector3(2.0,2.0,4.0)),"visual":true}
+	var flat := {"memberId":"flat-origin","groupId":"group-flat",
+		"bounds":AABB(Vector3(-2.0,0.0,-2.0),Vector3(4.0,0.0,4.0)),"visual":true}
+	for record: Dictionary in [low,high,flat]: record.make_read_only()
+	plan.member_records.append_array([low,high,flat])
+	plan.member_records.make_read_only()
+	plan.member_buckets={"-1,-1":[0,1,2],"-1,0":[0,1,2],"0,-1":[2],"0,0":[2]}
+	for indices: Array in plan.member_buckets.values(): indices.make_read_only()
+	plan.member_buckets.make_read_only()
+	var negative_section := AABB(Vector3(-21.6,0.0,-21.6),Vector3.ONE*21.6)
+	var low_query: Dictionary=plan.visual_members_intersecting_bounds(negative_section)
+	var found_low := false
+	var wrongly_found_high := false
+	var found_flat := false
+	for record: Dictionary in low_query.get("members",[]):
+		found_low = found_low or String(record.memberId)=="negative-low"
+		wrongly_found_high = wrongly_found_high or String(record.memberId)=="negative-high"
+		found_flat = found_flat or String(record.memberId)=="flat-origin"
+	_check("citadel_plan_section_query_filters_full_3d_bounds",low_query.get("status")=="described" \
+		and low_query.get("descriptionComplete",false) and found_low and not wrongly_found_high)
+	var below_section := AABB(Vector3(-21.6,-21.6,-21.6),Vector3.ONE*21.6)
+	var flat_below: Dictionary=plan.visual_members_intersecting_bounds(below_section)
+	_check("citadel_plan_flat_visual_belongs_to_one_vertical_section",
+		found_flat and not flat_below.get("members",[]).any(
+			func(record: Dictionary): return String(record.memberId)=="flat-origin"))
+	var touching := AABB(Vector3(-25.6,4.0,-4.0),Vector3(4.0,2.0,4.0))
+	var crossing := AABB(Vector3(-25.6,4.0,-4.0),Vector3(4.01,2.0,4.0))
+	_check("citadel_plan_negative_section_edges_are_half_open",
+		not CitadelPublicationPlan._aabb_intersects_section(touching,negative_section) \
+		and CitadelPublicationPlan._aabb_intersects_section(crossing,negative_section))
+	var provider := CitadelPublicationService.new()
+	provider.configure(EmptyCitadelAdmission.new())
+	var world_id := "seed:section-census-contract:%d" % CitadelPublicationService._seed_hash("section-census-contract")
+	var empty_snapshot: Dictionary=provider.capture_static_section_sources(world_id,[Vector3i.ZERO])
+	var empty_row: Dictionary=empty_snapshot.get("sections",{}).get(Vector3i.ZERO,{})
+	_check("citadel_section_provider_returns_revisioned_explicit_empty",
+		empty_snapshot.get("status")=="complete" and empty_snapshot.get("worldId")==world_id \
+		and String(empty_snapshot.get("authorityRevision","" )).length()==64 \
+		and empty_row.get("status")=="empty" and String(empty_row.get("coverageRevision","")).length()==64 \
+		and empty_row.get("sourcePartIds",[]).is_empty() and empty_snapshot.get("sourceRevisions",{}).is_empty())
+	provider.request_shutdown()
 
 
 func _append_native_layer_batch(backend: Node, source_id: String, generation: int,

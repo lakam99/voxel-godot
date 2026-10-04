@@ -18,6 +18,8 @@ cli(async () => {
     'scripts/world/ChunkRenderPacketOwner.gd',
     'scripts/world/WorldStaticSectionCoordinator.gd',
     'scripts/world/StaticSectionSourceRoster.gd',
+    'scripts/world/CitadelPublicationService.gd',
+    'scripts/world/CitadelPublicationPlan.gd',
     'scripts/world/PreparedStaticContributorLedger.gd',
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
     'scripts/world/ChunkStaticRenderSectionSnapshot.gd',

@@ -2862,6 +2862,12 @@ func setup_game_systems() -> void:
         var roster_result: Dictionary = world_static_section_coordinator.configure_source_roster(static_source_domains)
         if roster_result.get("status") != "ready":
             push_error("Static section source roster setup failed: %s" % roster_result)
+        else:
+            var blueprint_provider_result: Dictionary = world_static_section_coordinator.register_source_provider(
+                "blueprint_buildings", structure_system.citadel_publication,
+                "capture_static_section_sources")
+            if blueprint_provider_result.get("status") != "ready":
+                push_error("Blueprint building section source provider setup failed: %s" % blueprint_provider_result)
     utility_system = UtilityBlockSystemScript.new()
     utility_system.setup(inventory_system)
     equipment_system = EquipmentSystemScript.new(ItemCatalogScript.ITEMS, inventory_system)

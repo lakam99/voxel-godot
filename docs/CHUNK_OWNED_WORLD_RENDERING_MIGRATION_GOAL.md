@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority, static-source/readiness, and render-demand-owned section-slot seams are present. A world-lifetime section source roster is now owned by MainCore and gates coordinator admission, but none of its required terrain/building/ecology providers is yet registered in normal gameplay. The native GDExtension accepts immutable cross-chunk capture coverage while preserving the prior installed root through cancellation. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt/lifecycle evidence; worker-prepared, single-owner-cell building batches retain per-source packet installation and replay. No ordinary terrain/building/tree/prop producer yet publishes a complete shared section candidate. Exact source-capture epochs, mesh-payload budgets, multi-layer policies, complete producer census integration, and all live gameplay/visual/performance gates remain open.**
+Status: **Active; chunk-priority, static-source/readiness, and render-demand-owned section-slot seams are present. A world-lifetime section source roster is owned by MainCore and gates coordinator admission. The blueprint-building provider now registers in normal gameplay and derives exact 3D section membership from the immutable Citadel publication plan, but terrain, ordinary structures, and ecology/props remain unregistered, so no production section can yet pass the complete census. The native GDExtension accepts immutable cross-chunk capture coverage while preserving the prior installed root through cancellation. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt/lifecycle evidence; worker-prepared, single-owner-cell building batches retain per-source packet installation and replay. No ordinary terrain/building/tree/prop producer yet publishes a complete shared section candidate. Exact source-capture epochs, mesh-payload budgets, multi-layer policies, complete producer census integration, and all live gameplay/visual/performance gates remain open.**
 
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository at
@@ -165,7 +165,7 @@ not met.
 | Stage | Status | Evidence or remaining exit gate |
 |---|---|---|
 | 0. Source map and baseline | **Complete** | Producer-to-renderer maps, authority/revision/lifecycle audits, and the per-source baseline are recorded in the charter. |
-| 1. Close the candidate contract | **Partial** | The contributor ledger and immutable layered manifest/snapshot builders exist. The coordinator validates the exact contributor census, current source revisions, and live owner receipt set, including a two-section source fixture. Still needs a production-owned all-domain expected contributor census, cross-domain completeness, and caller-side live source/owner revalidation. |
+| 1. Close the candidate contract | **Partial** | The contributor ledger and immutable layered manifest/snapshot builders exist. The coordinator validates the exact contributor census, current source revisions, and live owner receipt set, including a two-section source fixture. The blueprint provider now registers in MainCore and queries prepared member manifests by exact 3D section bounds; its focused census check passes. Terrain, ordinary structures, and ecology/props still have no providers, and the blueprint census is not yet supplying section render payloads. Cross-domain completeness and caller-side live source/owner revalidation remain open. |
 | 2. Section-slot installation | **Partial** | The native GDExtension installs opaque/cutout section candidates under independent render-demand owners and retains the previous root through cancellation. A spanning source now installs all affected section slots before the coordinator accepts its ledger. Cross-chunk captured candidates do not pin gameplay chunks. Translucent sorting and a normal-world producer callsite remain open; exact source-capture epochs remain to be added. |
 | 3. Integrate smooth terrain | **Not started** | Capture resident authoritative SDF/material data with halo revisions, mesh it through the configured Transvoxel path, then prove terrain visual/edit/collision/fluid parity before retiring the old visual slot. |
 | 4. Cut over construction | **Not started** | A world-owned coordinator must aggregate both ordinary per-cell structure visuals and blueprint static batches. Retain per-cell collision/interaction, doors, furnishings and nav. Replace old visual commits only after complete section receipts and replay are acknowledged. |
@@ -187,6 +187,15 @@ It confirms the backend/install seam, including old-root retention, but does
 not pass a production producer cutover or live gameplay gate.
 
 ### Current stage charter: native far-tree readiness and traversal evidence
+
+The 2026-10-04 blueprint-provider increment is recorded in the canonical
+charter. Its native contract passed at
+`artifacts/citadel-runtime-integration/native-chunk-packet-section-provider-20261004-r5/report.json`,
+including synthetic explicit-empty provider coverage and exact 3D membership
+checks. The existing building-preparation contract was attempted but could not
+start its source assertions because its two pinned `.bin` fixtures are absent
+from this checkout. Neither result is production render or headed gameplay
+acceptance.
 
 - **Outcome:** a native far-tree impostor becomes a current, revision-checked
   readiness receipt only when the exact canonical tree candidate is installed

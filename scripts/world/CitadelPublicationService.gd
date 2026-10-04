@@ -12,6 +12,7 @@ const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const SitePreparation = preload("res://scripts/world/CitadelSitePreparation.gd")
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
+const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const MAX_REGIONS := 16
 const MAX_RETAINED_BOUNDS := 64
 const MAX_DISCOVERY_CHUNKS := 256
@@ -611,7 +612,129 @@ func _publication_plan_for_binding(binding: Dictionary):
 		var base = job._cpu.get("publicationBase",null) if job!=null else null
 		if base!=null and base.publication_plan!=null and base.publication_plan.matches(binding,base.description.publication_groups.groups):
 			return base.publication_plan
+	for region: Vector2i in _packet_bootstrap_bases:
+		var bootstrap: Dictionary = _packet_bootstrap_bases[region]
+		var base = bootstrap.get("base",null)
+		if bootstrap.get("binding",{}) == binding and base != null \
+				and base.publication_plan != null and base.publication_plan.matches(binding,base.description.publication_groups.groups):
+			return base.publication_plan
+	for region: Vector2i in _prepared:
+		var prepared: Dictionary = _prepared[region]
+		var base = prepared.get("base",null)
+		if prepared.get("binding",{}) == binding and base != null \
+				and base.publication_plan != null and base.publication_plan.matches(binding,base.description.publication_groups.groups):
+			return base.publication_plan
 	return null
+
+
+## Blueprint buildings are one provider in the section census, not proof that
+## the other static domains are empty. This query uses the immutable plan and
+## admission decisions only; scene Nodes and publication readiness are excluded.
+func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+	if _admission == null or _closing or _world_reset_pending \
+			or world_id != "seed:%s:%d" % [_seed,_seed_hash(_seed)] or section_keys.is_empty():
+		return {"status":"pending","reason":"citadel_section_source_authority_unavailable","retryable":true}
+	var unique_sections: Dictionary = {}
+	var sections: Array[Vector3i] = []
+	for value in section_keys:
+		if not value is Vector3i or unique_sections.has(value):
+			return {"status":"failed","reason":"invalid_citadel_section_source_query"}
+		unique_sections[value] = true
+		sections.append(value)
+	sections.sort_custom(func(a: Vector3i,b: Vector3i) -> bool:
+			if a.x != b.x: return a.x < b.x
+			if a.y != b.y: return a.y < b.y
+			return a.z < b.z)
+	var section_rows: Dictionary = {}
+	var source_revisions: Dictionary = {}
+	for section_key: Vector3i in sections:
+		var origin := SectionGrid.origin_for_key(section_key)
+		var section_bounds := AABB(origin,Vector3.ONE*SectionGrid.SECTION_SIZE_METERS)
+		# request_bounds operates on terrain cells and is deliberately conservative
+		# at the section edge; exact provider membership is filtered in 3D below.
+		var low := Vector2i(floori(origin.x/CitadelPublicationPlan.CELL)-2,
+			floori(origin.z/CitadelPublicationPlan.CELL)-2)
+		var high := Vector2i(ceili(section_bounds.end.x/CitadelPublicationPlan.CELL)+2,
+			ceili(section_bounds.end.z/CitadelPublicationPlan.CELL)+2)
+		var admission_bounds := Rect2i(low,high-low)
+		var admitted: Dictionary = _admission.request_bounds(admission_bounds)
+		if admitted.get("status") == "pending":
+			return {"status":"pending","reason":"citadel_section_admission_pending",
+				"section":section_key,"retryable":true}
+		if admitted.get("status") != "ready":
+			return {"status":"failed","reason":String(admitted.get("reason","citadel_section_admission_failed")),
+				"section":section_key}
+		var low_region := Field.region_for_cell(admission_bounds.position)
+		var high_region := Field.region_for_cell(admission_bounds.end-Vector2i.ONE)
+		var ids: Array[String] = []
+		var rows: Array = []
+		for rz in range(low_region.y,high_region.y+1):
+			for rx in range(low_region.x,high_region.x+1):
+				var region := Vector2i(rx,rz)
+				var source: Dictionary = _admission.source_state(region)
+				if source.get("status") == "absent":
+					# request_bounds proved any unprepared region does not intersect
+					# the admitted query, so source_not_requested is also safe here.
+					continue
+				if source.get("status") == "failed":
+					return {"status":"failed","reason":String(source.get("reason","citadel_section_source_failed")),
+						"section":section_key,"region":region}
+				if source.get("status") not in ["ready","prepared"]:
+					return {"status":"pending","reason":"citadel_section_source_decision_pending",
+						"section":section_key,"region":region,"retryable":true}
+				if not source.get("reservationCells") is Rect2i:
+					return {"status":"failed","reason":"citadel_section_reservation_missing","region":region}
+				if not source.reservationCells.intersects(admission_bounds): continue
+				if _failures.has(region):
+					return {"status":"failed","reason":String(_failures[region].reason),"region":region}
+				var binding: Dictionary = source.get("binding",{})
+				var plan = _publication_plan_for_binding(binding)
+				if plan == null or not plan.matches(binding,plan.groups):
+					return {"status":"pending","reason":"citadel_section_plan_pending",
+						"section":section_key,"region":region,"retryable":true}
+				var description: Dictionary = plan.visual_members_intersecting_bounds(section_bounds)
+				if description.get("status") != "described":
+					return {"status":"failed","reason":String(description.get("reason","citadel_section_membership_failed")),
+						"region":region}
+				for member: Dictionary in description.members:
+					var member_id := String(member.memberId)
+					var source_id := "citadel:%s:member:%s:section:%d,%d,%d" % [
+						String(binding.siteId),member_id,section_key.x,section_key.y,section_key.z]
+					var revision_bytes := var_to_bytes(["citadel-section-source/v1",binding.siteId,
+						binding.sourceKey,int(binding.get("generation",-1)),plan.output_signature,
+						member_id,member.groupId,member.bounds,section_key])
+					var source_digest := HashingContext.new()
+					if source_digest.start(HashingContext.HASH_SHA256) != OK:
+						return {"status":"failed","reason":"citadel_section_revision_hash_failed"}
+					source_digest.update(revision_bytes)
+					var revision := source_digest.finish().hex_encode()
+					if source_revisions.has(source_id) and source_revisions[source_id] != revision:
+						return {"status":"failed","reason":"citadel_section_source_revision_conflict"}
+					source_revisions[source_id] = revision
+					ids.append(source_id)
+					rows.append([source_id,revision])
+		ids.sort()
+		rows.sort_custom(func(a: Array,b: Array) -> bool: return String(a[0]) < String(b[0]))
+		var coverage_hash := HashingContext.new()
+		coverage_hash.start(HashingContext.HASH_SHA256)
+		coverage_hash.update(var_to_bytes([world_id,section_key,rows]))
+		section_rows[section_key] = {"status":"complete" if not ids.is_empty() else "empty",
+			"coverageRevision":coverage_hash.finish().hex_encode(),"sourcePartIds":ids}
+	var admission_state: Dictionary = _admission.stats()
+	var authority_hash := HashingContext.new()
+	authority_hash.start(HashingContext.HASH_SHA256)
+	authority_hash.update(var_to_bytes(["citadel-section-authority/v1",world_id,_generation,
+		int(admission_state.get("generation",-1))]))
+	return {"status":"complete","worldId":world_id,
+		"authorityRevision":authority_hash.finish().hex_encode(),
+		"sourceRevisions":source_revisions,"sections":section_rows}
+
+
+static func _seed_hash(value: String) -> int:
+	var result := 2166136261
+	for index in value.length():
+		result = int((result ^ value.unicode_at(index)) * 16777619) & 0xffffffff
+	return result
 
 ## Camera intent is scheduling state, not spatial/source ownership. Applying it
 ## must not replay the immutable source manifest or invalidate the currently

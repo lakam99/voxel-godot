@@ -289,6 +289,29 @@ func visual_member_requirements(bounds: Rect2i) -> Dictionary:
 		"queryMemberCandidateCount":indices.size()}
 
 
+## Exact, untruncated 3D query for a section source census. The 2D bucket index
+## bounds work in XZ; final ownership is filtered against all three axes.
+func visual_members_intersecting_bounds(section_bounds: AABB) -> Dictionary:
+	if not section_bounds.position.is_finite() or not section_bounds.size.is_finite() \
+			or section_bounds.size.x <= 0.0 or section_bounds.size.y <= 0.0 \
+			or section_bounds.size.z <= 0.0:
+		return {"status":"failed","reason":"invalid_visual_section_bounds"}
+	var query := Rect2(Vector2(section_bounds.position.x,section_bounds.position.z),
+		Vector2(section_bounds.size.x,section_bounds.size.z))
+	var indices := _bucket_record_candidates(member_buckets,query,member_records.size())
+	var members: Array[Dictionary] = []
+	for index: int in indices:
+		var record: Dictionary = member_records[index]
+		if bool(record.get("visual",false)) and _aabb_intersects_section(record.bounds,section_bounds):
+			members.append(record)
+	members.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
+		return String(a.memberId) < String(b.memberId))
+	members.make_read_only()
+	return {"status":"described","members":members,
+		"descriptionComplete":true,"sourceSignature":output_signature,
+		"queryMemberCandidateCount":indices.size()}
+
+
 func exterior_structural_group_requirements(bounds: Rect2i, runtime_eligible: Dictionary = {}) -> Dictionary:
 	if bounds.size.x <= 0 or bounds.size.y <= 0:
 		return {"status":"failed","reason":"invalid_dependency_bounds"}
@@ -497,6 +520,22 @@ static func _world_rect_for_cells(bounds: Rect2i) -> Rect2:
 
 static func _rect_intersects_aabb(query: Rect2, bounds: AABB) -> bool:
 	return query.intersects(Rect2(Vector2(bounds.position.x,bounds.position.z),Vector2(bounds.size.x,bounds.size.z)),true)
+
+
+static func _aabb_intersects_section(member_bounds: AABB, section_bounds: AABB) -> bool:
+	var xz_intersects := member_bounds.position.x < section_bounds.end.x \
+		and member_bounds.end.x > section_bounds.position.x \
+		and member_bounds.position.z < section_bounds.end.z \
+		and member_bounds.end.z > section_bounds.position.z
+	if not xz_intersects:
+		return false
+	# Flat ground/foundation planes belong to the vertical section containing
+	# their Y coordinate; non-flat bounds use half-open section intersections.
+	if member_bounds.size.y <= 0.0:
+		return member_bounds.position.y >= section_bounds.position.y \
+			and member_bounds.position.y < section_bounds.end.y
+	return member_bounds.position.y < section_bounds.end.y \
+		and member_bounds.end.y > section_bounds.position.y
 
 
 static func _rect_aabb_distance_squared(query: Rect2, bounds: AABB) -> float:
