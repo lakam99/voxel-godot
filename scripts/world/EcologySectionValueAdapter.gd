@@ -126,8 +126,10 @@ func capture_static_section_sources(world_id: String,
 				continue
 			var source_id := String(candidate.get("sourceId", ""))
 			var prop_id := String(candidate.get("propId", ""))
-			if source_id.is_empty() or String(candidate.get("contentRevision", "")).is_empty() \
-					or _candidate_digest(candidate) != String(candidate.get("contentRevision", "")):
+			# _capture_production_chunk validated every candidate digest before
+			# returning this immutable source snapshot. Do not canonicalize/hash
+			# the same records again while assigning them to section owners.
+			if source_id.is_empty() or String(candidate.get("contentRevision", "")).is_empty():
 				return _pending("ecology_candidate_membership_revision_invalid", {
 					"chunk":chunk, "sourceId":source_id})
 			if not prop_id.is_empty() and removed_ids.has(prop_id):

@@ -342,6 +342,16 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 	var tombstone_census: Dictionary = roster.capture_sections([section_key])
 	var section_removals: Array = tombstone_census.get("removalsBySection", {}) \
 		.get(section_key, [])
+	var corrupted_snapshot: Dictionary = prop_chunk.get_meta(
+		"static_ecology_source_value_snapshot", {}).duplicate(true)
+	var corrupted_candidates: Array = corrupted_snapshot.get("candidates", [])
+	if not corrupted_candidates.is_empty():
+		corrupted_candidates[0]["contentRevision"] = "invalid-candidate-digest"
+	else:
+		corrupted_snapshot["contentRevision"] = "invalid-snapshot-digest"
+	prop_chunk.set_meta("static_ecology_source_value_snapshot", corrupted_snapshot)
+	var corrupted_snapshot_census: Dictionary = provider.capture_static_section_sources(
+		world_id, [section_key])
 	main.free()
 	return {"census":census, "directCensus":direct_census,
 		"undergroundRequiredCensus":underground_required_census,
@@ -367,7 +377,8 @@ func _run_realized_prop_assembler_contract() -> Dictionary:
 		"dynamicExpectedSources":dynamic_expected,
 		"unaffectedRevisionsStable":unaffected_revisions_stable,
 		"tombstoneCensus":tombstone_census, "sectionRemovals":section_removals,
-		"tombstoneReason":String(tombstone_census.get("reason", ""))}
+		"tombstoneReason":String(tombstone_census.get("reason", "")),
+		"corruptedSnapshotCensus":corrupted_snapshot_census}
 
 
 func run() -> void:
@@ -707,6 +718,12 @@ func run() -> void:
 		uncommitted_tree_result.get("status") == "pending" \
 		and uncommitted_tree_result.get("reason") == "ecology_tree_queue_geometry_not_committed" \
 		and uncommitted_tree_result.get("sourceId", "").ends_with(":tree:uncommitted-tree"))
+	check("census_rejects_candidate_digest_corruption_before_membership",
+		realized_assembler_result.get("corruptedSnapshotCensus", {}).get("status") == "pending" \
+		and realized_assembler_result.get("corruptedSnapshotCensus", {}).get("reason") \
+			== "ecology_chunk_source_snapshot_revision_stale" \
+		and realized_assembler_result.get("corruptedSnapshotCensus", {}).get(
+			"snapshotValidation", {}).get("reason") == "ecology_candidate_revision_mismatch")
 	check("realized_prop_ids_are_enumerated_into_exact_completed_section_roster",
 		realized_assembler_result.get("census", {}).get("status") == "complete" \
 		and realized_assembler_result.get("initialInterleavedIds", []).is_empty() \

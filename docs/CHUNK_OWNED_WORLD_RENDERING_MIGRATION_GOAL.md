@@ -956,3 +956,9 @@ diagnostic still measured a 40,029 µs ecology census and did not retain the
 exact mismatched pebble ID in its final receipt. This is partial integration
 evidence only; the performance and exact-source gates remain open. See the
 [canonical charter follow-up](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md#section-owner-mismatch-follow-up-2026-10-04).
+
+A follow-up removed a second per-candidate digest pass after snapshot capture
+had already validated those records; a deliberately corrupted candidate still
+fails the census contract. One later headed sample measured ecology admission
+at 15,715 µs, but used a different chunk and is not a controlled performance
+comparison.
