@@ -221,6 +221,114 @@ func _run() -> void:
 		and section_mesh_expected.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
 		and section_mesh.get_surface_count()==0 \
 		and _has_installed_mesh(section_backend,section_mesh_expected))
+	var layered_chunk:=_make_chunk(scene,Vector2i(5,0))
+	var layered_owner: Dictionary=PacketOwner.attach_to_chunk(layered_chunk)
+	var layered_backend: Node=layered_owner.get("backend") as Node
+	var layered_source_id:="native-contract:layered-section-slot"
+	var layered_revision:="layered-section-revision-1"
+	var layered_digest:="layered-section-manifest-1"
+	var layered_layers: Array=[
+		{"layer":"opaque","expectedBatchCount":1,"expectedInstanceCount":1},
+		{"layer":"cutout","expectedBatchCount":0,"expectedInstanceCount":0},
+		{"layer":"translucent","expectedBatchCount":1,"expectedInstanceCount":1}]
+	var layered_material:=StandardMaterial3D.new()
+	var cutout_material:=StandardMaterial3D.new()
+	cutout_material.transparency=BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	var translucent_material:=StandardMaterial3D.new()
+	translucent_material.transparency=BaseMaterial3D.TRANSPARENCY_ALPHA
+	var layered_opaque_mesh:=BoxMesh.new()
+	var layered_translucent_mesh:=BoxMesh.new()
+	var layered_opaque_identity: Dictionary=StaticMeshFingerprint.inspect(layered_opaque_mesh)
+	var layered_translucent_identity: Dictionary=StaticMeshFingerprint.inspect(layered_translucent_mesh)
+	var layered_begin: Dictionary=layered_backend.call("begin_packet_with_layers",layered_source_id,Vector2i(5,0),1,
+		layered_revision,layered_digest,Transform3D.IDENTITY,2,2,layered_layers)
+	var layered_opaque_append:=_append_native_layer_batch(layered_backend,layered_source_id,1,
+		"opaque-batch",layered_opaque_mesh,String(layered_opaque_identity.get("contentDigest","")),
+		layered_material,"opaque",Vector3.ZERO)
+	var layered_translucent_append:=_append_native_layer_batch(layered_backend,layered_source_id,1,
+		"translucent-batch",layered_translucent_mesh,
+		String(layered_translucent_identity.get("contentDigest","")),translucent_material,
+		"translucent",Vector3(2.0,0.0,0.0))
+	var layered_upload_first: Dictionary=layered_backend.call("advance_packet",layered_source_id,1,1)
+	var layered_upload_second: Dictionary=layered_backend.call("advance_packet",layered_source_id,1,1)
+	var layered_commit: Dictionary=layered_backend.call("commit_packet",layered_source_id,1)
+	var layered_snapshot: Dictionary=layered_backend.call("installed_snapshot",layered_source_id)
+	var layered_receipts: Array=layered_snapshot.get("layers",[])
+	var layered_layer_receipts_match:=layered_receipts.size()==3 \
+		and String(layered_receipts[0].get("layer",""))=="opaque" \
+		and String(layered_receipts[0].get("status",""))=="ready" \
+		and String(layered_receipts[1].get("layer",""))=="cutout" \
+		and String(layered_receipts[1].get("status",""))=="empty" \
+		and int(layered_receipts[1].get("expectedBatchCount",-1))==0 \
+		and int(layered_receipts[1].get("installedBatchCount",-1))==0 \
+		and String(layered_receipts[2].get("layer",""))=="translucent" \
+		and String(layered_receipts[2].get("status",""))=="ready"
+	var layered_root_id:=int(layered_snapshot.get("rootInstanceId",0))
+	_check("native_section_slot_acknowledges_every_render_layer_and_explicit_empty_layer",
+		layered_begin.get("status")=="ready_to_append" \
+		and layered_opaque_append.get("status")=="accepted" \
+		and layered_translucent_append.get("status")=="accepted" \
+		and layered_upload_first.get("status")=="pending" \
+		and layered_upload_second.get("status")=="ready_to_commit" \
+		and layered_commit.get("status")=="ready" \
+		and layered_snapshot.get("status")=="ready" \
+		and layered_snapshot.get("sourceRevision")==layered_revision \
+		and layered_snapshot.get("packetDigest")==layered_digest \
+		and layered_layer_receipts_match)
+	var incomplete_layers: Array=[
+		{"layer":"opaque","expectedBatchCount":1,"expectedInstanceCount":1},
+		{"layer":"cutout","expectedBatchCount":0,"expectedInstanceCount":0},
+		{"layer":"translucent","expectedBatchCount":1,"expectedInstanceCount":1}]
+	var incomplete_begin: Dictionary=layered_backend.call("begin_packet_with_layers",layered_source_id,Vector2i(5,0),2,
+		"layered-section-revision-2","layered-section-manifest-2",Transform3D.IDENTITY,2,2,incomplete_layers)
+	var incomplete_append:=_append_native_layer_batch(layered_backend,layered_source_id,2,
+		"replacement-opaque",layered_opaque_mesh,String(layered_opaque_identity.get("contentDigest","")),
+		layered_material,"opaque",Vector3(0.0,1.0,0.0))
+	var incomplete_advance: Dictionary=layered_backend.call("advance_packet",layered_source_id,2,2)
+	var old_layered_snapshot: Dictionary=layered_backend.call("installed_snapshot",layered_source_id)
+	var incomplete_abort: Dictionary=layered_backend.call("abort_packet",layered_source_id,2)
+	var retained_layered_snapshot: Dictionary=layered_backend.call("installed_snapshot",layered_source_id)
+	_check("native_section_slot_keeps_old_layers_visible_until_replacement_manifest_is_complete",
+		incomplete_begin.get("status")=="ready_to_append" \
+		and incomplete_append.get("status")=="accepted" \
+		and incomplete_advance.get("status")=="pending" \
+		and incomplete_advance.get("reason")=="packet_batches_incomplete" \
+		and old_layered_snapshot.get("status")=="ready" \
+		and int(old_layered_snapshot.get("generation",0))==1 \
+		and int(old_layered_snapshot.get("rootInstanceId",0))==layered_root_id \
+		and old_layered_snapshot.get("layers")==layered_receipts \
+		and incomplete_abort.get("status")=="aborted" \
+		and retained_layered_snapshot.get("status")=="ready" \
+		and int(retained_layered_snapshot.get("rootInstanceId",0))==layered_root_id)
+	var empty_layers: Array=[
+		{"layer":"opaque","expectedBatchCount":0,"expectedInstanceCount":0},
+		{"layer":"cutout","expectedBatchCount":0,"expectedInstanceCount":0},
+		{"layer":"translucent","expectedBatchCount":0,"expectedInstanceCount":0}]
+	var empty_begin: Dictionary=layered_backend.call("begin_packet_with_layers",layered_source_id,Vector2i(5,0),3,
+		"layered-section-revision-3","layered-section-manifest-empty",Transform3D.IDENTITY,0,0,empty_layers)
+	var empty_advance: Dictionary=layered_backend.call("advance_packet",layered_source_id,3,1)
+	var empty_commit: Dictionary=layered_backend.call("commit_packet",layered_source_id,3)
+	var empty_snapshot: Dictionary=layered_backend.call("installed_snapshot",layered_source_id)
+	var empty_receipts: Array=empty_snapshot.get("layers",[])
+	_check("native_section_slot_replaces_with_explicitly_empty_layers",
+		empty_begin.get("status")=="ready_to_append" \
+		and empty_advance.get("status")=="ready_to_commit" \
+		and empty_commit.get("status")=="ready" \
+		and empty_snapshot.get("status")=="ready" \
+		and int(empty_snapshot.get("generation",0))==3 \
+		and empty_receipts.size()==3 \
+		and empty_receipts.all(func(layer: Dictionary) -> bool:
+			return layer.get("status")=="empty" \
+				and int(layer.get("expectedBatchCount",-1))==0 \
+				and int(layer.get("installedBatchCount",-1))==0 \
+				and int(layer.get("expectedInstanceCount",-1))==0 \
+				and int(layer.get("installedInstanceCount",-1))==0))
+	diagnostics["layeredSectionSlot"]={"begin":layered_begin,"firstAppend":layered_opaque_append,
+		"secondAppend":layered_translucent_append,"uploadFirst":layered_upload_first,
+		"uploadSecond":layered_upload_second,"commit":layered_commit,"snapshot":layered_snapshot,
+		"incompleteBegin":incomplete_begin,"incompleteAdvance":incomplete_advance,
+		"retainedAfterCancel":retained_layered_snapshot,"emptyBegin":empty_begin,
+		"emptyAdvance":empty_advance,"emptyCommit":empty_commit,"emptySnapshot":empty_snapshot}
 	var expected_mesh_payload_bytes: int=_mesh_payload_bytes(section_mesh_expected)
 	var backend_metrics: Dictionary=section_backend.call("metrics")
 	_check("native_mesh_surface_payload_bytes_are_reserved_and_reported",
@@ -641,6 +749,15 @@ func _run() -> void:
 	_check("main_runtime_retires_owner_after_dependencies_release",main.retire_streamed_chunk_container(OWNER_CELL))
 	_finish(not checks.values().has(false),"")
 	parent.free()
+
+
+func _append_native_layer_batch(backend: Node, source_id: String, generation: int,
+		batch_id: String, mesh: Mesh, mesh_digest: String, material: Material,
+		render_layer: String, origin: Vector3) -> Dictionary:
+	var buffer: PackedFloat32Array=InstanceBuffer.encode(
+		Transform3D(Basis.IDENTITY,origin+Vector3(0.5,0.5,0.5)),Color.WHITE)
+	return backend.call("append_batch_in_layer",source_id,generation,batch_id,mesh,mesh_digest,material,
+		buffer,AABB(origin,Vector3.ONE),"structural",true,240.0,18.0,render_layer)
 
 
 func _install(backend: Node, generation: int) -> bool:

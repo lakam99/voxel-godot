@@ -23,6 +23,10 @@ bool tier_supported(const String &p_tier) {
 	return p_tier == "silhouette" || p_tier == "structural" || p_tier == "detail" || p_tier == "horizon";
 }
 
+bool render_layer_supported(const String &p_layer) {
+	return p_layer == "opaque" || p_layer == "cutout" || p_layer == "translucent";
+}
+
 int64_t packed_mesh_array_bytes(const Variant &p_value) {
 	switch (p_value.get_type()) {
 		case Variant::NIL: return 0;
@@ -97,7 +101,9 @@ bool transform_finite(const Transform3D &p_transform) {
 
 void ChunkRenderPacketBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("begin_packet", "source_id", "owner_cell", "generation", "source_revision", "packet_digest", "local_to_chunk", "expected_batch_count", "expected_instance_count"), &ChunkRenderPacketBackend::begin_packet);
+	ClassDB::bind_method(D_METHOD("begin_packet_with_layers", "source_id", "owner_cell", "generation", "source_revision", "packet_digest", "local_to_chunk", "expected_batch_count", "expected_instance_count", "expected_layers"), &ChunkRenderPacketBackend::begin_packet_with_layers);
 	ClassDB::bind_method(D_METHOD("append_batch", "source_id", "generation", "batch_id", "mesh", "expected_mesh_content_digest", "material", "buffer", "bounds", "render_tier", "cast_shadows", "visibility_range", "fade_margin"), &ChunkRenderPacketBackend::append_batch);
+	ClassDB::bind_method(D_METHOD("append_batch_in_layer", "source_id", "generation", "batch_id", "mesh", "expected_mesh_content_digest", "material", "buffer", "bounds", "render_tier", "cast_shadows", "visibility_range", "fade_margin", "render_layer"), &ChunkRenderPacketBackend::append_batch_in_layer);
 	ClassDB::bind_method(D_METHOD("advance_packet", "source_id", "generation", "max_units"), &ChunkRenderPacketBackend::advance_packet, DEFVAL(1));
 	ClassDB::bind_method(D_METHOD("commit_packet", "source_id", "generation"), &ChunkRenderPacketBackend::commit_packet);
 	ClassDB::bind_method(D_METHOD("abort_packet", "source_id", "generation"), &ChunkRenderPacketBackend::abort_packet);
@@ -179,11 +185,56 @@ void ChunkRenderPacketBackend::_release_stage(std::map<std::string, StagedPacket
 	_staged.erase(p_it);
 }
 
+void ChunkRenderPacketBackend::_build_layer_receipts(StagedPacket &r_packet) const {
+	r_packet.layer_receipts.clear();
+	for (const StagedPacket::LayerManifestEntry &layer : r_packet.layers) {
+		Dictionary layer_receipt;
+		Array batch_ids;
+		for (const Dictionary &batch_receipt : r_packet.batch_receipts) {
+			if (String(batch_receipt.get("renderLayer", "")) == layer.layer) {
+				batch_ids.push_back(batch_receipt.get("batchId", String()));
+			}
+		}
+		layer_receipt["status"] = layer.expected_batch_count == 0 ? "empty" : "ready";
+		layer_receipt["layer"] = layer.layer;
+		layer_receipt["sourceId"] = r_packet.source_id;
+		layer_receipt["generation"] = r_packet.generation;
+		layer_receipt["sourceRevision"] = r_packet.source_revision;
+		layer_receipt["packetDigest"] = r_packet.packet_digest;
+		layer_receipt["expectedBatchCount"] = layer.expected_batch_count;
+		layer_receipt["expectedInstanceCount"] = layer.expected_instance_count;
+		layer_receipt["installedBatchCount"] = layer.accepted_batch_count;
+		layer_receipt["installedInstanceCount"] = layer.accepted_instance_count;
+		layer_receipt["batchIds"] = batch_ids;
+		r_packet.layer_receipts.push_back(layer_receipt);
+	}
+}
+
 Dictionary ChunkRenderPacketBackend::begin_packet(const String &p_source_id,
 		const Vector2i &p_owner_cell, int64_t p_generation,
 		const String &p_source_revision, const String &p_packet_digest,
 		const Transform3D &p_local_to_chunk, int64_t p_expected_batch_count,
 		int64_t p_expected_instance_count) {
+	return _begin_packet(p_source_id, p_owner_cell, p_generation, p_source_revision,
+		p_packet_digest, p_local_to_chunk, p_expected_batch_count,
+		p_expected_instance_count, Array());
+}
+
+Dictionary ChunkRenderPacketBackend::begin_packet_with_layers(const String &p_source_id,
+		const Vector2i &p_owner_cell, int64_t p_generation,
+		const String &p_source_revision, const String &p_packet_digest,
+		const Transform3D &p_local_to_chunk, int64_t p_expected_batch_count,
+		int64_t p_expected_instance_count, const Array &p_expected_layers) {
+	return _begin_packet(p_source_id, p_owner_cell, p_generation, p_source_revision,
+		p_packet_digest, p_local_to_chunk, p_expected_batch_count,
+		p_expected_instance_count, p_expected_layers);
+}
+
+Dictionary ChunkRenderPacketBackend::_begin_packet(const String &p_source_id,
+		const Vector2i &p_owner_cell, int64_t p_generation,
+		const String &p_source_revision, const String &p_packet_digest,
+		const Transform3D &p_local_to_chunk, int64_t p_expected_batch_count,
+		int64_t p_expected_instance_count, const Array &p_expected_layers) {
 	if (p_source_id.strip_edges().is_empty() || p_source_revision.strip_edges().is_empty() ||
 			p_packet_digest.strip_edges().is_empty() || p_generation <= 0 ||
 			p_expected_batch_count < 0 || p_expected_batch_count > MAX_PACKET_BATCHES ||
@@ -193,6 +244,43 @@ Dictionary ChunkRenderPacketBackend::begin_packet(const String &p_source_id,
 		return _status("failed", "invalid_packet_header_or_owner_cell");
 	}
 	const std::string key = _key(p_source_id);
+	Array expected_layers = p_expected_layers;
+	if (expected_layers.is_empty()) {
+		Dictionary opaque;
+		opaque["layer"] = "opaque";
+		opaque["expectedBatchCount"] = p_expected_batch_count;
+		opaque["expectedInstanceCount"] = p_expected_instance_count;
+		expected_layers.push_back(opaque);
+	}
+	std::vector<StagedPacket::LayerManifestEntry> parsed_layers;
+	int64_t expected_layer_batches = 0;
+	int64_t expected_layer_instances = 0;
+	for (int64_t index = 0; index < expected_layers.size(); ++index) {
+		if (expected_layers[index].get_type() != Variant::DICTIONARY) return _status("failed", "invalid_packet_layer_manifest");
+		const Dictionary layer_value = expected_layers[index];
+		const String layer_name = layer_value.get("layer", String());
+		const int64_t layer_batches = layer_value.get("expectedBatchCount", int64_t(-1));
+		const int64_t layer_instances = layer_value.get("expectedInstanceCount", int64_t(-1));
+		if (!render_layer_supported(layer_name) || layer_batches < 0 || layer_instances < 0 ||
+				((layer_batches == 0) != (layer_instances == 0)) ||
+				layer_batches > MAX_PACKET_BATCHES || layer_instances > MAX_PACKET_BATCHES * MAX_BATCH_INSTANCES) {
+			return _status("failed", "invalid_packet_layer_manifest_entry");
+		}
+		for (const StagedPacket::LayerManifestEntry &existing : parsed_layers) {
+			if (existing.layer == layer_name) return _status("failed", "duplicate_packet_render_layer");
+		}
+		StagedPacket::LayerManifestEntry entry;
+		entry.layer = layer_name;
+		entry.expected_batch_count = layer_batches;
+		entry.expected_instance_count = layer_instances;
+		parsed_layers.push_back(entry);
+		expected_layer_batches += layer_batches;
+		expected_layer_instances += layer_instances;
+	}
+	if (parsed_layers.empty() || expected_layer_batches != p_expected_batch_count ||
+			expected_layer_instances != p_expected_instance_count) {
+		return _status("failed", "packet_layer_manifest_count_mismatch");
+	}
 	auto staged = _staged.find(key);
 	if (staged != _staged.end()) {
 		const StagedPacket &current = staged->second;
@@ -200,7 +288,17 @@ Dictionary ChunkRenderPacketBackend::begin_packet(const String &p_source_id,
 				current.source_revision == p_source_revision && current.packet_digest == p_packet_digest &&
 				current.local_to_chunk.is_equal_approx(p_local_to_chunk) &&
 				current.expected_batch_count == p_expected_batch_count &&
-				current.expected_instance_count == p_expected_instance_count) {
+				current.expected_instance_count == p_expected_instance_count &&
+				current.layers.size() == parsed_layers.size()) {
+			bool manifest_matches = true;
+			for (size_t index = 0; index < parsed_layers.size(); ++index) {
+				const auto &expected = parsed_layers[index];
+				const auto &actual = current.layers[index];
+				manifest_matches &= expected.layer == actual.layer &&
+					expected.expected_batch_count == actual.expected_batch_count &&
+					expected.expected_instance_count == actual.expected_instance_count;
+			}
+			if (!manifest_matches) return _status("backpressure", "source_has_unresolved_staged_generation");
 			const String status = current.state == "failed" ? "failed" : current.state == "ready" ? "ready_to_commit" : "ready_to_append";
 			Dictionary result = _status(status, current.failure_reason);
 			result["generation"] = current.generation;
@@ -224,7 +322,9 @@ Dictionary ChunkRenderPacketBackend::begin_packet(const String &p_source_id,
 	packet.local_to_chunk = p_local_to_chunk;
 	packet.expected_batch_count = p_expected_batch_count;
 	packet.expected_instance_count = p_expected_instance_count;
+	packet.layers = std::move(parsed_layers);
 	packet.state = p_expected_batch_count == 0 && p_expected_instance_count == 0 ? "ready" : "collecting";
+	if (packet.state == "ready") _build_layer_receipts(packet);
 	packet.root = memnew(Node3D);
 	packet.root->set_name(String("StagedPacket_") + p_source_id.validate_node_name() + "_" + String::num_int64(p_generation));
 	packet.root->set_transform(p_local_to_chunk);
@@ -250,13 +350,35 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
 		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
 		double p_visibility_range, double p_fade_margin) {
+	return _append_batch(p_source_id, p_generation, p_batch_id, p_mesh,
+		p_expected_mesh_content_digest, p_material, p_buffer, p_bounds,
+		p_render_tier, p_cast_shadows, p_visibility_range, p_fade_margin, "opaque");
+}
+
+Dictionary ChunkRenderPacketBackend::append_batch_in_layer(const String &p_source_id,
+		int64_t p_generation, const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest,
+		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
+		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
+		double p_visibility_range, double p_fade_margin, const String &p_render_layer) {
+	return _append_batch(p_source_id, p_generation, p_batch_id, p_mesh,
+		p_expected_mesh_content_digest, p_material, p_buffer, p_bounds,
+		p_render_tier, p_cast_shadows, p_visibility_range, p_fade_margin, p_render_layer);
+}
+
+Dictionary ChunkRenderPacketBackend::_append_batch(const String &p_source_id,
+		int64_t p_generation, const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest,
+		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
+		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
+		double p_visibility_range, double p_fade_margin, const String &p_render_layer) {
 	auto found = _staged.find(_key(p_source_id));
 	if (found == _staged.end() || !_stage_matches(found->second, p_generation)) return _status("failed", "staged_generation_missing");
 	StagedPacket &packet = found->second;
 	if (packet.state != "collecting") return _status("failed", "packet_not_collecting");
 	Node3D *staging_root = _node3d_for_id(packet.root_instance_id);
 	if (staging_root == nullptr || staging_root->get_parent() != this) return _status("failed", "staging_root_retired");
-	if (p_batch_id.strip_edges().is_empty() || p_mesh.is_null() ||
+	if (p_batch_id.strip_edges().is_empty() || p_mesh.is_null() || !render_layer_supported(p_render_layer) ||
 			p_expected_mesh_content_digest.length() != 64 || p_buffer.is_empty() ||
 			p_buffer.size() % FLOATS_PER_INSTANCE != 0 ||
 			p_buffer.size() > MAX_BATCH_INSTANCES * FLOATS_PER_INSTANCE ||
@@ -272,6 +394,15 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 		if (existing.id == p_batch_id) return _status("failed", "duplicate_batch_id");
 	}
 	const int64_t instances = p_buffer.size() / FLOATS_PER_INSTANCE;
+	StagedPacket::LayerManifestEntry *target_layer = nullptr;
+	for (StagedPacket::LayerManifestEntry &layer : packet.layers) {
+		if (layer.layer == p_render_layer) { target_layer = &layer; break; }
+	}
+	if (target_layer == nullptr) return _status("failed", "batch_render_layer_missing_from_manifest");
+	if (target_layer->accepted_batch_count + 1 > target_layer->expected_batch_count ||
+			target_layer->accepted_instance_count + instances > target_layer->expected_instance_count) {
+		return _status("failed", "packet_layer_expected_count_exceeded");
+	}
 	const int64_t buffer_bytes = static_cast<int64_t>(p_buffer.size()) * FLOAT_BYTES;
 	Ref<Resource> duplicated_resource = p_mesh->duplicate(true);
 	Ref<Mesh> owned_mesh = duplicated_resource;
@@ -301,6 +432,7 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 	batch.buffer = p_buffer;
 	batch.mesh_payload_bytes = mesh_bytes;
 	batch.mesh_content_digest = mesh_digest;
+	batch.render_layer = p_render_layer;
 	batch.bounds = p_bounds;
 	batch.render_tier = p_render_tier;
 	batch.cast_shadows = p_cast_shadows;
@@ -308,6 +440,8 @@ Dictionary ChunkRenderPacketBackend::append_batch(const String &p_source_id,
 	batch.fade_margin = p_fade_margin;
 	packet.batches.push_back(std::move(batch));
 	packet.instance_count += instances;
+	target_layer->accepted_batch_count++;
+	target_layer->accepted_instance_count += instances;
 	packet.buffer_bytes += buffer_bytes;
 	packet.mesh_payload_bytes += mesh_bytes;
 	packet.reserved_bytes += payload_bytes;
@@ -333,6 +467,12 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 	if (static_cast<int64_t>(packet.batches.size()) != packet.expected_batch_count ||
 			packet.instance_count != packet.expected_instance_count) {
 		return _status("pending", "packet_batches_incomplete");
+	}
+	for (const StagedPacket::LayerManifestEntry &layer : packet.layers) {
+		if (layer.accepted_batch_count != layer.expected_batch_count ||
+				layer.accepted_instance_count != layer.expected_instance_count) {
+			return _status("pending", "packet_layer_manifest_incomplete");
+		}
 	}
 	int64_t units = 0;
 	while (units < p_max_units && packet.upload_cursor < static_cast<int32_t>(packet.batches.size())) {
@@ -371,6 +511,7 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		instance->set_visibility_range_fade_mode(GeometryInstance3D::VISIBILITY_RANGE_FADE_SELF);
 		instance->set_custom_aabb(batch.bounds);
 		instance->set_meta("packet_batch_id", batch.id);
+		instance->set_meta("packet_render_layer", batch.render_layer);
 		instance->set_meta("packet_render_tier", batch.render_tier);
 		instance->set_meta("packet_bounds", batch.bounds);
 		staging_root->add_child(instance);
@@ -380,6 +521,7 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		receipt["multimeshId"] = static_cast<int64_t>(multi->get_instance_id());
 		receipt["meshId"] = static_cast<int64_t>(batch.mesh->get_instance_id());
 		receipt["meshContentDigest"] = batch.mesh_content_digest;
+		receipt["renderLayer"] = batch.render_layer;
 		receipt["materialId"] = batch.material.is_valid() ? static_cast<int64_t>(batch.material->get_instance_id()) : 0;
 		receipt["bounds"] = batch.bounds;
 		receipt["renderTier"] = batch.render_tier;
@@ -396,7 +538,10 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		packet.upload_cursor++;
 		units++;
 	}
-	if (packet.upload_cursor == static_cast<int32_t>(packet.batches.size())) packet.state = "ready";
+	if (packet.upload_cursor == static_cast<int32_t>(packet.batches.size())) {
+		_build_layer_receipts(packet);
+		packet.state = "ready";
+	}
 	Dictionary result = _status(packet.state == "ready" ? "ready_to_commit" : "pending");
 	result["uploadedBatches"] = packet.upload_cursor;
 	result["expectedBatches"] = packet.expected_batch_count;
@@ -436,6 +581,7 @@ Dictionary ChunkRenderPacketBackend::commit_packet(const String &p_source_id, in
 	replacement.local_to_chunk = staged.local_to_chunk;
 	replacement.root_instance_id = staged.root_instance_id;
 	replacement.batch_receipts = staged.batch_receipts;
+	replacement.layer_receipts = staged.layer_receipts;
 	replacement.instance_count = staged.instance_count;
 	for (const Dictionary &receipt : replacement.batch_receipts) {
 		replacement.buffer_bytes += int64_t(receipt.get("bufferBytes", 0));
@@ -485,6 +631,7 @@ Dictionary ChunkRenderPacketBackend::_batch_snapshot(const Batch &p_batch, int32
 	result["castShadows"] = p_batch.cast_shadows;
 	result["visibilityRange"] = p_batch.visibility_range;
 	result["fadeMargin"] = p_batch.fade_margin;
+	result["renderLayer"] = p_batch.render_layer;
 	return result;
 }
 
@@ -529,12 +676,50 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 				std::abs(instance->get_visibility_range_end() - double(expected.get("visibilityRange", 0.0))) > 0.0001 ||
 				std::abs(instance->get_visibility_range_end_margin() - double(expected.get("fadeMargin", 0.0))) > 0.0001 ||
 				!instance->has_meta("packet_batch_id") || String(instance->get_meta("packet_batch_id")) != String(expected.get("batchId", "")) ||
+				!instance->has_meta("packet_render_layer") || String(instance->get_meta("packet_render_layer")) != String(expected.get("renderLayer", "")) ||
 				!instance->has_meta("packet_render_tier") || String(instance->get_meta("packet_render_tier")) != String(expected.get("renderTier", "")) ||
 				!instance->has_meta("packet_bounds") || actual_bounds != expected_bounds ||
 				!instance->get_custom_aabb().is_equal_approx(expected_aabb)) {
 			return _status("stale", "installed_batch_policy_replaced");
 		}
 	}
+	if (p_packet.layer_receipts.empty()) return _status("stale", "installed_layer_manifest_missing");
+	int64_t manifest_batches = 0;
+	int64_t manifest_instances = 0;
+	for (const Dictionary &layer : p_packet.layer_receipts) {
+		const int64_t expected_batches = layer.get("expectedBatchCount", int64_t(-1));
+		const int64_t expected_instances = layer.get("expectedInstanceCount", int64_t(-1));
+		const String expected_status = expected_batches == 0 ? "empty" : "ready";
+		if (!render_layer_supported(String(layer.get("layer", String()))) ||
+				String(layer.get("status", String())) != expected_status ||
+				String(layer.get("sourceId", String())) != p_packet.source_id ||
+				int64_t(layer.get("generation", int64_t(0))) != p_packet.generation ||
+				String(layer.get("sourceRevision", String())) != p_packet.source_revision ||
+				String(layer.get("packetDigest", String())) != p_packet.packet_digest ||
+				expected_batches < 0 || expected_instances < 0 ||
+				int64_t(layer.get("installedBatchCount", int64_t(-1))) != expected_batches ||
+				int64_t(layer.get("installedInstanceCount", int64_t(-1))) != expected_instances) {
+			return _status("stale", "installed_layer_receipt_identity_or_count_mismatch");
+		}
+		const Array batch_ids = layer.get("batchIds", Array());
+		if (batch_ids.size() != expected_batches) return _status("stale", "installed_layer_batch_receipt_mismatch");
+		for (int64_t index = 0; index < batch_ids.size(); ++index) {
+			const String batch_id = batch_ids[index];
+			bool found_batch = false;
+			for (const Dictionary &batch : p_packet.batch_receipts) {
+				if (String(batch.get("batchId", String())) == batch_id &&
+						String(batch.get("renderLayer", String())) == String(layer.get("layer", String()))) {
+					found_batch = true;
+					break;
+				}
+			}
+			if (!found_batch) return _status("stale", "installed_layer_batch_identity_mismatch");
+		}
+		manifest_batches += expected_batches;
+		manifest_instances += expected_instances;
+	}
+	if (manifest_batches != static_cast<int64_t>(p_packet.batch_receipts.size()) ||
+			manifest_instances != p_packet.instance_count) return _status("stale", "installed_layer_manifest_total_mismatch");
 	Dictionary result = _status("ready");
 	result["sourceId"] = p_packet.source_id;
 	result["ownerCell"] = p_packet.owner_cell;
@@ -544,6 +729,7 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 	result["localToChunk"] = p_packet.local_to_chunk;
 	result["rootInstanceId"] = static_cast<int64_t>(root->get_instance_id());
 	result["expectedBatchCount"] = static_cast<int64_t>(p_packet.batch_receipts.size());
+	result["expectedLayerCount"] = static_cast<int64_t>(p_packet.layer_receipts.size());
 	result["instanceCount"] = p_packet.instance_count;
 	result["bufferBytes"] = p_packet.buffer_bytes;
 	result["meshPayloadBytes"] = p_packet.mesh_payload_bytes;
@@ -551,6 +737,9 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 	Array batches;
 	for (const Dictionary &receipt : p_packet.batch_receipts) batches.push_back(receipt);
 	result["batches"] = batches;
+	Array layers;
+	for (const Dictionary &receipt : p_packet.layer_receipts) layers.push_back(receipt);
+	result["layers"] = layers;
 	return result;
 }
 

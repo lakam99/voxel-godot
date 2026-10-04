@@ -49,6 +49,7 @@ class ChunkRenderPacketBackend : public Node3D {
 		PackedFloat32Array buffer;
 		int64_t mesh_payload_bytes = 0;
 		String mesh_content_digest;
+		String render_layer;
 		AABB bounds;
 		String render_tier;
 		bool cast_shadows = true;
@@ -65,6 +66,7 @@ class ChunkRenderPacketBackend : public Node3D {
 		Transform3D local_to_chunk;
 		uint64_t root_instance_id = 0;
 		std::vector<Dictionary> batch_receipts;
+		std::vector<Dictionary> layer_receipts;
 		int64_t instance_count = 0;
 		int64_t buffer_bytes = 0;
 		int64_t mesh_payload_bytes = 0;
@@ -72,6 +74,14 @@ class ChunkRenderPacketBackend : public Node3D {
 	};
 
 	struct StagedPacket {
+		struct LayerManifestEntry {
+			String layer;
+			int64_t expected_batch_count = 0;
+			int64_t expected_instance_count = 0;
+			int64_t accepted_batch_count = 0;
+			int64_t accepted_instance_count = 0;
+		};
+
 		String source_id;
 		Vector2i owner_cell;
 		int64_t generation = 0;
@@ -91,6 +101,8 @@ class ChunkRenderPacketBackend : public Node3D {
 		uint64_t root_instance_id = 0;
 		std::vector<Batch> batches;
 		std::vector<Dictionary> batch_receipts;
+		std::vector<LayerManifestEntry> layers;
+		std::vector<Dictionary> layer_receipts;
 	};
 
 	std::map<std::string, InstalledPacket> _installed;
@@ -110,6 +122,18 @@ class ChunkRenderPacketBackend : public Node3D {
 	void _retire_root(uint64_t p_root_id, int64_t p_payload_bytes = 0);
 	void _on_retired_root_exiting(uint64_t p_root_id);
 	void _release_stage(std::map<std::string, StagedPacket>::iterator p_it);
+	void _build_layer_receipts(StagedPacket &r_packet) const;
+	Dictionary _begin_packet(const String &p_source_id, const Vector2i &p_owner_cell,
+		int64_t p_generation, const String &p_source_revision,
+		const String &p_packet_digest, const Transform3D &p_local_to_chunk,
+		int64_t p_expected_batch_count, int64_t p_expected_instance_count,
+		const Array &p_expected_layers);
+	Dictionary _append_batch(const String &p_source_id, int64_t p_generation,
+		const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest, const Ref<Material> &p_material,
+		const PackedFloat32Array &p_buffer, const AABB &p_bounds,
+		const String &p_render_tier, bool p_cast_shadows,
+		double p_visibility_range, double p_fade_margin, const String &p_render_layer);
 	Dictionary _batch_snapshot(const Batch &p_batch, int32_t p_index,
 		MultiMeshInstance3D *p_instance) const;
 	Dictionary _installed_snapshot(const InstalledPacket &p_packet) const;
@@ -122,12 +146,23 @@ public:
 		int64_t p_generation, const String &p_source_revision,
 		const String &p_packet_digest, const Transform3D &p_local_to_chunk,
 		int64_t p_expected_batch_count, int64_t p_expected_instance_count);
+	Dictionary begin_packet_with_layers(const String &p_source_id, const Vector2i &p_owner_cell,
+		int64_t p_generation, const String &p_source_revision,
+		const String &p_packet_digest, const Transform3D &p_local_to_chunk,
+		int64_t p_expected_batch_count, int64_t p_expected_instance_count,
+		const Array &p_expected_layers);
 	Dictionary append_batch(const String &p_source_id, int64_t p_generation,
 		const String &p_batch_id, const Ref<Mesh> &p_mesh,
 		const String &p_expected_mesh_content_digest,
 		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
 		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
 		double p_visibility_range, double p_fade_margin);
+	Dictionary append_batch_in_layer(const String &p_source_id, int64_t p_generation,
+		const String &p_batch_id, const Ref<Mesh> &p_mesh,
+		const String &p_expected_mesh_content_digest,
+		const Ref<Material> &p_material, const PackedFloat32Array &p_buffer,
+		const AABB &p_bounds, const String &p_render_tier, bool p_cast_shadows,
+		double p_visibility_range, double p_fade_margin, const String &p_render_layer);
 	Dictionary advance_packet(const String &p_source_id, int64_t p_generation,
 		int64_t p_max_units = 1);
 	Dictionary commit_packet(const String &p_source_id, int64_t p_generation);
