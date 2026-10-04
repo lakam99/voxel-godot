@@ -129,6 +129,48 @@ func capture_static_section_sources(world_id: String,
 	return result
 
 
+## Returns the exact immutable geometry admitted by the most recent census for
+## one section. The world coordinator can combine this with other providers
+## and run a single cross-domain partition; this method never publishes or
+## retires the current per-cell visuals.
+func capture_static_section_contribution(census: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	if census.get("status") != "complete" or census.get("worldId") != _world_id \
+			or not census.get("providerSnapshotRevisions") is Dictionary \
+			or not census.get("providerCoverageRevisions") is Dictionary:
+		return _pending("ordinary_section_contribution_census_unavailable")
+	var section_id := _section_id(section_key)
+	var snapshot: Dictionary = _latest_by_section.get(section_id, {})
+	if snapshot.is_empty() or snapshot.get("sectionKey") != section_key:
+		return _pending("ordinary_section_contribution_snapshot_missing")
+	var prepared: Dictionary = snapshot.get("prepared", {})
+	if prepared.is_empty() or prepared.get("sectionKey") != section_key:
+		return _pending("ordinary_section_contribution_geometry_missing")
+	var provider_coverage: Dictionary = census.providerCoverageRevisions.get(PROVIDER_ID, {})
+	var coverage_revision := String(provider_coverage.get(section_key, ""))
+	var provider_revision := String(census.providerSnapshotRevisions.get(PROVIDER_ID, ""))
+	if coverage_revision.is_empty() or provider_revision.is_empty() \
+			or coverage_revision != _coverage_revision(section_key, snapshot):
+		return _pending("ordinary_section_contribution_revision_stale")
+	var authority_revisions: Dictionary = snapshot.get("sourceRevisions", {})
+	if not authority_revisions.is_read_only() \
+			or not prepared.get("inputs", []) is Array \
+			or not prepared.get("inputs", []).is_read_only() \
+			or not prepared.get("compatibilityByKey", {}) is Dictionary \
+			or not prepared.get("compatibilityByKey", {}).is_read_only():
+		return _pending("ordinary_section_contribution_snapshot_unsealed")
+	var contribution := {"providerId":PROVIDER_ID, "sectionKey":section_key,
+		"coverageRevision":coverage_revision, "authorityRevision":provider_revision,
+		"authoritySourceRevisions":authority_revisions,
+		"inputs":prepared.get("inputs", []),
+		"compatibilityByKey":prepared.get("compatibilityByKey", {}),
+		"materialBindings":prepared.get("materialBindings", {}),
+		"meshBindings":prepared.get("meshBindings", {}),
+		"resourceBindings":prepared.get("resourceBindings", {})}
+	contribution.make_read_only()
+	return {"status":"ready", "contribution":contribution}
+
+
 ## Called only after the section coordinator accepts the installed replacement.
 ## Keeping this separate prevents an unaccepted candidate from consuming its
 ## tombstone and losing the retryable removal demand.

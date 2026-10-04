@@ -104,11 +104,26 @@ func run() -> void:
 	var registered: Dictionary = roster.register_provider(ProviderScript.PROVIDER_ID,
 		provider, "capture_static_section_sources")
 	var roster_result: Dictionary = roster.capture_sections([Vector3i.ZERO])
+	var contribution_result: Dictionary = provider.capture_static_section_contribution(
+		roster_result, Vector3i.ZERO)
+	var contribution: Dictionary = contribution_result.get("contribution", {})
 	check("provider_satisfies_exact_static_section_roster_contract",
 		roster_bound.get("status") == "ready" and registered.get("status") == "ready"
 		and roster_result.get("status") == "complete"
 		and roster_result.expectedContributorsBySection.get(Vector3i.ZERO, []).has(member_id),
 		roster_result)
+	check("provider_returns_same_sealed_geometry_for_cross_domain_assembly",
+		contribution_result.get("status") == "ready" and contribution.is_read_only()
+		and contribution.get("providerId") == ProviderScript.PROVIDER_ID
+		and contribution.get("authoritySourceRevisions", {}).get(member_id, "") \
+			== String(roster_result.sourceRevisions.get(member_id, ""))
+		and contribution.get("inputs", []).size() == 1
+		and contribution.get("inputs", [])[0].get("sourcePartId", "") == member_id
+		and contribution.get("compatibilityByKey", {}).size() == 1
+		and contribution.get("resourceBindings", {}).size() == 1,
+		{"status":contribution_result.get("status", ""),
+			"reason":contribution_result.get("reason", ""),
+			"inputCount":contribution.get("inputs", []).size()})
 	var first_coverage := String(section_row.get("coverageRevision", ""))
 	var acknowledged: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO, first_coverage)
 	check("membership_baseline_advances_only_on_explicit_install_ack",

@@ -99,6 +99,20 @@ func run() -> void:
 	check("candidate_explicitly_retains_legacy_render_and_gameplay_owners",
 		candidate.get("legacyVisualPolicy") == "retain_until_shared_coordinator_native_receipt_acknowledged"
 		and String(candidate.get("evidenceScope", "")).contains("no native install"), candidate)
+	var roster_census := {"status":"complete", "worldId":world_id,
+		"providerSnapshotRevisions":{"blueprint_buildings":"authority-revision"},
+		"providerCoverageRevisions":{"blueprint_buildings":{section:"coverage-revision"}},
+		"sourceRevisions":{source_id:source_revision}}
+	var contribution_result: Dictionary = service.capture_static_section_contribution(
+		roster_census, section)
+	var contribution: Dictionary = contribution_result.get("contribution", {})
+	check("citadel_packet_geometry_enters_common_immutable_provider_contribution",
+		contribution_result.get("status") == "ready" and contribution.is_read_only()
+		and contribution.get("providerId") == "blueprint_buildings"
+		and contribution.get("authoritySourceRevisions", {}).get(source_id, "") == source_revision
+		and contribution.get("inputs", []).size() == 1
+		and contribution.get("resourceBindings", {}).size() == 1,
+		{"capture":contribution_result, "inputCount":contribution.get("inputs", []).size()})
 	var legacy_visual := MeshInstance3D.new()
 	legacy_visual.mesh = BoxMesh.new()
 	get_root().add_child(legacy_visual)

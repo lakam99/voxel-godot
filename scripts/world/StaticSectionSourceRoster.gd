@@ -292,6 +292,43 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 	return result
 
 
+## Ask each registered authority owner for the immutable render inputs matching
+## an already captured exact census. Every required provider must participate;
+## absence of a contribution API or value data is retryable pending, never an
+## empty section.
+func capture_section_contributions(census: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	if census.get("status") != "complete" or census.get("worldId") != _world_id \
+			or not census.get("sections", []).has(section_key):
+		return _pending("static_section_contribution_census_invalid")
+	var contributions: Array[Dictionary] = []
+	for provider_id: String in _required_provider_ids:
+		var registration: Dictionary = _providers.get(provider_id, {})
+		var owner: Object = registration.get("owner").get_ref() \
+			if registration.get("owner") is WeakRef else null
+		if not is_instance_valid(owner) \
+				or owner.get_instance_id() != int(registration.get("ownerInstanceId", 0)):
+			return _pending("static_section_contribution_provider_owner_missing", {
+				"providerId":provider_id})
+		if not owner.has_method("capture_static_section_contribution"):
+			return _pending("static_section_contribution_provider_not_implemented", {
+				"providerId":provider_id})
+		var captured: Dictionary = owner.call("capture_static_section_contribution",
+			census, section_key)
+		if captured.get("status") != "ready":
+			captured["providerId"] = provider_id
+			return captured
+		var contribution: Variant = captured.get("contribution", {})
+		if not contribution is Dictionary or not contribution.is_read_only() \
+				or String(contribution.get("providerId", "")) != provider_id \
+				or contribution.get("sectionKey") != section_key:
+			return _failed("static_section_provider_contribution_invalid", {
+				"providerId":provider_id})
+		contributions.append(contribution)
+	contributions.make_read_only()
+	return {"status":"complete", "contributions":contributions}
+
+
 func is_snapshot_current(snapshot: Dictionary) -> bool:
 	if snapshot.get("status") != "complete" or snapshot.get("worldId") != _world_id:
 		return false

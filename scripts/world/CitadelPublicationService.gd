@@ -892,6 +892,7 @@ func capture_static_section_geometry_candidate(world_id: String, section_key: Ve
 		"sourceCensus":sealed_census, "memberBindings":member_bindings,
 		"providerPacketReceipts":provider_receipts,
 		"packetGroupCount":packet_groups.size(),
+		"inputs":candidate.get("inputs", []),
 		"partition":candidate.get("partition", {}),
 		"compatibilityByKey":candidate.get("compatibilityByKey", {}),
 		"resourceBindings":candidate.get("resourceBindings", {}),
@@ -901,6 +902,53 @@ func capture_static_section_geometry_candidate(world_id: String, section_key: Ve
 		"evidenceScope":"prepared Citadel packet groups transformed into shared section snapshots; no native install or gameplay retirement acknowledgement"}
 	result.make_read_only()
 	return result
+
+
+## Adapts the already admitted Citadel packet groups to the common provider
+## contribution boundary. Geometry stays value-only; the candidate assembler
+## performs the single cross-domain partition and no Citadel visuals are
+## retired here.
+func capture_static_section_contribution(census: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	if census.get("status") != "complete" or String(census.get("worldId", "")).is_empty():
+		return {"status":"pending", "reason":"citadel_contribution_census_unavailable",
+			"retryable":true}
+	var geometry: Dictionary = capture_static_section_geometry_candidate(
+		String(census.worldId), section_key, 1)
+	if geometry.get("status") != "ready":
+		return geometry
+	var coverage_map: Dictionary = census.get("providerCoverageRevisions", {}).get(
+		"blueprint_buildings", {})
+	var coverage_revision := String(coverage_map.get(section_key, ""))
+	var provider_revision := String(census.get("providerSnapshotRevisions", {}).get(
+		"blueprint_buildings", ""))
+	if coverage_revision.is_empty() or provider_revision.is_empty() \
+			or coverage_revision != String(geometry.get("coverageRevision", "")):
+		return {"status":"pending", "reason":"citadel_contribution_revision_stale",
+			"retryable":true}
+	var authority_source_revisions: Dictionary = {}
+	for member_value: Variant in geometry.get("members", []):
+		if not member_value is Dictionary:
+			return {"status":"failed", "reason":"citadel_contribution_member_invalid"}
+		var member: Dictionary = member_value
+		var source_part_id := String(member.get("sourcePartId", ""))
+		var revision := String(member.get("censusRevision", ""))
+		if source_part_id.is_empty() or revision.is_empty() \
+				or String(census.get("sourceRevisions", {}).get(source_part_id, "")) != revision \
+				or authority_source_revisions.has(source_part_id):
+			return {"status":"pending", "reason":"citadel_contribution_member_revision_stale",
+				"retryable":true, "sourcePartId":source_part_id}
+		authority_source_revisions[source_part_id] = revision
+	authority_source_revisions.make_read_only()
+	var contribution := {"providerId":"blueprint_buildings",
+		"sectionKey":section_key, "coverageRevision":coverage_revision,
+		"authorityRevision":provider_revision,
+		"authoritySourceRevisions":authority_source_revisions,
+		"inputs":geometry.get("inputs", []),
+		"compatibilityByKey":geometry.get("compatibilityByKey", {}),
+		"resourceBindings":geometry.get("resourceBindings", {})}
+	contribution.make_read_only()
+	return {"status":"ready", "contribution":contribution}
 
 
 func _current_packet_publisher_for_site(site_id: String) -> Dictionary:

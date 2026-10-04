@@ -74,6 +74,35 @@ func capture_authoritative_source_census(section_keys: Array) -> Dictionary:
 	return _source_roster.capture_sections(section_keys)
 
 
+## Production composition entry point. It captures the exact required-provider
+## census, requests each provider's sealed geometry, performs one shared
+## cross-domain assembly, and queues only a complete candidate. Missing terrain
+## layers or static domains therefore keep the existing renderer slot intact.
+func assemble_and_submit_complete_section_candidate(section_key: Vector3i,
+		candidate_generation: int) -> Dictionary:
+	if candidate_generation <= 0:
+		return _failed("invalid_complete_section_candidate_generation")
+	var census: Dictionary = capture_authoritative_source_census([section_key])
+	if census.get("status") != "complete":
+		return census
+	var captured: Dictionary = _source_roster.capture_section_contributions(
+		census, section_key)
+	if captured.get("status") != "complete":
+		return captured
+	var assembled: Dictionary = CandidateAssembler.assemble(census, section_key,
+		captured.get("contributions", []), candidate_generation)
+	if assembled.get("status") != "ready":
+		return assembled
+	var admitted: Dictionary = submit_complete_section_candidate(assembled.candidate)
+	if admitted.get("status") != "queued":
+		return admitted
+	return {"status":"queued", "sectionKey":section_key,
+		"generation":candidate_generation, "censusDigest":String(census.censusDigest),
+		"contentManifestDigest":String(assembled.contentManifestDigest),
+		"providerCount":int(assembled.providerCount),
+		"sourceCount":int(assembled.sourceCount), "inputCount":int(assembled.inputCount)}
+
+
 ## Admit one complete cross-domain section snapshot. This path does not merge
 ## per-source ledger deltas: every install is the result of one whole-section
 ## candidate assembled from the current provider census and one shared pass.

@@ -1,6 +1,5 @@
 extends SceneTree
 
-const Assembler := preload("res://scripts/world/WorldStaticSectionCandidateAssembler.gd")
 const Coordinator := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const PacketOwner := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 const InstallSession := preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
@@ -24,10 +23,16 @@ var coordinator
 
 
 class CensusProvider extends RefCounted:
+	const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+	const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 	var world_id := ""
 	var provider_id := ""
 	var source_part_id := ""
 	var source_revision := ""
+	var mesh: Mesh
+	var material: Material
+	var batch_key := ""
+	var compatibility: Dictionary
 
 	func capture_static_section_sources(request_world_id: String,
 			section_keys: Array) -> Dictionary:
@@ -47,6 +52,48 @@ class CensusProvider extends RefCounted:
 			"sourceRevisions":revisions, "sections":sections}
 		result.make_read_only()
 		return result
+
+	func capture_static_section_contribution(census: Dictionary,
+			section_key: Vector3i) -> Dictionary:
+		if census.get("status") != "complete" or census.get("worldId") != world_id \
+				or section_key != SECTION or source_part_id not in \
+				census.get("expectedContributorsBySection", {}).get(section_key, []):
+			return {"status":"pending", "reason":"fixture_contribution_census_stale",
+				"retryable":true}
+		var values: Array[float] = []
+		for value: float in Attributes.encode(Transform3D.IDENTITY, Color.WHITE):
+			values.append(value)
+		values.make_read_only()
+		var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+			"sourceId":source_part_id, "sourcePartId":source_part_id,
+			"sourceRevision":source_revision,
+			"ownerCell":Grid.logical_owner_cell_for_world_position(Vector3(2, 0, 2)),
+			"sourceToWorld":Transform3D(Basis.IDENTITY, Vector3(2, 0, 2)),
+			"meshLocalBounds":mesh.get_aabb(), "batchKey":batch_key,
+			"segmentId":source_part_id + ":mesh", "buffer":values, "instanceCount":1}
+		input.make_read_only()
+		var inputs: Array[Dictionary] = [input]
+		inputs.make_read_only()
+		var revisions := {source_part_id:source_revision}
+		revisions.make_read_only()
+		var compatibility_map := {batch_key:compatibility}
+		compatibility_map.make_read_only()
+		var materials := {"contract:shared":material}
+		materials.make_read_only()
+		var meshes := {"contract:shared-mesh":mesh}
+		meshes.make_read_only()
+		var binding := {"material":material, "mesh":mesh}
+		binding.make_read_only()
+		var resources := {batch_key:binding}
+		resources.make_read_only()
+		var contribution := {"providerId":provider_id, "sectionKey":section_key,
+			"coverageRevision":String(census.providerCoverageRevisions[provider_id][section_key]),
+			"authorityRevision":String(census.providerSnapshotRevisions[provider_id]),
+			"authoritySourceRevisions":revisions, "inputs":inputs,
+			"compatibilityByKey":compatibility_map, "materialBindings":materials,
+			"meshBindings":meshes, "resourceBindings":resources}
+		contribution.make_read_only()
+		return {"status":"ready", "contribution":contribution}
 
 
 class WorldRoot extends Node3D:
@@ -88,11 +135,19 @@ func _run() -> void:
 	terrain_provider.provider_id = "terrain"
 	terrain_provider.source_part_id = "terrain:0,0,0"
 	terrain_provider.source_revision = "terrain-r1"
+	terrain_provider.mesh = shared_mesh
+	terrain_provider.material = shared_material
+	terrain_provider.batch_key = shared_batch_key
+	terrain_provider.compatibility = shared_compatibility
 	var ordinary_provider := CensusProvider.new()
 	ordinary_provider.world_id = WORLD
 	ordinary_provider.provider_id = "ordinary"
 	ordinary_provider.source_part_id = "ordinary:fixture:0"
 	ordinary_provider.source_revision = "ordinary-r1"
+	ordinary_provider.mesh = shared_mesh
+	ordinary_provider.material = shared_material
+	ordinary_provider.batch_key = shared_batch_key
+	ordinary_provider.compatibility = shared_compatibility
 	coordinator.register_source_provider("terrain", terrain_provider,
 		"capture_static_section_sources")
 	coordinator.register_source_provider("ordinary", ordinary_provider,
@@ -102,10 +157,9 @@ func _run() -> void:
 	if not checks["real_native_section_backend_attached"].passed:
 		_finish()
 		return
-	var first_census: Dictionary = coordinator.capture_authoritative_source_census([SECTION])
-	var first_result: Dictionary = _assemble(1, first_census)
-	var first_candidate: Dictionary = first_result.get("candidate", {})
-	var first_admission: Dictionary = coordinator.submit_complete_section_candidate(first_candidate)
+	var first_admission: Dictionary = coordinator.assemble_and_submit_complete_section_candidate(
+		SECTION, 1)
+	var first_candidate: Dictionary = coordinator._production_candidate_jobs.get(SECTION, {}).get("candidate", {})
 	_check("production_candidate_enters_native_install_session",
 		first_admission.get("status") == "queued", first_admission)
 	if first_admission.get("status") != "queued":
@@ -123,10 +177,9 @@ func _run() -> void:
 	if first_outcome.get("status") != "installed":
 		_finish()
 		return
-	var second_census: Dictionary = coordinator.capture_authoritative_source_census([SECTION])
-	var second_result: Dictionary = _assemble(2, second_census)
-	var second_candidate: Dictionary = second_result.get("candidate", {})
-	var second_admission: Dictionary = coordinator.submit_complete_section_candidate(second_candidate)
+	var second_admission: Dictionary = coordinator.assemble_and_submit_complete_section_candidate(
+		SECTION, 2)
+	var second_candidate: Dictionary = coordinator._production_candidate_jobs.get(SECTION, {}).get("candidate", {})
 	_check("replacement_candidate_begins_without_retiring_old_slot",
 		second_admission.get("status") == "queued"
 		and int(backend.call("installed_snapshot", slot).get("generation", 0)) == 1,
@@ -161,10 +214,8 @@ func _run() -> void:
 		and bool(backend.call("receipt_installed", slot, 2,
 			"%s:%d" % [WORLD, 2], String(second_candidate.get("contentManifestDigest", "")))),
 		{"outcome":replacement_outcome, "installed":after_commit})
-	var third_census: Dictionary = coordinator.capture_authoritative_source_census([SECTION])
-	var third_result: Dictionary = _assemble(3, third_census)
-	var third_candidate: Dictionary = third_result.get("candidate", {})
-	var third_admission: Dictionary = coordinator.submit_complete_section_candidate(third_candidate)
+	var third_admission: Dictionary = coordinator.assemble_and_submit_complete_section_candidate(
+		SECTION, 3)
 	ordinary_provider.source_revision = "ordinary-r2"
 	var stale_advance: Dictionary = coordinator.advance_complete_section_candidate(SECTION, 8)
 	var retained_after_stale: Dictionary = backend.call("installed_snapshot", slot)
@@ -210,63 +261,6 @@ func _advance_coordinator_to_install() -> Dictionary:
 			return step
 		await process_frame
 	return {"status":"failed", "reason":"headed_native_install_frame_budget_exceeded"}
-
-
-func _assemble(generation: int, census: Dictionary) -> Dictionary:
-	var contributions: Array = []
-	for provider_id: String in ["terrain", "ordinary"]:
-		var parts: Array = census.expectedContributorsBySection.get(SECTION, [])
-		var part_id := ""
-		for part_value: Variant in parts:
-			if String(census.sourceProviderIds.get(String(part_value), "")) == provider_id:
-				part_id = String(part_value)
-		var inputs: Array = []
-		var source_revision := {}
-		if not part_id.is_empty():
-			var revision := String(census.sourceRevisions.get(part_id, ""))
-			inputs.append(_input(part_id, revision,
-				Vector3(2.0 if provider_id == "terrain" else 4.0, 0.0, 2.0)))
-			source_revision[part_id] = revision
-		inputs.make_read_only()
-		source_revision.make_read_only()
-		var compat := {}
-		var materials := {}
-		var meshes := {}
-		var resources := {}
-		if not inputs.is_empty():
-			compat[shared_batch_key] = shared_compatibility
-			materials["contract:shared"] = shared_material
-			meshes["contract:shared-mesh"] = shared_mesh
-			resources[shared_batch_key] = {"material":shared_material,"mesh":shared_mesh}
-		compat.make_read_only()
-		materials.make_read_only()
-		meshes.make_read_only()
-		resources.make_read_only()
-		var contribution := {"providerId":provider_id, "sectionKey":SECTION,
-			"coverageRevision":String(census.providerCoverageRevisions[provider_id][SECTION]),
-			"authorityRevision":String(census.providerSnapshotRevisions[provider_id]),
-			"authoritySourceRevisions":source_revision, "inputs":inputs,
-			"compatibilityByKey":compat, "materialBindings":materials,
-			"meshBindings":meshes, "resourceBindings":resources}
-		contribution.make_read_only()
-		contributions.append(contribution)
-	contributions.make_read_only()
-	return Assembler.assemble(census, SECTION, contributions, generation)
-
-
-func _input(part_id: String, revision: String, origin: Vector3) -> Dictionary:
-	var values: Array[float] = []
-	for value: float in Attributes.encode(Transform3D.IDENTITY, Color.WHITE):
-		values.append(value)
-	values.make_read_only()
-	var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
-		"sourceId":part_id, "sourcePartId":part_id, "sourceRevision":revision,
-		"ownerCell":Grid.logical_owner_cell_for_world_position(origin),
-		"sourceToWorld":Transform3D(Basis.IDENTITY, origin),
-		"meshLocalBounds":shared_mesh.get_aabb(), "batchKey":shared_batch_key,
-		"segmentId":part_id + ":mesh", "buffer":values, "instanceCount":1}
-	input.make_read_only()
-	return input
 
 
 func _build_shared_batch() -> void:
