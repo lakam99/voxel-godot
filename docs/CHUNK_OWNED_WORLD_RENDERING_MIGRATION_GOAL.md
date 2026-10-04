@@ -805,7 +805,7 @@ traversal or gameplay performance claim follows from this probe.
 | 0. Map authorities and baseline | Complete | Producer-to-renderer, revisions, ownership, collision, interactions, unload/replay and save paths documented. |
 | 1. Shared candidate and producer census | Partial | Ledger and coordinator contract exist; wire a world-lifetime producer roster and authoritative census into normal gameplay. |
 | 2. Native section install lifecycle | Partial | Native contract passes with a triangle `ArrayMesh`, manifest-bound mesh-content digest, mismatch rejection, copied immutable payload, CPU mesh-array/instance-buffer accounting, and old-root retention; production section callers, full layer policies, GPU memory accounting and exact per-source capture epochs remain. |
-| 3. Smooth terrain | Not started | Capture/revision/halo and install receipt path through the configured Transvoxel mesher, then prove collision, edits, seams, fluids and replacement. |
+| 3. Smooth terrain | Partial | A headed Main-scene probe captures live resident 19³ SDF/material bytes with 27 intersecting 3D section revisions, runs configured Transvoxel, and installs one terrain-only candidate through the independent native section owner. This is a shadow install only; no complete source census, visual parity, edit replacement, collision/fluid/light parity or Voxel Tools visual retirement is proven. |
 | 4. Generated buildings | Not started | Replace per-source final publication with complete section candidates; preserve structure gameplay authority, removals, replay and readiness. |
 | 5. Trees, flora and static props | Not started | Admit canonical deterministic prepared outputs, visual attributes, harvesting/removal and save/reload into shared candidates. |
 | 6. Readiness, performance and retirement | Not started | Headed real-world visual/traversal and performance gates, full lifecycle parity, then retire superseded queues. |
@@ -848,3 +848,18 @@ native-world runner stopped on failures in cave-field, natural-terrain,
 underground-prop and world-source tests at
 `artifacts/native-world-backend/section-mesh-identity-20261004-rerun/report.json`;
 their baseline classification is unknown, and they remain unresolved.
+
+**Resident Transvoxel shadow capture/install (2026-10-04):** game commit
+`9f1168ec` adds a resident-only capture API to `VoxelTerrainRuntime` and a
+focused headed `PlaytestRunner` gate. Command:
+`node tools/run-playtest.mjs --only resident_terrain_section_capture --seed section-capture-audit-20261004 --visible true`.
+Passing report:
+`artifacts/chunk-owned-rendering/terrain-candidate-install-headed-rerun-20261004/report.json`.
+It verified the live block `(12, 0, -1)`, all 27 halo-section revisions,
+channel byte sizes and payload tamper rejection, then received a native install
+receipt for generation 1 at section `(12, 0, -1)`. The original Voxel Tools
+visual and collision remain active. Screenshot evidence shows the loading
+overlay, so this proves source capture and renderer installation only; it is
+not visual-parity, traversal, normal-readiness or performance acceptance.
+The canonical architecture charter records the audit, seven stage exits and
+unresolved 240-second full-startup run.
