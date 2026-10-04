@@ -962,3 +962,14 @@ had already validated those records; a deliberately corrupted candidate still
 fails the census contract. One later headed sample measured ecology admission
 at 15,715 µs, but used a different chunk and is not a controlled performance
 comparison.
+
+The next tutorial-free headed run added an exact source gate for the previously
+mismatched pebble detail. After retrying the pending terrain exact-fluid proof,
+it proved census ownership, partition section `(-1, 0, 0)`, installed candidate
+manifest membership, and a current native receipt for
+`terrain-section-refresh-proof-20261004-r6:detail:-1,0:pebble:9:surface:0`.
+Terrain edit replacement also passed in the same run. The run took 117.9 seconds
+and required 134 census attempts before its proof was ready, so this closes the
+specific membership/install ambiguity while leaving cold-readiness latency and
+the migration's traversal, visual parity, unload/replay and performance gates
+open. Full evidence is in the canonical charter's exact-source follow-up.

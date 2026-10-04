@@ -7,6 +7,7 @@ const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRoute
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const StaticSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const StaticSectionInstallSessionScript := preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
+const EcologySectionValueAdapterScript := preload("res://scripts/world/EcologySectionValueAdapter.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -688,7 +689,9 @@ func _production_provider_census_diagnostics(section_key: Vector3i,
         var section_row: Dictionary = section_value if section_value is Dictionary else {}
         var ids: Array = section_row.get("sourcePartIds", [])
         var detail_values: Dictionary = {}
-        for detail_key in ["chunk", "snapshotRemovedPropsRevision",
+        for detail_key in ["chunk", "stage", "phase", "cursor", "section",
+                "sourceId", "sourceCount", "candidateCount", "pendingSourceIds",
+                "retryable", "snapshotRemovedPropsRevision",
                 "currentRemovedPropsRevision", "snapshotSourceRevision",
                 "currentSourceRevision", "snapshotValidation",
                 "missingCategories", "unsupportedCandidateIds", "sourceId",
@@ -697,8 +700,9 @@ func _production_provider_census_diagnostics(section_key: Vector3i,
                 "recipeTier", "bodyTier", "topologySignature", "branchCount"]:
             if snapshot.has(detail_key):
                 detail_values[detail_key] = snapshot[detail_key]
-        rows[provider_id] = {"status":String(snapshot.get("status", "missing_status")),
-            "reason":String(snapshot.get("reason", "")),
+        rows[provider_id] = {"status":String(section_row.get("status",
+                snapshot.get("status", "missing_status"))),
+            "reason":String(snapshot.get("reason", section_row.get("reason", ""))),
             "authorityRevision":String(snapshot.get("authorityRevision", "")),
             "coverageStatus":String(section_row.get("status", "")),
             "coverageRevision":String(section_row.get("coverageRevision", "")),
@@ -830,7 +834,31 @@ func run_production_section_candidate_diagnostic() -> void:
     trace.append({"frame":Engine.get_process_frames(), "event":"selected_current_resident_demand",
         "sectionKey":report.sectionKey, "terrainRevision":report.terrainRevision,
         "demandStage":selection.demand.get("stage", "")})
+    var ordinary_fixture := _install_ordinary_recipe_fixture(section_key, player_body)
+    var ordinary_sources_value: Variant = main.get("structure_system").get(
+        "ordinary_visual_sources") if is_instance_valid(main.get("structure_system")) else null
+    if ordinary_fixture.get("status") == "ready" and ordinary_sources_value is Dictionary:
+        var fixture_source_id := String(ordinary_fixture.get("sourceId", ""))
+        var fixture_source: Dictionary = ordinary_sources_value.get(fixture_source_id, {})
+        report["ordinaryFixtureLedger"] = {
+            "sourceId":fixture_source_id,
+            "completed":bool(fixture_source.get("completed", false)),
+            "revision":int(fixture_source.get("revision", 0)),
+            "expectedCount":(fixture_source.get("expected", {}) as Dictionary).size(),
+            "recipeCount":(fixture_source.get("visualRecipeInputs", {}) as Dictionary).size(),
+            "fixtureCellExpected":String((fixture_source.get("expected", {}) as Dictionary).get(
+                ordinary_fixture.get("cell", Vector3i.ZERO), "")) == String(ordinary_fixture.get("blockType", ""))
+        }
+    report["ordinaryRecipeFixture"] = ordinary_fixture.duplicate(true)
+    if ordinary_fixture.get("status") != "ready":
+        report["status"] = "failed"
+        report["firstBlocker"] = {"stage":"ordinary_recipe_fixture",
+            "reason":String(ordinary_fixture.get("reason", "fixture_unavailable"))}
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
     var census: Dictionary = {}
+    var last_pending_signature := ""
+    var unchanged_pending_samples := 0
     while is_inside_tree() and is_instance_valid(coordinator):
         census = coordinator.call("capture_authoritative_source_census", [section_key])
         report["providerCensus"] = _production_provider_census_diagnostics(
@@ -845,11 +873,36 @@ func run_production_section_candidate_diagnostic() -> void:
         var waiting_reason := String(census.get("reason", "pending"))
         var waiting_provider: Dictionary = report.providerCensus.get("providers", {}).get(
             waiting_on, {})
+        var pending_details: Dictionary = waiting_provider.get("details", {}).duplicate(true)
+        # Timings are expected to differ on each capture and do not establish
+        # forward progress. Cursor, phase and source identity remain in the
+        # signature so genuine bounded work continues to be admitted.
+        pending_details.erase("phaseUsec")
+        var pending_signature := JSON.stringify([waiting_on, waiting_reason,
+            pending_details])
+        if pending_signature == last_pending_signature:
+            unchanged_pending_samples += 1
+        else:
+            last_pending_signature = pending_signature
+            unchanged_pending_samples = 0
         var waiting_detail := JSON.stringify(waiting_provider.get("details", {}))
         if waiting_detail.length() > 1200:
             waiting_detail = waiting_detail.substr(0, 1200)
         mark_progress("production_section_waiting_for_%s_%s_%s" % [
             waiting_on, waiting_reason, waiting_detail])
+        # Source discovery and producer publication are both asynchronous. Keep
+        # waiting while their bounded cursor/phase telemetry changes, but don't
+        # let a permanently missing source turn this headed diagnostic into an
+        # opaque watchdog timeout.
+        if unchanged_pending_samples >= 60:
+            report["status"] = "failed"
+            report["firstBlocker"] = {"stage":"stable_provider_pending",
+                "reason":waiting_reason, "providerId":waiting_on,
+                "unchangedSamples":unchanged_pending_samples,
+                "details":waiting_provider.get("details", {})}
+            report["trace"] = trace
+            add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+            return
         await wait_physics_frames(30)
     if not is_instance_valid(coordinator):
         report["status"] = "failed"
@@ -867,6 +920,18 @@ func run_production_section_candidate_diagnostic() -> void:
             .get(section_key, []).size()}
     report["providerContributions"] = _production_provider_contribution_diagnostics(
         section_key, coordinator, census)
+    var contribution_providers: Dictionary = report.providerContributions.get("providers", {})
+    var ordinary_contribution: Dictionary = contribution_providers.get(
+        "ordinary-structures", {})
+    var ordinary_input_count := int(ordinary_contribution.get("inputCount", 0))
+    if ordinary_contribution.get("status") != "ready" or ordinary_input_count < 1:
+        report["status"] = "failed"
+        report["firstBlocker"] = {"stage":"ordinary_provider_capture",
+            "reason":String(ordinary_contribution.get("reason",
+                "ordinary_recipe_fixture_missing_from_provider_capture")),
+            "contribution":ordinary_contribution}
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
     var demand_request: Dictionary = {"status":"unavailable",
         "reason":"visible_section_demand_api_missing"}
     if census.get("status") == "complete":
@@ -914,7 +979,12 @@ func run_production_section_candidate_diagnostic() -> void:
                     "generation":int(install.generation)})
                 last_trace_stage = stage
             if frame_index > 0 and frame_index % 120 == 0:
-                mark_progress("production_section_candidate_%s_%s" % [stage, reason])
+                var admission_detail := JSON.stringify(
+                    demand_state.get("lastAdmissionDetails", {}))
+                if admission_detail.length() > 1200:
+                    admission_detail = admission_detail.substr(0, 1200)
+                mark_progress("production_section_candidate_%s_%s_%s" % [
+                    stage, reason, admission_detail])
             if stage in ["installed", "blocked", "withdrawn"]:
                 break
     else:
@@ -924,6 +994,15 @@ func run_production_section_candidate_diagnostic() -> void:
     var installed_candidates: Variant = coordinator.get("_production_candidates_by_section")
     var installed_candidate: Dictionary = installed_candidates.get(section_key, {}) \
         if installed_candidates is Dictionary else {}
+    var candidate_envelope: Dictionary = installed_candidate.get("candidate", {})
+    var candidate_snapshot: Dictionary = candidate_envelope.get("snapshot", {})
+    var candidate_manifest: Array = candidate_snapshot.get("manifest", [])
+    var ordinary_fixture_part_id := String(ordinary_fixture.get("sourcePartId", ""))
+    var ordinary_fixture_installed := false
+    for manifest_value: Variant in candidate_manifest:
+        if manifest_value is Dictionary \
+                and String(manifest_value.get("sourcePartId", "")) == ordinary_fixture_part_id:
+            ordinary_fixture_installed = true
     var receipts_value: Variant = coordinator.get("_production_candidate_receipts")
     var coordinator_receipt: Dictionary = receipts_value.get(section_key, {}) \
         if receipts_value is Dictionary else {}
@@ -942,6 +1021,7 @@ func run_production_section_candidate_diagnostic() -> void:
         and bool(backend.call("receipt_installed", slot_id, installed_generation,
             "%s:%d" % [world_id, installed_generation], manifest_digest))
     var matching_receipt: bool = install.get("status") == "installed" \
+        and ordinary_fixture_installed \
         and not manifest_digest.is_empty() \
         and String(coordinator_receipt.get("contentManifestDigest", "")) == manifest_digest \
         and int(coordinator_receipt.get("generation", 0)) == installed_generation \
@@ -962,7 +1042,14 @@ func run_production_section_candidate_diagnostic() -> void:
         "coordinatorReceipt":coordinator_receipt,
         "nativeSnapshot":native_snapshot,
         "nativeReceiptCurrent":native_receipt_current,
+        "ordinaryFixturePartId":ordinary_fixture_part_id,
+        "ordinaryFixtureInCandidateManifest":ordinary_fixture_installed,
         "receiptBackedInstall":matching_receipt}
+    if matching_receipt:
+        var exact_ecology_probe: Dictionary = await _exercise_exact_ecology_source_install(
+            coordinator, terrain_runtime, main)
+        report["exactEcologySourceInstall"] = exact_ecology_probe
+        matching_receipt = bool(exact_ecology_probe.get("passed", false))
     if matching_receipt:
         var edit_refresh: Dictionary = await _exercise_production_terrain_section_edit_refresh(
             coordinator, terrain_runtime, section_key, installed_generation, manifest_digest)
@@ -986,6 +1073,176 @@ func run_production_section_candidate_diagnostic() -> void:
         "status":report.status, "receiptBackedInstall":matching_receipt,
         "elapsedMs":report.elapsedMs})
     add_result("production_section_candidate_diagnostic", matching_receipt, JSON.stringify(report))
+
+
+func _exercise_exact_ecology_source_install(coordinator: Object,
+        terrain_runtime: Object, main_node: Node3D) -> Dictionary:
+    var source_id := "%s:detail:-1,0:pebble:9:surface:0" % String(main_node.get("seed_text"))
+    var chunks_value: Variant = main_node.get("chunks")
+    if not chunks_value is Dictionary:
+        return {"passed":false, "stage":"source_owner_lookup",
+            "reason":"ecology_chunk_map_unavailable", "sourceId":source_id}
+    var owner_node := chunks_value.get(Vector2i(-1, 0)) as Node3D
+    if not is_instance_valid(owner_node):
+        return {"passed":false, "stage":"source_owner_lookup",
+            "reason":"exact_ecology_source_chunk_unavailable", "sourceId":source_id,
+            "chunk":Vector2i(-1, 0)}
+    var source_snapshot: Variant = owner_node.get_meta("static_ecology_source_value_snapshot", {})
+    if not source_snapshot is Dictionary:
+        return {"passed":false, "stage":"source_lookup",
+            "reason":"exact_ecology_source_snapshot_unavailable", "sourceId":source_id}
+    var source_candidate: Dictionary = {}
+    for candidate_value: Variant in source_snapshot.get("candidates", []):
+        if candidate_value is Dictionary \
+                and String(candidate_value.get("sourceId", "")) == source_id:
+            source_candidate = candidate_value
+            break
+    if source_candidate.is_empty():
+        return {"passed":false, "stage":"source_lookup",
+            "reason":"exact_ecology_source_not_recorded", "sourceId":source_id,
+            "snapshotRevision":String(source_snapshot.get("contentRevision", ""))}
+    var detail_type := String(source_candidate.get("detailType", ""))
+    var surface_index := int(source_candidate.get("surfaceIndex", -1))
+    var mesh: Variant = null
+    if surface_index >= 0 and main_node.has_method("detail_mesh_surface"):
+        mesh = main_node.call("detail_mesh_surface", detail_type, surface_index)
+    elif main_node.has_method("detail_mesh"):
+        mesh = main_node.call("detail_mesh", detail_type)
+    if not mesh is Mesh or not source_candidate.get("transform") is Transform3D:
+        return {"passed":false, "stage":"source_geometry",
+            "reason":"exact_ecology_source_mesh_or_transform_missing", "sourceId":source_id}
+    var section_key: Vector3i = EcologySectionValueAdapterScript._surface_detail_census_section_key(
+        mesh, owner_node.global_transform, source_candidate.transform)
+    var result := {"passed":false, "sourceId":source_id,
+        "sourceOwnerInstanceId":owner_node.get_instance_id(),
+        "producerSnapshotRevision":String(source_snapshot.get("contentRevision", "")),
+        "expectedSection":section_key}
+    var census: Dictionary = {}
+    var census_attempts := 0
+    while is_inside_tree() and is_instance_valid(coordinator):
+        census = coordinator.call("capture_authoritative_source_census", [section_key])
+        census_attempts += 1
+        if census.get("status") != "pending":
+            break
+        var pending_rows: Dictionary = _production_provider_census_diagnostics(
+            section_key, String(census.get("worldId", coordinator.get("_world_id"))),
+            coordinator).get("providers", {})
+        var pending_detail := JSON.stringify(pending_rows)
+        if pending_detail.length() > 1200:
+            pending_detail = pending_detail.substr(0, 1200)
+        mark_progress("exact_ecology_source_census_pending_%d_%s" % [
+            census_attempts, pending_detail])
+        await wait_physics_frames(30)
+    result["censusAttempts"] = census_attempts
+    result["censusStatus"] = String(census.get("status", "missing_status"))
+    result["censusReason"] = String(census.get("reason", ""))
+    result["censusProviderDiagnostics"] = _production_provider_census_diagnostics(
+        section_key, String(census.get("worldId", coordinator.get("_world_id"))),
+        coordinator)
+    result["censusContributorIds"] = census.get("expectedContributorsBySection", {}) \
+        .get(section_key, []).duplicate()
+    var censused_source: bool = result.censusContributorIds.has(source_id)
+    result["exactSourceInCensus"] = censused_source
+    if census.get("status") != "complete" or not censused_source:
+        result["stage"] = "section_census"
+        result["reason"] = String(census.get("reason",
+            "exact_ecology_source_missing_from_owner_section_census"))
+        return result
+    var published_value: Variant = terrain_runtime.get("published_mesh_blocks")
+    var revisions_value: Variant = terrain_runtime.get("mesh_block_revisions")
+    if not published_value is Dictionary or not revisions_value is Dictionary \
+            or not bool(published_value.get(section_key, false)):
+        result["stage"] = "terrain_dependency"
+        result["reason"] = "exact_ecology_source_section_not_currently_published"
+        return result
+    var terrain_revision := int(revisions_value.get(section_key, 0))
+    if terrain_revision <= 0:
+        result["stage"] = "terrain_dependency"
+        result["reason"] = "exact_ecology_source_section_revision_missing"
+        return result
+    var request: Dictionary = coordinator.call("request_visible_section_demand",
+        section_key, terrain_revision, 0.0)
+    result["demandRequest"] = request.duplicate(true)
+    if request.get("status") not in ["queued", "tracked"]:
+        result["stage"] = "visible_demand"
+        result["reason"] = String(request.get("reason", "exact_ecology_demand_rejected"))
+        return result
+    var installed := false
+    var demand_state: Dictionary = {}
+    for frame_index in range(3600):
+        await get_tree().process_frame
+        coordinator.call("advance_visible_section_candidate_demands", 1)
+        coordinator.call("advance_queued_complete_section_candidates", 1, 1)
+        var demands: Variant = coordinator.get("_visible_section_demands")
+        demand_state = demands.get(section_key, {}) if demands is Dictionary else {}
+        var stage := String(demand_state.get("stage", ""))
+        if stage == "installed":
+            installed = true
+            break
+        if stage in ["blocked", "withdrawn"]:
+            result["stage"] = "native_install"
+            result["reason"] = String(demand_state.get("blockedReason",
+                demand_state.get("lastReason", stage)))
+            break
+        if frame_index > 0 and frame_index % 120 == 0:
+            var details := JSON.stringify(demand_state.get("lastAdmissionDetails", {}))
+            if details.length() > 1200:
+                details = details.substr(0, 1200)
+            mark_progress("exact_ecology_source_%s_%s" % [stage, details])
+    result["demandState"] = demand_state.duplicate(true)
+    if not installed:
+        result["stage"] = String(result.get("stage", "native_install"))
+        if String(result.get("reason", "")).is_empty():
+            result["reason"] = "exact_ecology_section_install_not_acknowledged"
+        return result
+    var installed_value: Variant = coordinator.get("_production_candidates_by_section")
+    var installed_candidate: Dictionary = installed_value.get(section_key, {}) \
+        if installed_value is Dictionary else {}
+    var envelope: Dictionary = installed_candidate.get("candidate", {})
+    var manifest: Array = envelope.get("snapshot", {}).get("manifest", [])
+    var manifest_has_source := false
+    for manifest_value: Variant in manifest:
+        if manifest_value is Dictionary \
+                and String(manifest_value.get("sourcePartId", "")) == source_id:
+            manifest_has_source = true
+            break
+    result["sectionContributionStatus"] = "installed_candidate_manifest" \
+        if installed else "not_installed"
+    result["sectionContributionReason"] = "" if manifest_has_source \
+        else "exact_source_not_in_installed_candidate_manifest"
+    result["partitionSectionKeys"] = [section_key] if manifest_has_source else []
+    result["exactSourceInSectionContribution"] = manifest_has_source
+    var receipt_map: Variant = coordinator.get("_production_candidate_receipts")
+    var receipt: Dictionary = receipt_map.get(section_key, {}) \
+        if receipt_map is Dictionary else {}
+    var receipt_sources: Variant = receipt.get("sourceRevisions", {})
+    var receipt_has_source: bool = receipt_sources is Dictionary \
+        and (receipt_sources as Dictionary).has(source_id)
+    var candidate_generation := int(installed_candidate.get("generation", 0))
+    var world_id := String(coordinator.get("_world_id"))
+    var owner_cell := StaticSectionGridScript.chunk_key_for_section(section_key)
+    var render_owner: Dictionary = main_node.call("get_static_section_render_owner",
+        owner_cell, false)
+    var backend: Node = render_owner.get("backend") as Node \
+        if render_owner.get("status") == "ready" else null
+    var slot_id := StaticSectionInstallSessionScript.slot_id(world_id, section_key)
+    var manifest_digest := String(installed_candidate.get("contentManifestDigest", ""))
+    var native_current := is_instance_valid(backend) and bool(backend.call(
+        "receipt_installed", slot_id, candidate_generation,
+        "%s:%d" % [world_id, candidate_generation], manifest_digest))
+    result["installedGeneration"] = candidate_generation
+    result["manifestHasExactSource"] = manifest_has_source
+    result["receiptHasExactSource"] = receipt_has_source
+    result["nativeReceiptCurrent"] = native_current
+    result["receiptSection"] = receipt.get("sectionKey", Vector3i(-999, -999, -999))
+    result["receiptManifestDigestMatches"] = String(receipt.get(
+        "contentManifestDigest", "")) == manifest_digest
+    result["passed"] = manifest_has_source and receipt_has_source and native_current \
+        and result.receiptSection == section_key \
+        and bool(result.receiptManifestDigestMatches)
+    result["stage"] = "complete" if bool(result.passed) else "native_receipt"
+    result["reason"] = "" if bool(result.passed) else "exact_ecology_source_receipt_mismatch"
+    return result
 
 
 func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
@@ -7719,6 +7976,95 @@ func underground_volume_focus_chunk_lookup(cells: Array[Vector2i]) -> Dictionary
         if not focused.is_empty():
             return focused
     return result
+
+
+func _install_ordinary_recipe_fixture(section_key: Vector3i,
+        player_body: CharacterBody3D) -> Dictionary:
+    ## Diagnostic-only source created through Main's production block constructor
+    ## and StructureSystem's ordinary-source ledger. This proves one complete
+    ## opaque base-block recipe reaches the native section installer; it does not
+    ## stand in for a generated building's full decorated member manifest.
+    if not is_instance_valid(main) or not is_instance_valid(player_body):
+        return {"status":"pending", "reason":"ordinary_fixture_world_or_player_missing"}
+    var structure_system: Object = main.get("structure_system")
+    var blocks_value: Variant = main.get("blocks")
+    var cell_size := float(main.get("CELL"))
+    if not is_instance_valid(structure_system) or not blocks_value is Dictionary \
+            or cell_size <= 0.0:
+        return {"status":"pending", "reason":"ordinary_fixture_authority_unavailable"}
+    var min_x := section_key.x * StaticSectionGridScript.SECTION_SIZE_CELLS + 1
+    var min_z := section_key.z * StaticSectionGridScript.SECTION_SIZE_CELLS + 1
+    var min_y := section_key.y * StaticSectionGridScript.SECTION_SIZE_CELLS + 8
+    var target: Vector3i
+    var found := false
+    for candidate_index in range(144):
+        var candidate := Vector3i(min_x + candidate_index % 12, min_y,
+            min_z + int(candidate_index / 12))
+        var candidate_position := Vector3(float(candidate.x) * cell_size,
+            (float(candidate.y) - 0.5) * cell_size,
+            float(candidate.z) * cell_size)
+        if blocks_value.has(candidate) \
+                or candidate_position.distance_squared_to(player_body.global_position) < 16.0:
+            continue
+        target = candidate
+        found = true
+        break
+    if not found:
+        return {"status":"pending", "reason":"ordinary_fixture_cell_unavailable",
+            "sectionKey":section_key}
+    var town_region_cache: Variant = main.get("town_region_cache")
+    if not town_region_cache is Dictionary:
+        return {"status":"pending", "reason":"ordinary_fixture_town_cache_unavailable"}
+    var town_region_size := int(main.get("TOWN_REGION_CELLS"))
+    if town_region_size <= 0:
+        return {"status":"pending", "reason":"ordinary_fixture_town_grid_invalid"}
+    var region := Vector2i(floori(float(target.x) / town_region_size),
+        floori(float(target.z) / town_region_size))
+    var source_cache_region := region
+    var town_value: Variant = town_region_cache.get(source_cache_region, {})
+    if town_value is Dictionary and not town_value.is_empty():
+        var cache_slot_found := false
+        for dz in range(-1, 2):
+            for dx in range(-1, 2):
+                var nearby_region := region + Vector2i(dx, dz)
+                var nearby_value: Variant = town_region_cache.get(nearby_region, {})
+                if nearby_value is Dictionary and nearby_value.is_empty():
+                    source_cache_region = nearby_region
+                    town_value = nearby_value
+                    cache_slot_found = true
+                    break
+            if cache_slot_found:
+                break
+        if not cache_slot_found:
+            return {"status":"pending", "reason":"ordinary_fixture_town_cache_slot_unavailable"}
+    var source_key := "%d,%d" % [target.x, target.z]
+    town_region_cache[source_cache_region] = {"key":source_key,
+        "centerX":target.x, "centerZ":target.z, "radius":3}
+    var source_id := "town:" + source_key
+    var world_position := Vector3(float(target.x) * cell_size,
+        (float(target.y) - 0.5) * cell_size, float(target.z) * cell_size)
+    var options := {"generated":true, "generatedTier":"section_recipe_proof",
+        "generatedVisualSourceId":source_id, "world_x":world_position.x,
+        "world_y":world_position.y, "world_z":world_position.z}
+    structure_system.call("_begin_ordinary_visual_source", source_id)
+    structure_system.set("active_structure_visual_source_id", source_id)
+    var body: StaticBody3D = main.call("create_block", target, "stoneBlock", options)
+    structure_system.call("_record_ordinary_visual_block", target, "stoneBlock",
+        body, options)
+    structure_system.set("active_structure_visual_source_id", "")
+    if not is_instance_valid(body):
+        return {"status":"pending", "reason":"ordinary_fixture_block_creation_failed",
+            "cell":target}
+    structure_system.call("_complete_ordinary_visual_source", source_id)
+    var source_part_id := "ordinary:%s:cell:%d,%d,%d" % [
+        source_id, target.x, target.y, target.z]
+    return {"status":"ready", "sourceId":source_id,
+        "sourcePartId":source_part_id, "blockType":"stoneBlock", "cell":target,
+        "worldPosition":[world_position.x, world_position.y, world_position.z],
+        "sectionKey":section_key,
+        "creationPath":"diagnostic town-region source -> Main.create_block -> StructureSystem ordinary emission ledger",
+        "sourceDiscovery":"test-scoped empty town-cache slot descriptor",
+        "generatedTownLayoutProven":false}
 
 func underground_volume_summary(found: Dictionary) -> Dictionary:
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}
