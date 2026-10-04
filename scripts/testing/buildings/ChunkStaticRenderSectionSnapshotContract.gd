@@ -90,6 +90,7 @@ func _run() -> void:
 	checks["render_layer_and_pipeline_revision_stay_separate"] = _separates_render_layer_policy()
 	checks["invalid_translucency_sort_policy_rejected"] = _rejects_invalid_sort_policy()
 	checks["merged_batches_split_at_native_instance_limit"] = _splits_coalesced_batches_at_native_limit()
+	checks["merged_native_segment_ids_are_stable_and_unique"] = _merged_native_segment_ids_are_stable_and_unique()
 	var report := {"schema":"chunk-static-render-section-snapshot-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
 		"evidence":"pure immutable snapshot contract; no rendering integration or gameplay acceptance"}
@@ -486,3 +487,29 @@ func _splits_coalesced_batches_at_native_limit() -> bool:
 		and first.sourceRanges.size() == 2 \
 		and second.sourceRanges.size() == 1 \
 		and second.sourceRanges[0].sourceFirstInstance == 56
+
+
+func _merged_native_segment_ids_are_stable_and_unique() -> bool:
+	var contributor := _contributor("many", "many-part", "many-r1", [
+		_batch("stone", "structural", "unit-box", true, 240.0, 18.0, [
+			_segment("many-a", AABB(Vector3(1, 1, 1), Vector3.ONE), 200, 0.2),
+			_segment("many-b", AABB(Vector3(2, 1, 1), Vector3.ONE), 100, 0.3)])])
+	var values: Array = [contributor]
+	values.make_read_only()
+	var first_result := Snapshot.assemble(Vector3i.ZERO, values)
+	var second_result := Snapshot.assemble(Vector3i.ZERO, values)
+	if first_result.get("status") != "ready" or second_result.get("status") != "ready":
+		return false
+	var batch_key := String(first_result.snapshot.batchKeys[0])
+	var first_segments: Array = first_result.snapshot.batches[batch_key].segments
+	var second_segments: Array = second_result.snapshot.batches[batch_key].segments
+	if first_segments.size() != 2 or second_segments.size() != 2:
+		return false
+	var ids: Array[String] = []
+	for index in range(first_segments.size()):
+		var first_id := String(first_segments[index].get("segmentId", ""))
+		var second_id := String(second_segments[index].get("segmentId", ""))
+		if first_id.is_empty() or first_id != second_id:
+			return false
+		ids.append(first_id)
+	return ids[0] != ids[1]

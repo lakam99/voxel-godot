@@ -236,7 +236,26 @@ func advance(max_upload_units: int = 1) -> Dictionary:
 		if appended.get("status") == "backpressure":
 			return {"status":"pending", "reason":appended.get("reason", "backpressure")}
 		if appended.get("status") != "accepted":
-			return _fail(String(appended.get("reason", "native_section_candidate_append_failed")))
+			var failure := _fail(String(appended.get("reason", "native_section_candidate_append_failed")))
+			var bounds: AABB = segment.bounds
+			var append_buffer := PackedFloat32Array(segment.buffer)
+			var mesh := entry.mesh as Mesh
+			failure["nativeAppend"] = {"sourceId":_source_id,
+				"batchId":batch_id, "batchKey":String(entry.get("batchKey", "")),
+				"segmentId":String(segment.get("segmentId", "")),
+				"meshClass":mesh.get_class() if is_instance_valid(mesh) else "null",
+				"meshSurfaceCount":mesh.get_surface_count() if is_instance_valid(mesh) else -1,
+				"materialClass":entry.material.get_class() if is_instance_valid(entry.material) else "null",
+				"meshContentDigestLength":mesh_content_digest.length(),
+				"bufferFloatCount":append_buffer.size(),
+				"floatsPerInstance":Attributes.FLOATS_PER_INSTANCE,
+				"renderLayer":String(batch.get("renderLayer", "")),
+				"renderTier":String(batch.get("renderTier", "structural")),
+				"visibilityRangeEnd":float(policy.visibilityRangeEnd),
+				"fadeMargin":float(policy.fadeMargin),
+				"boundsPosition":[bounds.position.x, bounds.position.y, bounds.position.z],
+				"boundsSize":[bounds.size.x, bounds.size.y, bounds.size.z]}
+			return failure
 		_batch_index += 1
 		units += 1
 		return {"status":"pending", "stage":"append", "completedBatches":_batch_index}

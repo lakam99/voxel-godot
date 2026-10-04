@@ -226,7 +226,8 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		"recipeIdentityKey": recipe_identity_key,
 		"enqueuedUsec": Time.get_ticks_usec(),
 		"publicationPriority": priority,
-		"enqueueSequence": enqueue_sequence
+		"enqueueSequence": enqueue_sequence,
+		"sectionValueMembers": []
 	}
 	# The trunk collision is already owned by the gameplay prop before this
 	# presentation queue is called.  Record that boundary once, then make a
@@ -621,13 +622,17 @@ func refresh_published_lods() -> void:
 			record["rebuildPending"] = false
 			published_lod_records[record_index] = record
 
-func remember_published_lod(body: StaticBody3D, request: Dictionary) -> void:
+func remember_published_lod(body: StaticBody3D, request: Dictionary,
+		section_value_members: Array = [], recipe_snapshot: Dictionary = {}) -> void:
 	var record := {
 		"body": weakref(body),
 		"bodyInstanceId": body.get_instance_id(),
 		"request": request.duplicate(true),
 		"tier": String(request.get("renderLodTier", "near")),
-		"rebuildPending": false
+		"rebuildPending": false,
+		"sectionValueMembers": _freeze_section_value(section_value_members),
+		"recipeSnapshot": _freeze_section_value(recipe_snapshot),
+		"recipeSignature":String(recipe_snapshot.get("signature", ""))
 	}
 	for index in range(published_lod_records.size()):
 		var existing: Dictionary = published_lod_records[index]
@@ -668,7 +673,7 @@ func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> boo
 	task["publicationPosition"] = body.global_position
 	task["recipeCacheKey"] = publication_service.recipe_cache_key(request)
 	task["recipeIdentityKey"] = publication_service.recipe_identity_key(request)
-	for key in ["recipe", "lodSourceRecipe", "renderStage", "visual", "woodRoot", "typedBranches", "boleBuildState", "boleBuildComplete", "distalBuildState", "distalBuildComplete", "foliageBuildState", "foliageBuildComplete"]:
+	for key in ["recipe", "lodSourceRecipe", "renderStage", "visual", "woodRoot", "typedBranches", "boleBuildState", "boleBuildComplete", "distalBuildState", "distalBuildComplete", "foliageBuildState", "foliageBuildComplete", "sectionValueMembers", "sectionValueCapturePending"]:
 		task.erase(key)
 	var cached_recipe: Dictionary = recipe_cache.fetch(String(task.get("recipeCacheKey", "")))
 	if not cached_recipe.is_empty():
@@ -1490,6 +1495,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			)
 			if completed_bole_visual != null:
 				wood_root.add_child(completed_bole_visual)
+				_append_section_value_member(task, completed_bole_visual, "bole")
 			# `finish_runtime_bole` transfers the ArrayMesh to the attached visual.
 			# Do not keep the completed SurfaceTool/build-state graph alive until
 			# the local task happens to fall out of scope after commit: releasing it
@@ -1540,6 +1546,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			)
 			if distal_visual != null:
 				wood_root.add_child(distal_visual)
+				_append_section_value_member(task, distal_visual, "branches")
 			# The visual now owns the MultiMesh. Release the detached builder and
 			# the typed branch projection before this stage returns, not when the
 			# completed task dictionary is later destroyed outside the budget.
@@ -1586,6 +1593,10 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			) as Node3D
 			if foliage_visual != null:
 				visual.add_child(foliage_visual)
+				if foliage_visual.get_child_count() == 1 \
+						and foliage_visual.get_child(0) is MultiMeshInstance3D:
+					_append_section_value_member(task,
+						foliage_visual.get_child(0) as MultiMeshInstance3D, "foliage")
 			# Same ownership transfer as the wood stages: the attached node owns
 			# the finished MultiMesh, so retire the detached state while this timed
 			# finalization slice is active.
@@ -1631,9 +1642,103 @@ func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3
 	body.set_meta("tree_visual_queue_wait_usec", Time.get_ticks_usec() - int(task.get("enqueuedUsec", Time.get_ticks_usec())))
 	replace_published_render_stats(body, recipe)
 	published_count += 1
-	remember_published_lod(body, request)
+	remember_published_lod(body, request, task.get("sectionValueMembers", []), recipe)
 	publication_stage_counts["commit"] = int(publication_stage_counts.get("commit", 0)) + 1
 	tree_visual_published.emit(body, recipe)
+
+
+## Capture renderer inputs at the producer handoff, while the queue still owns
+## the exact completed geometry. Later section consumers read this sealed value
+## record instead of treating a scene-tree traversal as the source of truth.
+func _append_section_value_member(task: Dictionary, instance: GeometryInstance3D,
+		role: String) -> void:
+	var tree_visual: Node3D = task.get("visual", null) as Node3D
+	var captured := capture_section_value_member(instance, role, tree_visual)
+	if captured.get("status") != "ready":
+		task["sectionValueCapturePending"] = String(captured.get("reason", "unknown"))
+		return
+	var members: Array = task.get("sectionValueMembers", [])
+	members.append(captured.member)
+	task["sectionValueMembers"] = members
+
+
+func capture_section_value_member(instance: GeometryInstance3D, role: String,
+		tree_visual: Node3D = null) -> Dictionary:
+	if not is_instance_valid(instance) or not is_instance_valid(tree_visual) \
+			or role not in ["bole", "branches", "foliage"]:
+		return {"status":"pending", "reason":"tree_section_member_owner_missing"}
+	var member_to_tree := _transform_relative_to_root(instance, tree_visual)
+	if member_to_tree.get("status") != "ready":
+		return member_to_tree
+	var mesh: Mesh
+	var transforms: Array[Transform3D] = []
+	var colors: Array[Color] = []
+	var custom_values: Array[Color] = []
+	if instance is MeshInstance3D:
+		var mesh_instance := instance as MeshInstance3D
+		mesh = mesh_instance.mesh
+		# The full node path is carried by localTransform below. Keep the
+		# per-instance lane identity for a non-instanced MeshInstance.
+		transforms.append(Transform3D.IDENTITY)
+		colors.append(Color.WHITE)
+		custom_values.append(Color(0.0, 0.0, 0.0, 1.0))
+	elif instance is MultiMeshInstance3D:
+		var multi_instance := instance as MultiMeshInstance3D
+		var multi_mesh := multi_instance.multimesh
+		if multi_mesh == null or not multi_mesh.use_custom_data \
+				or multi_mesh.transform_format != MultiMesh.TRANSFORM_3D:
+			return {"status":"pending", "reason":"tree_section_multimesh_layout_unsupported"}
+		mesh = multi_mesh.mesh
+		for index: int in range(multi_mesh.instance_count):
+			transforms.append(multi_mesh.get_instance_transform(index))
+			colors.append(multi_mesh.get_instance_color(index) if multi_mesh.use_colors else Color.WHITE)
+			custom_values.append(multi_mesh.get_instance_custom_data(index))
+	else:
+		return {"status":"pending", "reason":"tree_section_member_type_unsupported"}
+	if not is_instance_valid(mesh) or transforms.is_empty() or instance.material_override == null:
+		return {"status":"pending", "reason":"tree_section_member_resources_missing"}
+	transforms.make_read_only()
+	colors.make_read_only()
+	custom_values.make_read_only()
+	var member := {"schema":"tree-section-render-member/v1", "role":role,
+		"mesh":mesh, "material":instance.material_override,
+		"localTransform":member_to_tree.transform, "transforms":transforms,
+		"colors":colors, "customData":custom_values,
+		"producerElementCount":int(instance.get_meta("tree_wood_segment_count", -1)),
+		"visibilityRangeEnd":float(instance.visibility_range_end),
+		"fadeMargin":float(instance.visibility_range_end_margin),
+		"castShadows":instance.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF}
+	member.make_read_only()
+	return {"status":"ready", "member":member}
+
+
+func _transform_relative_to_root(instance: Node3D, root: Node3D) -> Dictionary:
+	var accumulated := Transform3D.IDENTITY
+	var current := instance
+	while current != root:
+		accumulated = current.transform * accumulated
+		var parent_value: Variant = current.get_parent()
+		if not parent_value is Node3D:
+			return {"status":"pending", "reason":"tree_section_member_outside_visual_root"}
+		current = parent_value as Node3D
+	accumulated = root.transform * accumulated
+	return {"status":"ready", "transform":accumulated}
+
+
+func _freeze_section_value(value: Variant) -> Variant:
+	if value is Dictionary:
+		var result: Dictionary = {}
+		for key: Variant in value:
+			result[key] = _freeze_section_value(value[key])
+		result.make_read_only()
+		return result
+	if value is Array:
+		var result: Array = []
+		for item: Variant in value:
+			result.append(_freeze_section_value(item))
+		result.make_read_only()
+		return result
+	return value
 
 func replace_published_render_stats(body: StaticBody3D, recipe: Dictionary) -> void:
 	if body == null or not is_instance_valid(body):

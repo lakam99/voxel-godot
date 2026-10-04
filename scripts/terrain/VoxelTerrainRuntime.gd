@@ -1960,6 +1960,10 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 	for section_key: Vector3i in sections:
 		var proof: Dictionary = terrain_section_fluid_proofs.get(section_key, {})
 		if not _terrain_section_fluid_proof_is_current(section_key, proof):
+			# Census is metadata-only, but it must make forward progress. The exact
+			# fluid authority owns the bounded scan; this only admits its retryable
+			# request and never treats absent proof as empty.
+			request_terrain_section_fluid_probe(section_key)
 			return {"status":"pending", "reason":"terrain_exact_fluid_section_probe_pending",
 				"section":section_key, "retryable":true}
 		if bool(proof.get("hasFluid", false)):
@@ -2014,6 +2018,17 @@ func request_terrain_section_fluid_probe(section_key: Vector3i) -> Dictionary:
 	terrain_section_fluid_probe_queue.append(section_key)
 	terrain_section_fluid_probe_queued[section_key] = true
 	return {"status":"queued", "section":section_key}
+
+
+## Captures the immutable smooth-terrain payload for the shared whole-section
+## candidate path. Preparation is queued and advanced by this runtime's normal
+## per-frame publisher tick; this does not install or hide VoxelTerrain.
+func capture_static_section_contribution(census: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	if terrain_section_shadow_publisher == null:
+		return {"status":"pending", "reason":"terrain_section_contribution_publisher_unavailable",
+			"retryable":true}
+	return terrain_section_shadow_publisher.capture_contribution(census, section_key)
 
 
 func advance_terrain_section_fluid_probes() -> Dictionary:
@@ -2303,10 +2318,41 @@ func _terrain_capture_mesher_material_revision() -> String:
 		return ""
 	var mesher = terrain.mesher
 	var material := terrain.material_override
-	return "%s:%s:%s:%d" % [str(mesher.get_class()) if is_instance_valid(mesher) else "missing",
+	var material_digest := _terrain_material_content_digest(material)
+	if material_digest.is_empty():
+		return ""
+	return "%s:%s:%s:%s:%d" % [str(mesher.get_class()) if is_instance_valid(mesher) else "missing",
 		str(mesher.get_instance_id()) if is_instance_valid(mesher) else "0",
 		str(material.get_instance_id()) if is_instance_valid(material) else "0",
+		material_digest,
 		NATIVE_MESH_BLOCK_SIZE_CELLS]
+
+
+func _terrain_material_content_digest(material: Material) -> String:
+	if not is_instance_valid(material):
+		return ""
+	var properties: Array = []
+	for property: Dictionary in material.get_property_list():
+		var name := String(property.get("name", ""))
+		if name.is_empty() or name.begins_with("resource_") \
+				or name in ["script", "resource_local_to_scene"]:
+			continue
+		var value: Variant = material.get(name)
+		if value is Shader:
+			value = ["Shader", String(value.code)]
+		elif value is Resource:
+			var resource := value as Resource
+			value = [resource.get_class(), resource.resource_path]
+		elif value is Object or value is Callable:
+			return ""
+		properties.append([name, value])
+	properties.sort_custom(func(a: Array, b: Array) -> bool:
+		return String(a[0]) < String(b[0]))
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK \
+			or context.update(var_to_bytes([material.get_class(), properties])) != OK:
+		return ""
+	return context.finish().hex_encode()
 
 
 func visible_mesh_vertical_bounds() -> Vector2i:

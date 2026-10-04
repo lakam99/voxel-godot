@@ -216,16 +216,30 @@ func _run() -> void:
 		{"outcome":replacement_outcome, "installed":after_commit})
 	var third_admission: Dictionary = coordinator.assemble_and_submit_complete_section_candidate(
 		SECTION, 3)
+	var staged_advance: Dictionary = coordinator.advance_complete_section_candidate(SECTION, 1)
+	var staged_job: Dictionary = coordinator._production_candidate_jobs.get(SECTION, {})
+	var staged_session = staged_job.get("session")
+	var staged_snapshot: Dictionary = backend.call("installed_snapshot", slot)
+	var retained_root_id := int(staged_snapshot.get("rootInstanceId", 0))
+	var began_stale_replacement: bool = third_admission.get("status") == "queued" \
+		and staged_advance.get("status") == "pending" \
+		and staged_session is RefCounted \
+		and String(staged_session.get("state")) in ["append", "upload", "commit"] \
+		and int(staged_snapshot.get("generation", 0)) == 2
 	ordinary_provider.source_revision = "ordinary-r2"
 	var stale_advance: Dictionary = coordinator.advance_complete_section_candidate(SECTION, 8)
 	var retained_after_stale: Dictionary = backend.call("installed_snapshot", slot)
-	_check("stale_authority_rejects_candidate_and_retains_last_live_slot",
-		third_admission.get("status") == "queued"
+	_check("stale_authority_cancels_staged_replacement_and_retains_last_live_slot",
+		began_stale_replacement
 		and stale_advance.get("status") == "pending"
 		and bool(stale_advance.get("requiresReassembly", false))
-		and int(retained_after_stale.get("generation", 0)) == 2,
-		{"admission":third_admission, "advance":stale_advance,
-		"retainedGeneration":retained_after_stale.get("generation", 0)})
+		and int(retained_after_stale.get("generation", 0)) == 2
+		and int(retained_after_stale.get("rootInstanceId", 0)) == retained_root_id,
+		{"admission":third_admission, "stagedAdvance":staged_advance,
+		"stagedState":staged_session.get("state") if staged_session is RefCounted else "missing",
+		"advance":stale_advance, "retainedGeneration":retained_after_stale.get("generation", 0),
+		"retainedRootId":retained_after_stale.get("rootInstanceId", 0),
+		"previousRootId":retained_root_id})
 	ordinary_provider.source_revision = "ordinary-r1"
 	var old_chunk_instance_id := chunk.get_instance_id()
 	var unloaded_sections: int = coordinator.notify_stream_chunk_unloaded(Vector2i.ZERO,

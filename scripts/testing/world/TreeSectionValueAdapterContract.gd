@@ -47,7 +47,8 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 		request: Dictionary) -> Dictionary:
 	var recipe := queue.publication_service.build_recipe(request)
 	var service = queue.publication_service
-	var signature := String(service.runtime_recipe_signature(recipe, request))
+	var normalized_request: Dictionary = service.normalize_request(request)
+	var signature := String(service.runtime_recipe_signature(recipe, normalized_request))
 	recipe["signature"] = signature
 	recipe["branches"] = [
 		{"order":0,"start":Vector3.ZERO,"end":Vector3.UP},
@@ -58,7 +59,7 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 	# Runtime signature intentionally covers source topology and branch count;
 	# the fixture uses a compact deterministic render graph for exact membership.
 	recipe["topologySignature"] = "tree-section-contract-topology"
-	recipe["signature"] = service.runtime_recipe_signature(recipe, request)
+	recipe["signature"] = service.runtime_recipe_signature(recipe, normalized_request)
 	signature = String(recipe.signature)
 	var lod: Dictionary = recipe.get("renderLod", {})
 	lod["tier"] = String(request.get("renderLodTier", "near"))
@@ -66,13 +67,16 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 	recipe["runtimeImpostor"] = false
 	var visual := Node3D.new()
 	visual.name = "GeneratedTreeVisual"
+	visual.transform = Transform3D(Basis.IDENTITY, Vector3(0.5, 0.0, 0.0))
 	visual.set_meta("tree_recipe_signature", signature)
 	visual.set_meta("tree_id", String(request.treeId))
 	var wood := Node3D.new()
 	wood.name = "ProceduralTreeWood"
+	wood.transform = Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
 	visual.add_child(wood)
 	var bole := MeshInstance3D.new()
 	bole.name = "ProceduralTreeContinuousStructuralWood"
+	bole.transform = Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 2.0))
 	bole.mesh = BoxMesh.new()
 	bole.material_override = _material(Color("65411e"))
 	bole.visibility_range_end = 440.0
@@ -88,6 +92,7 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 		[Transform3D(Basis.IDENTITY, Vector3(24.0,2.0,0.0))],
 		[Color(0.5,0.7,0.37,0.81)], "ProceduralTreeDistalBranches",
 		"instanced_distal_branches")
+	branches.transform = Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 3.0))
 	wood.add_child(branches)
 	var foliage_mesh := BoxMesh.new()
 	foliage_mesh.resource_name = "tree-contract-foliage"
@@ -95,9 +100,11 @@ func _recipe_and_visual(body: StaticBody3D, queue: TreePublicationQueue,
 	var foliage := _multi_instance(foliage_mesh, foliage_material,
 		[Transform3D(Basis.IDENTITY, Vector3(48.0,3.0,0.0))],
 		[Color(0.2,0.8,0.35,0.0)], "RuntimeFoliage", "")
+	foliage.transform = Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 5.0))
 	foliage.set_meta("tree_foliage_batching", "single_shared_cluster_mesh")
 	var foliage_root := Node3D.new()
 	foliage_root.name = "ProceduralTreeFoliage"
+	foliage_root.transform = Transform3D(Basis.IDENTITY, Vector3(0.0, 4.0, 0.0))
 	foliage_root.add_child(foliage)
 	visual.add_child(foliage_root)
 	body.add_child(visual)
@@ -129,6 +136,7 @@ func run() -> void:
 	var prop_id := "tree-section-adapter-contract:0,0:0"
 	var body := StaticBody3D.new()
 	body.name = "TreeBody"
+	body.transform = Transform3D(Basis(Vector3.UP, 0.37), Vector3(100.0, 4.0, -30.0))
 	body.set_meta("prop_id", prop_id)
 	body.add_to_group("generated_props")
 	var collider := CollisionShape3D.new()
@@ -146,12 +154,34 @@ func run() -> void:
 		"canopyDensity":0.6, "geneticSeed":12345}
 	var built := _recipe_and_visual(body, queue, request)
 	var recipe: Dictionary = built.recipe
-	queue.published_lod_records.append({"body":weakref(body),
-		"bodyInstanceId":body.get_instance_id(), "request":request.duplicate(true),
-		"tier":"near", "rebuildPending":false})
+	var wood: Node3D = built.visual.get_node("ProceduralTreeWood")
+	var foliage_root: Node3D = built.visual.get_node("ProceduralTreeFoliage")
+	var section_members: Array = [
+		queue.capture_section_value_member(wood.get_node("ProceduralTreeContinuousStructuralWood"), "bole", built.visual).member,
+		queue.capture_section_value_member(wood.get_node("ProceduralTreeDistalBranches"), "branches", built.visual).member,
+		queue.capture_section_value_member(foliage_root.get_node("RuntimeFoliage"), "foliage", built.visual).member]
+	var expected_local_origins := [Vector3(0.5, 1.0, 2.0), Vector3(24.5, 3.0, 3.0), Vector3(48.5, 7.0, 5.0)]
+	var captured_local_origins: Array[Vector3] = []
+	for member_index: int in range(section_members.size()):
+		var member: Dictionary = section_members[member_index]
+		captured_local_origins.append((member.localTransform as Transform3D).origin
+			+ ((member.transforms as Array)[0] as Transform3D).origin)
+	check("nonidentity_body_and_child_hierarchy_are_captured_once",
+		captured_local_origins.size() == expected_local_origins.size() \
+		and section_members[0].transforms[0].is_equal_approx(Transform3D.IDENTITY) \
+		and captured_local_origins[0].is_equal_approx(expected_local_origins[0]) \
+		and captured_local_origins[1].is_equal_approx(expected_local_origins[1]) \
+		and captured_local_origins[2].is_equal_approx(expected_local_origins[2]))
+	queue.remember_published_lod(body, request, section_members, recipe)
 	await process_frame
 	var world_id := "seed:%s:%d" % [authority.seed_text, authority.seed_hash]
+	# The adapter must consume the queue's sealed producer artifact. The legacy
+	# visual tree can be absent while capture still binds the acknowledged data.
+	body.remove_child(built.visual)
+	built.visual.queue_free()
 	var captured := _make_capture(queue, authority, body, recipe, world_id)
+	var queue_capture := Adapter.capture_from_queue_record(queue, authority,
+		world_id, body, RemovedProps.capture(authority))
 	var partition: Dictionary = captured.get("partition", {})
 	var expected_instances := 3 # one bole, one branch, one foliage cluster
 	check("exact_queue_acknowledged_recipe_membership_partitions_every_draw_instance",
@@ -159,6 +189,10 @@ func run() -> void:
 		and int(partition.get("inputInstanceCount", -1)) == expected_instances \
 		and int(partition.get("outputInstanceCount", -1)) == expected_instances \
 		and captured.get("memberRows", []).size() == 3)
+	check("committed_queue_recipe_and_geometry_values_survive_legacy_visual_removal",
+		queue_capture.get("status") == "ready" \
+		and queue_capture.get("sourceRevision", "") == captured.get("sourceRevision", "") \
+		and queue_capture.get("inputs", []).size() == captured.get("inputs", []).size())
 	check("branch_and_foliage_custom_data_survive_shared_20_float_abi",
 		captured.get("status") == "ready" \
 		and captured.get("inputs", []).all(func(input: Dictionary) -> bool:
@@ -170,12 +204,27 @@ func run() -> void:
 		and captured.get("materialBindings", {}).size() == 3 \
 		and captured.get("compatibilityByKey", {}).values().all(func(value: Dictionary) -> bool:
 			return not String(value.get("batchKey", "")).is_empty()))
+	var renderer_tier_by_role := {}
+	for row_value: Variant in captured.get("memberRows", []):
+		if row_value is Dictionary:
+			renderer_tier_by_role[String(row_value.get("role", ""))] = String(
+				row_value.get("rendererTier", ""))
+	check("recipe_lod_stays_separate_from_native_renderer_categories",
+		captured.get("status") == "ready" \
+		and captured.get("renderLodTier") == "near" \
+		and renderer_tier_by_role == {"bole":"structural", "branches":"structural",
+			"foliage":"detail"} \
+		and captured.get("compatibilityByKey", {}).values().all(func(value: Dictionary) -> bool:
+			return String(value.get("renderTier", "")) in ["silhouette", "structural", "detail", "horizon"]))
 	var section_boundaries: Array = captured.get("sectionKeys", [])
+	var expected_world_origins: Array[Vector3] = []
+	for origin: Vector3 in expected_local_origins:
+		expected_world_origins.append(body.global_transform * origin)
 	check("tree_instances_are_owned_by_the_partition_of_their_transformed_mesh_bounds",
 		captured.get("status") == "ready" \
-		and section_boundaries.has(Grid.key_for_world_position(Vector3(0.0,0.0,0.0))) \
-		and section_boundaries.has(Grid.key_for_world_position(Vector3(24.0,2.0,0.0))) \
-		and section_boundaries.has(Grid.key_for_world_position(Vector3(48.0,3.0,0.0))) \
+		and section_boundaries.has(Grid.key_for_world_position(expected_world_origins[0])) \
+		and section_boundaries.has(Grid.key_for_world_position(expected_world_origins[1])) \
+		and section_boundaries.has(Grid.key_for_world_position(expected_world_origins[2])) \
 		and section_boundaries.size() >= 3)
 	check("capture_retains_gameplay_body_collision_and_stable_source_identity",
 		body.get_node_or_null("TrunkCollision") == collider \
@@ -184,7 +233,15 @@ func run() -> void:
 	var stale_recipe := recipe.duplicate(true)
 	stale_recipe["signature"] = "tree-v10-deadbeef"
 	var stale := _make_capture(queue, authority, body, stale_recipe, world_id)
-	check("recipe_signature_mismatch_stays_pending", stale.get("status") == "pending")
+	check("recipe_signature_mismatch_stays_pending_with_revision_diagnostics",
+		stale.get("status") == "pending" \
+		and stale.get("reason") == "tree_recipe_revision_not_current" \
+		and not String(stale.get("queueRequestKey", "")).is_empty() \
+		and not String(stale.get("expectedRecipeSignature", "")).is_empty() \
+		and stale.get("capturedRecipeSignature") == "tree-v10-deadbeef" \
+		and stale.get("bodyRecipeSignature") == String(recipe.get("signature", "")) \
+		and stale.get("queueTier") == stale.get("recipeTier") \
+		and stale.get("queueTier") == stale.get("bodyTier"))
 	var lod_record: Dictionary = queue.published_lod_records[0]
 	lod_record["rebuildPending"] = true
 	queue.published_lod_records[0] = lod_record
@@ -202,16 +259,11 @@ func run() -> void:
 		and removed.get("reason") == "tree_authoritative_tombstone")
 	authority.removed_props.erase(prop_id)
 	authority.removed_props_revision += 1
-	var headless_proxy := Node3D.new()
-	headless_proxy.name = "GeneratedTreeVisual"
-	headless_proxy.set_meta("tree_recipe_signature", recipe.signature)
-	headless_proxy.set_meta("tree_id", prop_id)
-	headless_proxy.set_meta("tree_headless_visual_proxy", true)
-	body.remove_child(built.visual)
-	built.visual.queue_free()
-	body.add_child(headless_proxy)
+	var stale_record: Dictionary = queue.published_lod_records[0].duplicate()
+	stale_record.erase("sectionValueMembers")
+	queue.published_lod_records[0] = stale_record
 	var proxy_capture := _make_capture(queue, authority, body, recipe, world_id)
-	check("missing_production_geometry_does_not_become_visual_success",
+	check("missing_queue_geometry_values_do_not_become_visual_success",
 		proxy_capture.get("status") == "pending")
 	var report := {"schema":"tree-section-value-adapter-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
@@ -219,7 +271,7 @@ func run() -> void:
 		"captureReason":captured.get("reason", ""),
 		"sourceId":captured.get("sourceId", ""),
 		"collisionPresent":body.get_node_or_null("TrunkCollision") == collider,
-		"liveMultiTransform":built.visual.get_node("ProceduralTreeWood/ProceduralTreeDistalBranches").multimesh.get_instance_transform(0),
+		"liveMultiTransform":section_members[1].get("transforms", [])[0],
 		"partitionInstanceCount":partition.get("outputInstanceCount", 0),
 		"sectionKeys":captured.get("sectionKeys", []),
 		"sectionSizeMeters":Grid.SECTION_SIZE_METERS,

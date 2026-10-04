@@ -8,6 +8,8 @@ const HorizonChunkPropManifestCacheScript := preload("res://scripts/world/Horizo
 const PhysicalChunkPropManifestCacheScript := preload("res://scripts/world/PhysicalChunkPropManifestCache.gd")
 const DetailBatchVisualReceiptPublisherScript := preload("res://scripts/world/DetailBatchVisualReceiptPublisher.gd")
 const EcologySourceValueLedgerScript := preload("res://scripts/world/EcologySourceValueLedger.gd")
+const EcologyMeshFingerprintScript := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const EcologyMaterialDigestScript := preload("res://scripts/world/EcologySectionValueAdapter.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
 signal rock_published(body: StaticBody3D, collider: CollisionShape3D)
@@ -3017,9 +3019,13 @@ func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary
     var detail_rng := RandomNumberGenerator.new()
     detail_rng.seed = hash_string("%s:details:%d,%d" % [seed_text, cx, cz])
     var source_ledger = EcologySourceValueLedgerScript.new()
+    var terrain_revision := -1
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
+        terrain_revision = int(world_generation_system.call("terrain_volume_chunk_revision",
+            Vector2i(cx, cz), CHUNK_SIZE))
     source_ledger.configure(seed_text, Vector2i(cx, cz),
         _ecology_chunk_source_revision(Vector2i(cx, cz)),
-        int(removed_props_revision))
+        int(removed_props_revision), terrain_revision)
     if chunk != null and is_instance_valid(chunk):
         chunk.remove_meta("static_ecology_source_value_snapshot")
         chunk.set_meta("static_ecology_source_value_ledger", source_ledger)
@@ -3062,6 +3068,180 @@ func _record_ecology_source_value(chunk: Node, candidate: Dictionary) -> bool:
         return bool(ledger.call("record_tombstone", source_id, "removed_props"))
     return bool(ledger.call("record_candidate", candidate))
 
+
+## Called by prop creators with the meshes/materials they have just built. The
+## creator passes each member as it is made; this helper never inspects a Node
+## subtree and never asks the RNG for another value.
+func ecology_render_member(member_id: String, mesh: Mesh, local_transform: Transform3D,
+        material_key: String, render_layer: String, material: Material = null) -> Dictionary:
+    if member_id.is_empty() or not is_instance_valid(mesh) or not local_transform.is_finite():
+        return {"status":"pending", "reason":"realized_prop_mesh_unavailable",
+            "memberId":member_id}
+    var fingerprint: Dictionary = EcologyMeshFingerprintScript.inspect(mesh)
+    if fingerprint.get("status") != "ready":
+        return {"status":"pending", "reason":String(fingerprint.get("reason", "mesh_fingerprint_pending")),
+            "memberId":member_id}
+    var captured_layer := render_layer
+    var pending_reason := ""
+    var material_digest := EcologyMaterialDigestScript._material_digest(material) \
+        if is_instance_valid(material) else ""
+    if material_digest.is_empty():
+        pending_reason = "prop_material_content_digest_unavailable"
+    if material is BaseMaterial3D:
+        match material.transparency:
+            BaseMaterial3D.TRANSPARENCY_DISABLED:
+                captured_layer = "opaque"
+            BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+                captured_layer = "cutout"
+            _:
+                captured_layer = "translucent"
+                pending_reason = "translucent_prop_layer_sort_unavailable"
+    elif material is ShaderMaterial:
+        var shader := (material as ShaderMaterial).shader
+        if shader != null and not shader.code.is_empty() \
+                and not shader.code.contains("ALPHA") \
+                and not shader.code.contains("discard") \
+                and not shader.code.contains("blend_"):
+            captured_layer = "opaque"
+        else:
+            captured_layer = ""
+            pending_reason = "shader_prop_render_semantics_unsupported"
+    else:
+        captured_layer = ""
+        pending_reason = "unsupported_material_render_semantics"
+    var result := {"status":"ready" if pending_reason.is_empty() else "pending",
+        "reason":pending_reason, "memberId":member_id,
+        "meshContentDigest":String(fingerprint.contentDigest),
+        "meshSchema":String(fingerprint.schema), "meshCpuArrayBytes":int(fingerprint.cpuArrayBytes),
+        "meshBounds":mesh.get_aabb(), "transform":local_transform,
+        "localBounds":mesh.get_aabb() * local_transform,
+        "materialKey":material_key, "materialClass":material.get_class() if is_instance_valid(material) else "missing",
+        "materialContentDigest":material_digest, "renderLayer":captured_layer,
+        "_meshResource":mesh, "_materialResource":material}
+    return result
+
+
+func _record_realized_ecology_prop(parent: Node, body: StaticBody3D,
+        source_kind: String, members: Array, pending_reason := "") -> bool:
+    if parent == null or not is_instance_valid(parent) or not is_instance_valid(body):
+        return false
+    var context_value: Variant = parent.get_meta("ecology_capture_context", {})
+    if not context_value is Dictionary or context_value.is_empty():
+        return false
+    var context: Dictionary = context_value
+    var category := String(context.get("category", ""))
+    var chunk_key := Vector2i(int(context.get("chunkX", 0)), int(context.get("chunkZ", 0)))
+    var prop_id := String(body.get_meta("prop_id", ""))
+    if prop_id.is_empty() or category.is_empty():
+        return false
+    var source_id := "%s:%s:%s" % [seed_text, category, prop_id]
+    var source_revision := _ecology_chunk_source_revision(chunk_key)
+    var scan_revision := String(context.get("scanRevision", ""))
+    var provenance := {"producer":String(context.get("producer", "")),
+        "chunk":chunk_key, "sourceRevision":source_revision,
+        "terrainRevision":int(context.get("terrainRevision", -1)),
+        "attemptIndex":int(context.get("attemptIndex", -1)),
+        "sourceCell":context.get("sourceCell", Vector3i.ZERO),
+        "scanRevision":scan_revision, "creatorOutputComplete":true}
+    var ready_members: Array[Dictionary] = []
+    var pending_members: Array[Dictionary] = []
+    var resource_bindings: Dictionary = parent.get_meta("static_ecology_render_resource_bindings", {}) \
+        if parent.has_meta("static_ecology_render_resource_bindings") else {}
+    resource_bindings = resource_bindings.duplicate(false)
+    for member_value: Variant in members:
+        if member_value is Dictionary and member_value.get("status") == "ready":
+            var member: Dictionary = member_value.duplicate(true)
+            var mesh_resource: Variant = member.get("_meshResource", null)
+            var material_resource: Variant = member.get("_materialResource", null)
+            if mesh_resource is Mesh and material_resource is Material:
+                var binding := {
+                    "mesh":mesh_resource, "material":material_resource,
+                    "meshContentDigest":String(member.get("meshContentDigest", "")),
+                    "materialContentDigest":String(member.get("materialContentDigest", "")),
+                    "materialKey":String(member.get("materialKey", "")),
+                    "renderLayer":String(member.get("renderLayer", ""))}
+                binding.make_read_only()
+                resource_bindings[source_id + "|" + String(member.get("memberId", ""))] = binding
+            else:
+                member["status"] = "pending"
+                member["reason"] = "realized_prop_resource_binding_missing"
+            member.erase("_meshResource")
+            member.erase("_materialResource")
+            if member.get("status") == "ready":
+                ready_members.append(member)
+            else:
+                pending_members.append(member)
+        elif member_value is Dictionary:
+            pending_members.append(member_value)
+    resource_bindings.make_read_only()
+    parent.set_meta("static_ecology_render_resource_bindings", resource_bindings)
+    var candidate := {"sourceId":source_id, "propId":prop_id,
+        "kind":"realized_static_prop", "category":category,
+        "sourceKind":source_kind, "chunk":chunk_key,
+        "transform":body.transform, "renderMembers":ready_members,
+        "renderStatus":"ready" if pending_reason.is_empty() and ready_members.size() == members.size() \
+            else "pending",
+        "missingMembers":pending_members,
+        "pendingReason":pending_reason, "provenance":provenance}
+    if members.is_empty() or ready_members.size() != members.size():
+        candidate["pendingReason"] = pending_reason if not pending_reason.is_empty() \
+            else "realized_prop_member_recipe_missing"
+    var bounds := AABB()
+    var have_bounds := false
+    for member in ready_members:
+        var member_bounds: AABB = member.localBounds * body.transform
+        bounds = member_bounds if not have_bounds else bounds.merge(member_bounds)
+        have_bounds = true
+    candidate["localBounds"] = bounds if have_bounds else AABB(body.position, Vector3.ZERO)
+    return _record_ecology_source_value(parent, candidate)
+
+
+func _mark_ecology_category_complete(state: Dictionary, category: String,
+        producer: String, scan_revision := "") -> bool:
+    var ledger: Variant = state.get("ecologySourceLedger", null)
+    if ledger == null or not ledger.has_method("mark_category_complete"):
+        return false
+    var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+    var terrain_revision := -1
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
+        terrain_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
+    return bool(ledger.call("mark_category_complete", category, {
+        "producer":producer, "chunk":key,
+        "sourceRevision":_ecology_chunk_source_revision(key),
+        "terrainRevision":terrain_revision, "scanRevision":scan_revision,
+        "producerComplete":true}))
+
+
+func _ecology_capture_context(state: Dictionary, producer: String, category: String,
+        attempt_index: int, source_cell: Vector3i, scan_revision := "") -> Dictionary:
+    var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+    var terrain_revision := -1
+    if world_generation_system != null and world_generation_system.has_method("terrain_volume_chunk_revision"):
+        terrain_revision = int(world_generation_system.call("terrain_volume_chunk_revision", key, CHUNK_SIZE))
+    return {"producer":producer, "category":category, "chunkX":key.x, "chunkZ":key.y,
+        "terrainRevision":terrain_revision, "attemptIndex":attempt_index,
+        "sourceCell":source_cell, "scanRevision":scan_revision}
+
+
+func _underground_prop_scan_revision(state: Dictionary) -> String:
+    if not bool(state.get("undergroundScanComplete", false)) or world_generation_system == null:
+        return ""
+    var service_scan: Variant = state.get("undergroundVolumeFloorScan", {})
+    if service_scan is Dictionary and not str(service_scan.get("revision", "")).is_empty():
+        return str(service_scan.revision)
+    if not world_generation_system.has_method("sample_cell"):
+        return ""
+    var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+    var candidates: Array = state.get("undergroundCandidates", []) \
+        if state.get("undergroundCandidates", []) is Array else []
+    var rows: Array = []
+    for cell_value: Variant in candidates:
+        if cell_value is Vector3i:
+            var cell: Vector3i = cell_value
+            rows.append([cell.x, cell.y, cell.z])
+    var source := _ecology_chunk_source_revision(key)
+    return "sample-cell-scan:%s:%s" % [source, JSON.stringify(rows).sha256_text()]
+
 func _finalize_ecology_source_values(state: Dictionary) -> void:
     var ledger = state.get("ecologySourceLedger")
     if ledger == null or not ledger.has_method("snapshot"):
@@ -3077,6 +3257,30 @@ func _finalize_ecology_source_values(state: Dictionary) -> void:
     if chunk != null and is_instance_valid(chunk):
         chunk.remove_meta("static_ecology_source_value_ledger")
         chunk.set_meta("static_ecology_source_value_snapshot", snapshot.duplicate(true))
+
+
+## Seal a value copy of the completed surface families without sealing the
+## producer ledger; underground discovery continues in the same deterministic
+## state and will replace this snapshot only when its scan is complete.
+func _publish_surface_ecology_source_values(state: Dictionary) -> void:
+    var ledger = state.get("ecologySourceLedger")
+    if ledger == null or not ledger.has_method("snapshot"):
+        return
+    var chunk := valid_node3d_from_variant(state.get("chunk"))
+    if chunk == null or not is_instance_valid(chunk):
+        return
+    var existing_value: Variant = chunk.get_meta("static_ecology_source_value_snapshot", {})
+    if existing_value is Dictionary \
+            and String(existing_value.get("contentScope", "")) == "surface_pending_underground" \
+            and String(existing_value.get("sourceRevision", "")) == _ecology_chunk_source_revision(
+                Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))) \
+            and int(existing_value.get("removedPropsRevision", -1)) == int(removed_props_revision):
+        return
+    var snapshot: Dictionary = ledger.call("snapshot", false, "surface_pending_underground")
+    var key := Vector2i(int(state.get("cx", 0)), int(state.get("cz", 0)))
+    snapshot["status"] = "ready" if String(snapshot.get("sourceRevision", "")) == \
+        _ecology_chunk_source_revision(key) else "stale"
+    chunk.set_meta("static_ecology_source_value_snapshot", snapshot.duplicate(true))
 
 func _ecology_chunk_source_revision(key: Vector2i) -> String:
     var terrain_revision := -1
@@ -3139,6 +3343,12 @@ func process_chunk_prop_spawn_state(
         if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
             return false
         state["phase"] = "underground_props"
+    if String(state.get("phase", "")) == "underground_props" \
+            and not bool(state.get("surfaceStaticCategoriesEvaluated", false)):
+        _mark_ecology_category_complete(state, "surface_rocks", "surface_spawn")
+        _mark_ecology_category_complete(state, "ore", "surface_spawn")
+        _mark_ecology_category_complete(state, "forage", "surface_spawn")
+        state["surfaceStaticCategoriesEvaluated"] = true
     if String(state.get("phase", "")) == "underground_props":
         if not bool(chunk.get_meta("chunk_surface_candidate_scan_complete", false)):
             # Surface props and decorative batches are now fully decided by
@@ -3148,6 +3358,7 @@ func process_chunk_prop_spawn_state(
             chunk.set_meta("chunk_surface_candidate_source_revision", "%s:%d:%d:surface" % [
                 seed_text, int(get("seed_hash")), chunk.get_instance_id()
             ])
+        _publish_surface_ecology_source_values(state)
         if bool(chunk.get_meta("horizon_visual_only", false)):
             _finalize_ecology_source_values(state)
             return true
@@ -3155,6 +3366,10 @@ func process_chunk_prop_spawn_state(
             return false
         if chunk_prop_spawn_budget_elapsed(start_usec, time_budget_ms):
             return false
+        var scan_revision := _underground_prop_scan_revision(state)
+        if not scan_revision.is_empty():
+            _mark_ecology_category_complete(state, "underground_props",
+                "underground_exposed_floor_scan", scan_revision)
     var completed_chunk := valid_node3d_from_variant(state.get("chunk"))
     if completed_chunk != null:
         completed_chunk.set_meta("chunk_prop_candidate_scan_complete", true)
@@ -3367,9 +3582,14 @@ func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenera
         var ore := ore_for_cell(biome, h, rng)
         var rock_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_rock") if runtime_perf_monitor != null else Time.get_ticks_usec()
         if ore != "":
+            chunk.set_meta("ecology_capture_context", _ecology_capture_context(
+                state, "surface_spawn", "ore", i, Vector3i(x, roundi(h / CELL), z)))
             make_ore_cluster(chunk, prop_id, local_position, ore, rng, 2)
         else:
+            chunk.set_meta("ecology_capture_context", _ecology_capture_context(
+                state, "surface_spawn", "surface_rocks", i, Vector3i(x, roundi(h / CELL), z)))
             make_rock(chunk, prop_id, local_position, rng)
+        chunk.remove_meta("ecology_capture_context")
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("chunk_surface_prop_make_rock", rock_start)
     elif prop_roll < rock_roll + tree_roll:
@@ -3379,7 +3599,10 @@ func spawn_chunk_prop_attempt(state: Dictionary, i: int, rng: RandomNumberGenera
             runtime_perf_monitor.end_section("chunk_surface_prop_make_tree", tree_start)
     elif prop_roll < rock_roll + tree_roll + forage_roll:
         var forage_start: int = runtime_perf_monitor.begin_section("chunk_surface_prop_make_forage") if runtime_perf_monitor != null else Time.get_ticks_usec()
+        chunk.set_meta("ecology_capture_context", _ecology_capture_context(
+            state, "surface_spawn", "forage", i, Vector3i(x, roundi(h / CELL), z)))
         make_forage(chunk, prop_id, local_position, biome, rng)
+        chunk.remove_meta("ecology_capture_context")
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("chunk_surface_prop_make_forage", forage_start)
     elif prop_roll < rock_roll + tree_roll + forage_roll + wildlife_roll:
@@ -3659,16 +3882,36 @@ func spawn_underground_prop_attempt(state: Dictionary, solid_cell: Vector3i, rng
     var air_cell := solid_cell + Vector3i(0, 1, 0)
     var local_position := Vector3((float(solid_cell.x - start_x) + 0.5) * CELL, float(air_cell.y) * CELL + CELL * 0.04, (float(solid_cell.z - start_z) + 0.5) * CELL)
     var roll := rng.randf()
+    var scan_state: Variant = state.get("undergroundVolumeFloorScan", {})
+    var scan_revision := String(scan_state.get("revision", "")) if scan_state is Dictionary else ""
+    if scan_revision.is_empty():
+        scan_revision = _underground_prop_scan_revision(state)
     if material in ["copperOre", "ironOre"]:
+        chunk.set_meta("ecology_capture_context", _ecology_capture_context(state,
+            "underground_exposed_floor_scan", "underground_props", int(state.get("undergroundIndex", -1)),
+            solid_cell, scan_revision))
         make_ore_cluster(chunk, prop_id, local_position, material, rng, 1)
+        chunk.remove_meta("ecology_capture_context")
         return
     if roll < 0.12 and material in ["stone", "deepStone", "bedrock"]:
         var ore := "ironOre" if solid_cell.y < -22 and rng.randf() < 0.38 else "copperOre"
+        chunk.set_meta("ecology_capture_context", _ecology_capture_context(state,
+            "underground_exposed_floor_scan", "underground_props", int(state.get("undergroundIndex", -1)),
+            solid_cell, scan_revision))
         make_ore_cluster(chunk, prop_id, local_position, ore, rng, 1)
+        chunk.remove_meta("ecology_capture_context")
     elif roll < 0.36:
+        chunk.set_meta("ecology_capture_context", _ecology_capture_context(state,
+            "underground_exposed_floor_scan", "underground_props", int(state.get("undergroundIndex", -1)),
+            solid_cell, scan_revision))
         make_rock(chunk, prop_id, local_position, rng)
+        chunk.remove_meta("ecology_capture_context")
     elif roll < 0.48:
+        chunk.set_meta("ecology_capture_context", _ecology_capture_context(state,
+            "underground_exposed_floor_scan", "underground_props", int(state.get("undergroundIndex", -1)),
+            solid_cell, scan_revision))
         make_forage(chunk, prop_id, local_position, "swamp", rng)
+        chunk.remove_meta("ecology_capture_context")
 
 func process_chunk_detail_spawn_state(
     state: Dictionary,
@@ -3783,48 +4026,41 @@ func record_chunk_detail_source_values(chunk: Node3D, cx: int, cz: int,
     var mesh := detail_mesh(detail_type)
     if mesh == null:
         return
-    var material_keys: Array[String] = []
-    match detail_type:
-        "flowerStem":
-            material_keys = ["detailGrass"]
-        "flowerBloom":
-            material_keys = ["detailFlower"]
-        "grass":
-            material_keys = ["detailGrass"]
-        "reed":
-            material_keys = ["detailReed"]
-        "pebble":
-            material_keys = ["detailPebble"]
-        "snowClump":
-            material_keys = ["detailSnow"]
-        "leafLitter":
-            material_keys = ["detailLeaf"]
-        _:
-            material_keys = ["detailScrub"]
-    var layer := "opaque"
-    if detail_type in ["grass", "reed", "scrub", "flowerStem", "flowerBloom"]:
-        layer = "alpha_scissor"
     for index in range(transforms.size()):
         var transform_value: Variant = transforms[index]
         if not transform_value is Transform3D:
             continue
         var transform: Transform3D = transform_value
-        var local_bounds: AABB = mesh.get_aabb() * transform
-        var candidate := {
-            "sourceId": "%s:detail:%d,%d:%s:%d" % [seed_text, cx, cz, detail_type, index],
-            "kind": "surface_detail",
-            "detailType": detail_type,
-            "renderLayers": [layer],
-            "materials": material_keys.duplicate(),
-            "meshSource": "procedural_detail:%s" % detail_type,
-            "transform": transform,
-            "instanceColor": detail_instance_color(detail_type, transform, index),
-            "customData": Color(detail_instance_phase(detail_type, transform, index), 0.0, 0.0, 1.0),
-            "localBounds": local_bounds,
-            "shadowCasting": "off",
-            "visibilityRangeEnd": detail_visibility_range(detail_type)
-        }
-        _record_ecology_source_value(chunk, candidate)
+        var surface_count := mesh.get_surface_count()
+        if surface_count <= 0:
+            surface_count = 1
+        for surface_index in range(surface_count):
+            var surface_mesh: Mesh = detail_mesh_surface(detail_type, surface_index) \
+                if mesh is ArrayMesh else mesh
+            if surface_mesh == null:
+                continue
+            var material_key := detail_surface_material_key(detail_type, surface_index) \
+                if mesh is ArrayMesh else String(detail_type_material_key(detail_type))
+            var surface_material: Material = detail_surface_material(detail_type, surface_index) \
+                if mesh is ArrayMesh else detail_material(detail_type)
+            var layer := detail_surface_render_layer(surface_material)
+            var candidate := {
+                "sourceId": "%s:detail:%d,%d:%s:%d:surface:%d" % [seed_text, cx, cz, detail_type, index, surface_index],
+                "kind": "surface_detail",
+                "detailType": detail_type,
+                "surfaceIndex": surface_index if mesh is ArrayMesh else -1,
+                "renderLayers": [layer],
+                "materials": [material_key],
+                "meshSource": "procedural_detail:%s:surface:%d" % [detail_type, surface_index] \
+                    if mesh is ArrayMesh else "procedural_detail:%s" % detail_type,
+                "transform": transform,
+                "instanceColor": detail_instance_color(detail_type, transform, index),
+                "customData": Color(detail_instance_phase(detail_type, transform, index), 0.0, 0.0, 1.0),
+                "localBounds": surface_mesh.get_aabb() * transform,
+                "shadowCasting": "off",
+                "visibilityRangeEnd": detail_visibility_range(detail_type)
+            }
+            _record_ecology_source_value(chunk, candidate)
 
 func begin_chunk_detail_attempt(state: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
     var start_x := int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE))
@@ -4132,6 +4368,81 @@ func detail_material(detail_type: String) -> Material:
         "leafLitter":
             return materials["detailLeaf"]
     return materials["detailGrass"]
+
+func detail_type_material_key(detail_type: String) -> String:
+    match detail_type:
+        "flowerStem", "flowerBloom", "grass":
+            return "detailGrass"
+        "reed":
+            return "detailReed"
+        "pebble":
+            return "detailPebble"
+        "snowClump":
+            return "detailSnow"
+        "scrub":
+            return "detailScrub"
+        "leafLitter":
+            return "detailLeaf"
+    return "detailGrass"
+
+func detail_surface_material_key(detail_type: String, surface_index: int) -> String:
+    var source_mesh := detail_mesh(detail_type)
+    if not source_mesh is ArrayMesh or surface_index < 0 \
+            or surface_index >= source_mesh.get_surface_count():
+        return ""
+    var surface_material := source_mesh.surface_get_material(surface_index)
+    if not surface_material is Material:
+        return ""
+    for key_value: Variant in materials:
+        var key := String(key_value)
+        if materials[key_value] == surface_material:
+            return key
+    return ""
+
+func detail_surface_material(detail_type: String, surface_index: int) -> Material:
+    var source_mesh := detail_mesh(detail_type)
+    if not source_mesh is ArrayMesh or surface_index < 0 \
+            or surface_index >= source_mesh.get_surface_count():
+        return null
+    var surface_material := source_mesh.surface_get_material(surface_index)
+    return surface_material as Material if surface_material is Material else null
+
+func detail_surface_render_layer(material: Material) -> String:
+    if material is ShaderMaterial:
+        var shader := (material as ShaderMaterial).shader
+        if shader == null or shader.code.is_empty() or shader.code.contains("ALPHA") \
+                or shader.code.contains("discard") or shader.code.contains("blend_"):
+            return ""
+        if shader.resource_path != "res://resources/visual/detail_material.gdshader":
+            return ""
+        return "opaque"
+    if material is BaseMaterial3D:
+        var base := material as BaseMaterial3D
+        if base.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED \
+                and base.albedo_color.a >= 0.999:
+            return "opaque"
+        if base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+            return "alpha_scissor"
+    return ""
+
+func detail_mesh_surface(detail_type: String, surface_index: int) -> Mesh:
+    var cache_key := "__surface__:%s:%d" % [detail_type, surface_index]
+    if detail_meshes.has(cache_key):
+        return detail_meshes[cache_key] as Mesh
+    var source_mesh := detail_mesh(detail_type)
+    if not source_mesh is ArrayMesh or surface_index < 0 \
+            or surface_index >= source_mesh.get_surface_count():
+        return null
+    var arrays := source_mesh.surface_get_arrays(surface_index)
+    if arrays.is_empty():
+        return null
+    var surface_mesh := ArrayMesh.new()
+    surface_mesh.add_surface_from_arrays(source_mesh.surface_get_primitive_type(surface_index), arrays)
+    var surface_material := source_mesh.surface_get_material(surface_index)
+    if surface_material is Material:
+        surface_mesh.surface_set_material(0, surface_material)
+    detail_meshes[cache_key] = surface_mesh
+    return surface_mesh
 
 func detail_mesh(detail_type: String) -> Mesh:
     if detail_meshes.has(detail_type):
@@ -4745,6 +5056,35 @@ func add_generated_rock_visual(body: StaticBody3D, prop_id: String, biome: Strin
     body.add_child(visual)
     body.set_meta("visual_source", "generated_asset")
     body.set_meta("visual_asset_id", asset_id)
+    var manifest_value: Variant = visual.get_meta("static_render_member_values", [])
+    var render_members: Array[Dictionary] = []
+    var pending_reason := ""
+    if not manifest_value is Array or manifest_value.is_empty():
+        pending_reason = "generated_rock_asset_render_manifest_empty"
+    else:
+        for member_value: Variant in manifest_value:
+            if not member_value is Dictionary \
+                    or String(member_value.get("status", "")) != "ready":
+                pending_reason = String(member_value.get("reason",
+                    "generated_rock_asset_render_member_pending")) \
+                    if member_value is Dictionary else "generated_rock_asset_render_member_invalid"
+                continue
+            var member: Dictionary = member_value
+            var member_transform: Transform3D = visual.transform * member.get("transform",
+                Transform3D.IDENTITY)
+            var captured_member := ecology_render_member(
+                String(member.get("memberId", "")), member.get("mesh") as Mesh,
+                member_transform, String(member.get("materialKey", "")),
+                String(member.get("renderLayer", "")), member.get("material") as Material)
+            if captured_member.get("status") != "ready":
+                pending_reason = String(captured_member.get("reason",
+                    "generated_rock_asset_render_member_unrenderable"))
+            render_members.append(captured_member)
+    body.set_meta("ecology_render_members", render_members)
+    if not pending_reason.is_empty():
+        body.set_meta("ecology_render_capture_pending", pending_reason)
+    else:
+        body.remove_meta("ecology_render_capture_pending")
     return true
 
 func add_fallback_rock_visual(body: StaticBody3D, spec: Dictionary) -> void:
@@ -4762,6 +5102,9 @@ func add_fallback_rock_visual(body: StaticBody3D, spec: Dictionary) -> void:
     body.add_child(rock)
     body.set_meta("visual_source", "primitive_fallback")
     body.set_meta("visual_asset_id", "")
+    var transform := Transform3D(Basis.IDENTITY.scaled(rock.scale), rock.position)
+    body.set_meta("ecology_render_members", [ecology_render_member(
+        "rock_visual", rock_mesh, transform, "rock", "opaque", materials["rock"])])
 
 func prop_biome_for_position(parent: Node, position: Vector3) -> String:
     var world_position := position
@@ -4816,6 +5159,10 @@ func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumb
             runtime_perf_monitor.end_section("rock_navigation_notify", navigation_started)
     if not horizon_only:
         rock_published.emit(body, collider)
+    var capture_members: Array = body.get_meta("ecology_render_members", []) \
+        if body.get_meta("ecology_render_members", []) is Array else []
+    _record_realized_ecology_prop(parent, body, "rock", capture_members,
+        String(body.get_meta("ecology_render_capture_pending", "")))
     return body
 
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array:

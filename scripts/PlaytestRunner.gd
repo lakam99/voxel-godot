@@ -652,6 +652,336 @@ func _terrain_candidate_bounds_fit_native_block(bounds_value: Variant) -> bool:
         and bounds.end.x <= 16.05 and bounds.end.y <= 16.05 \
         and bounds.end.z <= 16.05
 
+
+func _production_provider_census_diagnostics(section_key: Vector3i,
+        world_id: String, coordinator: Object) -> Dictionary:
+    var roster: Variant = coordinator.get("_source_roster")
+    if not is_instance_valid(roster):
+        return {"status":"unavailable", "reason":"production_source_roster_missing",
+            "providers":{}}
+    var required_value: Variant = roster.get("_required_provider_ids")
+    var registrations_value: Variant = roster.get("_providers")
+    if not required_value is Array or not registrations_value is Dictionary:
+        return {"status":"unavailable", "reason":"production_source_roster_shape_invalid",
+            "providers":{}}
+    var rows: Dictionary = {}
+    for provider_id_value: Variant in required_value:
+        var provider_id := String(provider_id_value)
+        var registration_value: Variant = registrations_value.get(provider_id, {})
+        var registration: Dictionary = registration_value if registration_value is Dictionary else {}
+        var owner_ref := registration.get("owner") as WeakRef
+        var provider_owner: Variant = owner_ref.get_ref() if owner_ref != null else null
+        if not is_instance_valid(provider_owner) \
+                or provider_owner.get_instance_id() != int(registration.get("ownerInstanceId", 0)):
+            rows[provider_id] = {"status":"pending", "reason":"production_provider_owner_unavailable"}
+            continue
+        var method := String(registration.get("captureMethod", ""))
+        if method != "capture_static_section_sources" or not provider_owner.has_method(method):
+            rows[provider_id] = {"status":"failed", "reason":"production_provider_capture_method_invalid"}
+            continue
+        var raw: Variant = provider_owner.call(method, world_id, [section_key])
+        if not raw is Dictionary:
+            rows[provider_id] = {"status":"failed", "reason":"production_provider_returned_non_dictionary"}
+            continue
+        var snapshot: Dictionary = raw
+        var section_value: Variant = snapshot.get("sections", {}).get(section_key, {})
+        var section_row: Dictionary = section_value if section_value is Dictionary else {}
+        var ids: Array = section_row.get("sourcePartIds", [])
+        var detail_values: Dictionary = {}
+        for detail_key in ["chunk", "snapshotRemovedPropsRevision",
+                "currentRemovedPropsRevision", "snapshotSourceRevision",
+                "currentSourceRevision", "snapshotValidation",
+                "missingCategories", "unsupportedCandidateIds", "sourceId",
+                "queueRequestKey", "expectedRecipeSignature",
+                "capturedRecipeSignature", "bodyRecipeSignature", "queueTier",
+                "recipeTier", "bodyTier", "topologySignature", "branchCount"]:
+            if snapshot.has(detail_key):
+                detail_values[detail_key] = snapshot[detail_key]
+        rows[provider_id] = {"status":String(snapshot.get("status", "missing_status")),
+            "reason":String(snapshot.get("reason", "")),
+            "authorityRevision":String(snapshot.get("authorityRevision", "")),
+            "coverageStatus":String(section_row.get("status", "")),
+            "coverageRevision":String(section_row.get("coverageRevision", "")),
+            "sourcePartIds":ids.duplicate(), "sourceCount":ids.size(),
+            "details":detail_values}
+    return {"status":"captured", "providers":rows}
+
+
+func _production_provider_contribution_diagnostics(section_key: Vector3i,
+        coordinator: Object, census: Dictionary) -> Dictionary:
+    var roster: Variant = coordinator.get("_source_roster")
+    var required_value: Variant = roster.get("_required_provider_ids") \
+        if is_instance_valid(roster) else null
+    var registrations_value: Variant = roster.get("_providers") \
+        if is_instance_valid(roster) else null
+    if not required_value is Array or not registrations_value is Dictionary:
+        return {"status":"unavailable", "reason":"production_source_roster_missing",
+            "providers":{}}
+    var rows: Dictionary = {}
+    if census.get("status") != "complete":
+        for provider_id_value: Variant in required_value:
+            rows[String(provider_id_value)] = {"status":"not_attempted",
+                "reason":"complete_production_census_not_available"}
+        return {"status":"not_attempted", "providers":rows}
+    for provider_id_value: Variant in required_value:
+        var provider_id := String(provider_id_value)
+        var registration_value: Variant = registrations_value.get(provider_id, {})
+        var registration: Dictionary = registration_value if registration_value is Dictionary else {}
+        var owner_ref := registration.get("owner") as WeakRef
+        var provider_owner: Variant = owner_ref.get_ref() if owner_ref != null else null
+        if not is_instance_valid(provider_owner) \
+                or provider_owner.get_instance_id() != int(registration.get("ownerInstanceId", 0)):
+            rows[provider_id] = {"status":"pending", "reason":"production_provider_owner_unavailable"}
+            continue
+        if not provider_owner.has_method("capture_static_section_contribution"):
+            rows[provider_id] = {"status":"pending", "reason":"production_provider_contribution_method_missing"}
+            continue
+        var raw: Variant = provider_owner.call("capture_static_section_contribution",
+            census, section_key)
+        if not raw is Dictionary:
+            rows[provider_id] = {"status":"failed", "reason":"production_provider_returned_non_dictionary"}
+            continue
+        var result: Dictionary = raw
+        var contribution: Variant = result.get("contribution", {})
+        rows[provider_id] = {"status":String(result.get("status", "missing_status")),
+            "reason":String(result.get("reason", "")),
+            "inputCount":contribution.get("inputs", []).size() if contribution is Dictionary else 0}
+    return {"status":"captured", "providers":rows}
+
+
+func _select_demanded_production_section(coordinator: Object,
+        terrain_runtime: Object, observer_position: Vector3) -> Dictionary:
+    var demands_value: Variant = coordinator.get("_visible_section_demands")
+    var published_value: Variant = terrain_runtime.get("published_mesh_blocks")
+    var revisions_value: Variant = terrain_runtime.get("mesh_block_revisions")
+    if not demands_value is Dictionary or not published_value is Dictionary \
+            or not revisions_value is Dictionary:
+        return {"status":"pending", "reason":"production_demand_or_terrain_state_unavailable"}
+    var nearest: Dictionary = {}
+    var nearest_distance := INF
+    for section_value: Variant in demands_value:
+        if not section_value is Vector3i:
+            continue
+        var section_key: Vector3i = section_value
+        var demand_value: Variant = demands_value[section_key]
+        if not demand_value is Dictionary or not bool(published_value.get(section_key, false)):
+            continue
+        var revision := int(revisions_value.get(section_key, 0))
+        if revision <= 0 or int(demand_value.get("terrainRevision", 0)) != revision:
+            continue
+        var center := StaticSectionGridScript.origin_for_key(section_key) \
+            + Vector3.ONE * (StaticSectionGridScript.SECTION_SIZE_METERS * 0.5)
+        var distance_squared := observer_position.distance_squared_to(center)
+        if distance_squared < nearest_distance:
+            nearest_distance = distance_squared
+            nearest = {"sectionKey":section_key, "terrainRevision":revision,
+                "cameraDistanceSquared":distance_squared, "demand":demand_value.duplicate(true)}
+    if nearest.is_empty():
+        return {"status":"pending", "reason":"no_published_resident_section_has_current_visible_demand",
+            "demandCount":demands_value.size(), "publishedSectionCount":published_value.size()}
+    return {"status":"ready", "selection":nearest}
+
+
+func run_production_section_candidate_diagnostic() -> void:
+    var report: Dictionary = {"schema":"production-section-candidate-diagnostic/v1",
+        "evidenceLevel":"headed_live_main_real_provider_roster_diagnostic",
+        "passed":false, "status":"pending", "sectionKey":[],
+        "providerCensus":{}, "coordinatorCensus":{},
+        "providerContributions":{}, "trace":[],
+        "doesNotProve":"No old visual retirement, terrain collision/fluid/light parity, save/reload parity, traversal, or runtime performance."}
+    var trace: Array[Dictionary] = []
+    report["trace"] = trace
+    var started_usec := Time.get_ticks_usec()
+    if not bool(main.get("launch_options").get("skipTutorial", false)):
+        report["status"] = "failed"
+        report["firstBlocker"] = {"stage":"launch_options", "reason":"skip_tutorial_flag_required"}
+        trace.append({"frame":Engine.get_process_frames(), "event":"blocked",
+            "reason":"skip_tutorial_flag_required"})
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
+    var coordinator: Object = main.get("world_static_section_coordinator")
+    var terrain_runtime: Object = main.get("voxel_terrain_runtime")
+    if not is_instance_valid(coordinator) or not is_instance_valid(terrain_runtime):
+        report["status"] = "pending"
+        report["firstBlocker"] = {"stage":"runtime", "reason":"production_section_runtime_unavailable"}
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
+    var player_body := main.get("player") as CharacterBody3D
+    var camera := player_body.get("camera") as Camera3D if is_instance_valid(player_body) else null
+    var observer_position := camera.global_position if is_instance_valid(camera) else \
+        (player_body.global_position if is_instance_valid(player_body) else Vector3.ZERO)
+    var selection_result := _select_demanded_production_section(coordinator,
+        terrain_runtime, observer_position)
+    if selection_result.get("status") != "ready":
+        report["firstBlocker"] = {"stage":"section_selection",
+            "reason":String(selection_result.get("reason", "no_demanded_section")),
+            "detail":selection_result}
+        trace.append({"frame":Engine.get_process_frames(), "event":"selection_pending",
+            "detail":selection_result})
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
+    var selection: Dictionary = selection_result.selection
+    var section_key: Vector3i = selection.sectionKey
+    var world_id := String(coordinator.get("_world_id"))
+    report["sectionKey"] = [section_key.x, section_key.y, section_key.z]
+    report["terrainRevision"] = int(selection.terrainRevision)
+    report["initialDemand"] = selection.demand
+    report["observerPosition"] = [observer_position.x, observer_position.y, observer_position.z]
+    trace.append({"frame":Engine.get_process_frames(), "event":"selected_current_resident_demand",
+        "sectionKey":report.sectionKey, "terrainRevision":report.terrainRevision,
+        "demandStage":selection.demand.get("stage", "")})
+    var census: Dictionary = {}
+    while is_inside_tree() and is_instance_valid(coordinator):
+        census = coordinator.call("capture_authoritative_source_census", [section_key])
+        report["providerCensus"] = _production_provider_census_diagnostics(
+            section_key, world_id, coordinator)
+        if census.get("status") != "pending":
+            break
+        trace.append({"frame":Engine.get_process_frames(), "event":"provider_census_pending",
+            "reason":String(census.get("reason", "")),
+            "providerId":String(census.get("providerId", "")),
+            "providers":report.providerCensus.get("providers", {})})
+        var waiting_on := String(census.get("providerId", "source_census"))
+        var waiting_reason := String(census.get("reason", "pending"))
+        var waiting_provider: Dictionary = report.providerCensus.get("providers", {}).get(
+            waiting_on, {})
+        var waiting_detail := JSON.stringify(waiting_provider.get("details", {}))
+        if waiting_detail.length() > 1200:
+            waiting_detail = waiting_detail.substr(0, 1200)
+        mark_progress("production_section_waiting_for_%s_%s_%s" % [
+            waiting_on, waiting_reason, waiting_detail])
+        await wait_physics_frames(30)
+    if not is_instance_valid(coordinator):
+        report["status"] = "failed"
+        report["firstBlocker"] = {"stage":"coordinator_lifetime",
+            "reason":"production_section_coordinator_retired_while_waiting"}
+        report["trace"] = trace
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
+    report["coordinatorCensus"] = {"status":String(census.get("status", "missing_status")),
+        "reason":String(census.get("reason", "")),
+        "providerId":String(census.get("providerId", "")),
+        "worldId":String(census.get("worldId", "")),
+        "censusDigest":String(census.get("censusDigest", "")),
+        "expectedContributorCount":census.get("expectedContributorsBySection", {}) \
+            .get(section_key, []).size()}
+    report["providerContributions"] = _production_provider_contribution_diagnostics(
+        section_key, coordinator, census)
+    var demand_request: Dictionary = {"status":"unavailable",
+        "reason":"visible_section_demand_api_missing"}
+    if census.get("status") == "complete":
+        demand_request = coordinator.call("request_visible_section_demand", section_key,
+            int(selection.terrainRevision), float(selection.get("cameraDistanceSquared", 0.0)))
+    report["visibleDemandRequest"] = demand_request.duplicate(true)
+    report["admission"] = demand_request.duplicate(true)
+    var install: Dictionary = {"status":"pending",
+        "reason":"production_visible_section_scheduler_not_started"}
+    var last_trace_stage := ""
+    if demand_request.get("status") in ["queued", "tracked"]:
+        # Let MainRuntimeTools drive the same bounded visible-demand admission,
+        # contribution retry, native upload and receipt path used in gameplay.
+        # A first pending provider response (for example an exact-fluid proof)
+        # is not terminal: the demand remains owned by the coordinator.
+        for frame_index in range(3600):
+            await get_tree().process_frame
+            var admission_step: Dictionary = coordinator.call(
+                "advance_visible_section_candidate_demands", 1)
+            var install_step: Dictionary = coordinator.call(
+                "advance_queued_complete_section_candidates", 1, 1)
+            var demands: Variant = coordinator.get("_visible_section_demands")
+            var demand_state: Dictionary = demands.get(section_key, {}) \
+                if demands is Dictionary else {}
+            var stage := String(demand_state.get("stage", "withdrawn"))
+            var status := String(demand_state.get("lastInstallStatus",
+                demand_state.get("lastStatus", "pending")))
+            var reason := String(demand_state.get("lastInstallReason",
+                demand_state.get("lastReason", "")))
+            install = {"status":"installed" if stage == "installed" else
+                    ("failed" if stage == "blocked" else "pending"),
+                "stage":stage, "reason":reason,
+                "generation":int(demand_state.get("installedGeneration",
+                    demand_state.get("candidateGeneration", 0))),
+                "attempts":int(demand_state.get("attempts", 0)),
+                "admissionStep":admission_step,
+                "installStep":install_step,
+                "lastStatus":status, "lastInstallStage":String(
+                    demand_state.get("lastInstallStage", ""))}
+            if stage != last_trace_stage or frame_index % 120 == 0 \
+                    or stage in ["installed", "blocked", "withdrawn"]:
+                trace.append({"frame":Engine.get_process_frames(), "event":"production_demand_step",
+                    "status":String(install.status), "stage":stage,
+                    "reason":reason, "attempts":int(install.attempts),
+                    "generation":int(install.generation)})
+                last_trace_stage = stage
+            if frame_index > 0 and frame_index % 120 == 0:
+                mark_progress("production_section_candidate_%s_%s" % [stage, reason])
+            if stage in ["installed", "blocked", "withdrawn"]:
+                break
+    else:
+        install = {"status":"failed", "reason":String(demand_request.get("reason", "demand_rejected"))}
+    report["candidateGeneration"] = int(install.get("generation", 0))
+    report["install"] = install.duplicate(true)
+    var installed_candidates: Variant = coordinator.get("_production_candidates_by_section")
+    var installed_candidate: Dictionary = installed_candidates.get(section_key, {}) \
+        if installed_candidates is Dictionary else {}
+    var receipts_value: Variant = coordinator.get("_production_candidate_receipts")
+    var coordinator_receipt: Dictionary = receipts_value.get(section_key, {}) \
+        if receipts_value is Dictionary else {}
+    var manifest_digest := String(installed_candidate.get("contentManifestDigest", ""))
+    var installed_generation := int(installed_candidate.get("generation", 0))
+    var owner_cell: Vector2i = StaticSectionGridScript.chunk_key_for_section(section_key)
+    var owner_result: Dictionary = main.call("get_static_section_render_owner", owner_cell, false) \
+        if main.has_method("get_static_section_render_owner") else {"status":"missing"}
+    var owner := owner_result.get("owner") as Node3D
+    var backend := owner_result.get("backend") as Node \
+        if owner_result.get("status") == "ready" else null
+    var slot_id := StaticSectionInstallSessionScript.slot_id(world_id, section_key)
+    var native_snapshot: Dictionary = backend.call("installed_snapshot", slot_id) \
+        if is_instance_valid(backend) else {"status":"missing"}
+    var native_receipt_current := is_instance_valid(backend) \
+        and bool(backend.call("receipt_installed", slot_id, installed_generation,
+            "%s:%d" % [world_id, installed_generation], manifest_digest))
+    var matching_receipt: bool = install.get("status") == "installed" \
+        and not manifest_digest.is_empty() \
+        and String(coordinator_receipt.get("contentManifestDigest", "")) == manifest_digest \
+        and int(coordinator_receipt.get("generation", 0)) == installed_generation \
+        and int(coordinator_receipt.get("backendInstanceId", 0)) == backend.get_instance_id() \
+        and int(coordinator_receipt.get("chunkInstanceId", 0)) == owner.get_instance_id() \
+        and coordinator_receipt.get("sectionKey") == section_key \
+        and coordinator_receipt.get("worldId") == world_id \
+        and native_receipt_current and native_snapshot.get("status") == "ready" \
+        and String(native_snapshot.get("packetDigest", "")) == manifest_digest \
+        and int(native_snapshot.get("generation", 0)) == installed_generation \
+        and int(native_snapshot.get("meshPayloadBytes", 0)) > 0
+    report["nativeInstall"] = {"slotId":slot_id,
+        "ownerCell":[owner_cell.x, owner_cell.y],
+        "ownerInstanceId":owner.get_instance_id() if is_instance_valid(owner) else 0,
+        "backendInstanceId":backend.get_instance_id() if is_instance_valid(backend) else 0,
+        "candidateGeneration":installed_generation,
+        "contentManifestDigest":manifest_digest,
+        "coordinatorReceipt":coordinator_receipt,
+        "nativeSnapshot":native_snapshot,
+        "nativeReceiptCurrent":native_receipt_current,
+        "receiptBackedInstall":matching_receipt}
+    report["elapsedMs"] = float(Time.get_ticks_usec() - started_usec) / 1000.0
+    report["status"] = "passed" if matching_receipt else \
+        ("pending" if install.get("status") in ["pending", "pending_owner"] \
+            or census.get("status") == "pending" else "failed")
+    report["passed"] = matching_receipt
+    if not matching_receipt:
+        report["firstBlocker"] = {"stage":
+            ("coordinator_census" if census.get("status") != "complete" else
+                ("visible_section_demand" if demand_request.get("status") not in ["queued", "tracked"]
+                    or install.get("status") in ["pending", "failed"] else "native_install")),
+            "reason":String(install.get("reason", demand_request.get("reason",
+                census.get("reason", "receipt_not_current")))),
+            "providerId":String(census.get("providerId", demand_request.get("providerId", ""))),
+            "providerReason":String(census.get("reason", demand_request.get("reason", "")))}
+    trace.append({"frame":Engine.get_process_frames(), "event":"diagnostic_complete",
+        "status":report.status, "receiptBackedInstall":matching_receipt,
+        "elapsedMs":report.elapsedMs})
+    add_result("production_section_candidate_diagnostic", matching_receipt, JSON.stringify(report))
+
 func run() -> void:
     var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()
     mark_progress("start")
@@ -674,6 +1004,24 @@ func run() -> void:
         if player:
             camera = player.get("camera") as Camera3D
         await test_resident_terrain_section_capture()
+        finish_playtest()
+        return
+    if only_section == "production_section_candidate_diagnostic":
+        mark_progress("production_section_candidate_waiting_for_playable_world")
+        if not await wait_for_runtime_loading_complete():
+            add_result("production_section_candidate_diagnostic", false,
+                JSON.stringify({"schema":"production-section-candidate-diagnostic/v1",
+                    "status":"failed", "passed":false,
+                    "firstBlocker":{"stage":"main_startup",
+                        "reason":String(main.get("startup_loading_failure_result"))},
+                    "evidenceLevel":"headed_live_main_real_provider_roster_diagnostic"}))
+            finish_playtest()
+            return
+        await wait_physics_frames(20)
+        player = main.get("player") as CharacterBody3D
+        if player:
+            camera = player.get("camera") as Camera3D
+        await run_production_section_candidate_diagnostic()
         finish_playtest()
         return
     if not await wait_for_runtime_loading_complete():

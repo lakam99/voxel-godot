@@ -1,9 +1,9 @@
 extends RefCounted
 class_name TreeSectionValueAdapter
 
-## Captures one committed runtime tree into immutable shared-section instance
-## inputs. The tree queue remains the recipe/LOD owner; the StaticBody remains
-## the collision, interaction, harvest, and save owner. This is not a census of
+## Adapts the tree queue's sealed producer output into immutable shared-section
+## inputs. The queue remains the recipe/LOD owner; the StaticBody remains the
+## collision, interaction, harvest, and save owner. This is not a census of
 ## trees in a chunk or section.
 
 const QueueScript := preload("res://scripts/environment/TreePublicationQueue.gd")
@@ -18,6 +18,21 @@ const FoliageShader := preload("res://resources/visual/procedural_tree_foliage.g
 
 const SCHEMA := "tree-section-value-adapter/v1"
 const PIPELINE_REVISION := "procedural-tree-runtime-visual/v1"
+
+
+## Resolve the producer's committed recipe and value geometry from the queue's
+## own acknowledgement record. This lets the ecology provider join the normal
+## source census without enumerating GeneratedTreeVisual scene children.
+static func capture_from_queue_record(queue: Object, main: Object, world_id: String,
+		body: StaticBody3D, removed_snapshot: Dictionary) -> Dictionary:
+	if not is_instance_valid(queue) or not queue is QueueScript:
+		return _pending("tree_capture_authority_missing")
+	var record := _published_record(queue, body) if is_instance_valid(body) else {}
+	var recipe_value: Variant = record.get("recipeSnapshot", null)
+	if not recipe_value is Dictionary or not recipe_value.is_read_only():
+		return _pending("tree_queue_recipe_snapshot_missing")
+	return capture_published_tree(queue, main, world_id, body, recipe_value,
+		removed_snapshot)
 
 
 ## Capture is fail-closed: it accepts only the exact body instance and recipe
@@ -69,25 +84,44 @@ static func capture_published_tree(queue: Object, main: Object, world_id: String
 			or not (request.get("treeWorldPosition") as Vector3).is_equal_approx(body.global_position):
 		return _pending("tree_queue_request_identity_stale", {"sourceId":source_id})
 	var service_value: Variant = queue.get("publication_service")
-	if service_value == null or not service_value.has_method("runtime_recipe_signature"):
+	if service_value == null or not service_value.has_method("runtime_recipe_signature") \
+			or not service_value.has_method("normalize_request") \
+			or not service_value.has_method("request_key"):
 		return _pending("tree_recipe_authority_missing", {"sourceId":source_id})
-	var expected_signature := String(service_value.call("runtime_recipe_signature", recipe, request))
+	var normalized_request_value: Variant = service_value.call("normalize_request", request)
+	if not normalized_request_value is Dictionary or normalized_request_value.is_empty():
+		return _pending("tree_recipe_request_normalization_unavailable", {"sourceId":source_id})
+	var normalized_request: Dictionary = normalized_request_value
+	var expected_signature := String(service_value.call(
+		"runtime_recipe_signature", recipe, normalized_request))
 	if expected_signature.is_empty() or expected_signature != String(recipe.get("signature", "")) \
 			or expected_signature != String(body.get_meta("tree_recipe_signature", "")) \
 			or String(body.get_meta("tree_render_lod_tier", "")) != tier:
-		return _pending("tree_recipe_revision_not_current", {"sourceId":source_id})
+		return _pending("tree_recipe_revision_not_current", {
+			"sourceId":source_id,
+			"queueRequestKey":String(service_value.call("request_key", normalized_request)),
+			"expectedRecipeSignature":expected_signature,
+			"capturedRecipeSignature":String(recipe.get("signature", "")),
+			"bodyRecipeSignature":String(body.get_meta("tree_recipe_signature", "")),
+			"queueTier":tier,
+			"recipeTier":String(recipe_lod.get("tier", "")) if recipe_lod is Dictionary else "",
+			"bodyTier":String(body.get_meta("tree_render_lod_tier", "")),
+			"topologySignature":String(recipe.get("topologySignature", "")),
+			"branchCount":int(recipe.get("branchCount", 0))})
 	if bool(recipe.get("runtimeImpostor", false)) \
 			or String(body.get_meta("visual_source", "")) == "chunk_tree_impostor":
 		return _pending("tree_impostor_installation_not_enumerable", {"sourceId":source_id})
-	var visual := body.get_node_or_null("GeneratedTreeVisual") as Node3D
-	if not is_instance_valid(visual) or visual.is_queued_for_deletion() \
-			or String(visual.get_meta("tree_recipe_signature", "")) != expected_signature \
-			or String(visual.get_meta("tree_id", "")) != prop_id:
-		return _pending("tree_committed_visual_missing_or_stale", {"sourceId":source_id})
-	var geometry := _collect_geometry(visual)
-	if geometry.get("status") != "ready":
-		return geometry
-	var members: Dictionary = geometry.members
+	var member_values: Variant = queue_record.get("sectionValueMembers", null)
+	if bool(queue_record.get("sectionValueCapturePending", false)) \
+			or not member_values is Array or not member_values.is_read_only():
+		return _pending("tree_queue_section_value_snapshot_missing_or_stale", {
+			"sourceId":source_id,
+			"reason":String(queue_record.get("sectionValueCapturePending", ""))})
+	var members := _members_by_role(member_values)
+	if members.get("status") != "ready":
+		return _pending(String(members.get("reason", "tree_queue_section_value_snapshot_invalid")), {
+			"sourceId":source_id})
+	members = members.members
 	var recipe_check := _validate_recipe_members(recipe, members)
 	if recipe_check.get("status") != "ready":
 		return _pending(String(recipe_check.get("reason", "tree_recipe_visual_members_disagree")),
@@ -115,36 +149,24 @@ static func _published_record(queue: Object, body: StaticBody3D) -> Dictionary:
 	return {}
 
 
-static func _collect_geometry(visual: Node3D) -> Dictionary:
+static func _members_by_role(member_values: Array) -> Dictionary:
 	var members := {"bole":[], "branches":[], "foliage":[]}
-	var stack: Array[Node] = [visual]
-	while not stack.is_empty():
-		var current: Node = stack.pop_back()
-		if current != visual and current is GeometryInstance3D:
-			if not current.visible or not current.is_visible_in_tree():
-				return _pending("tree_visual_member_not_visible")
-			var role := String(current.get_meta("tree_wood_role", ""))
-			if role == "continuous_bole_and_scaffolds":
-				if not current is MeshInstance3D:
-					return _pending("tree_bole_member_type_unsupported")
-				members.bole.append(current)
-			elif role == "instanced_distal_branches":
-				if not current is MultiMeshInstance3D:
-					return _pending("tree_branch_member_type_unsupported")
-				members.branches.append(current)
-			elif String(current.get_meta("tree_render_role", "")) == "foliage":
-				if not current is MultiMeshInstance3D:
-					return _pending("tree_foliage_member_type_unsupported")
-				members.foliage.append(current)
-			else:
-				return _pending("tree_unclassified_geometry_in_committed_visual", {
-					"node":String(current.name), "class":current.get_class()})
-		for child_value: Variant in current.get_children():
-			if child_value is Node:
-				stack.append(child_value)
+	for member_value: Variant in member_values:
+		if not member_value is Dictionary or not member_value.is_read_only():
+			return _pending("tree_queue_member_value_unsealed")
+		var member: Dictionary = member_value
+		var role := String(member.get("role", ""))
+		if String(member.get("schema", "")) != "tree-section-render-member/v1" \
+				or role not in members or not member.get("mesh") is Mesh \
+				or not member.get("material") is Material \
+				or not member.get("transforms") is Array \
+				or not member.get("colors") is Array \
+				or not member.get("customData") is Array:
+			return _pending("tree_queue_member_value_invalid")
+		members[role].append(member)
 	if members.bole.size() != 1 or members.branches.size() > 1 \
 			or members.foliage.size() > 1:
-		return _pending("tree_visual_topology_not_supported", {
+		return _pending("tree_queue_member_topology_not_supported", {
 			"boleCount":members.bole.size(), "branchBatchCount":members.branches.size(),
 			"foliageBatchCount":members.foliage.size()})
 	return {"status":"ready", "members":members}
@@ -165,24 +187,18 @@ static func _validate_recipe_members(recipe: Dictionary, members: Dictionary) ->
 		else:
 			distal_count += 1
 	if bole_count < 1 or members.bole.size() != 1 \
-			or int(members.bole[0].get_meta("tree_wood_segment_count", -1)) != bole_count:
+			or int(members.bole[0].get("producerElementCount", -1)) != bole_count:
 		return _pending("tree_bole_geometry_membership_mismatch", {
 			"recipeBoleCount":bole_count})
 	var actual_distal := 0
 	if not members.branches.is_empty():
-		var branch_instance := members.branches[0] as MultiMeshInstance3D
-		if branch_instance.multimesh == null:
-			return _pending("tree_branch_multimesh_missing")
-		actual_distal = branch_instance.multimesh.instance_count
+		actual_distal = (members.branches[0].transforms as Array).size()
 	if actual_distal != distal_count or (distal_count > 0) != (members.branches.size() == 1):
 		return _pending("tree_branch_geometry_membership_mismatch", {
 			"recipeDistalCount":distal_count, "actualDistalCount":actual_distal})
 	var actual_foliage := 0
 	if not members.foliage.is_empty():
-		var foliage_instance := members.foliage[0] as MultiMeshInstance3D
-		if foliage_instance.multimesh == null:
-			return _pending("tree_foliage_multimesh_missing")
-		actual_foliage = foliage_instance.multimesh.instance_count
+		actual_foliage = (members.foliage[0].transforms as Array).size()
 	if actual_foliage != recipe_foliage_value.size() \
 			or (actual_foliage > 0) != (members.foliage.size() == 1):
 		return _pending("tree_foliage_geometry_membership_mismatch", {
@@ -199,36 +215,35 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 	var mesh_bindings := {}
 	var material_bindings := {}
 	for role: String in ["bole", "branches", "foliage"]:
-		for geometry_value: Variant in members.get(role, []):
-			var instance := geometry_value as GeometryInstance3D
-			var mesh: Mesh
+		for member_value: Variant in members.get(role, []):
+			var member: Dictionary = member_value
+			var mesh := member.get("mesh") as Mesh
+			var material := member.get("material") as Material
+			var local_transform: Variant = member.get("localTransform")
+			var raw_transforms: Variant = member.get("transforms")
+			var raw_colors: Variant = member.get("colors")
+			var raw_custom: Variant = member.get("customData")
+			if not is_instance_valid(mesh) or material == null \
+					or not local_transform is Transform3D \
+					or not raw_transforms is Array or not raw_colors is Array \
+					or not raw_custom is Array \
+					or raw_transforms.size() == 0 \
+					or raw_transforms.size() != raw_colors.size() \
+					or raw_transforms.size() != raw_custom.size():
+				return _pending("tree_geometry_mesh_or_material_missing", {"sourceId":source_id, "role":role})
 			var instance_transforms: Array[Transform3D] = []
 			var instance_colors: Array[Color] = []
 			var custom_data: Array[Color] = []
-			if instance is MeshInstance3D:
-				var mesh_instance := instance as MeshInstance3D
-				mesh = mesh_instance.mesh
-				instance_transforms.append(body.global_transform.affine_inverse() * mesh_instance.global_transform)
-				instance_colors.append(Color.WHITE)
-				custom_data.append(Color(0.0, 0.0, 0.0, 1.0))
-			elif instance is MultiMeshInstance3D:
-				var multi_instance := instance as MultiMeshInstance3D
-				var multi_mesh := multi_instance.multimesh
-				if multi_mesh == null or not multi_mesh.use_custom_data \
-						or multi_mesh.transform_format != MultiMesh.TRANSFORM_3D:
-					return _pending("tree_multimesh_instance_abi_unsupported", {"sourceId":source_id, "role":role})
-				mesh = multi_mesh.mesh
-				for index: int in range(multi_mesh.instance_count):
-					instance_transforms.append(body.global_transform.affine_inverse() \
-						* multi_instance.global_transform * multi_mesh.get_instance_transform(index))
-					instance_colors.append(multi_mesh.get_instance_color(index) if multi_mesh.use_colors else Color.WHITE)
-					custom_data.append(multi_mesh.get_instance_custom_data(index))
-			else:
-				return _pending("tree_geometry_member_type_unsupported", {"sourceId":source_id, "role":role})
-			if not is_instance_valid(mesh) or instance_transforms.is_empty() \
-					or instance.material_override == null:
-				return _pending("tree_geometry_mesh_or_material_missing", {"sourceId":source_id, "role":role})
-			var material: Material = instance.material_override
+			for index: int in range(raw_transforms.size()):
+				var member_transform: Variant = raw_transforms[index]
+				var member_color: Variant = raw_colors[index]
+				var member_custom: Variant = raw_custom[index]
+				if not member_transform is Transform3D or not member_color is Color \
+						or not member_custom is Color:
+					return _pending("tree_queue_instance_value_invalid", {"sourceId":source_id, "role":role})
+				instance_transforms.append(local_transform * member_transform)
+				instance_colors.append(member_color)
+				custom_data.append(member_custom)
 			var layer := _supported_opaque_layer(material, role)
 			if layer.is_empty():
 				return _pending("tree_material_render_layer_unsupported", {"sourceId":source_id, "role":role})
@@ -242,14 +257,15 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 			var mesh_bounds: AABB = mesh.get_aabb()
 			if not _valid_bounds(mesh_bounds):
 				return _pending("tree_mesh_bounds_invalid", {"sourceId":source_id, "role":role})
-			var visibility_end := float(instance.visibility_range_end)
-			var fade_margin := float(instance.visibility_range_end_margin)
-			var cast_shadows := instance.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			var visibility_end := float(member.get("visibilityRangeEnd", 0.0))
+			var fade_margin := float(member.get("fadeMargin", 0.0))
+			var cast_shadows := bool(member.get("castShadows", false))
 			var mesh_resource_key := "tree.runtime.%s:%s/v1" % [role, mesh_digest]
 			var mesh_key := "%s|pipeline=%s|layer=%s|sort=none" % [mesh_resource_key, PIPELINE_REVISION, layer]
 			var material_key := "tree.material.%s:%s" % [role, material_digest]
+			var renderer_tier := _renderer_tier_for_role(role)
 			var compatibility_value := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
-				"materialKey":material_key, "renderTier":tier,
+				"materialKey":material_key, "renderTier":renderer_tier,
 				"meshResourceKey":mesh_resource_key, "meshContentDigest":mesh_digest,
 				"meshKey":mesh_key, "pipelineRevision":PIPELINE_REVISION,
 				"renderLayer":layer, "translucentSortPolicy":"none",
@@ -281,6 +297,7 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 			member_rows.append({"role":role, "input":input,
 				"meshResourceKey":mesh_resource_key, "materialKey":material_key,
 				"meshContentDigest":mesh_digest, "materialContentDigest":material_digest,
+				"compatibilityKey":batch_key, "rendererTier":renderer_tier,
 				"instanceCount":instance_transforms.size()})
 	member_rows.make_read_only()
 	compatibility_by_key.make_read_only()
@@ -325,12 +342,18 @@ static func _prepare_members(body: StaticBody3D, source_id: String, world_id: St
 		"sourceId":source_id, "sourcePartId":source_id,
 		"sourceRevision":source_revision, "producerRevision":recipe_signature,
 		"removedPropsRevision":removed_revision, "ownerCell":owner_cell,
-		"bodyInstanceId":body.get_instance_id(), "renderTier":tier,
+		"bodyInstanceId":body.get_instance_id(), "renderLodTier":tier,
 		"memberRows":member_rows, "inputs":inputs, "partition":partition,
 		"sectionKeys":section_keys, "compatibilityByKey":compatibility_by_key,
 		"meshBindings":mesh_bindings, "materialBindings":material_bindings,
 		"censusStatus":"pending", "censusScope":"one_published_tree",
 		"collisionOwner":"tree_static_body", "gameplayOwner":"tree_prop_authority"}
+
+
+static func _renderer_tier_for_role(role: String) -> String:
+	# Recipe LOD (near/mid/far) changes the produced geometry and visibility;
+	# renderer category is the independent native packet classification.
+	return "detail" if role == "foliage" else "structural"
 
 
 static func _supported_opaque_layer(material: Material, role: String) -> String:
@@ -391,7 +414,8 @@ static func _source_revision(world_id: String, seed: String, source_id: String,
 		removed_revision, tier, owner_cell, source_to_world]
 	for row: Dictionary in rows:
 		parts.append([row.role, row.meshContentDigest,
-			row.materialContentDigest, row.instanceCount, row.input.buffer])
+			row.materialContentDigest, row.compatibilityKey,
+			row.instanceCount, row.input.buffer])
 	var context := HashingContext.new()
 	if context.start(HashingContext.HASH_SHA256) != OK \
 			or context.update(var_to_bytes(parts)) != OK:

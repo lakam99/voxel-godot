@@ -462,7 +462,9 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 				var sealed_buffer := output_buffer
 				sealed_buffer.make_read_only()
 				output_ranges.make_read_only()
-				var segment := {"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+				var segment_id := "merged:" + (batch_key + "\n" + str(output_segments.size())).sha256_text()
+				var segment := {"segmentId":segment_id,
+					"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
 					"batchIndex":output_segments.size(), "buffer":sealed_buffer,
 					"bounds":output_bounds, "instanceCount":output_instances, "sourceRanges":output_ranges}
 				segment.make_read_only()
@@ -477,7 +479,9 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 		var sealed_buffer := output_buffer
 		sealed_buffer.make_read_only()
 		output_ranges.make_read_only()
-		var segment := {"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+		var segment_id := "merged:" + (batch_key + "\n" + str(output_segments.size())).sha256_text()
+		var segment := {"segmentId":segment_id,
+			"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
 			"batchIndex":output_segments.size(), "buffer":sealed_buffer,
 			"bounds":output_bounds, "instanceCount":output_instances, "sourceRanges":output_ranges}
 		segment.make_read_only()

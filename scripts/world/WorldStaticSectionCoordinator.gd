@@ -26,6 +26,9 @@ const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SourceRoster = preload("res://scripts/world/StaticSectionSourceRoster.gd")
 const CandidateAssembler = preload("res://scripts/world/WorldStaticSectionCandidateAssembler.gd")
 
+const MAX_VISIBLE_SECTION_DEMAND_SCAN_PER_ADVANCE := 32
+const VISIBLE_SECTION_DEMAND_RETRY_FRAMES := 30
+
 var _ledger = LedgerScript.new()
 var _source_roster = SourceRoster.new()
 var _world_id := ""
@@ -41,6 +44,16 @@ var _census_digest_by_boundary: Dictionary = {}
 var _production_candidates_by_section: Dictionary = {}
 var _production_candidate_jobs: Dictionary = {}
 var _production_candidate_receipts: Dictionary = {}
+var _production_candidate_generation := 0
+var _visible_section_demands: Dictionary = {}
+var _visible_section_demand_queue: Array[Dictionary] = []
+var _visible_section_demand_head := 0
+var _visible_section_demand_tail := 0
+var _visible_section_demand_count := 0
+var _visible_section_demand_queue_token := 0
+var _visible_section_demand_attempts := 0
+var _visible_section_recompile_quota := 2
+var _visible_section_demand_wake_rounds := 0
 
 
 func configure(world_id: String) -> Dictionary:
@@ -63,11 +76,263 @@ func configure_source_roster(required_provider_ids: Array[String]) -> Dictionary
 
 func register_source_provider(provider_id: String, authority_owner: Object,
 		capture_method: String) -> Dictionary:
-	return _source_roster.register_provider(provider_id, authority_owner, capture_method)
+	var registered: Dictionary = _source_roster.register_provider(provider_id,
+		authority_owner, capture_method)
+	if registered.get("status") == "ready":
+		_wake_visible_section_demands()
+	return registered
 
 
 func unregister_source_provider(provider_id: String, authority_owner: Object) -> Dictionary:
-	return _source_roster.unregister_provider(provider_id, authority_owner)
+	var unregistered: Dictionary = _source_roster.unregister_provider(provider_id, authority_owner)
+	if unregistered.get("status") == "ready":
+		_wake_visible_section_demands()
+	return unregistered
+
+
+## Track a native terrain section that has entered the current mesh-block view.
+## The queue stores demand identity and priority only; each attempt recaptures the
+## full provider census before any whole-section candidate can be admitted.
+func request_visible_section_demand(section_key: Vector3i, terrain_revision: int,
+		camera_distance_squared: float) -> Dictionary:
+	if terrain_revision <= 0 or not is_finite(camera_distance_squared) \
+			or camera_distance_squared < 0.0:
+		return _failed("invalid_visible_section_demand_identity")
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	var revision := str(terrain_revision)
+	if state.is_empty():
+		state = {"terrainRevision":revision, "priority":camera_distance_squared,
+			"stage":"waiting", "attempts":0,
+			"nextAttemptFrame":Engine.get_process_frames(), "queued":false}
+		_visible_section_demands[section_key] = state
+		_enqueue_visible_section_demand(section_key, state)
+	else:
+		state["priority"] = camera_distance_squared
+		if String(state.get("terrainRevision", "")) != revision:
+			_cancel_pending_production_candidate(section_key)
+			state["terrainRevision"] = revision
+			state["stage"] = "waiting"
+			state["attempts"] = 0
+			state["lastReason"] = ""
+			state.erase("blockedReason")
+			state["nextAttemptFrame"] = Engine.get_process_frames()
+			state.erase("candidateGeneration")
+			state.erase("installedGeneration")
+			state.erase("installedReceipt")
+			if not bool(state.get("queued", false)):
+				_enqueue_visible_section_demand(section_key, state)
+		_visible_section_demands[section_key] = state
+	return {"status":"queued" if state.get("stage") == "waiting" else "tracked",
+		"sectionKey":section_key, "stage":String(state.get("stage", "waiting")),
+		"terrainRevision":revision}
+
+
+## Remove only queued/staged candidate work for an exited native mesh block.
+## Accepted render slots remain under their current owner and are not retired here.
+func withdraw_visible_section_demand(section_key: Vector3i) -> Dictionary:
+	if not _visible_section_demands.has(section_key):
+		return {"status":"idle", "sectionKey":section_key}
+	_visible_section_demands.erase(section_key)
+	_cancel_pending_production_candidate(section_key)
+	return {"status":"withdrawn", "sectionKey":section_key,
+		"installedRepresentationRetained":_production_candidates_by_section.has(section_key)}
+
+
+## Refresh queued priorities from the live camera with a fixed work cap. This
+## rotates only current pending demands and never enumerates the full resident
+## terrain mesh-block dictionary.
+func refresh_visible_section_demand_priorities(camera_position: Vector3,
+		max_updates := 16) -> Dictionary:
+	if not camera_position.is_finite() or max_updates < 1 or max_updates > 64:
+		return _failed("invalid_visible_section_priority_refresh")
+	var updated := 0
+	var refresh_count := mini(max_updates, _visible_section_demand_count)
+	for _index in range(refresh_count):
+		var popped: Dictionary = _pop_visible_section_demand()
+		if popped.get("status") != "ready":
+			break
+		var section_key: Vector3i = popped.sectionKey
+		var state: Dictionary = _visible_section_demands.get(section_key, {})
+		if state.is_empty() or not bool(state.get("queued", false)) \
+				or int(state.get("queueToken", -1)) != int(popped.get("queueToken", -2)):
+			continue
+		state["queued"] = false
+		if state.get("stage") == "waiting":
+			var center := SectionGrid.origin_for_key(section_key) \
+				+ Vector3.ONE * (SectionGrid.SECTION_SIZE_METERS * 0.5)
+			state["priority"] = camera_position.distance_squared_to(center)
+			updated += 1
+			_enqueue_visible_section_demand(section_key, state)
+		else:
+			_visible_section_demands[section_key] = state
+	return {"status":"advanced" if updated > 0 else "idle", "updatedCount":updated,
+		"pendingDemandCount":_visible_section_demands.size()}
+
+
+## Admit at most a small number of visible demands. Selection examines a bounded
+## queue window, prioritizes nearby first-time sections, and grants at most two
+## nearer recompiles before giving an initial section its turn. Pending providers
+## stay queued with delayed retries instead of rescanning every section each frame.
+func advance_visible_section_candidate_demands(max_attempts := 1) -> Dictionary:
+	if max_attempts < 1 or max_attempts > 4:
+		return _failed("invalid_visible_section_candidate_attempt_budget")
+	var results: Array[Dictionary] = []
+	for _attempt_index in range(max_attempts):
+		var selected: Dictionary = _take_next_visible_section_demand()
+		if selected.get("status") != "ready":
+			break
+		var section_key: Vector3i = selected.sectionKey
+		var state: Dictionary = selected.state
+		_production_candidate_generation += 1
+		var admission: Dictionary = assemble_and_submit_complete_section_candidate(
+			section_key, _production_candidate_generation)
+		state["attempts"] = int(state.get("attempts", 0)) + 1
+		state["lastReason"] = String(admission.get("reason", ""))
+		state["lastStatus"] = String(admission.get("status", "failed"))
+		if admission.get("status") == "queued":
+			state["stage"] = "candidate_queued"
+			state["candidateGeneration"] = _production_candidate_generation
+			state.erase("blockedReason")
+		else:
+			var retryable: bool = admission.get("status") == "pending" \
+				or bool(admission.get("retryable", false))
+			state["stage"] = "waiting" if retryable else "blocked"
+			if retryable:
+				state.erase("blockedReason")
+			else:
+				state["blockedReason"] = String(admission.get("reason", admission.get("status", "failed")))
+			state["nextAttemptFrame"] = Engine.get_process_frames() \
+				+ VISIBLE_SECTION_DEMAND_RETRY_FRAMES
+			if retryable:
+				_enqueue_visible_section_demand(section_key, state)
+		_visible_section_demands[section_key] = state
+		results.append({"sectionKey":section_key, "terrainRevision":state.terrainRevision,
+			"stage":String(state.stage), "admission":admission})
+	_visible_section_demand_attempts += results.size()
+	results.make_read_only()
+	return {"status":"advanced" if not results.is_empty() else "idle",
+		"attemptCount":results.size(), "totalAttempts":_visible_section_demand_attempts,
+		"pendingDemandCount":_visible_section_demands.size(), "results":results}
+
+
+func _take_next_visible_section_demand() -> Dictionary:
+	if _visible_section_demand_count <= 0:
+		return {"status":"idle"}
+	var current_frame := Engine.get_process_frames()
+	var wake_allows_retry := _visible_section_demand_wake_rounds > 0
+	var initial_candidates: Array[Dictionary] = []
+	var recompile_candidates: Array[Dictionary] = []
+	var scan_count := mini(MAX_VISIBLE_SECTION_DEMAND_SCAN_PER_ADVANCE,
+		_visible_section_demand_count)
+	for _scan_index in range(scan_count):
+		var popped: Dictionary = _pop_visible_section_demand()
+		if popped.get("status") != "ready":
+			break
+		var section_key: Vector3i = popped.sectionKey
+		var state: Dictionary = _visible_section_demands.get(section_key, {})
+		if state.is_empty() or not bool(state.get("queued", false)) \
+				or int(state.get("queueToken", -1)) != int(popped.get("queueToken", -2)):
+			continue
+		state["queued"] = false
+		_visible_section_demands[section_key] = state
+		if state.get("stage") != "waiting":
+			continue
+		if not wake_allows_retry and int(state.get("nextAttemptFrame", 0)) > current_frame:
+			_enqueue_visible_section_demand(section_key, state)
+			continue
+		var row := {"sectionKey":section_key, "state":state,
+			"priority":float(state.get("priority", INF))}
+		if _production_candidates_by_section.has(section_key):
+			recompile_candidates.append(row)
+		else:
+			initial_candidates.append(row)
+	if wake_allows_retry:
+		_visible_section_demand_wake_rounds = maxi(0, _visible_section_demand_wake_rounds - 1)
+	var selected: Dictionary = {}
+	var initial: Dictionary = _closest_visible_demand(initial_candidates)
+	var recompile: Dictionary = _closest_visible_demand(recompile_candidates)
+	if not recompile.is_empty() and (initial.is_empty() \
+			or float(recompile.priority) < float(initial.priority) \
+			and _visible_section_recompile_quota > 0):
+		selected = recompile
+		_visible_section_recompile_quota = maxi(0, _visible_section_recompile_quota - 1)
+	elif not initial.is_empty():
+		selected = initial
+		_visible_section_recompile_quota = 2
+	elif not recompile.is_empty():
+		selected = recompile
+		_visible_section_recompile_quota = maxi(0, _visible_section_recompile_quota - 1)
+	for row: Dictionary in initial_candidates + recompile_candidates:
+		if row.get("sectionKey") != selected.get("sectionKey"):
+			_enqueue_visible_section_demand(row.sectionKey, row.state)
+	if selected.is_empty():
+		return {"status":"idle"}
+	return {"status":"ready", "sectionKey":selected.sectionKey, "state":selected.state}
+
+
+func _closest_visible_demand(rows: Array[Dictionary]) -> Dictionary:
+	var selected: Dictionary = {}
+	for row: Dictionary in rows:
+		if selected.is_empty() or float(row.priority) < float(selected.priority):
+			selected = row
+	return selected
+
+
+func _enqueue_visible_section_demand(section_key: Vector3i, state: Dictionary) -> void:
+	if bool(state.get("queued", false)):
+		return
+	if _visible_section_demand_queue.is_empty():
+		_visible_section_demand_queue.resize(32)
+	elif _visible_section_demand_count >= _visible_section_demand_queue.size():
+		var expanded: Array[Dictionary] = []
+		expanded.resize(_visible_section_demand_queue.size() * 2)
+		for index in range(_visible_section_demand_count):
+			expanded[index] = _visible_section_demand_queue[
+				(_visible_section_demand_head + index) % _visible_section_demand_queue.size()]
+		_visible_section_demand_queue = expanded
+		_visible_section_demand_head = 0
+		_visible_section_demand_tail = _visible_section_demand_count
+	_visible_section_demand_queue_token += 1
+	var queue_token := _visible_section_demand_queue_token
+	_visible_section_demand_queue[_visible_section_demand_tail] = {
+		"sectionKey":section_key, "queueToken":queue_token}
+	_visible_section_demand_tail = (_visible_section_demand_tail + 1) \
+		% _visible_section_demand_queue.size()
+	_visible_section_demand_count += 1
+	state["queued"] = true
+	state["queueToken"] = queue_token
+	_visible_section_demands[section_key] = state
+
+
+func _pop_visible_section_demand() -> Dictionary:
+	if _visible_section_demand_count <= 0:
+		return {"status":"idle"}
+	var queued: Dictionary = _visible_section_demand_queue[_visible_section_demand_head]
+	var section_key: Vector3i = queued.get("sectionKey", Vector3i.ZERO)
+	_visible_section_demand_queue[_visible_section_demand_head] = {}
+	_visible_section_demand_head = (_visible_section_demand_head + 1) \
+		% _visible_section_demand_queue.size()
+	_visible_section_demand_count -= 1
+	return {"status":"ready", "sectionKey":section_key,
+		"queueToken":int(queued.get("queueToken", -1))}
+
+
+func _cancel_pending_production_candidate(section_key: Vector3i) -> void:
+	var job: Dictionary = _production_candidate_jobs.get(section_key, {})
+	if job.is_empty():
+		return
+	var session = job.get("session")
+	if session is RefCounted and session.has_method("cancel"):
+		session.cancel()
+	_production_candidate_jobs.erase(section_key)
+
+
+func _wake_visible_section_demands() -> void:
+	if _visible_section_demand_count > 0:
+		_visible_section_demand_wake_rounds = maxi(
+			_visible_section_demand_wake_rounds,
+			ceili(float(_visible_section_demand_count) \
+				/ float(MAX_VISIBLE_SECTION_DEMAND_SCAN_PER_ADVANCE)))
 
 
 func capture_authoritative_source_census(section_keys: Array) -> Dictionary:
@@ -166,20 +431,32 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		if stale_session is RefCounted and stale_session.has_method("cancel"):
 			stale_session.cancel()
 		_production_candidate_jobs.erase(section_key)
-		return {"status":"pending", "stage":"source_census",
+		var stale_result := {"status":"pending", "stage":"source_census",
 			"reason":String(census.get("reason", "complete_section_candidate_census_changed")),
 			"retryable":true, "sectionKey":section_key,
 			"requiresReassembly":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), stale_result)
+		return stale_result
 	var session = job.get("session")
 	if session == null:
 		var started: Dictionary = PacketOwner.begin_static_section_install(candidate,
 			candidate.get("materialBindings", {}), candidate.get("meshBindings", {}))
 		if started.get("status") == "pending":
-			return {"status":"pending_owner", "reason":String(started.get("reason", "")),
+			var owner_pending := {"status":"pending_owner", "reason":String(started.get("reason", "")),
 				"sectionKey":section_key, "retryable":true}
+			_reconcile_visible_section_candidate_outcome(section_key,
+				int(candidate.get("generation", 0)), owner_pending)
+			return owner_pending
 		if started.get("status") != "ready":
-			return _failed("complete_section_candidate_install_begin_failed:" +
+			_production_candidate_jobs.erase(section_key)
+			var begin_failure := _failed("complete_section_candidate_install_begin_failed:" +
 				String(started.get("reason", "unknown")))
+			if bool(started.get("retryable", false)):
+				begin_failure["retryable"] = true
+			_reconcile_visible_section_candidate_outcome(section_key,
+				int(candidate.get("generation", 0)), begin_failure)
+			return begin_failure
 		job["session"] = started.session
 		job["stage"] = "installing"
 		_production_candidate_jobs[section_key] = job
@@ -188,29 +465,102 @@ func advance_complete_section_candidate(section_key: Vector3i,
 	if step.get("status") == "pending":
 		job["stage"] = String(step.get("stage", "installing"))
 		_production_candidate_jobs[section_key] = job
-		return {"status":"pending", "stage":String(job.stage),
+		var install_pending := {"status":"pending", "stage":String(job.stage),
 			"reason":String(step.get("reason", "")), "sectionKey":section_key,
 			"generation":int(candidate.get("generation", 0)), "retryable":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), install_pending)
+		return install_pending
 	if step.get("status") == "failed" and String(step.get("reason", "")) == "section_install_owner_replaced":
 		job["session"] = null
 		job["stage"] = "owner_replaced"
 		_production_candidate_jobs[section_key] = job
-		return {"status":"pending_owner", "reason":String(step.reason),
+		var owner_replaced := {"status":"pending_owner", "reason":String(step.reason),
 			"sectionKey":section_key, "retryable":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), owner_replaced)
+		return owner_replaced
 	if step.get("status") != "installed":
 		_production_candidate_jobs.erase(section_key)
-		return _failed("complete_section_candidate_install_failed:" +
+		var install_failure := _failed("complete_section_candidate_install_failed:" +
 			String(step.get("reason", step.get("status", "unknown"))))
+		install_failure["nativeStep"] = step.duplicate(true)
+		if bool(step.get("retryable", false)):
+			install_failure["retryable"] = true
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), install_failure)
+		return install_failure
 	var receipt: Dictionary = step.get("receipt", {})
 	if receipt.get("censusDigest") != candidate.get("censusDigest") \
-			or String(receipt.get("contentManifestDigest", "")) != String(candidate.get("contentManifestDigest", "")):
+			or String(receipt.get("contentManifestDigest", "")) != String(candidate.get("contentManifestDigest", "")) \
+			or receipt.get("status") != "installed" \
+			or int(receipt.get("generation", 0)) != int(candidate.get("generation", 0)):
 		_production_candidate_jobs.erase(section_key)
-		return _failed("complete_section_candidate_receipt_identity_mismatch")
+		var receipt_failure := _failed("complete_section_candidate_receipt_identity_mismatch")
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), receipt_failure)
+		return receipt_failure
 	_production_candidates_by_section[section_key] = candidate
 	_production_candidate_receipts[section_key] = receipt
 	_production_candidate_jobs.erase(section_key)
-	return {"status":"installed", "sectionKey":section_key,
+	var installed_result := {"status":"installed", "sectionKey":section_key,
 		"generation":int(candidate.get("generation", 0)), "receipt":receipt}
+	_reconcile_visible_section_candidate_outcome(section_key,
+		int(candidate.get("generation", 0)), installed_result)
+	return installed_result
+
+
+## Keep visible demand state aligned with candidate ownership and the native
+## install receipt. Reassembly retries return to the bounded priority queue;
+## retained install sessions remain scheduled as candidate_pending jobs.
+func _reconcile_visible_section_candidate_outcome(section_key: Vector3i,
+		candidate_generation: int, outcome: Dictionary) -> void:
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	if state.is_empty() or int(state.get("candidateGeneration", 0)) != candidate_generation:
+		return
+	var status := String(outcome.get("status", "failed"))
+	state["lastInstallStatus"] = status
+	state["lastInstallReason"] = String(outcome.get("reason", ""))
+	state["lastInstallStage"] = String(outcome.get("stage", ""))
+	if status == "installed":
+		var receipt: Dictionary = outcome.get("receipt", {})
+		if String(receipt.get("status", "")) != "installed" \
+				or int(receipt.get("generation", 0)) != candidate_generation:
+			state["stage"] = "blocked"
+			state["blockedReason"] = "installed_candidate_receipt_identity_mismatch"
+			state["lastInstallStatus"] = "failed"
+			state["lastInstallReason"] = String(state.blockedReason)
+			state.erase("candidateGeneration")
+			_visible_section_demands[section_key] = state
+			return
+		state["stage"] = "installed"
+		state["installedGeneration"] = candidate_generation
+		state.erase("blockedReason")
+		state["installedReceipt"] = {
+			"censusDigest":String(receipt.get("censusDigest", "")),
+			"contentManifestDigest":String(receipt.get("contentManifestDigest", "")),
+			"backendInstanceId":int(receipt.get("backendInstanceId", 0)),
+			"chunkInstanceId":int(receipt.get("chunkInstanceId", 0)),
+			"ownerCell":receipt.get("ownerCell", Vector2i.ZERO)}
+		state["queued"] = false
+	elif bool(outcome.get("requiresReassembly", false)) \
+			or (status in ["failed", "cancelled"] and bool(outcome.get("retryable", false))):
+		state.erase("candidateGeneration")
+		state.erase("blockedReason")
+		state["stage"] = "waiting"
+		state["nextAttemptFrame"] = Engine.get_process_frames() \
+			+ VISIBLE_SECTION_DEMAND_RETRY_FRAMES
+		if not bool(state.get("queued", false)):
+			_enqueue_visible_section_demand(section_key, state)
+	elif status in ["pending", "pending_owner"]:
+		state["stage"] = "candidate_pending"
+		state.erase("blockedReason")
+		state["pendingCandidateStage"] = String(outcome.get("stage", status))
+	elif status in ["failed", "cancelled"]:
+		state["stage"] = "blocked"
+		state["blockedReason"] = String(outcome.get("reason", status))
+		state.erase("candidateGeneration")
+	_visible_section_demands[section_key] = state
 
 
 ## Called from the normal runtime publication loop. It advances a bounded
@@ -301,17 +651,28 @@ func reset_for_world(world_id: String) -> Dictionary:
 		return _failed("invalid_world_identity")
 	if not _active_boundary.is_empty() or not _boundary_queue.is_empty() \
 			or not _active_replay.is_empty() or not _replay_queue.is_empty() \
-			or not _production_candidate_jobs.is_empty():
+			or not _production_candidate_jobs.is_empty() \
+			or not _visible_section_demands.is_empty():
 		return _failed("world_reset_has_pending_section_work")
 	_world_id = world_id
 	_ledger = LedgerScript.new()
 	_source_roster = SourceRoster.new()
 	_generation = 0
+	_production_candidate_generation = 0
 	_committed_candidates.clear()
 	_installed_receipts.clear()
 	_production_candidates_by_section.clear()
 	_production_candidate_jobs.clear()
 	_production_candidate_receipts.clear()
+	_visible_section_demands.clear()
+	_visible_section_demand_queue.clear()
+	_visible_section_demand_head = 0
+	_visible_section_demand_tail = 0
+	_visible_section_demand_count = 0
+	_visible_section_demand_queue_token = 0
+	_visible_section_demand_attempts = 0
+	_visible_section_recompile_quota = 2
+	_visible_section_demand_wake_rounds = 0
 	_replay_set.clear()
 	_census_digest_by_boundary.clear()
 	return {"status":"ready", "worldId":_world_id}

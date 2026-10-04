@@ -38,6 +38,7 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
     body.set_meta("required_tool", ItemCatalogScript.material_required_tool(ore_type))
     body.set_meta("required_tier", ItemCatalogScript.material_required_tier(ore_type))
     body.set_meta("drop_count", rng.randi_range(1, 2 if ore_type == "ironOre" else 3))
+    var ecology_members: Array = []
 
     var radius := 0.58 + rng.randf() * 0.82
     var ore_mesh := SphereMesh.new()
@@ -52,6 +53,8 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
     ore.position.y = radius * 0.40
     ore.scale = Vector3(1.15 + rng.randf() * 0.5, 0.62 + rng.randf() * 0.45, 1.0 + rng.randf() * 0.42)
     body.add_child(ore)
+    ecology_members.append(ecology_render_member("ore_stone", ore_mesh, ore.transform,
+        "oreBase", "opaque", materials.get("oreBase", materials["rock"])))
 
     var vein_mesh := BoxMesh.new()
     vein_mesh.size = Vector3(radius * 0.78, radius * 0.12, radius * 0.18)
@@ -63,6 +66,8 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
         vein.position = Vector3((rng.randf() - 0.5) * radius * 0.95, radius * (0.38 + rng.randf() * 0.48), -radius * (0.44 + rng.randf() * 0.18))
         vein.rotation = Vector3(rng.randf() * 0.7, rng.randf() * TAU, rng.randf() * 0.7)
         body.add_child(vein)
+        ecology_members.append(ecology_render_member("ore_seam_%d" % i, vein_mesh,
+            vein.transform, ore_type, "opaque", materials.get(ore_type, materials["rock"])))
 
     var glow_key := "ironOreGlow" if ore_type == "ironOre" else "copperOreGlow"
     var glint_mesh := SphereMesh.new()
@@ -78,6 +83,9 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
         glint.position = Vector3((rng.randf() - 0.5) * radius * 0.72, radius * (0.58 + rng.randf() * 0.28), -radius * 0.58)
         glint.scale = Vector3(1.0, 0.72 + rng.randf() * 0.38, 1.0)
         body.add_child(glint)
+        ecology_members.append(ecology_render_member("ore_glint_%d" % i, glint_mesh,
+            glint.transform, glow_key, "opaque", materials.get(glow_key,
+                materials.get(ore_type, materials["rock"]))))
 
     if not horizon_only:
         var shape := SphereShape3D.new()
@@ -89,6 +97,7 @@ func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String
     parent.add_child(body)
     if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
+    _record_realized_ecology_prop(parent, body, "ore", ecology_members)
     return body
 
 func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):
@@ -106,6 +115,7 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
     body.set_meta("drop", String(spec.get("drop", "berries")))
     body.set_meta("material", material_id)
     body.set_meta("drop_count", rng.randi_range(int(spec.get("drop_min", 1)), int(spec.get("drop_max", 1))))
+    var ecology_members: Array = []
 
     match material_id:
         "aloePatch":
@@ -118,6 +128,8 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
                 leaf.rotation = Vector3(0.35 + rng.randf() * 0.35, rng.randf() * TAU, 0.0)
                 leaf.scale = Vector3(0.86 + rng.randf() * 0.28, 0.82 + rng.randf() * 0.35, 0.86 + rng.randf() * 0.28)
                 body.add_child(leaf)
+                ecology_members.append(ecology_render_member("aloe_leaf_%d" % i,
+                    leaf_mesh, leaf.transform, "aloePatch", "opaque", materials["aloePatch"]))
         "mushroomCluster":
             var stem_mesh := forage_cylinder_mesh("mushroom_stem", 0.055, 0.04, 0.36, 5)
             var cap_mesh := forage_sphere_mesh("mushroom_cap", 0.16, 0.13)
@@ -129,12 +141,16 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
                 stem.position = Vector3((rng.randf() - 0.5) * 0.52, 0.18 * stem_height_scale, (rng.randf() - 0.5) * 0.52)
                 stem.scale = Vector3(1.0, stem_height_scale, 1.0)
                 body.add_child(stem)
+                ecology_members.append(ecology_render_member("mushroom_stem_%d" % i,
+                    stem_mesh, stem.transform, "mushroomCluster", "opaque", materials["mushroomCluster"]))
                 var cap := MeshInstance3D.new()
                 cap.mesh = cap_mesh
                 cap.material_override = materials["mushroomCap"]
                 cap.position = stem.position + Vector3(0.0, 0.21 * stem_height_scale, 0.0)
                 cap.scale = Vector3(1.0 + rng.randf() * 0.34, 0.48 + rng.randf() * 0.16, 1.0 + rng.randf() * 0.34)
                 body.add_child(cap)
+                ecology_members.append(ecology_render_member("mushroom_cap_%d" % i,
+                    cap_mesh, cap.transform, "mushroomCap", "opaque", materials["mushroomCap"]))
         "frostHerbPatch":
             var blade_mesh := forage_cylinder_mesh("frost_blade", 0.055, 0.0, 0.52, 4)
             for i in range(5):
@@ -145,6 +161,8 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
                 blade.rotation = Vector3(0.18 + rng.randf() * 0.28, rng.randf() * TAU, 0.0)
                 blade.scale = Vector3(0.9 + rng.randf() * 0.22, 0.82 + rng.randf() * 0.42, 0.9 + rng.randf() * 0.22)
                 body.add_child(blade)
+                ecology_members.append(ecology_render_member("frost_blade_%d" % i,
+                    blade_mesh, blade.transform, "frostHerbPatch", "opaque", materials["frostHerbPatch"]))
         _:
             var bush_mesh := forage_sphere_mesh("berry_bush", 0.48, 0.50)
             var bush := MeshInstance3D.new()
@@ -153,6 +171,8 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
             bush.position.y = 0.38
             bush.scale = Vector3(1.02 + rng.randf() * 0.28, 0.62 + rng.randf() * 0.18, 0.96 + rng.randf() * 0.22)
             body.add_child(bush)
+            ecology_members.append(ecology_render_member("berry_bush", bush_mesh,
+                bush.transform, "berryBush", "opaque", materials["berryBush"]))
             var berry_mesh := forage_sphere_mesh("berry_fruit", 0.055, 0.11)
             for i in range(7):
                 var berry := MeshInstance3D.new()
@@ -162,6 +182,8 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
                 var spread := 0.20 + rng.randf() * 0.22
                 berry.position = Vector3(cos(angle) * spread, 0.40 + rng.randf() * 0.20, sin(angle) * spread)
                 body.add_child(berry)
+                ecology_members.append(ecology_render_member("berry_%d" % i,
+                    berry_mesh, berry.transform, "berryFruit", "opaque", materials["berryFruit"]))
 
     if not horizon_only:
         var shape := SphereShape3D.new()
@@ -173,6 +195,7 @@ func make_forage(parent: Node, prop_id: String, position: Vector3, biome: String
     parent.add_child(body)
     if not horizon_only and npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
+    _record_realized_ecology_prop(parent, body, "forage", ecology_members)
     return body
 
 func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator):

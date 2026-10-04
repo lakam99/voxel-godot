@@ -36,6 +36,7 @@ const STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS := 80
 var last_streaming_exterior_full_refresh_frame := -1000000
 var voxel_terrain_runtime: Node3D
 var voxel_terrain_section_provider_registered := false
+var voxel_terrain_section_demand_signal_connected := false
 
 ## Static render-section owners live beside gameplay chunks and are retired by
 ## render demand. A section can cross several gameplay chunks; its immutable
@@ -526,18 +527,24 @@ func ensure_voxel_terrain_authority() -> bool:
         return false
     var runtime := VoxelTerrainRuntimeScript.new() as Node3D
     runtime.name = "VoxelTerrainRuntime"
+    voxel_terrain_runtime = runtime
     add_child(runtime)
+    # Connect before setup adds VoxelTerrain so no initial mesh-block entry can
+    # race past the visible-section demand queue.
+    connect_voxel_terrain_section_demand_signal()
     var result: Dictionary = runtime.call("setup", self)
     if not bool(result.get("ok", false)):
         push_error("VOX-59 terrain authority failed: %s" % String(result.get("reason", "unknown")))
         runtime.queue_free()
+        voxel_terrain_runtime = null
+        voxel_terrain_section_demand_signal_connected = false
         return false
-    voxel_terrain_runtime = runtime
     clear_chunk_asset_cache()
     register_voxel_terrain_section_source_provider()
     return true
 
 func register_voxel_terrain_section_source_provider() -> Dictionary:
+    connect_voxel_terrain_section_demand_signal()
     if voxel_terrain_section_provider_registered:
         return {"status": "ready", "providerId": "terrain", "alreadyRegistered": true}
     if voxel_terrain_runtime == null or not is_instance_valid(voxel_terrain_runtime):
@@ -550,6 +557,37 @@ func register_voxel_terrain_section_source_provider() -> Dictionary:
     if registered.get("status") == "ready":
         voxel_terrain_section_provider_registered = true
     return registered
+
+func connect_voxel_terrain_section_demand_signal() -> void:
+    if voxel_terrain_runtime == null or not is_instance_valid(voxel_terrain_runtime) \
+            or not voxel_terrain_runtime.has_signal("visible_mesh_block_revision_changed"):
+        return
+    var callback := Callable(self, "on_visible_terrain_mesh_section_revision_changed")
+    if not voxel_terrain_runtime.is_connected("visible_mesh_block_revision_changed", callback):
+        voxel_terrain_runtime.connect("visible_mesh_block_revision_changed", callback)
+    voxel_terrain_section_demand_signal_connected = true
+
+func on_visible_terrain_mesh_section_revision_changed(section_key: Vector3i,
+        revision: int) -> void:
+    var coordinator = get("world_static_section_coordinator")
+    if coordinator == null:
+        return
+    var resident_blocks: Variant = voxel_terrain_runtime.get("published_mesh_blocks") \
+        if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime) else null
+    if not resident_blocks is Dictionary or not resident_blocks.has(section_key):
+        if coordinator.has_method("withdraw_visible_section_demand"):
+            coordinator.call("withdraw_visible_section_demand", section_key)
+        return
+    if not coordinator.has_method("request_visible_section_demand"):
+        return
+    var priority_origin := player.global_position if player != null else Vector3.ZERO
+    if player != null and player.camera != null:
+        priority_origin = player.camera.global_position
+    var center := StaticRenderSectionGridScript.origin_for_key(section_key) \
+        + Vector3.ONE * (StaticRenderSectionGridScript.SECTION_SIZE_METERS * 0.5)
+    var distance_squared: float = priority_origin.distance_squared_to(center)
+    coordinator.call("request_visible_section_demand", section_key,
+        revision, distance_squared)
 
 func report_voxel_authority_failure_once(source: String) -> void:
     if bool(get_meta("voxel_authority_failure_reported", false)):
@@ -683,6 +721,27 @@ func update_voxel_authority_chunks(force: bool) -> void:
     elif structure_system != null:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         structure_system.update_around(center_cell)
+    if not force and world_static_section_coordinator != null \
+            and world_static_section_coordinator.has_method("refresh_visible_section_demand_priorities"):
+        var priority_origin := player.global_position if player != null else Vector3.ZERO
+        if player != null and player.camera != null:
+            priority_origin = player.camera.global_position
+        world_static_section_coordinator.call(
+            "refresh_visible_section_demand_priorities", priority_origin, 16)
+    if not force and deferred_time_available and world_static_section_coordinator != null \
+            and world_static_section_coordinator.has_method("advance_visible_section_candidate_demands"):
+        var remaining_before_section_capture := gameplay_publication_deadline_usec - Time.get_ticks_usec()
+        if not shared_gameplay_schedule or remaining_before_section_capture > 2000:
+            var demand_admission_started := Time.get_ticks_usec()
+            var demand_admission: Dictionary = world_static_section_coordinator.call(
+                "advance_visible_section_candidate_demands", 1)
+            if monitor != null:
+                monitor.observe_external_duration("whole_section_candidate_capture",
+                    float(Time.get_ticks_usec() - demand_admission_started) / 1000.0)
+                monitor.observe_gauge("whole_section_candidate_visible_demand_count",
+                    int(demand_admission.get("pendingDemandCount", 0)))
+                if demand_admission.get("status") == "failed":
+                    monitor.increment_counter("whole_section_candidate_capture_failure")
     if not force and world_static_section_coordinator != null \
             and world_static_section_coordinator.has_method("advance_queued_complete_section_candidates"):
         var section_start_usec := Time.get_ticks_usec()

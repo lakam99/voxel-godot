@@ -59,6 +59,9 @@ func run() -> void:
 	add_result("canopy_assets_remain_static_meshes", rows_all_true(imported_rows, ["staticOnly"]), compact_rows(imported_rows, ["id", "skeletonCount", "animationPlayerCount", "staticOnly"]))
 	var registry = VisualAssetRegistryScript.new()
 	var registry_ready: bool = registry.setup()
+	var rock_member_manifest := _generated_rock_member_manifest_contract(registry)
+	add_result("generated_asset_registry_emits_stable_per_surface_member_values",
+		rock_member_manifest.get("passed", false), rock_member_manifest)
 	var cached_tree_ids: Array[String] = []
 	for asset in canopy_assets:
 		var asset_id := String(asset.get("id", ""))
@@ -143,6 +146,69 @@ func _registry_instance_row(label: String, ready: bool, asset_id: String, scene:
 		"meshCount": meshes.size(),
 		"threadId": OS.get_thread_caller_id(),
 	}
+
+func _generated_rock_member_manifest_contract(registry: Object) -> Dictionary:
+	var asset_id := "generated-rock-member-manifest-contract"
+	registry.assets_by_id[asset_id] = {"family":"rock"}
+	var root_node := Node3D.new()
+	root_node.name = "RockAsset"
+	root_node.set_meta("visual_asset_id", asset_id)
+	var mesh := ArrayMesh.new()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array([
+		Vector3.ZERO, Vector3.RIGHT, Vector3.UP])
+	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array([
+		Vector3.BACK, Vector3.BACK, Vector3.BACK])
+	for surface_index in range(2):
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var first_material := StandardMaterial3D.new()
+	var second_material := StandardMaterial3D.new()
+	first_material.albedo_color = Color(0.36, 0.3, 0.25, 1.0)
+	second_material.albedo_color = Color(0.58, 0.52, 0.42, 1.0)
+	mesh.surface_set_material(0, first_material)
+	mesh.surface_set_material(1, second_material)
+	var mesh_node := MeshInstance3D.new()
+	mesh_node.name = "RockMesh"
+	mesh_node.transform = Transform3D(Basis.IDENTITY,
+		Vector3(0.35, 0.8, -0.2))
+	mesh_node.mesh = mesh
+	root_node.add_child(mesh_node)
+	registry.apply_render_policy(root_node, asset_id)
+	var rows: Array = root_node.get_meta("static_render_member_values", [])
+	var ids: Array[String] = []
+	var exact_surface_bindings := rows.size() == 2
+	for row_value: Variant in rows:
+		if not row_value is Dictionary:
+			exact_surface_bindings = false
+			continue
+		var row: Dictionary = row_value
+		ids.append(String(row.get("memberId", "")))
+		var captured_mesh := row.get("mesh") as Mesh
+		var surface_index := int(row.get("meshSurfaceIndex", -1))
+		var expected_material := first_material if surface_index == 0 else second_material
+		var material_value := row.get("material") as Material
+		var mesh_material := captured_mesh.surface_get_material(0) \
+			if is_instance_valid(captured_mesh) and captured_mesh.get_surface_count() == 1 else null
+		exact_surface_bindings = exact_surface_bindings \
+			and String(row.get("status", "")) == "ready" \
+			and String(row.get("renderLayer", "")) == "opaque" \
+			and row.get("transform") == mesh_node.transform \
+			and is_instance_valid(captured_mesh) and captured_mesh.get_surface_count() == 1 \
+			and material_value == expected_material and mesh_material == expected_material
+	var repeat_ids: Array[String] = []
+	registry.apply_render_policy(root_node, asset_id)
+	for row_value: Variant in root_node.get_meta("static_render_member_values", []):
+		if row_value is Dictionary:
+			repeat_ids.append(String(row_value.get("memberId", "")))
+	var stable_ids := ids == repeat_ids and not ids.has("") \
+		and ids[0] != ids[1] if ids.size() == 2 else false
+	root_node.free()
+	registry.assets_by_id.erase(asset_id)
+	return {"passed":exact_surface_bindings and stable_ids,
+		"surfaceCount":rows.size(), "memberIds":ids,
+		"repeatMemberIds":repeat_ids, "stableIds":stable_ids,
+		"exactSurfaceBindings":exact_surface_bindings}
 
 func select_canopy_assets(manifest: Dictionary) -> Array[Dictionary]:
 	var selected: Array[Dictionary] = []

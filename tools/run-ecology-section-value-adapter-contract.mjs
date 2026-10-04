@@ -7,7 +7,11 @@ cli(async () => {
   prepare(c, 'userdata', false);
   const files = [
     'scripts/world/EcologySectionValueAdapter.gd',
+    'scripts/world/EcologySectionValueAdapter.gd.uid',
     'scripts/world/EcologySourceValueLedger.gd',
+    'scripts/world/TreeSectionValueAdapter.gd',
+    'scripts/world/TreeSectionValueAdapter.gd.uid',
+    'scripts/environment/TreePublicationQueue.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
     'scripts/world/StaticInstanceAttributeBuffer.gd',
@@ -25,10 +29,10 @@ cli(async () => {
   ];
   launchRecord(c, files, {
     schema: 'ecology-section-value-adapter-launch/v1',
-    evidenceLevel: 'synthetic_ecology_source_value_partition_contract',
+    evidenceLevel: 'synthetic_ecology_source_value_revision_tombstone_and_retry_contract',
     headed: false,
     timeoutSeconds: 60,
-    doesNotProve: 'No production provider registration, native section installation, complete ecology census, save/replay, headed gameplay, collision parity, or performance acceptance.'
+    doesNotProve: 'No complete ecology census or normal-world contribution, production provider registration, native section installation, save/replay, headed gameplay, collision parity, or performance acceptance.'
   });
   await phaseRun(c, {
     args: ['--headless', '--script', 'res://scripts/testing/world/EcologySectionValueAdapterContract.gd'],

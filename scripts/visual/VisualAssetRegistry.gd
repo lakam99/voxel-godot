@@ -319,10 +319,15 @@ func apply_render_policy(node: Node3D, asset_id: String) -> void:
     var family := String(asset.get("family", ""))
     var shadow_policy := shadow_policy_for_family(family)
     var visibility_end := visibility_range_for_family(family)
-    apply_render_policy_recursive(node, family, shadow_policy, visibility_end)
+    var render_members: Array[Dictionary] = []
+    apply_render_policy_recursive(node, family, shadow_policy, visibility_end,
+        Transform3D.IDENTITY, "", true, render_members)
     node.set_meta("shadow_policy", shadow_policy)
     node.set_meta("visibility_range_end", visibility_end)
     node.set_meta("shared_tree_wind_material", WIND_TREE_FAMILIES.has(family))
+    if family == "rock":
+        render_members.make_read_only()
+        node.set_meta("static_render_member_values", render_members)
 
 func shadow_policy_for_family(family: String) -> int:
     if family == "bush":
@@ -347,7 +352,17 @@ func visibility_range_for_family(family: String) -> float:
             return 120.0
     return 180.0
 
-func apply_render_policy_recursive(node: Node, family: String, shadow_policy: int, visibility_end: float) -> void:
+func apply_render_policy_recursive(node: Node, family: String, shadow_policy: int,
+        visibility_end: float, parent_transform := Transform3D.IDENTITY,
+        parent_path := "", is_asset_root := false,
+        render_members: Array[Dictionary] = []) -> void:
+    var node_transform := parent_transform
+    if not is_asset_root and node is Node3D:
+        node_transform = parent_transform * (node as Node3D).transform
+    var node_path := parent_path
+    if not is_asset_root:
+        var sibling_index := node.get_index() if node.get_parent() != null else 0
+        node_path = "%s/%s#%d" % [parent_path, String(node.name), sibling_index]
     if node is MeshInstance3D:
         var mesh_instance := node as MeshInstance3D
         mesh_instance.cast_shadow = shadow_policy
@@ -359,8 +374,74 @@ func apply_render_policy_recursive(node: Node, family: String, shadow_policy: in
             mesh_instance.extra_cull_margin = TREE_WIND_CULL_MARGIN
         if family == "bush":
             apply_bush_materials(mesh_instance)
+        if family == "rock":
+            _append_asset_render_members(mesh_instance, node_path, node_transform,
+                asset_id_for_family_instance(mesh_instance), render_members)
     for child in node.get_children():
-        apply_render_policy_recursive(child, family, shadow_policy, visibility_end)
+        apply_render_policy_recursive(child, family, shadow_policy, visibility_end,
+            node_transform, node_path, false, render_members)
+
+func asset_id_for_family_instance(node: Node) -> String:
+    var root: Node = node
+    while root.get_parent() != null:
+        root = root.get_parent()
+    return String(root.get_meta("visual_asset_id", ""))
+
+func _append_asset_render_members(mesh_instance: MeshInstance3D, node_path: String,
+        node_transform: Transform3D, asset_id: String,
+        render_members: Array[Dictionary]) -> void:
+    var mesh := mesh_instance.mesh
+    if not is_instance_valid(mesh) or not mesh is ArrayMesh or asset_id.is_empty():
+        return
+    var array_mesh := mesh as ArrayMesh
+    for surface_index in range(array_mesh.get_surface_count()):
+        var material := mesh_instance.material_override
+        if material == null:
+            material = mesh_instance.get_surface_override_material(surface_index)
+        if material == null:
+            material = array_mesh.surface_get_material(surface_index)
+        var layer := _static_asset_render_layer(material)
+        var surface_mesh := _asset_surface_mesh(array_mesh, surface_index, material)
+        var member_id := "%s:%s:surface:%d" % [asset_id, node_path, surface_index]
+        var row := {"memberId":member_id, "status":"ready" if surface_mesh != null \
+            and material is Material and not layer.is_empty() else "pending",
+            "reason":"" if surface_mesh != null and material is Material \
+            and not layer.is_empty() else "generated_asset_surface_material_or_mesh_unsupported",
+            "mesh":surface_mesh, "material":material,
+            "materialKey":"visual_asset:%s:%s:surface:%d" % [asset_id, node_path, surface_index],
+            "renderLayer":layer, "transform":node_transform,
+            "meshSurfaceIndex":surface_index, "nodePath":node_path}
+        row.make_read_only()
+        render_members.append(row)
+
+func _asset_surface_mesh(source_mesh: ArrayMesh, surface_index: int,
+        material: Material) -> ArrayMesh:
+    if surface_index < 0 or surface_index >= source_mesh.get_surface_count():
+        return null
+    var arrays := source_mesh.surface_get_arrays(surface_index)
+    if arrays.is_empty():
+        return null
+    var result := ArrayMesh.new()
+    result.add_surface_from_arrays(source_mesh.surface_get_primitive_type(surface_index), arrays)
+    if material != null:
+        result.surface_set_material(0, material)
+    return result
+
+func _static_asset_render_layer(material: Material) -> String:
+    if material is ShaderMaterial:
+        var shader := (material as ShaderMaterial).shader
+        if shader == null or shader.code.is_empty() or shader.code.contains("ALPHA") \
+                or shader.code.contains("discard") or shader.code.contains("blend_"):
+            return ""
+        return "opaque"
+    if material is BaseMaterial3D:
+        var base := material as BaseMaterial3D
+        if base.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED \
+                and base.albedo_color.a >= 0.999:
+            return "opaque"
+        if base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+            return "cutout"
+    return "translucent"
 
 func apply_tree_wind_materials(mesh_instance: MeshInstance3D) -> void:
     if mesh_instance.mesh == null:

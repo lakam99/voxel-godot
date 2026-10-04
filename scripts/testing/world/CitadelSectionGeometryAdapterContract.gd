@@ -68,6 +68,25 @@ func run() -> void:
 		{"censusContributorIds":census_contributor_ids,
 			"manifestSourceIds":manifest_source_ids,
 			"manifest":captured.get("members", [])})
+	var candidate_inputs: Variant = captured.get("inputs", null)
+	var input_source_ids: Array[String] = []
+	var all_inputs_sealed: bool = candidate_inputs is Array and candidate_inputs.is_read_only()
+	if candidate_inputs is Array:
+		for input_value: Variant in candidate_inputs:
+			if not input_value is Dictionary or not input_value.is_read_only():
+				all_inputs_sealed = false
+				continue
+			var input_source_id := String(input_value.get("sourcePartId", ""))
+			if not input_source_id.is_empty() and input_source_id not in input_source_ids:
+				input_source_ids.append(input_source_id)
+	input_source_ids.sort()
+	check("shared_assembler_inputs_are_immutable_and_exactly_cover_census_contributors",
+		all_inputs_sealed and input_source_ids == census_contributor_ids
+		and not candidate_inputs.is_empty(),
+		{"inputsReadOnly":candidate_inputs is Array and candidate_inputs.is_read_only(),
+			"allRowsReadOnly":all_inputs_sealed,
+			"censusContributorIds":census_contributor_ids,
+			"inputSourceIds":input_source_ids})
 	var partition_output: Dictionary = captured.partition.outputs[0]
 	var mapped_batch_key := String(partition_output.get("batchKey", ""))
 	var member_manifest: Dictionary = captured.members[0]
