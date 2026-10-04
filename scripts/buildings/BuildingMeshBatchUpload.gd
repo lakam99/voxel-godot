@@ -50,6 +50,7 @@ func _step(publisher) -> void:
 		"allocate":
 			_multi=publisher.create_mesh_batch()
 			_multi.transform_format=MultiMesh.TRANSFORM_3D
+			_multi.use_colors=true
 			_multi.use_custom_data=true
 			_multi.instance_count=_transforms.size()
 			_multi.mesh=_mesh

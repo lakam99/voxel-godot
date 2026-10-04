@@ -7,7 +7,7 @@ extends RefCounted
 ## and a read-only batches Array. Each batch declares
 ## materialKey, renderTier, meshKey, render policy, and immutable segments. A
 ## segment carries segmentId, a read-only typed Array[float] buffer in the
-## existing 16-float instance layout, bounds, and instanceCount. Compatible
+## canonical transform/color/custom 20-float instance layout, bounds, and count. Compatible
 ## contributor buffers are concatenated in stable order into native batches of
 ## at most 256 instances; source ranges remain in the manifest.
 ##
@@ -23,7 +23,9 @@ extends RefCounted
 ## streamed-chunk dependencies. Native packet-count and byte limits apply.
 
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
-const FLOATS_PER_INSTANCE := 16
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const INSTANCE_ATTRIBUTE_LAYOUT := Attributes.LAYOUT_SCHEMA
+const FLOATS_PER_INSTANCE := Attributes.FLOATS_PER_INSTANCE
 const MAX_BATCH_INSTANCES := 256
 const MAX_INPUT_SEGMENTS := 4096
 const MAX_NATIVE_BATCHES := 4096
@@ -50,8 +52,11 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 		var source_id := String(contributor.get("sourceId", ""))
 		var source_part_id := String(contributor.get("sourcePartId", ""))
 		var source_revision := String(contributor.get("sourceRevision", ""))
+		var attribute_layout := String(contributor.get("instanceAttributeLayout", ""))
 		if source_id.is_empty() or source_part_id.is_empty() or source_revision.is_empty():
 			return _failed("incomplete_contributor_identity")
+		if attribute_layout != INSTANCE_ATTRIBUTE_LAYOUT:
+			return _failed("unsupported_contributor_instance_attribute_layout")
 		if contributor.get("sectionKey") != section_key:
 			return _failed("contributor_section_key_mismatch")
 		if String(contributor.get("bufferSpace", "")) != "section_local":
@@ -83,7 +88,9 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 			var cast_shadows: Variant = batch.get("castShadows")
 			var visibility_end: Variant = batch.get("visibilityRangeEnd")
 			var fade_margin: Variant = batch.get("fadeMargin")
-			if material_key.is_empty() or render_tier.is_empty() or mesh_key.is_empty() \
+			var batch_attribute_layout := String(batch.get("instanceAttributeLayout", ""))
+			if batch_attribute_layout != INSTANCE_ATTRIBUTE_LAYOUT \
+					or material_key.is_empty() or render_tier.is_empty() or mesh_key.is_empty() \
 					or mesh_content_digest.length() != 64 \
 					or not mesh_content_digest.is_valid_hex_number(false) \
 					or pipeline_revision.is_empty() \
@@ -99,7 +106,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 			var batch_key := _compatible_batch_key(material_key, render_tier, mesh_key,
 				mesh_content_digest,
 				pipeline_revision, render_layer, transparency_sort_policy,
-				cast_shadows, visibility_end, fade_margin, mesh_local_bounds)
+				cast_shadows, visibility_end, fade_margin, mesh_local_bounds,
+				batch_attribute_layout)
 			var segments_value: Variant = batch.get("segments")
 			if not segments_value is Array or not segments_value.is_read_only():
 				return _failed("mutable_or_invalid_segment_list")
@@ -107,7 +115,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 				seen_batch_keys[batch_key] = true
 				manifest_batch_keys.append(batch_key)
 			if not batch_map.has(batch_key):
-				batch_map[batch_key] = {"batchKey":batch_key, "materialKey":material_key,
+				batch_map[batch_key] = {"instanceAttributeLayout":batch_attribute_layout,
+					"batchKey":batch_key, "materialKey":material_key,
 					"renderTier":render_tier, "meshKey":mesh_key,
 					"meshContentDigest":mesh_content_digest,
 					"meshLocalBounds":mesh_local_bounds,
@@ -126,7 +135,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 				var bounds_value: Variant = segment.get("bounds")
 				var segment_mesh_bounds: Variant = segment.get("meshLocalBounds")
 				var instance_count_value: Variant = segment.get("instanceCount")
-				if segment_id.is_empty() or not buffer_value is Array \
+				if String(segment.get("instanceAttributeLayout", "")) != INSTANCE_ATTRIBUTE_LAYOUT \
+						or segment_id.is_empty() or not buffer_value is Array \
 						or buffer_value.get_typed_builtin() != TYPE_FLOAT or not buffer_value.is_read_only() \
 						or not bounds_value is AABB or not bounds_value.position.is_finite() \
 						or not segment_mesh_bounds is AABB or segment_mesh_bounds != mesh_local_bounds \
@@ -182,7 +192,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 				return _failed("section_snapshot_input_buffer_capacity")
 		manifest_batch_keys.sort()
 		manifest_batch_keys.make_read_only()
-		var manifest := {"sourceId":source_id, "sourcePartId":source_part_id,
+		var manifest := {"instanceAttributeLayout":attribute_layout,
+			"sourceId":source_id, "sourcePartId":source_part_id,
 			"sourceRevision":source_revision, "ownerCell":owner_cell_value,
 			"sectionKey":section_key, "bufferSpace":"section_local",
 			"batchKeys":manifest_batch_keys, "ranges":[]}
@@ -244,7 +255,8 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 		layer_manifest.make_read_only()
 		render_layers.append(layer_manifest)
 	render_layers.make_read_only()
-	var snapshot := {"schema":"chunk-static-render-section-snapshot/v2",
+	var snapshot := {"schema":"chunk-static-render-section-snapshot/v3",
+		"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
 		"sectionKey":section_key,
 		"sectionOrigin":Grid.origin_for_key(section_key), "sectionBounds":section_bounds,
 		"bufferSpace":"section_local",
@@ -296,7 +308,8 @@ static func _segment_world_bounds(segment: Dictionary, section_key: Vector3i,
 
 static func _has_valid_center_ownership(segment: Dictionary, section_key: Vector3i) -> bool:
 	return String(segment.get("partitionerSchema", "")) \
-		== "chunk-static-render-section-instance-partition/v2" \
+		== "chunk-static-render-section-instance-partition/v3" \
+		and String(segment.get("instanceAttributeLayout", "")) == INSTANCE_ATTRIBUTE_LAYOUT \
 		and String(segment.get("ownershipPolicy", "")) == "transformed_mesh_aabb_center/v1" \
 		and segment.get("ownedSectionKey") == section_key \
 		and segment.get("worldBounds") is AABB and segment.get("meshLocalBounds") is AABB
@@ -353,11 +366,7 @@ static func _validate_center_owned_segment(segment: Dictionary, section_key: Vec
 
 
 static func _decode_instance_transform(buffer: Array, offset: int) -> Transform3D:
-	return Transform3D(Basis(
-		Vector3(float(buffer[offset]), float(buffer[offset + 4]), float(buffer[offset + 8])),
-		Vector3(float(buffer[offset + 1]), float(buffer[offset + 5]), float(buffer[offset + 9])),
-		Vector3(float(buffer[offset + 2]), float(buffer[offset + 6]), float(buffer[offset + 10]))),
-		Vector3(float(buffer[offset + 3]), float(buffer[offset + 7]), float(buffer[offset + 11])))
+	return Attributes.decode_transform(buffer, offset)
 
 
 static func _transform_is_finite(value: Transform3D) -> bool:
@@ -453,7 +462,8 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 				var sealed_buffer := output_buffer
 				sealed_buffer.make_read_only()
 				output_ranges.make_read_only()
-				var segment := {"batchIndex":output_segments.size(), "buffer":sealed_buffer,
+				var segment := {"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+					"batchIndex":output_segments.size(), "buffer":sealed_buffer,
 					"bounds":output_bounds, "instanceCount":output_instances, "sourceRanges":output_ranges}
 				segment.make_read_only()
 				output_segments.append(segment)
@@ -467,7 +477,8 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 		var sealed_buffer := output_buffer
 		sealed_buffer.make_read_only()
 		output_ranges.make_read_only()
-		var segment := {"batchIndex":output_segments.size(), "buffer":sealed_buffer,
+		var segment := {"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+			"batchIndex":output_segments.size(), "buffer":sealed_buffer,
 			"bounds":output_bounds, "instanceCount":output_instances, "sourceRanges":output_ranges}
 		segment.make_read_only()
 		output_segments.append(segment)
@@ -477,9 +488,10 @@ static func _merge_compatible_batch(batch_key: String, inputs: Array,
 
 static func _compatible_batch_key(material_key: String, render_tier: String,
 	mesh_key: String, mesh_content_digest: String, pipeline_revision: String, render_layer: String,
-		transparency_sort_policy: String, cast_shadows: bool,
-		visibility_end: float, fade_margin: float, mesh_local_bounds: AABB) -> String:
-	var canonical := JSON.stringify([material_key, render_tier, mesh_key, mesh_content_digest,
+	transparency_sort_policy: String, cast_shadows: bool,
+	visibility_end: float, fade_margin: float, mesh_local_bounds: AABB,
+	instance_attribute_layout: String) -> String:
+	var canonical := JSON.stringify([instance_attribute_layout, material_key, render_tier, mesh_key, mesh_content_digest,
 		pipeline_revision, render_layer, transparency_sort_policy, cast_shadows,
 		visibility_end, fade_margin, mesh_local_bounds.position.x,
 		mesh_local_bounds.position.y, mesh_local_bounds.position.z,

@@ -21,6 +21,8 @@ cli(async () => {
     'scripts/world/CitadelPublicationService.gd',
     'scripts/world/CitadelPublicationPlan.gd',
     'scripts/world/PreparedStaticContributorLedger.gd',
+    'scripts/world/StaticInstanceAttributeBuffer.gd',
+    'scripts/terrain/TerrainSectionShadowPublisher.gd',
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
     'scripts/world/ChunkStaticRenderSectionSnapshot.gd',
     'scripts/world/StaticRenderMeshFingerprint.gd',

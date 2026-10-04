@@ -2,6 +2,7 @@ extends SceneTree
 
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 
 var checks: Dictionary = {}
 
@@ -31,8 +32,12 @@ func _run() -> void:
 	checks["source_ranges_preserve_logical_owner_cell"] = \
 		_owner_cell_ranges_match_source_manifest(same_section_result.result)
 	checks["custom_data_is_preserved"] = same_section_result.get("status") == "ready" \
-		and is_equal_approx(_output_for_source(same_section_result.result, "root-a").segment.buffer[12], 0.0) \
-		and is_equal_approx(_output_for_source(same_section_result.result, "root-a").segment.buffer[16 + 12], 0.25)
+		and is_equal_approx(_output_for_source(same_section_result.result, "root-a").segment.buffer[16 + 1], 0.25)
+	checks["instance_color_and_custom_lanes_remain_independent"] = same_section_result.get("status") == "ready" \
+		and is_equal_approx(_output_for_source(same_section_result.result, "root-b").segment.buffer[32], 0.75) \
+		and is_equal_approx(_output_for_source(same_section_result.result, "root-b").segment.buffer[33], 0.5) \
+		and is_equal_approx(_output_for_source(same_section_result.result, "root-b").segment.buffer[36], 0.0) \
+		and is_equal_approx(_output_for_source(same_section_result.result, "root-b").segment.buffer[37], 0.25)
 
 	var crossing := _input_list([_input("cross", "r1", "s1",
 		Transform3D(Basis.IDENTITY, Vector3(37.7, 1.0, 1.0)), "stone", [0.2])])
@@ -122,9 +127,10 @@ func _input(source_id: String, revision: String, segment_id: String, source_to_w
 	var buffer: Array[float] = []
 	for x_value: float in origins:
 		buffer.append_array(_encode(Transform3D(Basis.IDENTITY, Vector3(x_value, 0.0, 0.0)),
-			Color(x_value, 0.5, 0.75, 1.0)))
+			Color(x_value, 0.5, 0.75, 1.0), Color(0.0, 0.25, 0.5, 1.0)))
 	buffer.make_read_only()
-	var input := {"sourceId":source_id, "sourceRevision":revision,
+	var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"sourceId":source_id, "sourceRevision":revision,
 		"sourcePartId":source_id + ":part",
 		"ownerCell":Grid.logical_owner_cell_for_world_position(source_to_world.origin),
 		"sourceToWorld":source_to_world, "meshLocalBounds":mesh_local_bounds,
@@ -140,11 +146,11 @@ func _input_list(values: Array) -> Array:
 	return values
 
 
-func _encode(transform: Transform3D, custom: Color) -> Array[float]:
-	return [transform.basis.x.x, transform.basis.y.x, transform.basis.z.x, transform.origin.x,
-		transform.basis.x.y, transform.basis.y.y, transform.basis.z.y, transform.origin.y,
-		transform.basis.x.z, transform.basis.y.z, transform.basis.z.z, transform.origin.z,
-		custom.r, custom.g, custom.b, custom.a]
+func _encode(transform: Transform3D, instance_color: Color, custom: Color) -> Array[float]:
+	var values: Array[float] = []
+	for value: float in Attributes.encode(transform, custom, instance_color):
+		values.append(value)
+	return values
 
 
 func _output_segment(result: Dictionary, index: int) -> Dictionary:
@@ -166,7 +172,7 @@ func _has_local_x_for_source(result: Dictionary, source_id: String,
 		instance_index: int, expected: float) -> bool:
 	var output := _output_for_source(result, source_id)
 	return not output.is_empty() and is_equal_approx(
-		float(output.segment.buffer[instance_index * 16 + 3]), expected)
+		float(output.segment.buffer[instance_index * Attributes.FLOATS_PER_INSTANCE + 3]), expected)
 
 
 func _manifest_has(result: Dictionary, source: String, revision: String, segment: String,
@@ -214,7 +220,7 @@ func _rejects_mutable_buffer() -> bool:
 
 func _rejects_nonfinite_input() -> bool:
 	var input := _input("nan", "r1", "s1", Transform3D.IDENTITY, "stone", [0.0]).duplicate(false)
-	var buffer: Array[float] = _encode(Transform3D(Basis.IDENTITY, Vector3(INF, 0.0, 0.0)), Color.WHITE)
+	var buffer: Array[float] = _encode(Transform3D(Basis.IDENTITY, Vector3(INF, 0.0, 0.0)), Color.WHITE, Color.WHITE)
 	buffer.make_read_only()
 	input["buffer"] = buffer
 	input.make_read_only()
@@ -223,7 +229,7 @@ func _rejects_nonfinite_input() -> bool:
 
 func _rejects_nonfinite_custom_data() -> bool:
 	var input := _input("nan-custom", "r1", "s1", Transform3D.IDENTITY, "stone", [0.0]).duplicate(false)
-	var buffer: Array[float] = _encode(Transform3D.IDENTITY, Color(INF, 0.0, 0.0, 1.0))
+	var buffer: Array[float] = _encode(Transform3D.IDENTITY, Color.WHITE, Color(INF, 0.0, 0.0, 1.0))
 	buffer.make_read_only()
 	input["buffer"] = buffer
 	input.make_read_only()

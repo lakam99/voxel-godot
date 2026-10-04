@@ -768,6 +768,7 @@ export async function runPlaytest(rawArgs, mode = 'playtest') {
   const argumentsList = ['--fixed-fps', '60'];
   if (!asBoolean(parsed.options.visible)) argumentsList.push('--headless');
   argumentsList.push('--path', projectRoot, '--scene', target);
+  if (parsed.passthrough.length) argumentsList.push('--', ...parsed.passthrough);
   const execution = await runGodotProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 1800) });
   if (!(await exists(reportPath))) throw new Error(`Missing playtest report: ${reportPath}`);
   const report = await readJson(reportPath);

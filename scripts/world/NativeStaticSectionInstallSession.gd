@@ -9,6 +9,7 @@ extends RefCounted
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const SNAPSHOT_ENVELOPE_SCHEMA := "prepared-static-section-snapshot-envelope/v1"
 
 
@@ -32,6 +33,7 @@ var _source_id := ""
 var _source_revision := ""
 var _generation := 0
 var _owner_cell := Vector2i.ZERO
+var _production_metadata: Dictionary = {}
 
 
 func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
@@ -43,7 +45,27 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 	if not is_instance_valid(backend) or not is_instance_valid(chunk) \
 			or not backend.is_inside_tree() or backend.get_parent() != chunk:
 		return _failed("section_install_owner_unavailable")
-	if not candidate.is_read_only() or String(candidate.get("schema", "")) != SNAPSHOT_ENVELOPE_SCHEMA:
+	if not candidate.is_read_only():
+		return _failed("mutable_or_invalid_section_candidate")
+	var submitted_candidate := candidate
+	_production_metadata = {}
+	if String(submitted_candidate.get("schema", "")) == "world-static-section-production-candidate/v1":
+		var envelope_value: Variant = submitted_candidate.get("candidate", null)
+		if not envelope_value is Dictionary or not envelope_value.is_read_only() \
+				or String(envelope_value.get("schema", "")) != SNAPSHOT_ENVELOPE_SCHEMA \
+				or submitted_candidate.get("sectionKey") != envelope_value.get("sectionKey") \
+				or submitted_candidate.get("worldId") != envelope_value.get("worldId") \
+				or submitted_candidate.get("generation") != envelope_value.get("generation") \
+				or submitted_candidate.get("contentManifestDigest") != envelope_value.get("contentManifestDigest") \
+				or String(submitted_candidate.get("censusDigest", "")).is_empty():
+			return _failed("inconsistent_production_section_candidate_envelope")
+		_production_metadata = {
+			"censusDigest":String(submitted_candidate.get("censusDigest", "")),
+			"sourceRevisions":submitted_candidate.get("sourceRevisions", {}),
+			"removalRevisions":submitted_candidate.get("removalRevisions", {}),
+			"providerCoverage":submitted_candidate.get("providerCoverage", [])}
+		candidate = envelope_value
+	if String(candidate.get("schema", "")) != SNAPSHOT_ENVELOPE_SCHEMA:
 		return _failed("mutable_or_invalid_section_candidate")
 	var world_id := String(candidate.get("worldId", ""))
 	var section_key_value: Variant = candidate.get("sectionKey")
@@ -56,6 +78,8 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		return _failed("incomplete_section_candidate_identity")
 	var section_key: Vector3i = section_key_value
 	var snapshot: Dictionary = snapshot_value
+	if String(snapshot.get("instanceAttributeLayout", "")) != Attributes.LAYOUT_SCHEMA:
+		return _failed("section_snapshot_instance_attribute_layout_mismatch")
 	if SnapshotBuilder._snapshot_digest(snapshot, world_id, int(generation_value), section_key) != digest:
 		return _failed("section_candidate_manifest_digest_mismatch")
 	var expected_owner := Grid.chunk_key_for_section(section_key)
@@ -93,6 +117,8 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		if not batch_value is Dictionary or not batch_value.is_read_only():
 			return _failed("mutable_or_invalid_section_batch")
 		var batch: Dictionary = batch_value
+		if String(batch.get("instanceAttributeLayout", "")) != Attributes.LAYOUT_SCHEMA:
+			return _failed("section_batch_instance_attribute_layout_mismatch")
 		var render_layer := String(batch.get("renderLayer", ""))
 		var sort_policy := String(batch.get("transparencySortPolicy", ""))
 		if not layer_counts.has(render_layer):
@@ -125,7 +151,7 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 			if not buffer_value is Array or buffer_value.get_typed_builtin() != TYPE_FLOAT \
 					or not buffer_value.is_read_only() or not bounds_value is AABB \
 					or not count_value is int or count_value <= 0 \
-					or buffer_value.size() != count_value * 16:
+					or buffer_value.size() != count_value * Attributes.FLOATS_PER_INSTANCE:
 				return _failed("invalid_section_segment_payload")
 			expected_instances += count_value
 			var counts: Dictionary = layer_counts[render_layer]
@@ -252,6 +278,12 @@ func _receipt(backend: Node, chunk: Node3D) -> Dictionary:
 		"ownerCell":_owner_cell, "backendInstanceId":backend.get_instance_id(),
 		"chunkInstanceId":chunk.get_instance_id(),
 		"sourceCaptureChunkKeys":_candidate.snapshot.streamChunkDependencies.duplicate()}
+	if not _production_metadata.is_empty():
+		receipt["candidateSchema"] = "world-static-section-production-candidate/v1"
+		receipt["censusDigest"] = String(_production_metadata.get("censusDigest", ""))
+		receipt["sourceRevisions"] = _production_metadata.get("sourceRevisions", {})
+		receipt["removalRevisions"] = _production_metadata.get("removalRevisions", {})
+		receipt["providerCoverage"] = _production_metadata.get("providerCoverage", [])
 	receipt.make_read_only()
 	return receipt
 

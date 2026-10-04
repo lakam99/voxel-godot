@@ -7,6 +7,7 @@ cli(async () => {
   prepare(c, 'userdata', false);
   const files = [
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
+    'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd.uid',

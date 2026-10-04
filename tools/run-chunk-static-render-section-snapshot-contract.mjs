@@ -7,6 +7,7 @@ cli(async () => {
   prepare(c, 'userdata', false);
   const files = [
     'scripts/world/ChunkStaticRenderSectionSnapshot.gd',
+    'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
     'scripts/testing/buildings/ChunkStaticRenderSectionSnapshotContract.gd',

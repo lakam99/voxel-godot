@@ -13,6 +13,8 @@ const SitePreparation = preload("res://scripts/world/CitadelSitePreparation.gd")
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const SectionGeometryAdapter = preload("res://scripts/world/CitadelSectionGeometryAdapter.gd")
+const SectionSnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const MAX_REGIONS := 16
 const MAX_RETAINED_BOUNDS := 64
 const MAX_DISCOVERY_CHUNKS := 256
@@ -728,6 +730,239 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 	return {"status":"complete","worldId":world_id,
 		"authorityRevision":authority_hash.finish().hex_encode(),
 		"sourceRevisions":source_revisions,"sections":section_rows}
+
+
+## Bridges the current immutable Citadel source census and the actual retained
+## prepared packet groups into the shared section partition/snapshot contract.
+## This captures value geometry only: it does not publish, retire, or hide the
+## current BuildingPartPublisher visuals, collision, doors, or navigation.
+func capture_static_section_geometry_candidate(world_id: String, section_key: Vector3i,
+		candidate_generation: int) -> Dictionary:
+	if candidate_generation <= 0:
+		return {"status":"failed", "reason":"invalid_citadel_candidate_generation"}
+	var census: Dictionary = capture_static_section_sources(world_id, [section_key])
+	if census.get("status") != "complete":
+		return census
+	var census_sections: Dictionary = census.get("sections", {})
+	var census_row: Dictionary = census_sections.get(section_key, {})
+	if census_row.is_empty():
+		return {"status":"pending", "reason":"citadel_geometry_census_section_missing",
+			"retryable":true}
+	var packet_groups: Array[Dictionary] = []
+	var member_bindings: Dictionary = {}
+	var provider_receipts: Array[Dictionary] = []
+	if census_row.get("status") == "complete":
+		var source_ids: Array = census_row.get("sourcePartIds", [])
+		for source_id_value: Variant in source_ids:
+			var source_id := String(source_id_value)
+			var site_id := SectionGeometryAdapter._site_id_from_census_source(source_id)
+			var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+			if site_id.is_empty() or not member_id.begins_with("building:"):
+				return {"status":"pending", "reason":"citadel_member_kind_has_no_prepared_static_packet",
+					"sourceId":source_id, "memberId":member_id, "retryable":true}
+			var part_id := member_id.trim_prefix("building:")
+			var owner_result := _current_packet_publisher_for_site(site_id)
+			if owner_result.get("status") != "ready":
+				owner_result["sourceId"] = source_id
+				return owner_result
+			var publisher = owner_result.publisher
+			var legacy_visual_state: Dictionary = _packet_member_legacy_visual_state(publisher, part_id)
+			if legacy_visual_state.get("status") != "clear":
+				legacy_visual_state["sourceId"] = source_id
+				return legacy_visual_state
+			var member_bindings_by_part: Dictionary = publisher.get("_physical_packet_bindings_by_part_id")
+			var member_binding := String(member_bindings_by_part.get(part_id, ""))
+			if member_binding.is_empty():
+				return {"status":"pending", "reason":"citadel_packet_member_binding_unavailable",
+					"sourceId":source_id, "sourcePartId":part_id, "retryable":true}
+			var source_revision := String(census.get("sourceRevisions", {}).get(source_id, ""))
+			if source_revision.is_empty():
+				return {"status":"pending", "reason":"citadel_census_member_revision_unavailable",
+					"sourceId":source_id, "retryable":true}
+			var expected_by_source: Dictionary = publisher.get("_chunk_static_packet_expected").get(part_id, {})
+			var pending_expected_by_source: Dictionary = publisher.get("_chunk_static_packet_pending_expected").get(part_id, {})
+			if not pending_expected_by_source.is_empty():
+				return {"status":"pending", "reason":"citadel_packet_group_receipts_pending",
+					"sourceId":source_id, "pendingPacketSourceIds":pending_expected_by_source.keys(),
+					"retryable":true}
+			if expected_by_source.is_empty():
+				return {"status":"pending", "reason":"citadel_packet_group_roster_unavailable",
+					"sourceId":source_id, "sourcePartId":part_id, "retryable":true}
+			var recipes: Dictionary = publisher.get("_chunk_static_packet_recipes")
+			for packet_source_value: Variant in expected_by_source.keys():
+				var packet_source_id := String(packet_source_value)
+				var expected: Dictionary = expected_by_source[packet_source_value]
+				var recipe_value: Variant = recipes.get(packet_source_id)
+				if not recipe_value is Dictionary or not recipe_value.is_read_only():
+					return {"status":"pending", "reason":"citadel_prepared_packet_group_missing",
+						"sourceId":source_id, "packetSourceId":packet_source_id, "retryable":true}
+				var recipe: Dictionary = recipe_value
+				if String(recipe.get("sourcePartId", "")) != part_id \
+						or String(recipe.get("sourceRevision", "")) != member_binding \
+						or String(expected.get("sourceRevision", "")) != member_binding \
+						or not publisher.chunk_static_packet_receipt_live(part_id, packet_source_id):
+					return {"status":"pending", "reason":"citadel_packet_group_revision_or_receipt_stale",
+						"sourceId":source_id, "packetSourceId":packet_source_id, "retryable":true}
+				var packet_generation: Variant = expected.get("generation")
+				var packet_digest := String(expected.get("packetDigest", ""))
+				var expected_owner_cell: Variant = expected.get("ownerCell")
+				if not packet_generation is int or int(packet_generation) <= 0 \
+						or packet_digest.length() != 64 \
+						or expected_owner_cell != recipe.get("ownerCell"):
+					return {"status":"pending", "reason":"citadel_packet_receipt_identity_incomplete",
+						"sourceId":source_id, "packetSourceId":packet_source_id, "retryable":true}
+				var packet_group: Dictionary = recipe.duplicate(false)
+				packet_group["siteId"] = site_id
+				packet_group["packetSourceId"] = packet_source_id
+				packet_group["packetGeneration"] = int(packet_generation)
+				packet_group["packetDigest"] = packet_digest
+				packet_group["packetOwnerCell"] = expected_owner_cell
+				packet_group["sourceToWorld"] = owner_result.sourceToWorld
+				packet_group.make_read_only()
+				packet_groups.append(packet_group)
+			member_bindings[source_id] = member_binding
+			var packet_source_ids: Array[String] = []
+			for packet_source_value: Variant in expected_by_source.keys():
+				packet_source_ids.append(String(packet_source_value))
+			packet_source_ids.sort()
+			packet_source_ids.make_read_only()
+			var packet_receipts: Array[Dictionary] = []
+			for packet_source_value: Variant in packet_source_ids:
+				var packet_source_id := String(packet_source_value)
+				var expected: Dictionary = expected_by_source.get(packet_source_id, {})
+				var packet_receipt := {"packetSourceId":packet_source_id,
+					"generation":int(expected.get("generation", 0)),
+					"packetDigest":String(expected.get("packetDigest", "")),
+					"ownerCell":expected.get("ownerCell")}
+				packet_receipt.make_read_only()
+				packet_receipts.append(packet_receipt)
+			packet_receipts.make_read_only()
+			var provider_receipt := {"siteId":site_id, "sourcePartId":part_id,
+				"censusRevision":source_revision, "memberBinding":member_binding,
+				"packetSourceIds":packet_source_ids, "packetReceipts":packet_receipts}
+			provider_receipt.make_read_only()
+			provider_receipts.append(provider_receipt)
+	member_bindings.make_read_only()
+	provider_receipts.make_read_only()
+	var default_mesh: Mesh = null
+	if not packet_groups.is_empty():
+		default_mesh = packet_groups[0].get("mesh") as Mesh
+	var candidate: Dictionary = SectionGeometryAdapter.capture_section(census,
+		section_key, candidate_generation, packet_groups, member_bindings,
+		Transform3D.IDENTITY, default_mesh)
+	if candidate.get("status") != "ready":
+		return candidate
+	var impacted_sections: Array[Vector3i] = [section_key]
+	impacted_sections.make_read_only()
+	var snapshot_result: Dictionary = SectionSnapshotBuilder.build_replacements(
+		candidate.get("partition", {}), candidate.get("compatibilityByKey", {}),
+		impacted_sections, candidate_generation, world_id)
+	if snapshot_result.get("status") != "ready":
+		return {"status":"failed", "reason":"citadel_section_snapshot_build_failed",
+			"detail":snapshot_result}
+	var current_census: Dictionary = capture_static_section_sources(world_id, [section_key])
+	if current_census.get("status") != "complete" \
+			or current_census.get("authorityRevision") != census.get("authorityRevision") \
+			or current_census.get("sourceRevisions") != census.get("sourceRevisions") \
+			or current_census.get("sections", {}).get(section_key, {}) != census_row:
+		return {"status":"pending", "reason":"citadel_section_candidate_stale_after_capture",
+			"retryable":true}
+	var sealed_member_ids: Array[String] = []
+	for source_id_value: Variant in census_row.get("sourcePartIds", []):
+		sealed_member_ids.append(String(source_id_value))
+	sealed_member_ids.sort()
+	sealed_member_ids.make_read_only()
+	var sealed_section := {"status":String(census_row.get("status", "")),
+		"coverageRevision":String(census_row.get("coverageRevision", "")),
+		"sourcePartIds":sealed_member_ids}
+	sealed_section.make_read_only()
+	var sealed_sections := {section_key:sealed_section}
+	sealed_sections.make_read_only()
+	var sealed_source_revisions: Dictionary = census.get("sourceRevisions", {}).duplicate()
+	sealed_source_revisions.make_read_only()
+	var sealed_census := {"status":"complete", "worldId":world_id,
+		"authorityRevision":String(census.get("authorityRevision", "")),
+		"sourceRevisions":sealed_source_revisions, "sections":sealed_sections}
+	sealed_census.make_read_only()
+	var result := {"status":"ready", "schema":"citadel-section-geometry-candidate/v1",
+		"worldId":world_id, "sectionKey":section_key,
+		"candidateGeneration":candidate_generation,
+		"authorityRevision":census.get("authorityRevision", ""),
+		"coverageRevision":census_row.get("coverageRevision", ""),
+		"sourceCensus":sealed_census, "memberBindings":member_bindings,
+		"providerPacketReceipts":provider_receipts,
+		"packetGroupCount":packet_groups.size(),
+		"partition":candidate.get("partition", {}),
+		"compatibilityByKey":candidate.get("compatibilityByKey", {}),
+		"resourceBindings":candidate.get("resourceBindings", {}),
+		"members":candidate.get("members", []),
+		"replacements":snapshot_result.get("replacements", []),
+		"legacyVisualPolicy":"retain_until_shared_coordinator_native_receipt_acknowledged",
+		"evidenceScope":"prepared Citadel packet groups transformed into shared section snapshots; no native install or gameplay retirement acknowledgement"}
+	result.make_read_only()
+	return result
+
+
+func _current_packet_publisher_for_site(site_id: String) -> Dictionary:
+	var match_region := Vector2i.ZERO
+	var match_entry: Dictionary = {}
+	for region: Vector2i in _scenes:
+		var entry: Dictionary = _scenes[region]
+		if String(entry.get("binding", {}).get("siteId", "")) != site_id:
+			continue
+		if not match_entry.is_empty():
+			return {"status":"pending", "reason":"citadel_site_has_multiple_scene_owners",
+				"siteId":site_id, "retryable":true}
+		match_region = region
+		match_entry = entry
+	if match_entry.is_empty():
+		return {"status":"pending", "reason":"citadel_packet_scene_owner_unavailable",
+			"siteId":site_id, "retryable":true}
+	if not bool(match_entry.get("packetMode", false)) \
+			or match_entry.get("phase") != "scene_ready":
+		return {"status":"pending", "reason":"citadel_packet_scene_not_ready",
+			"siteId":site_id, "phase":match_entry.get("phase"), "retryable":true}
+	var current: Dictionary = _admission.source_state(match_region)
+	if current.get("status") not in ["ready", "prepared"] \
+			or current.get("binding", {}) != match_entry.get("binding", {}):
+		return {"status":"pending", "reason":"citadel_packet_scene_binding_stale",
+			"siteId":site_id, "retryable":true}
+	var job = match_entry.get("job")
+	var publisher = job.get("_building") if job != null else null
+	if publisher == null or not is_instance_valid(publisher) \
+			or String(publisher.get("publication_site_id")) != site_id:
+		return {"status":"pending", "reason":"citadel_building_packet_publisher_unavailable",
+			"siteId":site_id, "retryable":true}
+	if publisher.has_pending_static_flush() \
+			or not publisher.get("_chunk_static_packet_pending_expected").is_empty():
+		return {"status":"pending", "reason":"citadel_static_packet_flush_pending",
+			"siteId":site_id, "retryable":true}
+	var profile = match_entry.get("profile")
+	if profile == null or not profile.get("origin") is Vector3 \
+			or not profile.origin.is_finite():
+		return {"status":"pending", "reason":"citadel_packet_root_transform_unavailable",
+			"siteId":site_id, "retryable":true}
+	return {"status":"ready", "publisher":publisher, "region":match_region,
+		"binding":match_entry.binding,
+		"sourceToWorld":Transform3D(Basis.IDENTITY, profile.origin)}
+
+
+func _packet_member_legacy_visual_state(publisher, part_id: String) -> Dictionary:
+	if publisher == null or not is_instance_valid(publisher) \
+			or not publisher.get("published_nodes") is Array:
+		return {"status":"pending", "reason":"citadel_legacy_visual_census_unavailable",
+			"retryable":true}
+	for visual_value: Variant in publisher.get("published_nodes"):
+		if not visual_value is GeometryInstance3D or not is_instance_valid(visual_value) \
+				or not visual_value.is_inside_tree() or visual_value.is_queued_for_deletion():
+			continue
+		if not visual_value.has_meta("building_source_part_id"):
+			return {"status":"pending", "reason":"citadel_legacy_visual_member_identity_unavailable",
+				"retryable":true}
+		if String(visual_value.get_meta("building_source_part_id")) == part_id:
+			return {"status":"pending", "reason":"citadel_member_has_unmigrated_legacy_visual",
+				"sourcePartId":part_id, "retryable":true}
+	return {"status":"clear"}
 
 
 static func _seed_hash(value: String) -> int:

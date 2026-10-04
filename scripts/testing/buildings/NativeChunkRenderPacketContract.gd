@@ -8,6 +8,7 @@ const StaticRenderSectionGrid = preload("res://scripts/world/StaticRenderSection
 const StaticSectionSnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const StaticSectionInstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const StaticContributorLedger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
+const InstanceAttributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const StaticMeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const WorldStaticSectionCoordinator = preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const CitadelPublicationPlan = preload("res://scripts/world/CitadelPublicationPlan.gd")
@@ -160,7 +161,10 @@ func _run() -> void:
 	section_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,terrain_surface_arrays)
 	var section_mesh_identity: Dictionary=StaticMeshFingerprint.inspect(section_mesh)
 	var section_buffer: Array[float]=[]
-	for value: float in InstanceBuffer.encode(Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5)),Color(0.3,0.7,0.4,1.0)):
+	var expected_instance_color:=Color(0.15,0.45,0.8,0.9)
+	var expected_custom_data:=Color(0.3,0.7,0.4,1.0)
+	for value: float in InstanceBuffer.encode(
+			Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5)),expected_custom_data,expected_instance_color):
 		section_buffer.append(value)
 	section_buffer.make_read_only()
 	var section_bounds:=AABB(Vector3.ZERO,Vector3.ONE)
@@ -169,6 +173,7 @@ func _run() -> void:
 	var section_resource_mesh_key:="unit-box-v1"
 	var section_pipeline:="native-section-v1"
 	var section_segment_declaration: Dictionary={"segmentId":"native-section-source-segment",
+		"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
 		"materialKey":section_material_key,"renderTier":section_tier,
 		"meshKey":section_resource_mesh_key,"meshContentDigest":section_mesh_identity.contentDigest,
 		"meshLocalBounds":section_bounds,
@@ -191,6 +196,7 @@ func _run() -> void:
 	var section_begin: Dictionary=section_ledger.begin_boundary("native-section-boundary",
 		section_declarations,section_removals)
 	var section_input: Dictionary={"sourcePartId":"native-section-part",
+		"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
 		"sourceId":"native-section-source","sourceRevision":"native-section-rev-1",
 		"segmentId":"native-section-source-segment","buffer":section_buffer,
 		"instanceCount":1,"materialKey":section_material_key,"renderTier":section_tier,
@@ -240,6 +246,12 @@ func _run() -> void:
 	var section_slot_id:=StaticSectionInstallSession.slot_id("native-section-contract-world",Vector3i.ZERO)
 	var section_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id) \
 		if is_instance_valid(section_backend) else {"status":"missing"}
+	var installed_batch_receipts: Array=section_backend_snapshot.get("batches",[])
+	var installed_multimesh: MultiMesh = null
+	if not installed_batch_receipts.is_empty():
+		var installed_batch_node := instance_from_id(int(installed_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D
+		if is_instance_valid(installed_batch_node):
+			installed_multimesh = installed_batch_node.multimesh
 	var installed_section_layers: Array=section_backend_snapshot.get("layers",[])
 	var session_layer_receipts_match:=installed_section_layers.size()==3 \
 		and String(installed_section_layers[0].get("layer",""))=="cutout" \
@@ -267,6 +279,113 @@ func _run() -> void:
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
 		and session_layer_receipts_match \
 		and section_promoted.get("status")=="committed")
+	_check("native_section_receipt_and_multimesh_keep_independent_color_and_custom_lanes",
+		installed_batch_receipts.size()==1 \
+		and bool(installed_batch_receipts[0].get("usesColors",false)) \
+		and bool(installed_batch_receipts[0].get("usesCustomData",false)) \
+		and installed_multimesh is MultiMesh and installed_multimesh.use_colors \
+		and installed_multimesh.use_custom_data \
+		and installed_multimesh.get_buffer().size()==InstanceAttributes.FLOATS_PER_INSTANCE \
+		and Color(installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET],
+			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+1],
+			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+2],
+			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+3]).is_equal_approx(expected_instance_color) \
+		and Color(installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET],
+			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+1],
+			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+2],
+			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+3]).is_equal_approx(expected_custom_data))
+	diagnostics["instanceAttributeLanes"]={"receiptCount":installed_batch_receipts.size(),
+		"receiptUsesColors":bool(installed_batch_receipts[0].get("usesColors",false)) if not installed_batch_receipts.is_empty() else false,
+		"receiptUsesCustomData":bool(installed_batch_receipts[0].get("usesCustomData",false)) if not installed_batch_receipts.is_empty() else false,
+		"multimeshValid":installed_multimesh is MultiMesh,
+		"usesColors":installed_multimesh.use_colors if installed_multimesh is MultiMesh else false,
+		"usesCustomData":installed_multimesh.use_custom_data if installed_multimesh is MultiMesh else false,
+		"expectedColor":expected_instance_color,
+		"actualColor":installed_multimesh.get_instance_color(0) if installed_multimesh is MultiMesh else Color.TRANSPARENT,
+		"expectedCustom":expected_custom_data,
+		"actualCustom":installed_multimesh.get_instance_custom_data(0) if installed_multimesh is MultiMesh else Color.TRANSPARENT,
+		"readbackBuffer":installed_multimesh.get_buffer() if installed_multimesh is MultiMesh else PackedFloat32Array()}
+	var replacement_color:=Color(0.9,0.2,0.1,1.0)
+	var replacement_custom:=Color(0.8,0.1,0.6,1.0)
+	var replacement_buffer: Array[float]=[]
+	for value: float in InstanceBuffer.encode(
+			Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5)),replacement_custom,replacement_color):
+		replacement_buffer.append(value)
+	replacement_buffer.make_read_only()
+	var replacement_segment_declaration:=section_segment_declaration.duplicate(false)
+	replacement_segment_declaration.make_read_only()
+	var replacement_segment_declarations: Array[Dictionary]=[replacement_segment_declaration]
+	replacement_segment_declarations.make_read_only()
+	var replacement_declaration:=section_declaration.duplicate(false)
+	replacement_declaration["sourceRevision"]="native-section-rev-2"
+	replacement_declaration["segments"]=replacement_segment_declarations
+	replacement_declaration.make_read_only()
+	var replacement_declarations: Array[Dictionary]=[replacement_declaration]
+	replacement_declarations.make_read_only()
+	var replacement_no_removals: Array=[]
+	replacement_no_removals.make_read_only()
+	var replacement_begin: Dictionary=section_ledger.begin_boundary("native-section-boundary-2",
+		replacement_declarations,replacement_no_removals)
+	var replacement_input:=section_input.duplicate(false)
+	replacement_input["sourceRevision"]="native-section-rev-2"
+	replacement_input["buffer"]=replacement_buffer
+	replacement_input.make_read_only()
+	var replacement_admission: Dictionary=section_ledger.accept_prepared_segment(
+		"native-section-boundary-2",replacement_input)
+	var replacement_revisions: Dictionary={"native-section-part":"native-section-rev-2"}
+	replacement_revisions.make_read_only()
+	var replacement_prepared: Dictionary=section_ledger.prepare_boundary(
+		"native-section-boundary-2",replacement_revisions,"native-section-contract-world",2)
+	var replacement_candidate: Dictionary=replacement_prepared.replacements[0]
+	var replacement_started: Dictionary=PacketOwner.begin_static_section_install(replacement_candidate,
+		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
+	var replacement_session: Variant=replacement_started.get("session")
+	var replacement_first_turn: Dictionary={"status":"not_started"}
+	if replacement_session is RefCounted:
+		replacement_first_turn=replacement_session.advance(1)
+	var still_installed_before_swap: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
+	var old_batch_receipts: Array=still_installed_before_swap.get("batches",[])
+	var old_batch_node:=instance_from_id(int(old_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D \
+		if not old_batch_receipts.is_empty() else null
+	var old_multimesh: MultiMesh=old_batch_node.multimesh if is_instance_valid(old_batch_node) else null
+	var replacement_turns:=0
+	var replacement_result: Dictionary={"status":replacement_started.get("status","failed")}
+	while replacement_session is RefCounted \
+			and replacement_session.state not in ["installed","failed","cancelled"] \
+			and replacement_turns<64:
+		replacement_result=replacement_session.advance(4)
+		replacement_turns+=1
+	var replacement_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
+	var replacement_batch_receipts: Array=replacement_snapshot.get("batches",[])
+	var replacement_batch_node:=instance_from_id(int(replacement_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D \
+		if not replacement_batch_receipts.is_empty() else null
+	var replacement_multimesh: MultiMesh=replacement_batch_node.multimesh \
+		if is_instance_valid(replacement_batch_node) else null
+	var replacement_section_receipts: Array[Dictionary]=[]
+	if replacement_result.get("status")=="installed" and replacement_result.get("receipt") is Dictionary:
+		replacement_section_receipts.append(replacement_result.receipt)
+	replacement_section_receipts.make_read_only()
+	var replacement_promoted: Dictionary=section_ledger.accept_installed_candidate(
+		"native-section-boundary-2",replacement_section_receipts,replacement_revisions)
+	_check("native_section_replacement_keeps_old_color_and_custom_until_new_receipt_then_swaps",
+		replacement_begin.get("status")=="ready" and replacement_admission.get("status")=="accepted" \
+		and replacement_prepared.get("status")=="prepared" \
+		and replacement_first_turn.get("status")=="pending" \
+		and still_installed_before_swap.get("status")=="ready" \
+		and int(still_installed_before_swap.get("generation",0))==1 \
+		and is_instance_valid(old_multimesh) \
+		and _multimesh_color(old_multimesh).is_equal_approx(expected_instance_color) \
+		and _multimesh_custom(old_multimesh).is_equal_approx(expected_custom_data) \
+		and replacement_result.get("status")=="installed" \
+		and replacement_snapshot.get("status")=="ready" \
+		and int(replacement_snapshot.get("generation",0))==2 \
+		and replacement_batch_receipts.size()==1 \
+		and bool(replacement_batch_receipts[0].get("usesColors",false)) \
+		and bool(replacement_batch_receipts[0].get("usesCustomData",false)) \
+		and is_instance_valid(replacement_multimesh) \
+		and _multimesh_color(replacement_multimesh).is_equal_approx(replacement_color) \
+		and _multimesh_custom(replacement_multimesh).is_equal_approx(replacement_custom) \
+		and replacement_promoted.get("status")=="committed")
 	_check("native_section_slot_installs_transvoxel_shaped_array_mesh",
 		section_mesh_expected.get_surface_count()==1 \
 		and section_mesh_expected.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
@@ -388,7 +507,7 @@ func _run() -> void:
 	var backend_metrics: Dictionary=section_backend.call("metrics")
 	_check("native_mesh_surface_payload_bytes_are_reserved_and_reported",
 		int(section_backend_snapshot.get("meshPayloadBytes",-1))==expected_mesh_payload_bytes \
-		and int(section_backend_snapshot.get("payloadBytes",-1))==expected_mesh_payload_bytes+64 \
+		and int(section_backend_snapshot.get("payloadBytes",-1))==expected_mesh_payload_bytes+InstanceAttributes.FLOATS_PER_INSTANCE*4 \
 		and int(backend_metrics.get("installedMeshPayloadBytes",-1))==expected_mesh_payload_bytes \
 		and int(backend_metrics.get("residentPayloadBytes",-1))>=int(section_backend_snapshot.payloadBytes))
 	var coordinator := WorldStaticSectionCoordinator.new()
@@ -677,9 +796,11 @@ func _run() -> void:
 		and int(spanning_installed_a.get("generation",0))>1 \
 		and int(spanning_installed_a.get("generation",0))==int(spanning_installed_b.get("generation",0)) \
 		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id))
-	var section_root_id:=int(section_backend_snapshot.get("rootInstanceId",0))
+	var retained_generation:=int(replacement_snapshot.get("generation",0))
+	var retained_payload_bytes:=int(replacement_snapshot.get("payloadBytes",0))
+	var section_root_id:=int(replacement_snapshot.get("rootInstanceId",0))
 	var cancelled_candidate: Dictionary=section_candidate.duplicate(false)
-	cancelled_candidate["generation"]=2
+	cancelled_candidate["generation"]=retained_generation+1
 	cancelled_candidate["contentManifestDigest"]=StaticSectionSnapshotBuilder._snapshot_digest(
 		section_snapshot,String(cancelled_candidate.worldId),int(cancelled_candidate.generation),cancelled_candidate.sectionKey)
 	cancelled_candidate.make_read_only()
@@ -694,11 +815,11 @@ func _run() -> void:
 	_check("cancelled_section_replacement_keeps_previous_native_root_visible",
 		cancelled_append.get("stage")=="append" and cancel_receipt.get("status")=="cancelled" \
 		and retained_after_cancel.get("status")=="ready" \
-		and int(retained_after_cancel.get("generation",0))==1 \
+		and int(retained_after_cancel.get("generation",0))==retained_generation \
 		and int(retained_after_cancel.get("rootInstanceId",0))==section_root_id \
 		and int(overlap_metrics.get("installedMeshPayloadBytes",0))>0 \
-		and int(overlap_metrics.get("retiringPayloadBytes",0))>=int(section_backend_snapshot.get("payloadBytes",0)) \
-		and int(overlap_metrics.get("residentPayloadBytes",0))>=int(section_backend_snapshot.get("payloadBytes",0))*2)
+		and int(overlap_metrics.get("retiringPayloadBytes",0))>=retained_payload_bytes \
+		and int(overlap_metrics.get("residentPayloadBytes",0))>=retained_payload_bytes*2)
 	var stale_section_start: Dictionary=PacketOwner.begin_static_section_install(section_candidate,
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh_expected})
 	_check("native_section_slot_rejects_reused_generation",
@@ -719,14 +840,14 @@ func _run() -> void:
 		owner_swap_started.get("status")=="ready" \
 		and owner_swap_result.get("status")=="failed" \
 		and owner_swap_result.get("reason")=="section_install_owner_replaced" \
-		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
+		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==retained_generation)
 	var cross_chunk_snapshot: Dictionary=section_snapshot.duplicate(false)
 	var cross_chunk_dependencies: Array[Vector2i]=[OWNER_CELL,Vector2i(1,0)]
 	cross_chunk_dependencies.make_read_only()
 	cross_chunk_snapshot["streamChunkDependencies"]=cross_chunk_dependencies
 	cross_chunk_snapshot.make_read_only()
 	var cross_chunk_candidate: Dictionary=section_candidate.duplicate(false)
-	cross_chunk_candidate["generation"]=2
+	cross_chunk_candidate["generation"]=retained_generation+1
 	cross_chunk_candidate["snapshot"]=cross_chunk_snapshot
 	cross_chunk_candidate["contentManifestDigest"]=StaticSectionSnapshotBuilder._snapshot_digest(
 		cross_chunk_snapshot,String(cross_chunk_candidate.worldId),int(cross_chunk_candidate.generation),cross_chunk_candidate.sectionKey)
@@ -740,7 +861,7 @@ func _run() -> void:
 		cross_chunk_start.get("status")=="ready" \
 		and cross_chunk_cancel.get("status")=="cancelled" \
 		and cross_chunk_start.get("chunk")!=first_chunk \
-		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
+		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==retained_generation)
 	var instance_transform:=Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5))
 	var buffer: Array[float]=[]
 	for value: float in InstanceBuffer.encode(instance_transform,Color.WHITE): buffer.append(value)
@@ -1075,7 +1196,8 @@ func _translucent_section_candidate_rejected(backend: Node, chunk: Node3D,
 	var ledger = StaticContributorLedger.new()
 	if ledger.begin_boundary("translucent-contract-boundary", declarations, removals).get("status") != "ready":
 		return false
-	var input := {"sourcePartId":"translucent-contract-part",
+	var input := {"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
+		"sourcePartId":"translucent-contract-part",
 		"sourceId":"translucent-contract-source", "sourceRevision":"translucent-contract-rev",
 		"segmentId":"native-section-source-segment", "buffer":buffer,
 		"instanceCount":1, "materialKey":base_segment.get("materialKey", ""),
@@ -1168,6 +1290,22 @@ func _mesh_payload_bytes(mesh: Mesh) -> int:
 			elif array_value != null:
 				return -1
 	return total
+
+
+func _multimesh_color(multimesh: MultiMesh) -> Color:
+	var buffer: PackedFloat32Array=multimesh.get_buffer()
+	if buffer.size()<InstanceAttributes.FLOATS_PER_INSTANCE:
+		return Color.TRANSPARENT
+	return Color(buffer[InstanceAttributes.COLOR_OFFSET],buffer[InstanceAttributes.COLOR_OFFSET+1],
+		buffer[InstanceAttributes.COLOR_OFFSET+2],buffer[InstanceAttributes.COLOR_OFFSET+3])
+
+
+func _multimesh_custom(multimesh: MultiMesh) -> Color:
+	var buffer: PackedFloat32Array=multimesh.get_buffer()
+	if buffer.size()<InstanceAttributes.FLOATS_PER_INSTANCE:
+		return Color.TRANSPARENT
+	return Color(buffer[InstanceAttributes.CUSTOM_DATA_OFFSET],buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+1],
+		buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+2],buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+3])
 
 
 func _make_chunk(scene: SceneRegistry, cell: Vector2i) -> Node3D:

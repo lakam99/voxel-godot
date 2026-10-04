@@ -34,7 +34,7 @@ using namespace godot;
 class ChunkRenderPacketBackend : public Node3D {
 	GDCLASS(ChunkRenderPacketBackend, Node3D);
 
-	static constexpr int32_t FLOATS_PER_INSTANCE = 16;
+	static constexpr int32_t FLOATS_PER_INSTANCE = 20;
 	static constexpr int32_t MAX_BATCH_INSTANCES = 256;
 	static constexpr int32_t MAX_PACKET_BATCHES = 4096;
 	static constexpr int64_t MAX_PACKET_BUFFER_BYTES = 64LL * 1024LL * 1024LL;

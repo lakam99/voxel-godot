@@ -24,6 +24,7 @@ const PacketOwner = preload("res://scripts/world/ChunkRenderPacketOwner.gd")
 const InstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SourceRoster = preload("res://scripts/world/StaticSectionSourceRoster.gd")
+const CandidateAssembler = preload("res://scripts/world/WorldStaticSectionCandidateAssembler.gd")
 
 var _ledger = LedgerScript.new()
 var _source_roster = SourceRoster.new()
@@ -37,6 +38,9 @@ var _replay_queue: Array[Vector3i] = []
 var _replay_set: Dictionary = {}
 var _active_replay: Dictionary = {}
 var _census_digest_by_boundary: Dictionary = {}
+var _production_candidates_by_section: Dictionary = {}
+var _production_candidate_jobs: Dictionary = {}
+var _production_candidate_receipts: Dictionary = {}
 
 
 func configure(world_id: String) -> Dictionary:
@@ -68,6 +72,138 @@ func unregister_source_provider(provider_id: String, authority_owner: Object) ->
 
 func capture_authoritative_source_census(section_keys: Array) -> Dictionary:
 	return _source_roster.capture_sections(section_keys)
+
+
+## Admit one complete cross-domain section snapshot. This path does not merge
+## per-source ledger deltas: every install is the result of one whole-section
+## candidate assembled from the current provider census and one shared pass.
+func submit_complete_section_candidate(candidate: Dictionary) -> Dictionary:
+	if _world_id.is_empty() or not candidate.is_read_only() \
+			or String(candidate.get("schema", "")) != CandidateAssembler.SCHEMA \
+			or String(candidate.get("worldId", "")) != _world_id:
+		return _failed("invalid_complete_section_candidate")
+	var section_value: Variant = candidate.get("sectionKey", null)
+	var generation_value: Variant = candidate.get("generation", null)
+	var envelope_value: Variant = candidate.get("candidate", null)
+	var digest := String(candidate.get("contentManifestDigest", ""))
+	if not section_value is Vector3i or not generation_value is int \
+			or generation_value <= 0 or not envelope_value is Dictionary \
+			or not envelope_value.is_read_only() or digest.length() != 64 \
+			or String(envelope_value.get("contentManifestDigest", "")) != digest \
+			or envelope_value.get("sectionKey") != section_value \
+			or int(envelope_value.get("generation", 0)) != generation_value:
+		return _failed("inconsistent_complete_section_candidate_identity")
+	var census: Dictionary = _source_roster.capture_sections([section_value])
+	if census.get("status") != "complete":
+		return {"status":"pending", "reason":String(census.get("reason", "section_census_pending")),
+			"retryable":true, "sectionKey":section_value}
+	if String(census.get("censusDigest", "")) != String(candidate.get("censusDigest", "")):
+		return {"status":"pending", "reason":"complete_section_candidate_census_stale",
+			"retryable":true, "sectionKey":section_value}
+	var section_key: Vector3i = section_value
+	var latest_candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
+	if not latest_candidate.is_empty() \
+			and int(latest_candidate.get("generation", 0)) >= int(generation_value):
+		return _failed("stale_complete_section_candidate_generation")
+	var existing: Dictionary = _production_candidate_jobs.get(section_key, {})
+	if not existing.is_empty():
+		var existing_candidate: Dictionary = existing.get("candidate", {})
+		if int(existing_candidate.get("generation", 0)) >= int(generation_value):
+			return _failed("stale_complete_section_candidate_generation")
+		var session = existing.get("session")
+		if session is RefCounted and session.has_method("cancel"):
+			session.cancel()
+	_production_candidate_jobs[section_key] = {"candidate":candidate,
+		"session":null, "stage":"queued"}
+	return {"status":"queued", "sectionKey":section_key,
+		"generation":int(generation_value),
+		"replacedPendingGeneration":int(existing.get("candidate", {}).get("generation", 0))}
+
+
+## Revalidates the full provider census before each staging/upload/commit step.
+## A stale candidate is aborted while the old native slot remains visible.
+func advance_complete_section_candidate(section_key: Vector3i,
+		max_upload_units := 1) -> Dictionary:
+	if max_upload_units < 1 or max_upload_units > 64:
+		return _failed("invalid_complete_section_upload_budget")
+	var job: Dictionary = _production_candidate_jobs.get(section_key, {})
+	if job.is_empty():
+		return {"status":"idle", "sectionKey":section_key}
+	var candidate: Dictionary = job.get("candidate", {})
+	var census: Dictionary = _source_roster.capture_sections([section_key])
+	if census.get("status") != "complete" \
+			or String(census.get("censusDigest", "")) != String(candidate.get("censusDigest", "")):
+		var stale_session = job.get("session")
+		if stale_session is RefCounted and stale_session.has_method("cancel"):
+			stale_session.cancel()
+		_production_candidate_jobs.erase(section_key)
+		return {"status":"pending", "stage":"source_census",
+			"reason":String(census.get("reason", "complete_section_candidate_census_changed")),
+			"retryable":true, "sectionKey":section_key,
+			"requiresReassembly":true}
+	var session = job.get("session")
+	if session == null:
+		var started: Dictionary = PacketOwner.begin_static_section_install(candidate,
+			candidate.get("materialBindings", {}), candidate.get("meshBindings", {}))
+		if started.get("status") == "pending":
+			return {"status":"pending_owner", "reason":String(started.get("reason", "")),
+				"sectionKey":section_key, "retryable":true}
+		if started.get("status") != "ready":
+			return _failed("complete_section_candidate_install_begin_failed:" +
+				String(started.get("reason", "unknown")))
+		job["session"] = started.session
+		job["stage"] = "installing"
+		_production_candidate_jobs[section_key] = job
+		session = started.session
+	var step: Dictionary = session.advance(max_upload_units)
+	if step.get("status") == "pending":
+		job["stage"] = String(step.get("stage", "installing"))
+		_production_candidate_jobs[section_key] = job
+		return {"status":"pending", "stage":String(job.stage),
+			"reason":String(step.get("reason", "")), "sectionKey":section_key,
+			"generation":int(candidate.get("generation", 0)), "retryable":true}
+	if step.get("status") == "failed" and String(step.get("reason", "")) == "section_install_owner_replaced":
+		job["session"] = null
+		job["stage"] = "owner_replaced"
+		_production_candidate_jobs[section_key] = job
+		return {"status":"pending_owner", "reason":String(step.reason),
+			"sectionKey":section_key, "retryable":true}
+	if step.get("status") != "installed":
+		_production_candidate_jobs.erase(section_key)
+		return _failed("complete_section_candidate_install_failed:" +
+			String(step.get("reason", step.get("status", "unknown"))))
+	var receipt: Dictionary = step.get("receipt", {})
+	if receipt.get("censusDigest") != candidate.get("censusDigest") \
+			or String(receipt.get("contentManifestDigest", "")) != String(candidate.get("contentManifestDigest", "")):
+		_production_candidate_jobs.erase(section_key)
+		return _failed("complete_section_candidate_receipt_identity_mismatch")
+	_production_candidates_by_section[section_key] = candidate
+	_production_candidate_receipts[section_key] = receipt
+	_production_candidate_jobs.erase(section_key)
+	return {"status":"installed", "sectionKey":section_key,
+		"generation":int(candidate.get("generation", 0)), "receipt":receipt}
+
+
+## Called from the normal runtime publication loop. It advances a bounded
+## number of whole-section candidates; capture and assembly stay producer-side.
+func advance_queued_complete_section_candidates(max_sections := 1,
+		max_upload_units := 1) -> Dictionary:
+	if max_sections < 1 or max_sections > 8:
+		return _failed("invalid_complete_section_scheduler_budget")
+	var section_keys: Array[Vector3i] = []
+	for section_value: Variant in _production_candidate_jobs:
+		if section_value is Vector3i:
+			section_keys.append(Vector3i(section_value))
+	section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	var results: Array[Dictionary] = []
+	for index in range(mini(max_sections, section_keys.size())):
+		results.append(advance_complete_section_candidate(section_keys[index], max_upload_units))
+	results.make_read_only()
+	return {"status":"advanced" if not results.is_empty() else "idle",
+		"sectionCount":results.size(), "results":results}
 
 
 ## Production admission path: recapture the complete authority roster on every
@@ -108,8 +244,19 @@ func advance_boundary_from_roster(section_keys: Array,
 			"reason":"authoritative_source_census_changed_during_boundary",
 			"boundaryId":boundary_id, "retryable":false, "requiresResubmit":true}
 	_census_digest_by_boundary[boundary_id] = census_digest
+	var current_source_revisions: Dictionary = census.sourceRevisions.duplicate(false)
+	var removal_revisions: Variant = census.get("removalRevisions", {})
+	if not removal_revisions is Dictionary:
+		return _failed("invalid_roster_removal_revision_map")
+	for part_id_value: Variant in removal_revisions:
+		var part_id := String(part_id_value)
+		if part_id.is_empty() or not removal_revisions[part_id_value] is String \
+				or current_source_revisions.has(part_id):
+			return _failed("invalid_or_current_roster_removal_revision:" + part_id)
+		current_source_revisions[part_id] = String(removal_revisions[part_id_value])
+	current_source_revisions.make_read_only()
 	var result: Dictionary = advance_boundary(
-		census.sourceRevisions, census.expectedContributorsBySection,
+		current_source_revisions, census.expectedContributorsBySection,
 		material_bindings, mesh_bindings, max_upload_units)
 	result["censusDigest"] = census_digest
 	if String(result.get("status", "")) in ["committed", "failed", "cancelled"]:
@@ -117,7 +264,6 @@ func advance_boundary_from_roster(section_keys: Array,
 	return result
 
 
-## Rebind after the caller has cancelled/retired every install and replay
 ## session and removed this coordinator's installed section slots from the old
 ## world. The coordinator cannot retire renderer resources on the caller's
 ## behalf. This is a world-lifetime boundary, not an in-place seed mutation.
@@ -125,7 +271,8 @@ func reset_for_world(world_id: String) -> Dictionary:
 	if world_id.strip_edges().is_empty():
 		return _failed("invalid_world_identity")
 	if not _active_boundary.is_empty() or not _boundary_queue.is_empty() \
-			or not _active_replay.is_empty() or not _replay_queue.is_empty():
+			or not _active_replay.is_empty() or not _replay_queue.is_empty() \
+			or not _production_candidate_jobs.is_empty():
 		return _failed("world_reset_has_pending_section_work")
 	_world_id = world_id
 	_ledger = LedgerScript.new()
@@ -133,6 +280,9 @@ func reset_for_world(world_id: String) -> Dictionary:
 	_generation = 0
 	_committed_candidates.clear()
 	_installed_receipts.clear()
+	_production_candidates_by_section.clear()
+	_production_candidate_jobs.clear()
+	_production_candidate_receipts.clear()
 	_replay_set.clear()
 	_census_digest_by_boundary.clear()
 	return {"status":"ready", "worldId":_world_id}
@@ -323,6 +473,23 @@ func notify_stream_chunk_unloaded(owner_cell: Vector2i, chunk_instance_id := 0) 
 		_installed_receipts.erase(section_key)
 		_queue_replay(section_key)
 		queued += 1
+	for section_value: Variant in _production_candidates_by_section:
+		if not section_value is Vector3i:
+			continue
+		var section_key: Vector3i = section_value
+		if SectionGrid.chunk_key_for_section(section_key) != owner_cell:
+			continue
+		var production_receipt: Dictionary = _production_candidate_receipts.get(section_key, {})
+		if chunk_instance_id > 0 and not production_receipt.is_empty() \
+				and int(production_receipt.get("chunkInstanceId", 0)) not in [0, chunk_instance_id]:
+			continue
+		var job: Dictionary = _production_candidate_jobs.get(section_key, {})
+		var session = job.get("session")
+		if session is RefCounted and session.has_method("cancel"):
+			session.cancel()
+		_production_candidate_jobs.erase(section_key)
+		_production_candidate_receipts.erase(section_key)
+		queued += 1
 	return queued
 
 
@@ -333,10 +500,30 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 		if SectionGrid.chunk_key_for_section(section_key) == owner_cell:
 			_queue_replay(section_key)
 			queued += 1
+	for section_value: Variant in _production_candidates_by_section:
+		if not section_value is Vector3i:
+			continue
+		var section_key: Vector3i = section_value
+		if SectionGrid.chunk_key_for_section(section_key) != owner_cell \
+				or _production_candidate_receipts.has(section_key) \
+				or _production_candidate_jobs.has(section_key):
+			continue
+		_production_candidate_jobs[section_key] = {
+			"candidate":_production_candidates_by_section[section_key],
+			"session":null, "stage":"unload_replay"}
+		queued += 1
 	return queued
 
 
 func request_section_replay(section_key: Vector3i) -> bool:
+	if _production_candidates_by_section.has(section_key):
+		if _production_candidate_receipts.has(section_key) \
+				or _production_candidate_jobs.has(section_key):
+			return false
+		_production_candidate_jobs[section_key] = {
+			"candidate":_production_candidates_by_section[section_key],
+			"session":null, "stage":"requested_replay"}
+		return true
 	if not _committed_candidates.has(section_key):
 		return false
 	_queue_replay(section_key)

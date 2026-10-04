@@ -23,6 +23,8 @@ const HorizonEcologySourceScript := preload("res://scripts/world/HorizonEcologyS
 const VoxelTerrainVisualManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const GeneratedStructureVisualManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
 const WorldStaticSectionCoordinatorScript := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
+const OrdinaryStructureStaticSectionProviderScript := preload("res://scripts/world/OrdinaryStructureStaticSectionProvider.gd")
+const EcologySectionValueAdapterScript := preload("res://scripts/world/EcologySectionValueAdapter.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
@@ -184,6 +186,8 @@ var structure_system
 ## Required producer domains intentionally remain pending until each real
 ## authority is connected; legacy visual publishers remain active meanwhile.
 var world_static_section_coordinator = WorldStaticSectionCoordinatorScript.new()
+var ordinary_static_section_provider
+var ecology_static_section_provider
 var subsurface_system
 var utility_system
 var save_system
@@ -2856,7 +2860,7 @@ func setup_game_systems() -> void:
     if section_world_result.get("status") != "ready":
         push_error("Static section coordinator setup failed: %s" % section_world_result)
     else:
-        var static_source_domains: Array[String] = ["terrain", "ordinary_structures",
+        var static_source_domains: Array[String] = ["terrain", "ordinary-structures",
             "blueprint_buildings", "ecology_and_static_props"]
         static_source_domains.make_read_only()
         var roster_result: Dictionary = world_static_section_coordinator.configure_source_roster(static_source_domains)
@@ -2868,6 +2872,29 @@ func setup_game_systems() -> void:
                 "capture_static_section_sources")
             if blueprint_provider_result.get("status") != "ready":
                 push_error("Blueprint building section source provider setup failed: %s" % blueprint_provider_result)
+            ordinary_static_section_provider = OrdinaryStructureStaticSectionProviderScript.new()
+            var ordinary_setup: Dictionary = ordinary_static_section_provider.configure(
+                static_sections_world_id, structure_system, self)
+            if ordinary_setup.get("status") != "ready":
+                push_error("Ordinary structure section provider setup failed: %s" % ordinary_setup)
+            else:
+                var ordinary_registration: Dictionary = world_static_section_coordinator.register_source_provider(
+                    "ordinary-structures", ordinary_static_section_provider,
+                    "capture_static_section_sources")
+                if ordinary_registration.get("status") != "ready":
+                    push_error("Ordinary structure section provider registration failed: %s" % ordinary_registration)
+            ecology_static_section_provider = EcologySectionValueAdapterScript.new()
+            var ecology_setup: Dictionary = ecology_static_section_provider.configure(static_sections_world_id)
+            if ecology_setup.get("status") == "ready":
+                ecology_setup = ecology_static_section_provider.bind_main_authority(self)
+            if ecology_setup.get("status") != "ready":
+                push_error("Ecology section provider setup failed: %s" % ecology_setup)
+            else:
+                var ecology_registration: Dictionary = world_static_section_coordinator.register_source_provider(
+                    "ecology_and_static_props", ecology_static_section_provider,
+                    "capture_static_section_sources")
+                if ecology_registration.get("status") != "ready":
+                    push_error("Ecology section provider registration failed: %s" % ecology_registration)
     utility_system = UtilityBlockSystemScript.new()
     utility_system.setup(inventory_system)
     equipment_system = EquipmentSystemScript.new(ItemCatalogScript.ITEMS, inventory_system)

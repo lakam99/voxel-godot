@@ -1854,6 +1854,8 @@ func create_mesh_batch() -> MultiMesh:
 
 func submit_mesh_batch_instance(mesh: MultiMesh, index: int, transform: Transform3D, custom: Color) -> void:
 	mesh.set_instance_transform(index,transform)
+	if mesh.use_colors:
+		mesh.set_instance_color(index,Color.WHITE)
 	mesh.set_instance_custom_data(index,custom)
 
 func submit_mesh_batch_buffer(mesh: MultiMesh, buffer: PackedFloat32Array) -> void:

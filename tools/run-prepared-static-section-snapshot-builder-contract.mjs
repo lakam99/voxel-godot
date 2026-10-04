@@ -10,6 +10,7 @@ cli(async () => {
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd.uid',
     'scripts/world/ChunkStaticRenderSectionSnapshot.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
+    'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
     'scripts/world/StaticRenderSectionGrid.gd.uid',
     'scripts/terrain/VoxelTerrainRuntime.gd',

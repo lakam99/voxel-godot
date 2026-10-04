@@ -67,11 +67,13 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 		if String(segment.get("segmentId", "")) != segment_id \
 				or String(segment.get("sourceId", "")) != source_id \
 				or String(segment.get("sourcePartId", "")) != source_part_id \
-				or String(segment.get("sourceRevision", "")) != source_revision \
+		or String(segment.get("sourceRevision", "")) != source_revision \
 				or segment.get("ownerCell") != owner_cell_value \
 				or segment.get("ownedSectionKey") != section_key \
+				or String(segment.get("instanceAttributeLayout", "")) \
+					!= Snapshot.INSTANCE_ATTRIBUTE_LAYOUT \
 				or String(segment.get("partitionerSchema", "")) \
-					!= "chunk-static-render-section-instance-partition/v2":
+					!= "chunk-static-render-section-instance-partition/v3":
 			return _failed("partition_output_segment_identity_mismatch")
 		var source_ranges: Variant = segment.get("sourceRanges")
 		if not source_ranges is Array or not source_ranges.is_read_only():
@@ -136,7 +138,9 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 
 
 static func _validate_partition_result(value: Dictionary) -> Dictionary:
-	if String(value.get("schema", "")) != "chunk-static-render-section-instance-partition/v2":
+	if String(value.get("schema", "")) != "chunk-static-render-section-instance-partition/v3" \
+			or String(value.get("instanceAttributeLayout", "")) \
+				!= Snapshot.INSTANCE_ATTRIBUTE_LAYOUT:
 		return _failed("invalid_partition_result_schema")
 	var outputs_value: Variant = value.get("outputs")
 	var manifest_value: Variant = value.get("sourceManifest")
@@ -193,8 +197,10 @@ static func _validate_partition_result(value: Dictionary) -> Dictionary:
 				or String(segment.get("sourceRevision", "")) != source_revision \
 				or segment.get("ownerCell") != owner_cell_value \
 				or segment.get("ownedSectionKey") != section_key \
+				or String(segment.get("instanceAttributeLayout", "")) \
+					!= Snapshot.INSTANCE_ATTRIBUTE_LAYOUT \
 				or String(segment.get("partitionerSchema", "")) \
-					!= "chunk-static-render-section-instance-partition/v2":
+					!= "chunk-static-render-section-instance-partition/v3":
 			return _failed("partition_output_segment_identity_mismatch")
 		output_sections[section_key] = true
 		output_batches["%s\n%s\n%s\n%s" % [section_key, batch_key,
@@ -320,7 +326,8 @@ static func _contributors_for_section(section_key: Vector3i, source_groups: Dict
 			for segment: Dictionary in segments:
 				readonly_segments.append(segment)
 			readonly_segments.make_read_only()
-			var batch := {"materialKey":String(compatibility.materialKey),
+			var batch := {"instanceAttributeLayout":String(compatibility.instanceAttributeLayout),
+				"materialKey":String(compatibility.materialKey),
 				"renderTier":String(compatibility.renderTier),
 				"meshKey":String(compatibility.meshResourceKey),
 				"meshContentDigest":String(compatibility.meshContentDigest),
@@ -335,7 +342,8 @@ static func _contributors_for_section(section_key: Vector3i, source_groups: Dict
 			batch.make_read_only()
 			batches.append(batch)
 		batches.make_read_only()
-		var contributor := {"sourceId":source_id,
+		var contributor := {"instanceAttributeLayout":Snapshot.INSTANCE_ATTRIBUTE_LAYOUT,
+			"sourceId":source_id,
 			"sourcePartId":String(source_group.sourcePartId),
 			"sourceRevision":String(source_group.sourceRevision),
 			"ownerCell":Vector2i(source_group.ownerCell),
@@ -348,7 +356,18 @@ static func _contributors_for_section(section_key: Vector3i, source_groups: Dict
 
 
 static func _valid_compatibility(value: Dictionary, expected_batch_key: String) -> bool:
+	var calculated_key := batch_compatibility_key(value)
+	return not calculated_key.is_empty() and expected_batch_key == calculated_key \
+		and String(value.get("batchKey", "")) == calculated_key \
+		and String(value.get("compatibilityKey", "")) == calculated_key
+
+
+## Canonical batch identity shared by every production producer adapter. The
+## caller supplies all render compatibility fields; source/category names do
+## not create parallel keys for otherwise compatible draw batches.
+static func batch_compatibility_key(value: Dictionary) -> String:
 	var material_key := String(value.get("materialKey", ""))
+	var instance_attribute_layout := String(value.get("instanceAttributeLayout", ""))
 	var render_tier := String(value.get("renderTier", ""))
 	var mesh_resource_key := String(value.get("meshResourceKey", ""))
 	var mesh_content_digest := String(value.get("meshContentDigest", ""))
@@ -360,7 +379,8 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 	var cast_shadows: Variant = value.get("castShadows")
 	var visibility_end: Variant = value.get("visibilityRangeEnd")
 	var fade_margin: Variant = value.get("fadeMargin")
-	if material_key.is_empty() or render_tier.is_empty() or mesh_resource_key.is_empty() \
+	if instance_attribute_layout != Snapshot.INSTANCE_ATTRIBUTE_LAYOUT \
+			or material_key.is_empty() or render_tier.is_empty() or mesh_resource_key.is_empty() \
 			or mesh_content_digest.length() != 64 \
 			or not mesh_content_digest.is_valid_hex_number(false) \
 			or pipeline_revision.is_empty() or mesh_key != "%s|pipeline=%s|layer=%s|sort=%s" % [
@@ -372,16 +392,14 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 			or not cast_shadows is bool or not visibility_end is float or not fade_margin is float \
 			or not is_finite(visibility_end) or not is_finite(fade_margin) \
 			or visibility_end < 0.0 or fade_margin < 0.0:
-		return false
+		return ""
 	var mesh_bounds: AABB = mesh_bounds_value
-	var canonical := JSON.stringify([material_key, render_tier, mesh_key, mesh_content_digest, cast_shadows,
-		visibility_end, fade_margin, mesh_bounds.position.x, mesh_bounds.position.y,
+	var canonical := JSON.stringify([instance_attribute_layout, material_key, render_tier,
+		mesh_resource_key, mesh_content_digest, pipeline_revision, render_layer, sort_policy,
+		cast_shadows, visibility_end, fade_margin, mesh_bounds.position.x, mesh_bounds.position.y,
 		mesh_bounds.position.z, mesh_bounds.size.x, mesh_bounds.size.y,
 		mesh_bounds.size.z])
-	var calculated_key := "section-batch:" + canonical.sha256_text()
-	return expected_batch_key == calculated_key \
-		and String(value.get("batchKey", "")) == calculated_key \
-		and String(value.get("compatibilityKey", "")) == calculated_key
+	return "section-batch:" + canonical.sha256_text()
 
 
 static func _snapshot_digest(snapshot: Dictionary, world_id: String,

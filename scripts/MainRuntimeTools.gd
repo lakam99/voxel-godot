@@ -35,6 +35,7 @@ const STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS := 80
 
 var last_streaming_exterior_full_refresh_frame := -1000000
 var voxel_terrain_runtime: Node3D
+var voxel_terrain_section_provider_registered := false
 
 ## Static render-section owners live beside gameplay chunks and are retired by
 ## render demand. A section can cross several gameplay chunks; its immutable
@@ -519,6 +520,7 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
 func ensure_voxel_terrain_authority() -> bool:
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
         if voxel_terrain_runtime.generation_context_current():
+            register_voxel_terrain_section_source_provider()
             return bool(voxel_terrain_runtime.get("authority_ready"))
         push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
         return false
@@ -532,7 +534,22 @@ func ensure_voxel_terrain_authority() -> bool:
         return false
     voxel_terrain_runtime = runtime
     clear_chunk_asset_cache()
+    register_voxel_terrain_section_source_provider()
     return true
+
+func register_voxel_terrain_section_source_provider() -> Dictionary:
+    if voxel_terrain_section_provider_registered:
+        return {"status": "ready", "providerId": "terrain", "alreadyRegistered": true}
+    if voxel_terrain_runtime == null or not is_instance_valid(voxel_terrain_runtime):
+        return {"status": "pending", "reason": "voxel_terrain_runtime_unavailable", "retryable": true}
+    var coordinator = get("world_static_section_coordinator")
+    if coordinator == null or not coordinator.has_method("register_source_provider"):
+        return {"status": "pending", "reason": "world_static_section_coordinator_unavailable", "retryable": true}
+    var registered: Dictionary = coordinator.register_source_provider(
+        "terrain", voxel_terrain_runtime, "capture_static_section_sources")
+    if registered.get("status") == "ready":
+        voxel_terrain_section_provider_registered = true
+    return registered
 
 func report_voxel_authority_failure_once(source: String) -> void:
     if bool(get_meta("voxel_authority_failure_reported", false)):
@@ -666,6 +683,18 @@ func update_voxel_authority_chunks(force: bool) -> void:
     elif structure_system != null:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         structure_system.update_around(center_cell)
+    if not force and world_static_section_coordinator != null \
+            and world_static_section_coordinator.has_method("advance_queued_complete_section_candidates"):
+        var section_start_usec := Time.get_ticks_usec()
+        var section_step: Dictionary = world_static_section_coordinator.call(
+            "advance_queued_complete_section_candidates", 1, 1)
+        if monitor != null:
+            monitor.observe_external_duration("whole_section_candidate_install",
+                float(Time.get_ticks_usec() - section_start_usec) / 1000.0)
+            monitor.observe_gauge("whole_section_candidate_pending_install_count",
+                world_static_section_coordinator.get("_production_candidate_jobs").size())
+            if section_step.get("status") == "failed":
+                monitor.increment_counter("whole_section_candidate_install_failure")
     if monitor != null:
         monitor.end_section("streaming_deferred_world_work", deferred_start)
     npc_navigation_publication_permitted = not shared_gameplay_schedule or (

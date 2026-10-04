@@ -5,6 +5,7 @@ const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Snapshot = preload("res://scripts/world/ChunkStaticRenderSectionSnapshot.gd")
 const TEST_MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 
 var checks: Dictionary = {}
 
@@ -29,7 +30,8 @@ func _run() -> void:
 	var assembled: Dictionary = Snapshot.assemble(key, inputs)
 	var snapshot: Dictionary = assembled.get("snapshot", {})
 	checks["valid_snapshot"] = assembled.get("status") == "ready" \
-		and snapshot.get("schema") == "chunk-static-render-section-snapshot/v2" \
+		and snapshot.get("schema") == "chunk-static-render-section-snapshot/v3" \
+		and snapshot.get("instanceAttributeLayout") == Attributes.LAYOUT_SCHEMA \
 		and snapshot.get("bufferSpace") == "section_local"
 	checks["compatible_sources_share_batch"] = snapshot.get("batchCount") == 2 \
 		and snapshot.get("batches", {}).size() == 2 \
@@ -104,7 +106,8 @@ func _run() -> void:
 func _contributor(source_id: String, part_id: String, revision: String,
 		batches: Array) -> Dictionary:
 	batches.make_read_only()
-	var contributor := {"sourceId":source_id, "sourcePartId":part_id,
+	var contributor := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"sourceId":source_id, "sourcePartId":part_id,
 		"sourceRevision":revision, "ownerCell":Vector2i.ZERO, "sectionKey":Vector3i.ZERO,
 		"bufferSpace":"section_local", "batches":batches}
 	contributor.make_read_only()
@@ -124,7 +127,8 @@ func _batch(material: String, tier: String, mesh_key: String, shadows: bool,
 		segment.make_read_only()
 		sealed_segments.append(segment)
 	sealed_segments.make_read_only()
-	var batch := {"materialKey":material, "renderTier":tier, "meshKey":mesh_key,
+	var batch := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"materialKey":material, "renderTier":tier, "meshKey":mesh_key,
 		"meshContentDigest":TEST_MESH_DIGEST,
 		"pipelineRevision":pipeline_revision, "renderLayer":render_layer,
 		"transparencySortPolicy":sort_policy,
@@ -137,10 +141,13 @@ func _batch(material: String, tier: String, mesh_key: String, shadows: bool,
 
 func _segment(segment_id: String, bounds: AABB, instances: int, first_value: float) -> Dictionary:
 	var buffer: Array[float] = []
-	for i in range(instances * Snapshot.FLOATS_PER_INSTANCE):
-		buffer.append(first_value + float(i) * 0.001)
+	for i in range(instances):
+		var instance_origin := bounds.position + Vector3(0.5, 0.5, 0.5)
+		buffer.append_array(Attributes.encode(Transform3D(Basis.IDENTITY, instance_origin),
+			Color(first_value, 0.4, 0.6, 1.0), Color(first_value, 0.2, 0.3, 1.0)))
 	buffer.make_read_only()
-	var segment := {"segmentId":segment_id, "buffer":buffer,
+	var segment := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"segmentId":segment_id, "buffer":buffer,
 		"bounds":bounds, "instanceCount":instances}
 	segment.make_read_only()
 	return segment
@@ -176,8 +183,10 @@ func _coalesced_stone_payload(snapshot: Dictionary) -> bool:
 		return false
 	var segment: Dictionary = batch.segments[0]
 	return segment.instanceCount == 2 and segment.buffer.size() == 2 * Snapshot.FLOATS_PER_INSTANCE \
-		and is_equal_approx(segment.buffer[0], 0.1) \
-		and is_equal_approx(segment.buffer[Snapshot.FLOATS_PER_INSTANCE], 0.2)
+		and is_equal_approx(segment.buffer[12], 0.1) \
+		and is_equal_approx(segment.buffer[Snapshot.FLOATS_PER_INSTANCE + 12], 0.2) \
+		and is_equal_approx(segment.buffer[16 + 1], 0.4) \
+		and is_equal_approx(segment.buffer[Snapshot.FLOATS_PER_INSTANCE + 16 + 1], 0.4)
 
 
 func _batch_key(material: String, tier: String, mesh_key: String, shadows: bool,
@@ -185,7 +194,7 @@ func _batch_key(material: String, tier: String, mesh_key: String, shadows: bool,
 		sort_policy := "none", pipeline_revision := "building_static_pipeline/v1",
 		mesh_local_bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)) -> String:
 	return "section-batch:" + JSON.stringify([
-		material, tier, mesh_key, TEST_MESH_DIGEST, pipeline_revision, render_layer, sort_policy,
+		Attributes.LAYOUT_SCHEMA, material, tier, mesh_key, TEST_MESH_DIGEST, pipeline_revision, render_layer, sort_policy,
 		shadows, visibility, fade, mesh_local_bounds.position.x,
 		mesh_local_bounds.position.y, mesh_local_bounds.position.z,
 		mesh_local_bounds.size.x, mesh_local_bounds.size.y,
@@ -317,10 +326,13 @@ func _rejects_forged_center_owner_proof() -> bool:
 func _partition_input(source_id: String, revision: String, segment_id: String,
 		source_to_world: Transform3D,
 		mesh_local_bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)) -> Array:
-	var buffer: Array[float] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-		0.0, 0.0, 1.0, 0.0, 0.2, 0.3, 0.4, 1.0]
+	var buffer: Array[float] = []
+	for value: float in Attributes.encode(Transform3D.IDENTITY,
+			Color(0.2, 0.3, 0.4, 1.0), Color.WHITE):
+		buffer.append(value)
 	buffer.make_read_only()
-	var input := {"sourceId":source_id, "sourceRevision":revision,
+	var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"sourceId":source_id, "sourceRevision":revision,
 		"sourcePartId":source_id + ":part",
 		"ownerCell":Grid.logical_owner_cell_for_world_position(source_to_world.origin),
 		"sourceToWorld":source_to_world, "meshLocalBounds":mesh_local_bounds,

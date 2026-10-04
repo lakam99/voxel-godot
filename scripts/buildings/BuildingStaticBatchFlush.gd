@@ -1,6 +1,7 @@
 extends RefCounted
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const InstanceBuffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
+const InstanceAttributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 ## One existing static-batch boundary, prepared in small main-thread units.
 ## No Node references survive a call. The owner pauses part publication until
@@ -163,6 +164,7 @@ func _step(publisher) -> void:
 				return
 			_mesh = publisher.create_mesh_batch()
 			_mesh.transform_format = MultiMesh.TRANSFORM_3D
+			_mesh.use_colors = true
 			_mesh.use_custom_data = true
 			_mesh.instance_count = _transforms.size()
 			publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
@@ -209,6 +211,7 @@ func _step(publisher) -> void:
 				if String(owner.get("reason","")) in ["current_world_scene_unavailable","current_world_chunk_registry_missing"]:
 					_mesh = publisher.create_mesh_batch()
 					_mesh.transform_format = MultiMesh.TRANSFORM_3D
+					_mesh.use_colors = true
 					_mesh.use_custom_data = true
 					_mesh.instance_count = _transforms.size()
 					publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
@@ -238,8 +241,9 @@ func _step(publisher) -> void:
 			_packet_mesh_content_digest=String(mesh_identity.contentDigest)
 			var mesh_size: Vector3=packet_mesh.size if packet_mesh is BoxMesh else publisher.unit_box.size
 			var mesh_bytes:=PackedFloat32Array([mesh_size.x,mesh_size.y,mesh_size.z]).to_byte_array()
-			var header: String="%s\n%s\n%s\n%d\n%d\n%s\n%s\n%s\n%s\n%s" % [
-				_packet_source_id,_packet_source_revision,str(_packet_owner_cell),_packet_segments.size(),_packet_instance_count,
+			var header: String="%s\n%s\n%s\n%s\n%d\n%d\n%s\n%s\n%s\n%s\n%s" % [
+				_packet_source_id,_packet_source_revision,str(_packet_owner_cell),InstanceAttributes.LAYOUT_SCHEMA,
+				_packet_segments.size(),_packet_instance_count,
 				String(packet_group.materialKey),String(packet_group.renderTier),str(policy),"unit_box_v1",
 				_packet_mesh_content_digest]
 			if _packet_hash.start(HashingContext.HASH_SHA256)!=OK \

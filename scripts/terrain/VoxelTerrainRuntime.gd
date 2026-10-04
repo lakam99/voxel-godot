@@ -44,6 +44,7 @@ const STARTUP_VERTICAL_MAX_CELL := 48
 const VERTICAL_BOUNDS_EXPANSION_STEP_CELLS := 16
 const NATIVE_MESH_BLOCK_SIZE_CELLS := 16
 const SECTION_SIZE := NATIVE_MESH_BLOCK_SIZE_CELLS
+const MAX_TERRAIN_SECTION_FLUID_PROOFS := 256
 const EDIT_SECTIONS_PER_FRAME := 1
 const PUBLICATION_PROBES_PER_PHYSICS_FRAME := 2
 const COLLISION_SURFACE_TOLERANCE := CELL * 2.5
@@ -103,6 +104,10 @@ var startup_auxiliary_cleanup_frames_remaining := 0
 var startup_auxiliary_viewers_created := 0
 var site_gate
 var terrain_section_shadow_publisher
+var terrain_section_fluid_probe_states: Dictionary = {}
+var terrain_section_fluid_proofs: Dictionary = {}
+var terrain_section_fluid_probe_queue: Array[Vector3i] = []
+var terrain_section_fluid_probe_queued: Dictionary = {}
 var retained_gameplay_chunks: Dictionary = {}
 var retained_chunk_viewers: Dictionary = {}
 var retained_viewer_groups: Dictionary = {}
@@ -734,6 +739,9 @@ func reset_for_current_seed_staged() -> Dictionary:
 		)
 	var previous_seed := configured_seed
 	var terrain_instance_id := terrain.get_instance_id()
+	if terrain_section_shadow_publisher != null:
+		terrain_section_shadow_publisher.cancel_pending()
+	_clear_terrain_section_fluid_probes()
 	var previous_mesh_blocks := published_mesh_blocks.size()
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
 	_retire_mesh_preparation_viewer()
@@ -1411,6 +1419,7 @@ func _process(delta: float) -> void:
 			_retire_mesh_preparation_viewer()
 			return
 		if site_gate != null: site_gate.advance()
+		advance_terrain_section_fluid_probes()
 		if terrain_section_shadow_publisher != null:
 			terrain_section_shadow_publisher.advance()
 		observe_native_viewer_workload()
@@ -1448,6 +1457,7 @@ func begin_shutdown() -> void:
 	if terrain_section_shadow_publisher != null:
 		terrain_section_shadow_publisher.shutdown()
 		terrain_section_shadow_publisher = null
+	_clear_terrain_section_fluid_probes()
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	clear_foreground_collision_demand()
@@ -1922,6 +1932,204 @@ func capture_resident_terrain_mesh_block(block_position: Vector3i) -> Dictionary
 		"captureIsTerrainOnly":true, "collisionAuthority":"VoxelTerrainRuntime"}
 	result.make_read_only()
 	return result
+
+
+## Metadata-only complete-source census provider for shared render sections.
+## The exact fluid probe is advanced separately from `_process`; this method
+## never copies voxel payloads or scans cells during coordinator recapture.
+func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+	if not authority_ready or not generation_context_current() or section_keys.is_empty():
+		return {"status":"pending", "reason":"terrain_section_authority_unavailable", "retryable":true}
+	var expected_world_id := "seed:%s:%d" % [String(main.get("seed_text")), int(main.get("seed_hash"))]
+	if world_id != expected_world_id:
+		return {"status":"pending", "reason":"terrain_section_world_identity_mismatch", "retryable":true}
+	var sections: Array[Vector3i] = []
+	var seen: Dictionary = {}
+	for value in section_keys:
+		if not value is Vector3i or seen.has(value):
+			return {"status":"failed", "reason":"invalid_terrain_section_source_query"}
+		seen[value] = true
+		sections.append(value)
+	sections.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+			if a.x != b.x: return a.x < b.x
+			if a.y != b.y: return a.y < b.y
+			return a.z < b.z)
+	var section_rows: Dictionary = {}
+	var source_revisions: Dictionary = {}
+	var authority_rows: Array = []
+	for section_key: Vector3i in sections:
+		var proof: Dictionary = terrain_section_fluid_proofs.get(section_key, {})
+		if not _terrain_section_fluid_proof_is_current(section_key, proof):
+			return {"status":"pending", "reason":"terrain_exact_fluid_section_probe_pending",
+				"section":section_key, "retryable":true}
+		if bool(proof.get("hasFluid", false)):
+			return {"status":"pending", "reason":"terrain_fluid_section_layer_not_supported",
+				"section":section_key, "fluidPayloadSignature":String(proof.get("signature", "")),
+				"retryable":true}
+		var source_part_id := _terrain_section_source_part_id(section_key)
+		var revision := _terrain_section_source_revision(section_key,
+			String(proof.get("signature", "")))
+		if revision.is_empty():
+			return {"status":"pending", "reason":"terrain_section_revision_capture_pending",
+				"section":section_key, "retryable":true}
+		var ids: Array[String] = [source_part_id]
+		var revisions: Array = [[source_part_id, revision]]
+		ids.make_read_only()
+		var coverage_revision := Marshalls.raw_to_base64(var_to_bytes([world_id, section_key,
+			revisions, String(proof.get("signature", ""))])).sha256_text()
+		section_rows[section_key] = {"status":"complete",
+			"coverageRevision":coverage_revision, "sourcePartIds":ids}
+		source_revisions[source_part_id] = revision
+		authority_rows.append([section_key, coverage_revision, revision,
+			String(proof.get("signature", ""))])
+	var authority_revision := Marshalls.raw_to_base64(var_to_bytes([
+		"terrain-section-census/v1", world_id, authority_rows])).sha256_text()
+	section_rows.make_read_only()
+	source_revisions.make_read_only()
+	sections.make_read_only()
+	return {"status":"complete", "worldId":world_id,
+		"authorityRevision":authority_revision, "sourceRevisions":source_revisions,
+		"sections":section_rows}
+
+
+func request_terrain_section_fluid_probe(section_key: Vector3i) -> Dictionary:
+	if _terrain_section_fluid_proof_is_current(section_key,
+			terrain_section_fluid_proofs.get(section_key, {})):
+		return {"status":"ready", "proof":terrain_section_fluid_proofs[section_key]}
+	if terrain_section_fluid_probe_states.has(section_key) or terrain_section_fluid_probe_queued.has(section_key):
+		return {"status":"pending", "reason":"terrain_exact_fluid_section_probe_pending",
+			"section":section_key, "retryable":true}
+	var world_generation = main.get("world_generation_system") if is_instance_valid(main) else null
+	if world_generation == null or not world_generation.has_method("begin_exact_fluid_payload_for_meshing_chunk"):
+		return {"status":"pending", "reason":"exact_fluid_probe_authority_unavailable",
+			"section":section_key, "retryable":true}
+	var origin := section_key * SECTION_SIZE
+	var fluid_state: Dictionary = world_generation.call(
+		"begin_exact_fluid_payload_for_meshing_chunk", origin.x, origin.z,
+		SECTION_SIZE, origin.y, origin.y + SECTION_SIZE - 1, 1)
+	if fluid_state.is_empty():
+		return {"status":"pending", "reason":"exact_fluid_section_probe_begin_failed",
+			"section":section_key, "retryable":true}
+	terrain_section_fluid_probe_states[section_key] = fluid_state
+	terrain_section_fluid_probe_queue.append(section_key)
+	terrain_section_fluid_probe_queued[section_key] = true
+	return {"status":"queued", "section":section_key}
+
+
+func advance_terrain_section_fluid_probes() -> Dictionary:
+	if terrain_section_fluid_probe_queue.is_empty():
+		return {"status":"idle"}
+	var section_key: Vector3i = terrain_section_fluid_probe_queue[0]
+	var state: Dictionary = terrain_section_fluid_probe_states.get(section_key, {})
+	var world_generation = main.get("world_generation_system") if is_instance_valid(main) else null
+	if state.is_empty() or world_generation == null \
+			or not world_generation.has_method("advance_exact_fluid_payload_state"):
+		_remove_terrain_section_fluid_probe(section_key)
+		return {"status":"pending", "reason":"exact_fluid_probe_authority_unavailable"}
+	var advanced: Dictionary = world_generation.call("advance_exact_fluid_payload_state",
+		state, 1.0, 512)
+	state = advanced.get("state", state)
+	terrain_section_fluid_probe_states[section_key] = state
+	if bool(advanced.get("stale", false)) or bool(advanced.get("cancelled", false)):
+		_remove_terrain_section_fluid_probe(section_key)
+		return {"status":"pending", "reason":"exact_fluid_section_probe_stale",
+			"section":section_key, "retryable":true}
+	if not bool(advanced.get("complete", false)):
+		return {"status":"pending", "section":section_key,
+			"cellsProcessed":int(advanced.get("cellsProcessed", 0))}
+	var payload: Dictionary = advanced.get("payload", {})
+	if payload.is_empty() or not bool(payload.get("immutable", false)):
+		_remove_terrain_section_fluid_probe(section_key)
+		return {"status":"failed", "reason":"exact_fluid_section_payload_incomplete",
+			"section":section_key}
+	var revision_rows_value: Variant = payload.get("sectionRevisions", null)
+	if not revision_rows_value is Array or revision_rows_value.is_empty():
+		_remove_terrain_section_fluid_probe(section_key)
+		return {"status":"failed", "reason":"exact_fluid_section_revision_rows_missing",
+			"section":section_key}
+	var proof := {"schema":"terrain-fluid-section-proof/v1", "sectionKey":section_key,
+		"hasFluid":bool(payload.get("hasFluid", false)),
+		"volumeRevision":int(payload.get("revision", -1)),
+		"fluidRevision":int(payload.get("fluidRevision", -1)),
+		"sectionRevisions":revision_rows_value,
+		"signature":String(payload.get("signature", ""))}
+	var immutable_revision_rows: Array[Dictionary] = []
+	for row_value in proof.sectionRevisions:
+		if not row_value is Dictionary:
+			_remove_terrain_section_fluid_probe(section_key)
+			return {"status":"failed", "reason":"exact_fluid_section_revision_row_invalid",
+				"section":section_key}
+		var immutable_row: Dictionary = row_value.duplicate()
+		immutable_row.make_read_only()
+		immutable_revision_rows.append(immutable_row)
+	immutable_revision_rows.make_read_only()
+	proof["sectionRevisions"] = immutable_revision_rows
+	proof.make_read_only()
+	_remove_terrain_section_fluid_probe(section_key)
+	if not _terrain_section_fluid_proof_is_current(section_key, proof):
+		return {"status":"pending", "reason":"exact_fluid_section_probe_revision_changed",
+			"section":section_key, "retryable":true}
+	terrain_section_fluid_proofs[section_key] = proof
+	while terrain_section_fluid_proofs.size() > MAX_TERRAIN_SECTION_FLUID_PROOFS:
+		terrain_section_fluid_proofs.erase(terrain_section_fluid_proofs.keys()[0])
+	return {"status":"ready", "section":section_key,
+		"hasFluid":bool(proof.hasFluid), "signature":String(proof.signature)}
+
+
+func _terrain_section_fluid_proof_is_current(section_key: Vector3i, proof_value: Variant) -> bool:
+	if not proof_value is Dictionary or not proof_value.is_read_only() \
+			or String(proof_value.get("schema", "")) != "terrain-fluid-section-proof/v1" \
+			or proof_value.get("sectionKey") != section_key:
+		return false
+	var service = volume_service()
+	if service == null or int(proof_value.get("volumeRevision", -1)) != int(service.get("revision")) \
+			or int(proof_value.get("fluidRevision", -1)) != int(service.get("fluid_revision")):
+		return false
+	var revision_rows: Variant = proof_value.get("sectionRevisions", null)
+	if not revision_rows is Array or revision_rows.is_empty():
+		return false
+	for row_value in revision_rows:
+		if not row_value is Dictionary:
+			return false
+		var row: Dictionary = row_value
+		var key_value: Variant = row.get("sectionKey", null)
+		if not key_value is Vector3i \
+				or int(row.get("revision", -1)) != int(service.call("exact_fluid_section_revision", key_value)):
+			return false
+	return not String(proof_value.get("signature", "")).is_empty()
+
+
+func _terrain_section_source_part_id(section_key: Vector3i) -> String:
+	return "resident-terrain:%d,%d,%d:part" % [section_key.x, section_key.y, section_key.z]
+
+
+func _terrain_section_source_revision(section_key: Vector3i,
+		fluid_signature := "") -> String:
+	var service = volume_service()
+	if service == null:
+		return ""
+	var origin := section_key * SECTION_SIZE - Vector3i.ONE
+	var revisions := _terrain_capture_section_revisions(service, origin,
+		Vector3i.ONE * (SECTION_SIZE + 3))
+	if revisions.get("status") != "ready":
+		return ""
+	return Marshalls.raw_to_base64(var_to_bytes(["resident-terrain-source/v1", configured_seed,
+		collision_owner_generation, section_key, String(revisions.revisionDigest),
+		fluid_signature, _terrain_capture_mesher_material_revision(),
+		"transvoxel-s4-no-transitions-v1"])).sha256_text()
+
+
+func _remove_terrain_section_fluid_probe(section_key: Vector3i) -> void:
+	terrain_section_fluid_probe_states.erase(section_key)
+	terrain_section_fluid_probe_queued.erase(section_key)
+	terrain_section_fluid_probe_queue.erase(section_key)
+
+
+func _clear_terrain_section_fluid_probes() -> void:
+	terrain_section_fluid_probe_states.clear()
+	terrain_section_fluid_proofs.clear()
+	terrain_section_fluid_probe_queue.clear()
+	terrain_section_fluid_probe_queued.clear()
 
 
 ## Call again immediately before installing a captured candidate. A snapshot

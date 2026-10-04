@@ -494,6 +494,7 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		Ref<MultiMesh> multi;
 		multi.instantiate();
 		multi->set_transform_format(MultiMesh::TRANSFORM_3D);
+		multi->set_use_colors(true);
 		multi->set_use_custom_data(true);
 		multi->set_instance_count(batch.buffer.size() / FLOATS_PER_INSTANCE);
 		multi->set_mesh(batch.mesh);
@@ -529,6 +530,8 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 		receipt["visibilityRange"] = batch.visibility_range;
 		receipt["fadeMargin"] = batch.fade_margin;
 		receipt["instanceCount"] = batch.buffer.size() / FLOATS_PER_INSTANCE;
+		receipt["usesColors"] = true;
+		receipt["usesCustomData"] = true;
 		receipt["bufferBytes"] = static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
 		receipt["meshPayloadBytes"] = batch.mesh_payload_bytes;
 		receipt["payloadBytes"] = int64_t(receipt["bufferBytes"]) + batch.mesh_payload_bytes;
@@ -654,7 +657,9 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 		Ref<MultiMesh> multi = instance->get_multimesh();
 		if (multi.is_null() || static_cast<int64_t>(multi->get_instance_id()) != int64_t(expected.get("multimeshId", 0)) ||
 				multi->get_instance_count() != int64_t(expected.get("instanceCount", 0)) ||
+				!multi->is_using_colors() || !bool(expected.get("usesColors", false)) ||
 				!multi->is_using_custom_data() ||
+				!bool(expected.get("usesCustomData", false)) ||
 				multi->get_mesh().is_null() || static_cast<int64_t>(multi->get_mesh()->get_instance_id()) != int64_t(expected.get("meshId", 0))) {
 			return _status("stale", "installed_batch_resource_replaced");
 		}

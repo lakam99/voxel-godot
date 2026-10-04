@@ -11,7 +11,9 @@ extends RefCounted
 ## This is a pure data contract; it creates no rendering or collision objects.
 
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
-const FLOATS_PER_INSTANCE := 16
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const INSTANCE_ATTRIBUTE_LAYOUT := Attributes.LAYOUT_SCHEMA
+const FLOATS_PER_INSTANCE := Attributes.FLOATS_PER_INSTANCE
 const MAX_OUTPUT_INSTANCES := 256
 static func partition(inputs: Array) -> Dictionary:
 	if not inputs.is_read_only():
@@ -28,6 +30,7 @@ static func partition(inputs: Array) -> Dictionary:
 			return _failed("mutable_or_invalid_input")
 		var input: Dictionary = input_value
 		var source_id := String(input.get("sourceId", ""))
+		var instance_attribute_layout := String(input.get("instanceAttributeLayout", ""))
 		var source_part_id := String(input.get("sourcePartId", ""))
 		var source_revision := String(input.get("sourceRevision", ""))
 		var owner_cell_value: Variant = input.get("ownerCell")
@@ -37,6 +40,8 @@ static func partition(inputs: Array) -> Dictionary:
 		var mesh_bounds_value: Variant = input.get("meshLocalBounds")
 		var buffer_value: Variant = input.get("buffer")
 		var instance_count_value: Variant = input.get("instanceCount")
+		if instance_attribute_layout != INSTANCE_ATTRIBUTE_LAYOUT:
+			return _failed("unsupported_instance_attribute_layout")
 		if source_id.is_empty() or source_part_id.is_empty() or source_revision.is_empty() \
 				or not owner_cell_value is Vector2i or batch_key.is_empty() or segment_id.is_empty():
 			return _failed("incomplete_source_or_batch_identity")
@@ -72,7 +77,7 @@ static func partition(inputs: Array) -> Dictionary:
 		var mesh_local_bounds: AABB = mesh_bounds_value
 		for instance_index in range(instance_count_value):
 			var offset := instance_index * FLOATS_PER_INSTANCE
-			var local_transform := _decode_transform(buffer_value, offset)
+			var local_transform := Attributes.decode_transform(buffer_value, offset)
 			if not _valid_transform(local_transform):
 				return _failed("invalid_instance_transform")
 			var world_transform := source_to_world * local_transform
@@ -88,7 +93,12 @@ static func partition(inputs: Array) -> Dictionary:
 			var local_bounds := section_local_transform * mesh_local_bounds
 			if not _valid_bounds(local_bounds):
 				return _failed("invalid_section_local_mesh_bounds")
-			var output_record := _encode_transform(section_local_transform, buffer_value, offset + 12)
+			var instance_color := Color(float(buffer_value[offset + Attributes.COLOR_OFFSET]),
+				float(buffer_value[offset + Attributes.COLOR_OFFSET + 1]),
+				float(buffer_value[offset + Attributes.COLOR_OFFSET + 2]),
+				float(buffer_value[offset + Attributes.COLOR_OFFSET + 3]))
+			var output_record := Attributes.encode_transform(section_local_transform,
+				buffer_value, offset, instance_color)
 			var bucket_key := _bucket_key(section_key, batch_key, source_id, source_revision)
 			if not buckets.has(bucket_key):
 				buckets[bucket_key] = {"sectionKey":section_key, "batchKey":batch_key,
@@ -170,13 +180,14 @@ static func partition(inputs: Array) -> Dictionary:
 			if dependencies.is_empty():
 				return _failed("empty_stream_chunk_dependencies")
 			var stable_segment_id := "partition:" + (bucket_key + "\n" + str(segment_index)).sha256_text()
-			var segment := {"segmentIndex":segment_index,
+			var segment := {"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+				"segmentIndex":segment_index,
 				"segmentId":stable_segment_id,
 				"sourceId":bucket.sourceId,
 				"sourcePartId":bucket.sourcePartId,
 				"ownerCell":bucket.ownerCell,
 				"sourceRevision":bucket.sourceRevision,
-				"partitionerSchema":"chunk-static-render-section-instance-partition/v2",
+				"partitionerSchema":"chunk-static-render-section-instance-partition/v3",
 				"ownershipPolicy":"transformed_mesh_aabb_center/v1",
 				"meshLocalBounds":bucket.records[cursor].meshLocalBounds,
 				"ownedSectionKey":bucket.sectionKey,
@@ -187,7 +198,8 @@ static func partition(inputs: Array) -> Dictionary:
 				"worldBounds":output_world_bounds,
 				"streamChunkDependencies":dependencies}
 			segment.make_read_only()
-			outputs.append({"sectionKey":bucket.sectionKey,
+			outputs.append({"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
+				"sectionKey":bucket.sectionKey,
 				"batchKey":bucket.batchKey,
 				"sourceId":bucket.sourceId,
 				"sourcePartId":bucket.sourcePartId,
@@ -241,7 +253,8 @@ static func partition(inputs: Array) -> Dictionary:
 		manifest.make_read_only()
 		source_manifest.append(manifest)
 	source_manifest.make_read_only()
-	var result := {"schema":"chunk-static-render-section-instance-partition/v2",
+	var result := {"schema":"chunk-static-render-section-instance-partition/v3",
+		"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
 		"outputs":outputs,
 		"sourceManifest":source_manifest,
 		"inputInstanceCount":input_instance_count,
@@ -251,24 +264,6 @@ static func partition(inputs: Array) -> Dictionary:
 		"batchCount":_distinct_batch_count(outputs)}
 	result.make_read_only()
 	return {"status":"ready", "result":result}
-
-
-static func _decode_transform(buffer: Array, offset: int) -> Transform3D:
-	var basis := Basis(
-		Vector3(float(buffer[offset]), float(buffer[offset + 4]), float(buffer[offset + 8])),
-		Vector3(float(buffer[offset + 1]), float(buffer[offset + 5]), float(buffer[offset + 9])),
-		Vector3(float(buffer[offset + 2]), float(buffer[offset + 6]), float(buffer[offset + 10])))
-	var origin := Vector3(float(buffer[offset + 3]), float(buffer[offset + 7]), float(buffer[offset + 11]))
-	return Transform3D(basis, origin)
-
-
-static func _encode_transform(transform: Transform3D, source_buffer: Array, custom_offset: int) -> Array[float]:
-	return [
-		transform.basis.x.x, transform.basis.y.x, transform.basis.z.x, transform.origin.x,
-		transform.basis.x.y, transform.basis.y.y, transform.basis.z.y, transform.origin.y,
-		transform.basis.x.z, transform.basis.y.z, transform.basis.z.z, transform.origin.z,
-		float(source_buffer[custom_offset]), float(source_buffer[custom_offset + 1]),
-		float(source_buffer[custom_offset + 2]), float(source_buffer[custom_offset + 3])]
 
 
 static func _valid_transform(transform: Transform3D) -> bool:

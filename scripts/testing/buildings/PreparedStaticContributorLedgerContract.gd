@@ -2,6 +2,7 @@ extends SceneTree
 
 const Ledger = preload("res://scripts/world/PreparedStaticContributorLedger.gd")
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const TEST_MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 var checks: Dictionary = {}
@@ -24,9 +25,26 @@ func _run() -> void:
 		_segment("part-b", "source-b", "rev-1", "seg-b", [0.0]))
 	var accepted_a: Dictionary = ledger.accept_prepared_segment("boundary-1",
 		_segment("part-a", "source-a", "rev-1", "seg-a", [0.0, 1.0]))
+	var admitted_buffer: Array[float] = _segment("part-a", "source-a", "rev-1", "seg-probe", [3.0]).buffer
+	var legacy_buffer := _encode(Transform3D.IDENTITY)
+	var truncated_legacy_buffer: Array[float] = legacy_buffer.slice(0, 16)
+	truncated_legacy_buffer.make_read_only()
+	var legacy_probe: Dictionary = _segment("part-a", "source-a", "rev-1", "seg-probe", [3.0]).duplicate(false)
+	legacy_probe["buffer"] = truncated_legacy_buffer
+	legacy_probe.make_read_only()
+	var legacy_admission: Dictionary = ledger.accept_prepared_segment("boundary-1", legacy_probe)
+	checks["typed_readonly_twenty_float_lane_buffer_admitted_and_legacy_width_named"] = \
+		admitted_buffer.get_typed_builtin() == TYPE_FLOAT and admitted_buffer.is_read_only() \
+		and admitted_buffer.size() == Attributes.FLOATS_PER_INSTANCE \
+		and accepted_a.get("status") == "accepted" \
+		and legacy_admission.get("reason") == "prepared_segment_buffer_width_mismatch:16!=1*20"
 	var current_initial := _revisions({"part-a":"rev-1", "part-b":"rev-1"})
 	var initial_prepared: Dictionary = ledger.prepare_boundary("boundary-1", current_initial,
 		"ledger-contract-world", 1)
+	if initial_prepared.get("status") != "prepared":
+		push_error("ledger initial candidate preparation failed: %s" % JSON.stringify(initial_prepared))
+		quit(1)
+		return
 	var initial_install := _mock_install_set(initial_prepared)
 	var replacement_envelopes: Array = initial_prepared.get("replacements", [])
 	var replacements_are_bound := replacement_envelopes.size() == 2
@@ -183,6 +201,7 @@ func _declaration(part_id: String, source_id: String, revision: String,
 	var segments: Array[Dictionary] = []
 	for segment_id: String in segment_ids:
 		var segment := {"segmentId":segment_id, "materialKey":"wood_oak",
+			"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 			"renderTier":"structural", "meshKey":"unit-box-v1",
 			"meshContentDigest":TEST_MESH_DIGEST,
 			"meshLocalBounds":_unit_box_bounds(),
@@ -216,6 +235,7 @@ func _segment(part_id: String, source_id: String, revision: String,
 	buffer.make_read_only()
 	var input := {"sourcePartId":part_id, "sourceId":source_id,
 		"sourceRevision":revision, "segmentId":segment_id, "buffer":buffer,
+		"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 		"instanceCount":local_x.size(), "materialKey":"wood_oak",
 		"renderTier":"structural", "meshKey":"unit-box-v1",
 		"meshContentDigest":TEST_MESH_DIGEST,
@@ -232,15 +252,16 @@ func _encode(transform: Transform3D) -> Array[float]:
 	return [transform.basis.x.x, transform.basis.y.x, transform.basis.z.x, transform.origin.x,
 		transform.basis.x.y, transform.basis.y.y, transform.basis.z.y, transform.origin.y,
 		transform.basis.x.z, transform.basis.y.z, transform.basis.z.z, transform.origin.z,
+		1.0, 1.0, 1.0, 1.0,
 		0.2, 0.5, 0.7, 1.0]
 
 
 func _compatibility_key(pipeline_revision := "building-static-v1",
 		render_layer := "opaque", sort_policy := "none") -> String:
-	var section_mesh_key := "unit-box-v1|pipeline=%s|layer=%s|sort=%s" % [
-		pipeline_revision, render_layer, sort_policy]
-	return "section-batch:" + JSON.stringify(["wood_oak", "structural", section_mesh_key, TEST_MESH_DIGEST,
-		true, 240.0, 18.0, -0.5, -0.5, -0.5, 1.0, 1.0, 1.0]).sha256_text()
+	return "section-batch:" + JSON.stringify([Attributes.LAYOUT_SCHEMA,
+		"wood_oak", "structural", "unit-box-v1", TEST_MESH_DIGEST,
+		pipeline_revision, render_layer, sort_policy, true, 240.0, 18.0,
+		-0.5, -0.5, -0.5, 1.0, 1.0, 1.0]).sha256_text()
 
 
 func _unit_box_bounds() -> AABB:
@@ -293,6 +314,7 @@ func _layer_policy_contract() -> bool:
 	var declaration := _declaration("p", "s", "r", Vector3.ZERO, ["seg"]).duplicate(false)
 	var segments: Array[Dictionary] = []
 	var cutout := {"segmentId":"seg", "materialKey":"wood_oak",
+		"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 		"renderTier":"structural", "meshKey":"unit-box-v1",
 		"meshContentDigest":TEST_MESH_DIGEST, "meshLocalBounds":_unit_box_bounds(),
 		"pipelineRevision":"building-static-v1", "renderLayer":"cutout",
@@ -309,6 +331,7 @@ func _layer_policy_contract() -> bool:
 	var invalid_sort_declaration := _declaration("p", "s", "r", Vector3.ZERO, ["seg"]).duplicate(false)
 	var invalid_sort_segments: Array[Dictionary] = []
 	var invalid_sort := {"segmentId":"seg", "materialKey":"wood_oak",
+		"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 		"renderTier":"structural", "meshKey":"unit-box-v1",
 		"meshContentDigest":TEST_MESH_DIGEST, "meshLocalBounds":_unit_box_bounds(),
 		"pipelineRevision":"building-static-v1", "renderLayer":"cutout",

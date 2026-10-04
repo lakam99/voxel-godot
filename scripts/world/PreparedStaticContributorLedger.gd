@@ -16,6 +16,7 @@ extends RefCounted
 
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 
 var _committed: Dictionary = {}
 var _committed_partition: Dictionary = {}
@@ -61,8 +62,10 @@ func begin_boundary(boundary_id: String, declarations: Array, removals: Array) -
 				return _failed("mutable_or_invalid_segment_declaration")
 			var segment_declaration: Dictionary = segment_value
 			var segment_id := String(segment_declaration.get("segmentId", ""))
+			var attribute_layout := String(segment_declaration.get("instanceAttributeLayout", ""))
 			var compatibility := _validated_compatibility(segment_declaration)
-			if segment_id.is_empty() or compatibility.is_empty():
+			if segment_id.is_empty() or attribute_layout != Attributes.LAYOUT_SCHEMA \
+					or compatibility.is_empty():
 				return _failed("invalid_segment_declaration")
 			if segments.has(segment_id):
 				return _failed("duplicate_declared_segment")
@@ -126,15 +129,25 @@ func accept_prepared_segment(boundary_id: String, input: Dictionary) -> Dictiona
 	var source_id := String(input.get("sourceId", ""))
 	var revision := String(input.get("sourceRevision", ""))
 	var segment_id := String(input.get("segmentId", ""))
+	var instance_attribute_layout := String(input.get("instanceAttributeLayout", ""))
 	var buffer_value: Variant = input.get("buffer")
 	var instance_count: Variant = input.get("instanceCount")
 	if part_id.is_empty() or source_id.is_empty() or revision.is_empty() or segment_id.is_empty():
 		return _failed("incomplete_prepared_segment_identity")
-	if not buffer_value is Array or buffer_value.get_typed_builtin() != TYPE_FLOAT \
-			or not buffer_value.is_read_only() or not instance_count is int \
-			or instance_count < 1 or instance_count > Partitioner.MAX_OUTPUT_INSTANCES \
-			or buffer_value.size() != instance_count * Partitioner.FLOATS_PER_INSTANCE:
-		return _failed("invalid_prepared_segment_buffer")
+	if instance_attribute_layout != Attributes.LAYOUT_SCHEMA:
+		return _failed("unsupported_prepared_segment_attribute_layout")
+	if not buffer_value is Array:
+		return _failed("prepared_segment_buffer_not_array")
+	if buffer_value.get_typed_builtin() != TYPE_FLOAT:
+		return _failed("prepared_segment_buffer_not_typed_float_array")
+	if not buffer_value.is_read_only():
+		return _failed("prepared_segment_buffer_not_read_only")
+	if not instance_count is int or instance_count < 1 \
+			or instance_count > Partitioner.MAX_OUTPUT_INSTANCES:
+		return _failed("invalid_prepared_segment_instance_count")
+	if buffer_value.size() != instance_count * Partitioner.FLOATS_PER_INSTANCE:
+		return _failed("prepared_segment_buffer_width_mismatch:%d!=%d*%d" % [
+			buffer_value.size(), instance_count, Partitioner.FLOATS_PER_INSTANCE])
 	for component: float in buffer_value:
 		if not is_finite(component):
 			return _failed("nonfinite_prepared_segment_buffer")
@@ -154,6 +167,7 @@ func accept_prepared_segment(boundary_id: String, input: Dictionary) -> Dictiona
 		return _failed("duplicate_prepared_segment")
 	var sealed_input := {"sourceId":source_id, "sourcePartId":part_id,
 		"sourceRevision":revision, "segmentId":segment_id,
+		"instanceAttributeLayout":instance_attribute_layout,
 		"batchKey":String(compatibility.batchKey),
 		"compatibility":compatibility, "buffer":buffer_value,
 		"instanceCount":instance_count}
@@ -381,6 +395,7 @@ func _partition_inputs_for(declarations: Dictionary) -> Dictionary:
 			var partition_input := {"sourceId":declaration.sourceId,
 				"sourcePartId":part_id,
 				"sourceRevision":declaration.sourceRevision,
+				"instanceAttributeLayout":String(received.get("instanceAttributeLayout", "")),
 				"sourceToWorld":declaration.sourceToWorld,
 				"ownerCell":declaration.ownerCell,
 				"meshLocalBounds":compatibility.meshLocalBounds,
@@ -472,15 +487,18 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var section_mesh_key := "%s|pipeline=%s|layer=%s|sort=%s" % [mesh_key,
 		pipeline_revision, render_layer, translucent_sort_policy]
 	var mesh_local_bounds: AABB = mesh_bounds_value
-	var canonical := JSON.stringify([material_key, render_tier, section_mesh_key, mesh_content_digest, cast_shadows,
-		visibility_end, fade_margin, mesh_local_bounds.position.x, mesh_local_bounds.position.y,
+	var canonical := JSON.stringify([Attributes.LAYOUT_SCHEMA, material_key, render_tier,
+		mesh_key, mesh_content_digest, pipeline_revision, render_layer,
+		translucent_sort_policy, cast_shadows, visibility_end, fade_margin,
+		mesh_local_bounds.position.x, mesh_local_bounds.position.y,
 		mesh_local_bounds.position.z, mesh_local_bounds.size.x, mesh_local_bounds.size.y,
 		mesh_local_bounds.size.z])
 	var batch_key := "section-batch:" + canonical.sha256_text()
 	var supplied := String(value.get("compatibilityKey", batch_key))
 	if supplied != batch_key:
 		return {}
-	var result := {"materialKey":material_key, "renderTier":render_tier,
+	var result := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"materialKey":material_key, "renderTier":render_tier,
 		"meshResourceKey":mesh_key, "meshKey":section_mesh_key,
 		"meshContentDigest":mesh_content_digest,
 		"meshLocalBounds":mesh_local_bounds,

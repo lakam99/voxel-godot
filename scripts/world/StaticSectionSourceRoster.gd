@@ -83,10 +83,14 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 	var source_revisions: Dictionary = {}
 	var source_provider_ids: Dictionary = {}
 	var provider_snapshot_revisions: Dictionary = {}
+	var provider_coverage_revisions: Dictionary = {}
+	var removal_revisions: Dictionary = {}
+	var removals_by_section: Dictionary = {}
 	var provider_generations: Array = []
 	var provider_section_revisions: Array = []
 	for section in sections:
 		contributors_by_section[section] = []
+		removals_by_section[section] = []
 	for provider_id in _required_provider_ids:
 		var registration: Dictionary = _providers.get(provider_id, {})
 		if registration.is_empty():
@@ -121,6 +125,7 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 				or not sections_map is Dictionary or sections_map.size() != sections.size():
 			return _failed("incomplete_static_source_provider_snapshot", {"providerId":provider_id})
 		var local_source_revisions: Dictionary = source_revision_map
+		var local_coverage_revisions: Dictionary = {}
 		var local_contributor_ids: Dictionary = {}
 		for source_id_value in local_source_revisions:
 			if not source_id_value is String \
@@ -167,6 +172,7 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 			provider_section_revisions.append([provider_id,
 				[raw_section.x, raw_section.y, raw_section.z], row_status,
 				coverage_revision, ids.duplicate()])
+			local_coverage_revisions[raw_section] = coverage_revision
 			var merged: Array = contributors_by_section[raw_section]
 			for source_id in ids:
 				if source_id in merged:
@@ -187,17 +193,70 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 			if source_revisions.has(source_id) and String(source_revisions[source_id]) != revision:
 				return _failed("conflicting_static_source_revision", {"sourcePartId":source_id})
 			source_revisions[source_id] = revision
+		var provider_removals_value: Variant = provider.get("removalsBySection", {})
+		if not provider_removals_value is Dictionary:
+			return _failed("invalid_static_source_removal_coverage", {"providerId":provider_id})
+		var provider_removals: Dictionary = provider_removals_value
+		for section_value: Variant in provider_removals:
+			if not section_value is Vector3i or not sections.has(section_value) \
+					or not provider_removals[section_value] is Array:
+				return _failed("invalid_static_source_removal_section", {"providerId":provider_id})
+			for removal_value: Variant in provider_removals[section_value]:
+				if not removal_value is Dictionary:
+					return _failed("invalid_static_source_removal_record", {"providerId":provider_id})
+				var removal: Dictionary = removal_value
+				var part_id := String(removal.get("sourcePartId", ""))
+				var source_id := String(removal.get("sourceId", ""))
+				var revision := String(removal.get("sourceRevision", ""))
+				if part_id.is_empty() or source_id.is_empty() or revision.is_empty() \
+						or removal.get("sectionKey") != section_value \
+						or local_source_revisions.has(part_id):
+					return _failed("invalid_or_current_static_source_removal", {
+						"providerId":provider_id, "sourcePartId":part_id})
+				if removal_revisions.has(part_id) \
+						and String(removal_revisions[part_id]) != revision:
+					return _failed("conflicting_static_source_removal_revision", {
+						"sourcePartId":part_id})
+				var section_removals: Array = removals_by_section[section_value]
+				for existing_value: Variant in section_removals:
+					if String(existing_value.get("sourcePartId", "")) == part_id:
+						return _failed("duplicate_static_source_removal", {
+							"sourcePartId":part_id, "section":section_value})
+				var sealed_removal := removal.duplicate(false)
+				sealed_removal["providerId"] = provider_id
+				sealed_removal.make_read_only()
+				section_removals.append(sealed_removal)
+				removal_revisions[part_id] = revision
+				provider_section_revisions.append([provider_id,
+					[section_value.x, section_value.y, section_value.z], "removed",
+					part_id, source_id, revision])
 		provider_snapshot_revisions[provider_id] = authority_revision
+		local_coverage_revisions.make_read_only()
+		provider_coverage_revisions[provider_id] = local_coverage_revisions
 		provider_generations.append([provider_id, int(registration.registrationGeneration),
 			int(registration.ownerInstanceId), authority_revision])
+	for part_id_value: Variant in removal_revisions:
+		var part_id := String(part_id_value)
+		if source_revisions.has(part_id):
+			return _failed("static_source_removal_is_current_contributor", {
+				"sourcePartId":part_id})
 	for section in sections:
 		var contributors: Array = contributors_by_section[section]
 		contributors.sort()
 		contributors.make_read_only()
 		contributors_by_section[section] = contributors
+		var section_removals: Array = removals_by_section[section]
+		section_removals.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return String(a.get("sourcePartId", "")) < String(b.get("sourcePartId", "")))
+		section_removals.make_read_only()
+		removals_by_section[section] = section_removals
 	contributors_by_section.make_read_only()
 	source_revisions.make_read_only()
+	source_provider_ids.make_read_only()
+	removal_revisions.make_read_only()
+	removals_by_section.make_read_only()
 	provider_snapshot_revisions.make_read_only()
+	provider_coverage_revisions.make_read_only()
 	provider_generations.sort_custom(func(a: Array, b: Array) -> bool: return String(a[0]) < String(b[0]))
 	var revision_ids: Array = source_revisions.keys()
 	revision_ids.sort()
@@ -210,14 +269,24 @@ func capture_sections(requested_sections: Array) -> Dictionary:
 	for section in sections:
 		section_rows.append([[section.x, section.y, section.z],
 			contributors_by_section[section].duplicate()])
+	var removal_rows: Array = []
+	for section in sections:
+		for removal: Dictionary in removals_by_section[section]:
+			removal_rows.append([[section.x, section.y, section.z],
+				String(removal.get("providerId", "")), String(removal.sourcePartId),
+				String(removal.sourceId), String(removal.sourceRevision)])
 	var digest_payload := [_world_id, sections, provider_generations,
-		provider_section_revisions, revision_rows, section_rows]
+		provider_section_revisions, revision_rows, section_rows, removal_rows]
 	var census_digest := Marshalls.raw_to_base64(var_to_bytes(digest_payload)).sha256_text()
 	sections.make_read_only()
 	var result: Dictionary = {"status":"complete", "worldId":_world_id, "sections":sections,
 		"sourceRevisions":source_revisions,
+		"sourceProviderIds":source_provider_ids,
+		"removalRevisions":removal_revisions,
+		"removalsBySection":removals_by_section,
 		"expectedContributorsBySection":contributors_by_section,
 		"providerSnapshotRevisions":provider_snapshot_revisions,
+		"providerCoverageRevisions":provider_coverage_revisions,
 		"censusDigest":census_digest}
 	result.make_read_only()
 	return result

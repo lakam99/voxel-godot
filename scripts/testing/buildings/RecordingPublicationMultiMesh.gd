@@ -10,7 +10,7 @@ func record_buffer(values: PackedFloat32Array) -> void:
 	_capture_configuration()
 	buffer_submissions += 1
 	for index in instance_count:
-		var offset := index * 16
+		var offset := index * 20
 		var transform := Transform3D(Basis(
 			Vector3(values[offset],values[offset+4],values[offset+8]),
 			Vector3(values[offset+1],values[offset+5],values[offset+9]),

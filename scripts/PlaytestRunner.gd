@@ -5,6 +5,8 @@ const ItemCatalogScript := preload("res://scripts/ItemCatalog.gd")
 const InventorySlotButtonScript := preload("res://scripts/InventorySlotButton.gd")
 const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
+const StaticSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const StaticSectionInstallSessionScript := preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const CELL := 1.35
 const CHUNK_SIZE := 28
 const WATER_LEVEL := 11.1
@@ -28,6 +30,30 @@ var hostile_motion_combat_contact_events: Array[Dictionary] = []
 # attributable without changing its frame limit, collision criterion, or
 # production-world behavior.
 var progress_context := "startup"
+var _terrain_section_fixture_providers: Dictionary = {}
+var _terrain_section_provider_registered_by_test := false
+
+class EmptyStaticSectionFixtureProvider extends RefCounted:
+    var provider_id := ""
+
+    func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+        var sections: Dictionary = {}
+        for section_value in section_keys:
+            if not section_value is Vector3i:
+                return {"status":"failed", "worldId":world_id,
+                    "reason":"invalid_fixture_section_key"}
+            var section_key: Vector3i = section_value
+            var source_ids: Array[String] = []
+            source_ids.make_read_only()
+            var coverage_revision := Marshalls.raw_to_base64(var_to_bytes([
+                "headed-empty-fixture/v1", provider_id, world_id, section_key])).sha256_text()
+            sections[section_key] = {"status":"empty",
+                "coverageRevision":coverage_revision, "sourcePartIds":source_ids}
+        var authority_revision := Marshalls.raw_to_base64(var_to_bytes([
+            "headed-empty-fixture-authority/v1", provider_id, world_id])).sha256_text()
+        return {"status":"complete", "worldId":world_id,
+            "authorityRevision":authority_revision, "sourceRevisions":{},
+            "sections":sections}
 
 func get_static_section_render_owner(owner_cell: Vector2i,
         create_if_missing := true) -> Dictionary:
@@ -174,6 +200,144 @@ func surface_biome_at_cell2(cell: Vector2i) -> String:
         return String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
     return "plains"
 
+func register_terrain_section_gate_providers(runtime) -> Dictionary:
+    if main == null or runtime == null:
+        return {"status":"failed", "reason":"terrain_gate_authority_missing"}
+    var coordinator = main.get("world_static_section_coordinator")
+    if coordinator == null:
+        return {"status":"failed", "reason":"main_world_static_section_coordinator_missing"}
+    var terrain_registration: Dictionary = coordinator.register_source_provider(
+        "terrain", runtime, "capture_static_section_sources")
+    _terrain_section_provider_registered_by_test = terrain_registration.get("status") == "ready"
+    var terrain_provider_preexisting: bool = terrain_registration.get("status") == "failed" \
+        and String(terrain_registration.get("reason", "")) == "static_source_provider_already_registered"
+    var main_runtime_owner_matches: bool = main.get("voxel_terrain_section_provider_registered") == true \
+        and is_same(main.get("voxel_terrain_runtime"), runtime)
+    if not _terrain_section_provider_registered_by_test and not terrain_provider_preexisting:
+        return {"status":"failed", "reason":"terrain_source_provider_registration_failed",
+            "detail":terrain_registration}
+    if terrain_provider_preexisting and not main_runtime_owner_matches:
+        return {"status":"failed", "reason":"preexisting_terrain_provider_owner_not_main_runtime",
+            "detail":terrain_registration, "mainRuntimeOwnerMatches":false}
+    _terrain_section_fixture_providers.clear()
+    for provider_id in ["ordinary_structures", "ecology_and_static_props"]:
+        var provider := EmptyStaticSectionFixtureProvider.new()
+        provider.provider_id = provider_id
+        var registration: Dictionary = coordinator.register_source_provider(provider_id,
+            provider, "capture_static_section_sources")
+        if registration.get("status") != "ready":
+            for registered_id in _terrain_section_fixture_providers:
+                coordinator.unregister_source_provider(registered_id,
+                    _terrain_section_fixture_providers[registered_id])
+            if _terrain_section_provider_registered_by_test:
+                coordinator.unregister_source_provider("terrain", runtime)
+            _terrain_section_fixture_providers.clear()
+            return {"status":"failed", "reason":"empty_fixture_provider_registration_failed",
+                "providerId":provider_id, "detail":registration}
+        _terrain_section_fixture_providers[provider_id] = provider
+    return {"status":"ready", "coordinator":coordinator,
+        "terrainRegistration":terrain_registration,
+        "terrainProviderPreexisting":terrain_provider_preexisting,
+        "mainRuntimeOwnerMatches":main_runtime_owner_matches,
+        "fixtureProviderIds":["ordinary_structures", "ecology_and_static_props"]}
+
+func unregister_terrain_section_gate_providers(runtime) -> Dictionary:
+    var coordinator = main.get("world_static_section_coordinator") if main != null else null
+    var results: Dictionary = {}
+    if coordinator == null:
+        _terrain_section_fixture_providers.clear()
+        return {"status":"failed", "reason":"main_world_static_section_coordinator_missing"}
+    var publisher = runtime.get("terrain_section_shadow_publisher") \
+        if runtime != null and is_instance_valid(runtime) else null
+    if publisher != null and publisher.has_method("cancel_pending"):
+        results["pendingPublisher"] = publisher.call("cancel_pending")
+    for provider_id in _terrain_section_fixture_providers:
+        var provider = _terrain_section_fixture_providers[provider_id]
+        results[provider_id] = coordinator.unregister_source_provider(provider_id, provider)
+    _terrain_section_fixture_providers.clear()
+    if runtime != null and _terrain_section_provider_registered_by_test:
+        results["terrain"] = coordinator.unregister_source_provider("terrain", runtime)
+    _terrain_section_provider_registered_by_test = false
+    var providers_removed := true
+    for provider_id in results:
+        if provider_id == "pendingPublisher":
+            continue
+        if results[provider_id].get("status") != "ready":
+            providers_removed = false
+    return {"status":"complete" if providers_removed else "failed",
+        "results":results}
+
+func blueprint_section_is_explicitly_empty(section_key: Vector3i) -> Dictionary:
+    var structure_system = main.get("structure_system") if main != null else null
+    var publication = structure_system.get("citadel_publication") if structure_system != null else null
+    if publication == null or not publication.has_method("capture_static_section_sources"):
+        return {"status":"failed", "reason":"live_blueprint_census_provider_missing"}
+    var world_id := "seed:%s:%d" % [String(main.get("seed_text")), int(main.get("seed_hash"))]
+    var capture: Dictionary = publication.call("capture_static_section_sources", world_id, [section_key])
+    if capture.get("status") != "complete":
+        return {"status":String(capture.get("status", "failed")),
+            "reason":String(capture.get("reason", "blueprint_census_not_complete")),
+            "provider":capture}
+    var sections: Variant = capture.get("sections", null)
+    if not sections is Dictionary or not sections.has(section_key):
+        return {"status":"failed", "reason":"blueprint_census_omitted_requested_section",
+            "provider":capture}
+    var row: Variant = sections[section_key]
+    if not row is Dictionary:
+        return {"status":"failed", "reason":"blueprint_census_section_row_invalid",
+            "provider":capture}
+    var source_ids: Variant = row.get("sourcePartIds", null)
+    if not source_ids is Array:
+        return {"status":"failed", "reason":"blueprint_census_source_ids_missing",
+            "provider":capture}
+    return {"status":"empty" if String(row.get("status", "")) == "empty" \
+            and source_ids.is_empty() else "occupied",
+        "coverageRevision":String(row.get("coverageRevision", "")),
+        "sourcePartIds":source_ids.duplicate(),
+        "authorityRevision":String(capture.get("authorityRevision", ""))}
+
+func terrain_physics_ray_witness(runtime, terrain, section_key: Vector3i) -> Dictionary:
+    if main == null or runtime == null or terrain == null or not is_instance_valid(terrain):
+        return {"status":"failed", "reason":"terrain_physics_authority_missing"}
+    var cell_size := CELL
+    var xz := Vector2((float(section_key.x * 16) + 8.0) * cell_size,
+        (float(section_key.z * 16) + 8.0) * cell_size)
+    var estimate := surface_y_at_position(Vector3(xz.x, 0.0, xz.y))
+    var span := cell_size * 64.0
+    var origin := Vector3(xz.x, estimate + span * 0.5, xz.y)
+    var destination := Vector3(xz.x, estimate - span * 0.5, xz.y)
+    var query := PhysicsRayQueryParameters3D.create(origin, destination,
+        int(terrain.collision_layer))
+    query.collide_with_areas = false
+    query.collide_with_bodies = true
+    if player != null and is_instance_valid(player):
+        query.exclude = [player.get_rid()]
+    await get_tree().physics_frame
+    var hit: Dictionary = main.get_world_3d().direct_space_state.intersect_ray(query)
+    var collider: Object = hit.get("collider") as Object
+    var collider_id := collider.get_instance_id() if is_instance_valid(collider) else 0
+    var hit_layer := int(collider.get("collision_layer")) \
+        if is_instance_valid(collider) and collider is CollisionObject3D else 0
+    var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+    var exact_terrain_collider := is_instance_valid(collider) and is_same(collider, terrain)
+    var surface_error := absf(hit_position.y - estimate) if not hit.is_empty() else INF
+    var horizontal_error := Vector2(hit_position.x - xz.x, hit_position.z - xz.y).length() \
+        if not hit.is_empty() else INF
+    var surface_tolerance := cell_size * 3.0
+    var horizontal_tolerance := cell_size * 0.1
+    var witness_valid := not hit.is_empty() and exact_terrain_collider \
+        and surface_error <= surface_tolerance and horizontal_error <= horizontal_tolerance
+    return {"status":"hit" if witness_valid else "miss",
+        "origin":origin, "destination":destination,
+        "colliderInstanceId":collider_id, "colliderClass":collider.get_class() if is_instance_valid(collider) else "",
+        "exactVoxelTerrainCollider":exact_terrain_collider,
+        "collisionLayer":hit_layer, "terrainCollisionLayer":int(terrain.collision_layer),
+        "position":hit_position, "normal":hit.get("normal", Vector3.ZERO),
+        "rayDistance":origin.distance_to(hit_position) if not hit.is_empty() else -1.0,
+        "estimatedSurfaceY":estimate, "surfaceError":surface_error,
+        "surfaceTolerance":surface_tolerance, "horizontalError":horizontal_error,
+        "horizontalTolerance":horizontal_tolerance}
+
 func test_resident_terrain_section_capture() -> void:
     var runtime = null
     var terrain = null
@@ -193,6 +357,11 @@ func test_resident_terrain_section_capture() -> void:
         add_result("resident_terrain_section_capture", false, "production VoxelViewer unavailable during startup")
         return
     player = main.get("player") as CharacterBody3D if main != null else null
+    var provider_setup: Dictionary = register_terrain_section_gate_providers(runtime)
+    if provider_setup.get("status") != "ready":
+        add_result("resident_terrain_section_provider_setup", false, JSON.stringify(provider_setup))
+        return
+    var coordinator = provider_setup.coordinator
     var target_position: Vector3 = player.global_position if player != null \
         else (viewer as Node3D).global_position
     var local_cells: Vector3 = terrain.to_local(target_position) / CELL
@@ -210,6 +379,7 @@ func test_resident_terrain_section_capture() -> void:
         add_result("resident_terrain_section_capture", false,
             JSON.stringify({"block":block, "lastCapture":capture,
                 "runtime":runtime.call("stats") if runtime.has_method("stats") else {}}))
+        unregister_terrain_section_gate_providers(runtime)
         return
     var sdf: PackedByteArray = capture.get("sdf16Le", PackedByteArray())
     var indices: PackedByteArray = capture.get("indices8", PackedByteArray())
@@ -256,48 +426,231 @@ func test_resident_terrain_section_capture() -> void:
         "authorityTamperedPayloadRejected":authority_tamper_rejected,
         "terrainOnly":capture.get("captureIsTerrainOnly"),
         "renderAuthorityRetained":"VoxelTerrainRuntime"}))
-    if passed:
-        var install: Dictionary = {"status":"failed", "reason":"terrain_shadow_request_not_started"}
-        var candidate_blocks: Array[Vector3i] = [block + Vector3i(0, -1, 0), block,
-            block + Vector3i(0, 1, 0), block + Vector3i(0, -2, 0),
-            block + Vector3i(0, 2, 0)]
-        var empty_candidates: Array[String] = []
-        for candidate_block: Vector3i in candidate_blocks:
-            var request: Dictionary = runtime.call("request_terrain_section_shadow_install", candidate_block)
-            if request.get("status") != "queued":
-                install = request
+    if not passed:
+        var failed_cleanup := unregister_terrain_section_gate_providers(runtime)
+        add_result("resident_terrain_section_fixture_provider_cleanup",
+            failed_cleanup.get("status") == "complete", JSON.stringify(failed_cleanup))
+        return
+    var install: Dictionary = {"status":"failed", "reason":"no_candidate_attempted"}
+    var chosen_block := Vector3i.ZERO
+    var has_chosen_block := false
+    var chosen_capture: Dictionary = {}
+    var candidate_attempts: Array[Dictionary] = []
+    var candidate_blocks: Array[Vector3i] = []
+    for offset in [Vector3i.ZERO, Vector3i(0,-1,0), Vector3i(0,1,0),
+            Vector3i(0,-2,0), Vector3i(0,2,0), Vector3i(-1,0,0),
+            Vector3i(1,0,0), Vector3i(0,0,-1), Vector3i(0,0,1),
+            Vector3i(-1,0,-1), Vector3i(1,0,-1), Vector3i(-1,0,1),
+            Vector3i(1,0,1)]:
+        var candidate_block: Vector3i = block + offset
+        if candidate_block not in candidate_blocks:
+            candidate_blocks.append(candidate_block)
+    var world_id := "seed:%s:%d" % [String(main.get("seed_text")), int(main.get("seed_hash"))]
+    for candidate_block: Vector3i in candidate_blocks:
+        var resident: Dictionary = runtime.call("capture_resident_terrain_mesh_block", candidate_block)
+        if resident.get("status") != "ready":
+            candidate_attempts.append({"block":candidate_block, "stage":"resident_capture",
+                "result":resident})
+            continue
+        var blueprint: Dictionary = blueprint_section_is_explicitly_empty(candidate_block)
+        if blueprint.get("status") != "empty":
+            candidate_attempts.append({"block":candidate_block, "stage":"blueprint_census",
+                "result":blueprint})
+            continue
+        var fluid: Dictionary = runtime.call("request_terrain_section_fluid_probe", candidate_block)
+        for attempt in range(1200):
+            if fluid.get("status") in ["ready", "failed"]:
                 break
-            var candidate_result: Dictionary = {"status":"pending"}
-            for attempt in range(1200):
-                var polled: Dictionary = runtime.call("poll_terrain_section_shadow_install", int(request.ticket))
-                if polled.get("status") == "ready":
-                    candidate_result = polled.get("result", {})
-                    break
-                if polled.get("status") == "failed":
-                    candidate_result = polled
-                    break
-                if attempt % 120 == 0:
-                    mark_progress("terrain_section_shadow_%s_%s" % [
-                        String(polled.get("stage", "pending")), String(polled.get("reason", ""))])
-                await get_tree().process_frame
-            if candidate_result.get("status") == "empty":
-                empty_candidates.append(str(candidate_block))
-                continue
-            install = candidate_result
-            if install.get("status") == "installed":
-                install["emptyCandidatesBeforeInstall"] = empty_candidates
-                install["requestedCandidateBlocks"] = candidate_blocks
+            if attempt % 120 == 0:
+                mark_progress("terrain_section_fluid_probe_%d,%d,%d_%s" % [
+                    candidate_block.x, candidate_block.y, candidate_block.z,
+                    String(fluid.get("reason", fluid.get("status", "pending")))])
+            await get_tree().process_frame
+            fluid = runtime.call("request_terrain_section_fluid_probe", candidate_block)
+        if fluid.get("status") != "ready" or bool(fluid.get("proof", {}).get("hasFluid", false)):
+            candidate_attempts.append({"block":candidate_block, "stage":"exact_fluid_proof",
+                "result":fluid})
+            continue
+        var source_census: Dictionary = coordinator.capture_authoritative_source_census([candidate_block])
+        var terrain_source_snapshot: Dictionary = runtime.call(
+            "capture_static_section_sources", world_id, [candidate_block])
+        var expected_ids: Array = source_census.get("expectedContributorsBySection", {}).get(candidate_block, [])
+        var terrain_part_id := "resident-terrain:%d,%d,%d:part" % [
+            candidate_block.x, candidate_block.y, candidate_block.z]
+        var coordinator_revision := String(source_census.get("sourceRevisions", {}).get(terrain_part_id, ""))
+        var runtime_revision := String(terrain_source_snapshot.get("sourceRevisions", {}).get(terrain_part_id, ""))
+        var terrain_provider_matches_runtime: bool = terrain_source_snapshot.get("status") == "complete" \
+            and source_census.get("status") == "complete" \
+            and String(source_census.get("providerSnapshotRevisions", {}).get("terrain", "")) \
+                == String(terrain_source_snapshot.get("authorityRevision", "")) \
+            and coordinator_revision == runtime_revision and not runtime_revision.is_empty()
+        if source_census.get("status") != "complete" \
+                or expected_ids.size() != 1 or not expected_ids.has(terrain_part_id) \
+                or not terrain_provider_matches_runtime:
+            candidate_attempts.append({"block":candidate_block, "stage":"complete_section_census",
+                "result":source_census, "terrainProducerSnapshot":terrain_source_snapshot,
+                "terrainProviderMatchesRuntime":terrain_provider_matches_runtime,
+                "expectedTerrainPartId":terrain_part_id})
+            continue
+        var owner_cell: Vector2i = StaticSectionGridScript.chunk_key_for_section(candidate_block)
+        var gameplay_chunks: Variant = main.get("chunks")
+        if not gameplay_chunks is Dictionary or not gameplay_chunks.has(owner_cell):
+            candidate_attempts.append({"block":candidate_block, "stage":"render_owner_demand",
+                "reason":"canonical_section_owner_chunk_not_retained", "ownerCell":owner_cell})
+            continue
+        chosen_block = candidate_block
+        has_chosen_block = true
+        chosen_capture = resident
+        var before_render_state: Dictionary = runtime.call("native_mesh_block_viewer_state", chosen_block)
+        var before_mesh_visible: bool = runtime.visible_mesh_block_rendered(chosen_block) \
+            and bool(runtime.published_mesh_blocks.get(chosen_block, false))
+        var before_capture_current: bool = runtime.call("resident_terrain_capture_is_current", resident)
+        var before_collision_config := bool(terrain.generate_collisions) \
+            and bool(viewer.requires_collisions)
+        var before_terrain_visible: bool = bool(terrain.is_visible_in_tree())
+        var collision_before: Dictionary = await terrain_physics_ray_witness(runtime, terrain, chosen_block)
+        var request: Dictionary = runtime.call("request_terrain_section_shadow_install", chosen_block)
+        if request.get("status") != "queued":
+            install = request
+            candidate_attempts.append({"block":chosen_block, "stage":"request", "result":request})
             break
-        var local_bounds: Variant = install.get("meshLocalBounds")
-        var mesh_origin_valid: bool = local_bounds is AABB \
-            and local_bounds.has_volume() \
-            and local_bounds.position.x >= -0.05 and local_bounds.position.y >= -0.05 \
-            and local_bounds.position.z >= -0.05 \
-            and local_bounds.end.x <= 16.05 and local_bounds.end.y <= 16.05 \
-            and local_bounds.end.z <= 16.05
-        install["meshOriginInsideNativeBlock"] = mesh_origin_valid
-        add_result("resident_terrain_candidate_native_renderer_install",
-            install.get("status") == "installed" and mesh_origin_valid, JSON.stringify(install))
+        var candidate_result: Dictionary = {"status":"pending"}
+        for attempt in range(1800):
+            var polled: Dictionary = runtime.call("poll_terrain_section_shadow_install", int(request.ticket))
+            if polled.get("status") == "ready":
+                candidate_result = polled.get("result", {})
+                break
+            if polled.get("status") == "failed":
+                candidate_result = polled
+                break
+            if attempt % 120 == 0:
+                mark_progress("terrain_section_shared_install_%s_%s_%s" % [
+                    String(polled.get("stage", "pending")),
+                    String(polled.get("lastCoordinatorStatus", "")),
+                    String(polled.get("lastReason", polled.get("reason", "")))])
+            await get_tree().process_frame
+        install = candidate_result
+        if install.get("status") == "empty":
+            candidate_attempts.append({"block":chosen_block, "stage":"transvoxel_mesh_build",
+                "result":install})
+            chosen_block = Vector3i.ZERO
+            has_chosen_block = false
+            chosen_capture = {}
+            continue
+        var after_render_state: Dictionary = runtime.call("native_mesh_block_viewer_state", chosen_block)
+        var after_mesh_visible: bool = runtime.visible_mesh_block_rendered(chosen_block) \
+            and bool(runtime.published_mesh_blocks.get(chosen_block, false))
+        var after_capture_current: bool = runtime.call("resident_terrain_capture_is_current", chosen_capture)
+        var after_collision_config := bool(terrain.generate_collisions) \
+            and bool(viewer.requires_collisions)
+        var after_terrain_visible: bool = bool(terrain.is_visible_in_tree())
+        var collision_after: Dictionary = await terrain_physics_ray_witness(runtime, terrain, chosen_block)
+        install["meshOriginInsideNativeBlock"] = _terrain_candidate_bounds_fit_native_block(
+            install.get("meshLocalBounds"))
+        install["originalVoxelTerrainBefore"] = {"visibleInTree":before_terrain_visible,
+            "generateCollisions":bool(terrain.generate_collisions),
+            "viewerRequiresCollisions":bool(viewer.requires_collisions),
+            "blockViewerState":before_render_state, "meshRendered":before_mesh_visible,
+            "residentTerrainCaptureCurrent":before_capture_current,
+            "collisionConfigReady":before_collision_config, "physicsRay":collision_before}
+        install["originalVoxelTerrainAfter"] = {"visibleInTree":after_terrain_visible,
+            "generateCollisions":bool(terrain.generate_collisions),
+            "viewerRequiresCollisions":bool(viewer.requires_collisions),
+            "blockViewerState":after_render_state, "meshRendered":after_mesh_visible,
+            "residentTerrainCaptureCurrent":after_capture_current,
+            "collisionConfigReady":after_collision_config, "physicsRay":collision_after}
+        install["liveBlueprintCensus"] = blueprint
+        install["preflightCoordinatorCensus"] = source_census
+        install["terrainProducerSnapshot"] = terrain_source_snapshot
+        install["terrainProviderMatchesRuntime"] = terrain_provider_matches_runtime
+        install["expectedTerrainPartId"] = terrain_part_id
+        install["candidateAttempts"] = candidate_attempts
+        install["requestedCandidateBlocks"] = candidate_blocks
+        install["worldId"] = world_id
+        install["fixtureProviderIds"] = ["ordinary_structures", "ecology_and_static_props"]
+        install["evidenceScope"] = "focused headed native renderer integration; ordinary/ecology are explicit empty fixtures; no whole-world census or gameplay acceptance"
+        var slot_id := StaticSectionInstallSessionScript.slot_id(world_id, chosen_block)
+        var installed_owner_cell: Vector2i = StaticSectionGridScript.chunk_key_for_section(chosen_block)
+        var owner_result: Dictionary = get_static_section_render_owner(installed_owner_cell, false)
+        var owner: Node3D = owner_result.get("owner") as Node3D
+        var backend: Node = owner_result.get("backend") as Node if owner_result.get("status") == "ready" else null
+        var native_snapshot: Dictionary = backend.call("installed_snapshot", slot_id) \
+            if backend != null and is_instance_valid(backend) else {"status":"missing"}
+        var committed_candidates: Variant = coordinator.get("_committed_candidates")
+        var committed_receipts: Variant = coordinator.get("_installed_receipts")
+        var committed_candidate: Dictionary = committed_candidates.get(chosen_block, {}) \
+            if committed_candidates is Dictionary else {}
+        var coordinator_receipt: Dictionary = committed_receipts.get(chosen_block, {}) \
+            if committed_receipts is Dictionary else {}
+        var manifest_digest := String(committed_candidate.get("contentManifestDigest", ""))
+        var generation := int(committed_candidate.get("generation", 0))
+        var backend_id := int(backend.get_instance_id()) if backend != null and is_instance_valid(backend) else 0
+        var native_receipt_current := backend != null and is_instance_valid(backend) \
+            and bool(backend.call("receipt_installed", slot_id, generation,
+                "%s:%d" % [world_id, generation], manifest_digest))
+        install["coordinatorReceipt"] = coordinator_receipt
+        install["nativeSnapshot"] = native_snapshot
+        install["nativeSlotId"] = slot_id
+        install["ownerCell"] = installed_owner_cell
+        install["ownerInstanceId"] = owner.get_instance_id() if is_instance_valid(owner) else 0
+        install["backendInstanceId"] = backend_id
+        install["committedCandidateManifestDigest"] = manifest_digest
+        install["nativeReceiptCurrent"] = native_receipt_current
+        install["coordinatorReceiptMatchesCandidate"] = not coordinator_receipt.is_empty() \
+            and String(coordinator_receipt.get("contentManifestDigest", "")) == manifest_digest \
+            and int(coordinator_receipt.get("generation", 0)) == generation \
+            and int(coordinator_receipt.get("backendInstanceId", 0)) == backend_id \
+            and coordinator_receipt.get("worldId") == world_id \
+            and coordinator_receipt.get("sectionKey") == chosen_block \
+            and coordinator_receipt.get("ownerCell") == installed_owner_cell
+        install["nativeReceiptMatchesCandidate"] = native_snapshot.get("status") == "ready" \
+            and String(native_snapshot.get("packetDigest", "")) == manifest_digest \
+            and int(native_snapshot.get("generation", 0)) == generation \
+            and int(native_snapshot.get("meshPayloadBytes", 0)) > 0
+        var runtime_authority_after: bool = runtime.call("terrain_capture_authority_is_current", chosen_capture)
+        install["captureAuthorityCurrentAfterInstall"] = runtime_authority_after
+        var old_visual_retained: bool = before_terrain_visible and after_terrain_visible \
+            and before_mesh_visible and after_mesh_visible and before_capture_current \
+            and after_capture_current and before_collision_config \
+            and after_collision_config and runtime.visible_mesh_block_rendered(chosen_block) \
+            and bool(runtime.published_mesh_blocks.get(chosen_block, false))
+        var physics_retained: bool = collision_before.get("status") == "hit" \
+            and collision_after.get("status") == "hit" \
+            and int(collision_before.get("colliderInstanceId", 0)) > 0 \
+            and int(collision_before.get("colliderInstanceId", 0)) == int(collision_after.get("colliderInstanceId", 0))
+        install["originalVoxelTerrainVisualAndCollisionRetained"] = old_visual_retained
+        install["originalVoxelTerrainPhysicsRayRetained"] = physics_retained
+        var install_passed: bool = install.get("status") == "installed" \
+            and bool(install.get("meshOriginInsideNativeBlock", false)) \
+            and not committed_candidate.is_empty() \
+            and coordinator.status().get("committedSourcePartIds", []).has(terrain_part_id) \
+            and bool(install.get("coordinatorReceiptMatchesCandidate", false)) \
+            and bool(install.get("nativeReceiptMatchesCandidate", false)) \
+            and native_receipt_current and runtime_authority_after \
+            and old_visual_retained and physics_retained
+        install["passed"] = install_passed
+        add_result("resident_terrain_candidate_shared_coordinator_native_install", install_passed,
+            JSON.stringify(install))
+        break
+    if not has_chosen_block:
+        add_result("resident_terrain_candidate_shared_coordinator_native_install", false,
+            JSON.stringify({"reason":"no_resident_surface_section_with_complete_empty_blueprint_census",
+                "candidateBlocks":candidate_blocks, "candidateAttempts":candidate_attempts,
+                "worldId":world_id,
+                "fixtureProviderIds":["ordinary_structures", "ecology_and_static_props"],
+                "evidenceScope":"focused headed native renderer integration only"}))
+    var cleanup := unregister_terrain_section_gate_providers(runtime)
+    add_result("resident_terrain_section_fixture_provider_cleanup",
+        cleanup.get("status") == "complete", JSON.stringify(cleanup))
+
+func _terrain_candidate_bounds_fit_native_block(bounds_value: Variant) -> bool:
+    if not bounds_value is AABB:
+        return false
+    var bounds: AABB = bounds_value
+    return bounds.has_volume() and bounds.position.x >= -0.05 \
+        and bounds.position.y >= -0.05 and bounds.position.z >= -0.05 \
+        and bounds.end.x <= 16.05 and bounds.end.y <= 16.05 \
+        and bounds.end.z <= 16.05
 
 func run() -> void:
     var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()

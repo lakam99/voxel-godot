@@ -4,6 +4,7 @@ extends SceneTree
 const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Partitioner = preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const Builder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 
 var checks: Dictionary = {}
 
@@ -112,11 +113,13 @@ func _compatibility(material: String, tier: String, mesh: String) -> Dictionary:
 	const MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)
 	var mesh_key := "%s|pipeline=%s|layer=opaque|sort=none" % [mesh, "building-static-v1"]
-	var canonical := JSON.stringify([material, tier, mesh_key, MESH_DIGEST, true, 240.0, 18.0,
+	var canonical := JSON.stringify([Attributes.LAYOUT_SCHEMA, material, tier, mesh,
+		MESH_DIGEST, "building-static-v1", "opaque", "none", true, 240.0, 18.0,
 		bounds.position.x, bounds.position.y, bounds.position.z,
 		bounds.size.x, bounds.size.y, bounds.size.z])
 	var key := "section-batch:" + canonical.sha256_text()
-	var value := {"materialKey":material, "renderTier":tier,
+	var value := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"materialKey":material, "renderTier":tier,
 		"meshResourceKey":mesh, "meshKey":mesh_key, "meshContentDigest":MESH_DIGEST,
 		"meshLocalBounds":bounds,
 		"pipelineRevision":"building-static-v1", "renderLayer":"opaque",
@@ -129,11 +132,14 @@ func _compatibility(material: String, tier: String, mesh: String) -> Dictionary:
 
 func _input(part_id: String, source_id: String, revision: String,
 		world_position: Vector3, batch_key: String) -> Dictionary:
-	var buffer: Array[float] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-		0.0, 0.0, 1.0, 0.0, 0.1, 0.2, 0.3, 1.0]
+	var buffer: Array[float] = []
+	for value: float in Attributes.encode(Transform3D.IDENTITY,
+			Color(0.1, 0.2, 0.3, 1.0), Color(0.6, 0.7, 0.8, 1.0)):
+		buffer.append(value)
 	buffer.make_read_only()
 	var root := Transform3D(Basis.IDENTITY, world_position)
-	var input := {"sourceId":source_id, "sourcePartId":part_id,
+	var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"sourceId":source_id, "sourcePartId":part_id,
 		"sourceRevision":revision,
 		"ownerCell":Grid.logical_owner_cell_for_world_position(world_position),
 		"sourceToWorld":root,
