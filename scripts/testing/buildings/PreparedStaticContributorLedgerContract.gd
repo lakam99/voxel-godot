@@ -159,6 +159,7 @@ func _run() -> void:
 	checks["undeclared_and_duplicate_segments_are_rejected"] = _exact_segment_set_rejected(ledger)
 	checks["mutable_inputs_and_stale_boundary_token_are_rejected"] = _readonly_and_token_rejected(ledger)
 	checks["failed_begin_does_not_leave_partial_transaction_open"] = _failed_begin_does_not_poison(ledger)
+	checks["section_generations_increase_and_world_epoch_stays_bound"] = _generation_and_world_binding_rejected()
 
 	var report := {"schema":"prepared-static-contributor-ledger-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
@@ -350,3 +351,25 @@ func _failed_begin_does_not_poison(ledger) -> bool:
 	if good.get("status") == "ready":
 		ledger.abort_boundary("good")
 	return bad.get("reason") == "mutable_or_invalid_declaration" and good.get("status") == "ready"
+
+
+func _generation_and_world_binding_rejected() -> bool:
+	var ledger = Ledger.new()
+	var first := _declaration("part", "source", "rev-1", Vector3.ZERO, ["seg-1"])
+	if ledger.begin_boundary("epoch-1", _array([first]), _array([])).get("status") != "ready":
+		return false
+	ledger.accept_prepared_segment("epoch-1", _segment("part", "source", "rev-1", "seg-1", [0.0]))
+	var revisions := _revisions({"part":"rev-1"})
+	var prepared: Dictionary = ledger.prepare_boundary("epoch-1", revisions, "world-a", 5)
+	if _accept_mock_install(ledger, prepared, revisions).get("status") != "committed":
+		return false
+	var second := _declaration("part", "source", "rev-2", Vector3.ZERO, ["seg-2"])
+	if ledger.begin_boundary("epoch-2", _array([second]), _array([])).get("status") != "ready":
+		return false
+	ledger.accept_prepared_segment("epoch-2", _segment("part", "source", "rev-2", "seg-2", [1.0]))
+	var next_revisions := _revisions({"part":"rev-2"})
+	var stale_generation: Dictionary = ledger.prepare_boundary("epoch-2", next_revisions, "world-a", 5)
+	var wrong_world: Dictionary = ledger.prepare_boundary("epoch-2", next_revisions, "world-b", 6)
+	ledger.abort_boundary("epoch-2")
+	return stale_generation.get("reason") == "stale_section_candidate_generation" \
+		and wrong_world.get("reason") == "section_candidate_world_changed"

@@ -683,10 +683,12 @@ replacement snapshots from its own validated partition and impacted-section
 set, and exposes those envelopes to the installer. `accept_installed_candidate()`
 no longer accepts caller-supplied candidate envelopes: it accepts receipts and
 matches each against the replacements already held by the ledger, while
-revalidating the exact source revision set. Partial receipts, wrong digests,
-wrong world epochs, and stale revisions leave the prior committed ledger active.
-The focused 19-check contract passed at
-`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-bound-candidate-20261004b/report.json`;
+revalidating the exact source revision set. It rejects a replacement generation
+that is not newer than the installed generation for each impacted section and
+pins the ledger to one world epoch. Partial receipts, wrong digests, wrong
+world epochs, and stale revisions leave the prior committed ledger active. The
+focused 20-check contract passed at
+`artifacts/citadel-runtime-integration/prepared-static-contributor-ledger-slot-generation-20261004/report.json`;
 the 16-check snapshot-builder contract passed at
 `artifacts/citadel-runtime-integration/prepared-static-section-snapshot-builder-bound-candidate-20261004/report.json`.
 These remain data contracts with mock receipt dictionaries, not a section-slot

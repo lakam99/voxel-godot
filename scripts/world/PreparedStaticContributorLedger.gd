@@ -20,6 +20,8 @@ const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapsh
 var _committed: Dictionary = {}
 var _committed_partition: Dictionary = {}
 var _committed_impacted_sections: Array[Vector3i] = []
+var _committed_world_id := ""
+var _committed_section_generations: Dictionary = {}
 var _pending: Dictionary = {}
 var _prepared_candidate: Dictionary = {}
 var _last_changed_source_parts: Array[String] = []
@@ -179,6 +181,8 @@ func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary,
 		return _failed("boundary_candidate_already_prepared")
 	if world_id.strip_edges().is_empty() or candidate_generation <= 0:
 		return _failed("invalid_section_candidate_identity")
+	if not _committed_world_id.is_empty() and world_id != _committed_world_id:
+		return _failed("section_candidate_world_changed")
 	var declared_inputs := _partition_inputs_for(_pending.get("declarations", {}))
 	if declared_inputs.get("status") != "ready":
 		return declared_inputs
@@ -215,6 +219,9 @@ func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary,
 	if impacts.get("status") != "ready":
 		return impacts
 	var impacted_keys := _readonly_vector3i(impacts.sections)
+	for section_key: Vector3i in impacted_keys:
+		if candidate_generation <= int(_committed_section_generations.get(section_key, 0)):
+			return _failed("stale_section_candidate_generation")
 	var replacements := SnapshotBuilder.build_replacements(partitioned.result,
 		inputs_result.compatibilityByKey, impacted_keys, candidate_generation, world_id)
 	if replacements.get("status") != "ready":
@@ -289,6 +296,9 @@ func accept_installed_candidate(boundary_id: String, section_receipts: Array,
 	_committed = _prepared_candidate.nextCommitted
 	_committed_partition = _prepared_candidate.partition
 	_committed_impacted_sections = _prepared_candidate.impactedSectionKeys
+	_committed_world_id = String(_prepared_candidate.worldId)
+	for replacement: Dictionary in _prepared_candidate.replacements:
+		_committed_section_generations[replacement.sectionKey] = int(replacement.generation)
 	_last_changed_source_parts = _prepared_candidate.changedSourceParts
 	var result := {"status":"committed", "boundaryId":boundary_id,
 		"changedSourceParts":_last_changed_source_parts,
