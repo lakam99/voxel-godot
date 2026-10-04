@@ -94,7 +94,7 @@ func _run() -> void:
 		and committed_inputs.inputs[0].sourceToWorld.origin == Vector3(2.0, 1.0, 2.0) \
 		and ledger.committed_impacted_section_keys() == [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
 	checks["render_resources_are_rejected"] = _resource_input_is_rejected()
-	checks["building_slice_rejects_nonopaque_layers_and_sort_policies"] = _nonopaque_policy_is_rejected()
+	checks["section_candidate_accepts_cutout_and_rejects_invalid_sort_policy"] = _layer_policy_contract()
 	checks["pipeline_revision_participates_in_stable_batch_identity"] = \
 		_compatibility_key("building-static-v1") != _compatibility_key("building-static-v2")
 
@@ -235,8 +235,10 @@ func _encode(transform: Transform3D) -> Array[float]:
 		0.2, 0.5, 0.7, 1.0]
 
 
-func _compatibility_key(pipeline_revision := "building-static-v1") -> String:
-	var section_mesh_key := "unit-box-v1|pipeline=%s|layer=opaque|sort=none" % pipeline_revision
+func _compatibility_key(pipeline_revision := "building-static-v1",
+		render_layer := "opaque", sort_policy := "none") -> String:
+	var section_mesh_key := "unit-box-v1|pipeline=%s|layer=%s|sort=%s" % [
+		pipeline_revision, render_layer, sort_policy]
 	return "section-batch:" + JSON.stringify(["wood_oak", "structural", section_mesh_key, TEST_MESH_DIGEST,
 		true, 240.0, 18.0, -0.5, -0.5, -0.5, 1.0, 1.0, 1.0]).sha256_text()
 
@@ -286,21 +288,42 @@ func _resource_input_is_rejected() -> bool:
 	return ledger.accept_prepared_segment("resource", input).get("reason") == "render_resources_not_allowed"
 
 
-func _nonopaque_policy_is_rejected() -> bool:
+func _layer_policy_contract() -> bool:
 	var ledger = Ledger.new()
 	var declaration := _declaration("p", "s", "r", Vector3.ZERO, ["seg"]).duplicate(false)
 	var segments: Array[Dictionary] = []
 	var cutout := {"segmentId":"seg", "materialKey":"wood_oak",
 		"renderTier":"structural", "meshKey":"unit-box-v1",
+		"meshContentDigest":TEST_MESH_DIGEST, "meshLocalBounds":_unit_box_bounds(),
 		"pipelineRevision":"building-static-v1", "renderLayer":"cutout",
 		"translucentSortPolicy":"none", "castShadows":true,
-		"visibilityRangeEnd":240.0, "fadeMargin":18.0}
+		"visibilityRangeEnd":240.0, "fadeMargin":18.0,
+		"compatibilityKey":_compatibility_key("building-static-v1", "cutout", "none")}
 	cutout.make_read_only()
 	segments.append(cutout)
 	segments.make_read_only()
 	declaration["segments"] = segments
 	declaration.make_read_only()
-	return ledger.begin_boundary("layer", _array([declaration]), _array([])).get("reason") == "invalid_segment_declaration"
+	var accepted: Dictionary = ledger.begin_boundary("layer", _array([declaration]), _array([]))
+	var invalid_sort_ledger = Ledger.new()
+	var invalid_sort_declaration := _declaration("p", "s", "r", Vector3.ZERO, ["seg"]).duplicate(false)
+	var invalid_sort_segments: Array[Dictionary] = []
+	var invalid_sort := {"segmentId":"seg", "materialKey":"wood_oak",
+		"renderTier":"structural", "meshKey":"unit-box-v1",
+		"meshContentDigest":TEST_MESH_DIGEST, "meshLocalBounds":_unit_box_bounds(),
+		"pipelineRevision":"building-static-v1", "renderLayer":"cutout",
+		"translucentSortPolicy":"camera_depth", "castShadows":true,
+		"visibilityRangeEnd":240.0, "fadeMargin":18.0,
+		"compatibilityKey":_compatibility_key("building-static-v1", "cutout", "camera_depth")}
+	invalid_sort.make_read_only()
+	invalid_sort_segments.append(invalid_sort)
+	invalid_sort_segments.make_read_only()
+	invalid_sort_declaration["segments"] = invalid_sort_segments
+	invalid_sort_declaration.make_read_only()
+	var rejected_sort: Dictionary = invalid_sort_ledger.begin_boundary("invalid-sort",
+		_array([invalid_sort_declaration]), _array([]))
+	return accepted.get("status") == "ready" \
+		and rejected_sort.get("reason") == "invalid_segment_declaration"
 
 
 func _incomplete_preserves(ledger) -> bool:

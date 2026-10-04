@@ -39,6 +39,9 @@ func _run() -> void:
 			["part-a", "part-b"])
 	checks["empty_impacted_section_has_explicit_zero_content_snapshot"] = \
 		_empty_replacement(built, Vector3i(8, 0, -3))
+	checks["snapshot_layer_manifest_covers_all_layers_and_explicit_zeros"] = \
+		_layer_manifest_is_complete(built, Vector3i.ZERO, 2, 2) \
+		and _layer_manifest_is_complete(built, Vector3i(8, 0, -3), 0, 0)
 
 	var reversed_outputs: Array = outputs.duplicate()
 	reversed_outputs.reverse()
@@ -94,7 +97,7 @@ func _run() -> void:
 		"checks":checks, "passed":not checks.values().has(false),
 		"initialBuildStatus":built.get("status", "missing"),
 		"initialBuildReason":built.get("reason", ""),
-		"evidence":"pure immutable adapter contract for committed section outputs, compatibility manifests, explicit empty replacements and deterministic digests; no publisher installation, upload acknowledgement, renderer layer support, or live gameplay acceptance"}
+		"evidence":"pure immutable adapter contract for committed section outputs, compatibility manifests, explicit per-layer counts/empty layers, empty replacements and deterministic digests; no publisher installation, upload acknowledgement, or live gameplay acceptance"}
 	var report_path := OS.get_environment("PREPARED_STATIC_SECTION_SNAPSHOT_BUILDER_REPORT")
 	if not report_path.is_empty():
 		var file := FileAccess.open(report_path, FileAccess.WRITE)
@@ -179,6 +182,29 @@ func _empty_replacement(result: Dictionary, section_key: Vector3i) -> bool:
 		and replacement.snapshot.instanceCount == 0 \
 		and replacement.snapshot.segmentCount == 0 \
 		and replacement.snapshot.batchKeys.is_empty()
+
+
+func _layer_manifest_is_complete(result: Dictionary, section_key: Vector3i,
+		expected_batches: int, expected_instances: int) -> bool:
+	var replacement := _replacement_for(result.get("replacements", []), section_key)
+	if replacement.is_empty():
+		return false
+	var layers: Variant = replacement.snapshot.get("renderLayers")
+	if not layers is Array or layers.size() != 3:
+		return false
+	var by_name: Dictionary = {}
+	for layer_value: Variant in layers:
+		if not layer_value is Dictionary or not layer_value.is_read_only():
+			return false
+		by_name[String(layer_value.get("layer", ""))] = layer_value
+	return by_name.size() == 3 \
+		and by_name.has("opaque") and by_name.has("cutout") and by_name.has("translucent") \
+		and int(by_name.opaque.get("expectedBatchCount", -1)) == expected_batches \
+		and int(by_name.opaque.get("expectedInstanceCount", -1)) == expected_instances \
+		and int(by_name.cutout.get("expectedBatchCount", -1)) == 0 \
+		and int(by_name.cutout.get("expectedInstanceCount", -1)) == 0 \
+		and int(by_name.translucent.get("expectedBatchCount", -1)) == 0 \
+		and int(by_name.translucent.get("expectedInstanceCount", -1)) == 0
 
 
 func _replacement_for(replacements: Array, section_key: Vector3i) -> Dictionary:

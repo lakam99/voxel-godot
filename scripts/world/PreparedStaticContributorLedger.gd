@@ -451,14 +451,17 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var cast_shadows: Variant = value.get("castShadows")
 	var visibility_end: Variant = value.get("visibilityRangeEnd")
 	var fade_margin: Variant = value.get("fadeMargin")
-	# BuildingPartPublisher's prepared unit-box path is explicitly hard opaque.
-	# Other layer/sort policies need their own ordered layer compiler contract.
+	# Opaque and alpha-scissored batches are order-independent. Translucent
+	# content retains an explicit sort policy in the manifest; the native install
+	# session currently fails closed until its renderer sorting contract is wired.
 	if material_key.is_empty() or render_tier.is_empty() or mesh_key.is_empty() \
 			or mesh_content_digest.length() != 64 \
 			or not mesh_content_digest.is_valid_hex_number(false) \
 			or not mesh_bounds_value is AABB or not _valid_bounds(mesh_bounds_value) \
-			or pipeline_revision.is_empty() or render_layer != "opaque" \
-			or translucent_sort_policy != "none" \
+			or pipeline_revision.is_empty() \
+			or render_layer not in ["opaque", "cutout", "translucent"] \
+			or (render_layer in ["opaque", "cutout"] and translucent_sort_policy != "none") \
+			or (render_layer == "translucent" and translucent_sort_policy not in ["camera_depth", "weighted_oit"]) \
 			or not cast_shadows is bool or not visibility_end is float or not fade_margin is float \
 			or not is_finite(visibility_end) or not is_finite(fade_margin) \
 			or visibility_end < 0.0 or fade_margin < 0.0:

@@ -365,7 +365,9 @@ static func _valid_compatibility(value: Dictionary, expected_batch_key: String) 
 			or not mesh_content_digest.is_valid_hex_number(false) \
 			or pipeline_revision.is_empty() or mesh_key != "%s|pipeline=%s|layer=%s|sort=%s" % [
 				mesh_resource_key, pipeline_revision, render_layer, sort_policy] \
-			or render_layer != "opaque" or sort_policy != "none" \
+			or render_layer not in ["opaque", "cutout", "translucent"] \
+			or (render_layer in ["opaque", "cutout"] and sort_policy != "none") \
+			or (render_layer == "translucent" and sort_policy not in ["camera_depth", "weighted_oit"]) \
 			or not mesh_bounds_value is AABB or not _valid_bounds(mesh_bounds_value) \
 			or not cast_shadows is bool or not visibility_end is float or not fade_margin is float \
 			or not is_finite(visibility_end) or not is_finite(fade_margin) \

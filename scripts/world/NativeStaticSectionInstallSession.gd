@@ -1,5 +1,5 @@
 extends RefCounted
-## Budgeted install session for one immutable opaque section candidate.
+## Budgeted install session for one immutable layered section candidate.
 ##
 ## This is the bridge from prepared section snapshots to the native chunk
 ## renderer. It owns no world authority: the caller supplies the immutable
@@ -25,6 +25,7 @@ var _backend_id := 0
 var _chunk_id := 0
 var _candidate: Dictionary = {}
 var _batches: Array[Dictionary] = []
+var _layer_manifest: Array[Dictionary] = []
 var _batch_index := 0
 var _segment_index := 0
 var _source_id := ""
@@ -37,6 +38,8 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		material_bindings: Dictionary, mesh_bindings: Dictionary) -> Dictionary:
 	if state != "idle":
 		return _failed("section_install_session_already_started")
+	_batches.clear()
+	_layer_manifest.clear()
 	if not is_instance_valid(backend) or not is_instance_valid(chunk) \
 			or not backend.is_inside_tree() or backend.get_parent() != chunk:
 		return _failed("section_install_owner_unavailable")
@@ -71,6 +74,13 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 	var batches_value: Variant = snapshot.get("batches")
 	if not batches_value is Dictionary or not batches_value.is_read_only():
 		return _failed("invalid_section_batch_manifest")
+	var render_layers_value: Variant = snapshot.get("renderLayers")
+	if not render_layers_value is Array or not render_layers_value.is_read_only():
+		return _failed("section_render_layer_manifest_missing")
+	var layer_counts := {
+		"opaque":{"batchCount":0, "instanceCount":0},
+		"cutout":{"batchCount":0, "instanceCount":0},
+		"translucent":{"batchCount":0, "instanceCount":0}}
 	var batch_keys: Array[String] = []
 	for key_value: Variant in batches_value:
 		if not key_value is String:
@@ -83,9 +93,14 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		if not batch_value is Dictionary or not batch_value.is_read_only():
 			return _failed("mutable_or_invalid_section_batch")
 		var batch: Dictionary = batch_value
-		if String(batch.get("renderLayer", "")) != "opaque" \
-				or String(batch.get("transparencySortPolicy", "")) != "none":
+		var render_layer := String(batch.get("renderLayer", ""))
+		var sort_policy := String(batch.get("transparencySortPolicy", ""))
+		if not layer_counts.has(render_layer):
 			return _failed("native_section_backend_layer_not_supported")
+		if render_layer in ["opaque", "cutout"] and sort_policy != "none":
+			return _failed("section_order_independent_layer_has_sort_policy")
+		if render_layer == "translucent":
+			return _failed("native_section_translucent_sort_not_implemented")
 		var material_key := String(batch.get("materialKey", ""))
 		var mesh_key := String(batch.get("meshKey", ""))
 		var material: Variant = material_bindings.get(material_key)
@@ -113,8 +128,31 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 					or buffer_value.size() != count_value * 16:
 				return _failed("invalid_section_segment_payload")
 			expected_instances += count_value
+			var counts: Dictionary = layer_counts[render_layer]
+			counts.batchCount = int(counts.batchCount) + 1
+			counts.instanceCount = int(counts.instanceCount) + count_value
 			_batches.append({"batchKey":batch_key, "batch":batch,
 				"segment":segment, "mesh":mesh, "material":material})
+	var seen_layers: Dictionary = {}
+	if render_layers_value.size() != layer_counts.size():
+		return _failed("section_render_layer_manifest_count_mismatch")
+	for layer_value: Variant in render_layers_value:
+		if not layer_value is Dictionary or not layer_value.is_read_only():
+			return _failed("mutable_or_invalid_section_render_layer_manifest")
+		var layer: Dictionary = layer_value
+		var layer_name := String(layer.get("layer", ""))
+		if not layer_counts.has(layer_name) or seen_layers.has(layer_name):
+			return _failed("invalid_or_duplicate_section_render_layer")
+		seen_layers[layer_name] = true
+		var counts: Dictionary = layer_counts[layer_name]
+		if int(layer.get("expectedBatchCount", -1)) != int(counts.batchCount) \
+				or int(layer.get("expectedInstanceCount", -1)) != int(counts.instanceCount):
+			return _failed("section_render_layer_manifest_count_mismatch")
+		_layer_manifest.append({"layer":layer_name,
+			"expectedBatchCount":int(counts.batchCount),
+			"expectedInstanceCount":int(counts.instanceCount)})
+	_layer_manifest.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return String(a.get("layer", "")) < String(b.get("layer", "")))
 	if expected_instances != int(snapshot.get("instanceCount", -1)) \
 			or _batches.size() != int(snapshot.get("segmentCount", -1)):
 		return _failed("section_candidate_content_count_mismatch")
@@ -132,9 +170,9 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		return _failed("stale_section_slot_generation")
 	var section_transform := Transform3D(Basis.IDENTITY, Grid.origin_for_key(section_key))
 	var local_to_chunk: Transform3D = chunk.global_transform.affine_inverse() * section_transform
-	var begun: Dictionary = backend.call("begin_packet", _source_id, _owner_cell,
+	var begun: Dictionary = backend.call("begin_packet_with_layers", _source_id, _owner_cell,
 		_generation, _source_revision, digest, local_to_chunk,
-		_batches.size(), expected_instances)
+		_batches.size(), expected_instances, _layer_manifest)
 	if begun.get("status") not in ["ready_to_append", "ready_to_commit"]:
 		return _failed(String(begun.get("reason", "native_section_candidate_begin_failed")))
 	state = "append" if not _batches.is_empty() else "upload"
@@ -163,11 +201,12 @@ func advance(max_upload_units: int = 1) -> Dictionary:
 		var policy := {"castShadows":batch.get("castShadows", true),
 			"visibilityRangeEnd":batch.get("visibilityRangeEnd", 0.0),
 			"fadeMargin":batch.get("fadeMargin", 0.0)}
-		var appended: Dictionary = backend.call("append_batch", _source_id,
+		var appended: Dictionary = backend.call("append_batch_in_layer", _source_id,
 			_generation, batch_id, entry.mesh, mesh_content_digest, entry.material,
 			PackedFloat32Array(segment.buffer), segment.bounds,
 			String(batch.get("renderTier", "structural")),
-			bool(policy.castShadows), float(policy.visibilityRangeEnd), float(policy.fadeMargin))
+			bool(policy.castShadows), float(policy.visibilityRangeEnd), float(policy.fadeMargin),
+			String(batch.get("renderLayer", "")))
 		if appended.get("status") == "backpressure":
 			return {"status":"pending", "reason":appended.get("reason", "backpressure")}
 		if appended.get("status") != "accepted":

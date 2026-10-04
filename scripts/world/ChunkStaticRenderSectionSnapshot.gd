@@ -227,6 +227,23 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 	batch_keys.make_read_only()
 	frozen_batches.make_read_only()
 	manifest_rows.make_read_only()
+	var render_layers: Array[Dictionary] = []
+	for layer_name: String in ["opaque", "cutout", "translucent"]:
+		var layer_batch_count := 0
+		var layer_instance_count := 0
+		for batch_key: String in batch_keys:
+			var batch: Dictionary = frozen_batches[batch_key]
+			if String(batch.get("renderLayer", "")) != layer_name:
+				continue
+			layer_batch_count += (batch.get("segments", []) as Array).size()
+			for segment_value: Variant in batch.get("segments", []):
+				layer_instance_count += int((segment_value as Dictionary).get("instanceCount", 0))
+		var layer_manifest := {"layer":layer_name,
+			"expectedBatchCount":layer_batch_count,
+			"expectedInstanceCount":layer_instance_count}
+		layer_manifest.make_read_only()
+		render_layers.append(layer_manifest)
+	render_layers.make_read_only()
 	var snapshot := {"schema":"chunk-static-render-section-snapshot/v2",
 		"sectionKey":section_key,
 		"sectionOrigin":Grid.origin_for_key(section_key), "sectionBounds":section_bounds,
@@ -234,6 +251,7 @@ static func assemble(section_key: Vector3i, contributors: Array) -> Dictionary:
 		"streamChunkKey":Grid.chunk_key_for_section(section_key),
 		"streamChunkDependencies":_readonly_stream_dependencies(section_key, stream_dependencies),
 		"manifest":manifest_rows, "batchKeys":batch_keys,
+		"renderLayers":render_layers,
 		"batches":frozen_batches, "contributorCount":manifest_rows.size(),
 		"batchGroupCount":batch_keys.size(), "batchCount":native_batch_count,
 		"inputSegmentCount":total_segments,

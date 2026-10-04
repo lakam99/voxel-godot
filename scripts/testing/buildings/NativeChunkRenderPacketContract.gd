@@ -107,6 +107,7 @@ func _run() -> void:
 	var material := StandardMaterial3D.new()
 	publisher.material_cache["native-contract-material"]=material
 	var section_material := StandardMaterial3D.new()
+	section_material.transparency=BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 	# Smooth terrain compiles to arbitrary triangle geometry. Exercise that exact
 	# renderer resource shape through the section slot instead of another box.
 	var section_mesh := ArrayMesh.new()
@@ -131,7 +132,7 @@ func _run() -> void:
 		"materialKey":section_material_key,"renderTier":section_tier,
 		"meshKey":section_resource_mesh_key,"meshContentDigest":section_mesh_identity.contentDigest,
 		"meshLocalBounds":section_bounds,
-		"pipelineRevision":section_pipeline,"renderLayer":"opaque",
+		"pipelineRevision":section_pipeline,"renderLayer":"cutout",
 		"translucentSortPolicy":"none","castShadows":true,
 		"visibilityRangeEnd":240.0,"fadeMargin":18.0}
 	section_segment_declaration.make_read_only()
@@ -155,7 +156,7 @@ func _run() -> void:
 		"instanceCount":1,"materialKey":section_material_key,"renderTier":section_tier,
 		"meshKey":section_resource_mesh_key,"meshContentDigest":section_mesh_identity.contentDigest,
 		"meshLocalBounds":section_bounds,
-		"pipelineRevision":section_pipeline,"renderLayer":"opaque",
+		"pipelineRevision":section_pipeline,"renderLayer":"cutout",
 		"translucentSortPolicy":"none","castShadows":true,
 		"visibilityRangeEnd":240.0,"fadeMargin":18.0}
 	section_input.make_read_only()
@@ -199,6 +200,15 @@ func _run() -> void:
 	var section_slot_id:=StaticSectionInstallSession.slot_id("native-section-contract-world",Vector3i.ZERO)
 	var section_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id) \
 		if is_instance_valid(section_backend) else {"status":"missing"}
+	var installed_section_layers: Array=section_backend_snapshot.get("layers",[])
+	var session_layer_receipts_match:=installed_section_layers.size()==3 \
+		and String(installed_section_layers[0].get("layer",""))=="cutout" \
+		and String(installed_section_layers[0].get("status",""))=="ready" \
+		and int(installed_section_layers[0].get("installedBatchCount",-1))==1 \
+		and String(installed_section_layers[1].get("layer",""))=="opaque" \
+		and String(installed_section_layers[1].get("status",""))=="empty" \
+		and String(installed_section_layers[2].get("layer",""))=="translucent" \
+		and String(installed_section_layers[2].get("status",""))=="empty"
 	var section_receipts: Array[Dictionary]=[]
 	if section_result.get("status")=="installed" and section_result.get("receipt") is Dictionary:
 		section_receipts.append(section_result.receipt)
@@ -215,12 +225,17 @@ func _run() -> void:
 			"native-section-contract-world:1",String(section_candidate.contentManifestDigest)) \
 		and section_backend_snapshot.get("status")=="ready" \
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
+		and session_layer_receipts_match \
 		and section_promoted.get("status")=="committed")
 	_check("native_section_slot_installs_transvoxel_shaped_array_mesh",
 		section_mesh_expected.get_surface_count()==1 \
 		and section_mesh_expected.surface_get_primitive_type(0)==Mesh.PRIMITIVE_TRIANGLES \
 		and section_mesh.get_surface_count()==0 \
 		and _has_installed_mesh(section_backend,section_mesh_expected))
+	_check("native_section_session_fails_closed_for_unimplemented_translucent_sort",
+		_translucent_section_candidate_rejected(section_backend,
+			section_bindings_started.get("chunk") as Node3D, section_segment_declaration,
+			section_buffer, section_mesh, section_mesh_identity.contentDigest))
 	var layered_chunk:=_make_chunk(scene,Vector2i(5,0))
 	var layered_owner: Dictionary=PacketOwner.attach_to_chunk(layered_chunk)
 	var layered_backend: Node=layered_owner.get("backend") as Node
@@ -758,6 +773,57 @@ func _append_native_layer_batch(backend: Node, source_id: String, generation: in
 		Transform3D(Basis.IDENTITY,origin+Vector3(0.5,0.5,0.5)),Color.WHITE)
 	return backend.call("append_batch_in_layer",source_id,generation,batch_id,mesh,mesh_digest,material,
 		buffer,AABB(origin,Vector3.ONE),"structural",true,240.0,18.0,render_layer)
+
+
+func _translucent_section_candidate_rejected(backend: Node, chunk: Node3D,
+		base_segment: Dictionary, buffer: Array[float], mesh: Mesh, mesh_digest: String) -> bool:
+	if not is_instance_valid(backend) or not is_instance_valid(chunk):
+		return false
+	var segment_declaration := base_segment.duplicate(false)
+	segment_declaration["renderLayer"] = "translucent"
+	segment_declaration["translucentSortPolicy"] = "camera_depth"
+	segment_declaration.erase("compatibilityKey")
+	segment_declaration.make_read_only()
+	var segment_declarations: Array[Dictionary] = [segment_declaration]
+	segment_declarations.make_read_only()
+	var declaration := {"sourcePartId":"translucent-contract-part",
+		"sourceId":"translucent-contract-source", "sourceRevision":"translucent-contract-rev",
+		"sourceToWorld":Transform3D.IDENTITY, "ownerCell":OWNER_CELL,
+		"segments":segment_declarations}
+	declaration.make_read_only()
+	var declarations: Array[Dictionary] = [declaration]
+	declarations.make_read_only()
+	var removals: Array = []
+	removals.make_read_only()
+	var ledger = StaticContributorLedger.new()
+	if ledger.begin_boundary("translucent-contract-boundary", declarations, removals).get("status") != "ready":
+		return false
+	var input := {"sourcePartId":"translucent-contract-part",
+		"sourceId":"translucent-contract-source", "sourceRevision":"translucent-contract-rev",
+		"segmentId":"native-section-source-segment", "buffer":buffer,
+		"instanceCount":1, "materialKey":base_segment.get("materialKey", ""),
+		"renderTier":base_segment.get("renderTier", "structural"),
+		"meshKey":base_segment.get("meshKey", ""), "meshContentDigest":mesh_digest,
+		"meshLocalBounds":base_segment.get("meshLocalBounds", AABB()),
+		"pipelineRevision":base_segment.get("pipelineRevision", ""),
+		"renderLayer":"translucent", "translucentSortPolicy":"camera_depth",
+		"castShadows":true, "visibilityRangeEnd":240.0, "fadeMargin":18.0}
+	input.make_read_only()
+	if ledger.accept_prepared_segment("translucent-contract-boundary", input).get("status") != "accepted":
+		return false
+	var revisions: Dictionary = {"translucent-contract-part":"translucent-contract-rev"}
+	revisions.make_read_only()
+	var prepared: Dictionary = ledger.prepare_boundary("translucent-contract-boundary",
+		revisions, "native-section-contract-world", 2)
+	if prepared.get("status") != "prepared":
+		return false
+	var candidate: Dictionary = prepared.replacements[0]
+	var session := StaticSectionInstallSession.new()
+	var started: Dictionary = session.begin(backend, chunk, candidate,
+		{"native-section-material":StandardMaterial3D.new()},
+		{String(base_segment.get("meshKey", "")):mesh})
+	return started.get("status") == "failed" \
+		and started.get("reason") == "native_section_translucent_sort_not_implemented"
 
 
 func _install(backend: Node, generation: int) -> bool:
