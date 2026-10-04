@@ -41,6 +41,24 @@ var _segments: Dictionary = {}
 var _buffer := PackedFloat32Array()
 var _retired_buffers: Array = []
 var _publication_boundary: Dictionary = {}
+var _packet_segments: Array = []
+var _packet_segment_index := 0
+var _packet_backend: Node
+var _packet_chunk: Node3D
+var _packet_source_id := ""
+var _packet_source_revision := ""
+var _packet_digest := ""
+var _packet_generation := 0
+var _packet_owner_cell := Vector2i.ZERO
+var _packet_hash: HashingContext
+var _packet_instance_count := 0
+var _packet_local_to_chunk := Transform3D.IDENTITY
+var _packet_retire_parts: Array[String] = []
+var _packet_retire_part_index := 0
+var _packet_retire_sources: Array[String] = []
+var _packet_retire_source_index := 0
+var _replay_only := false
+var replay_source_id := ""
 
 func begin(groups: Dictionary, records: Dictionary, parent: Node3D, publication_boundary: Dictionary = {}) -> void:
 	if state != "idle": return
@@ -52,6 +70,34 @@ func begin(groups: Dictionary, records: Dictionary, parent: Node3D, publication_
 	_parent = weakref(parent)
 	state = "keys"
 
+
+func begin_replay(group: Dictionary, parent: Node3D) -> void:
+	if state != "idle" or not is_instance_valid(parent):
+		state="failed"; reason="static_packet_replay_owner_unavailable"; return
+	_groups={"replay":group}
+	_records={}
+	_publication_boundary={}
+	_parent=weakref(parent)
+	_replay_only=true
+	replay_source_id=String(group.get("sourceId",""))
+	state="keys"
+
+
+func cancel() -> void:
+	if is_instance_valid(_packet_backend) and _packet_generation>0:
+		_packet_backend.call("abort_packet",_packet_source_id,_packet_generation)
+	_packet_backend=null
+	_packet_chunk=null
+	_packet_segments=[]
+	state="idle"
+
+
+func _packet_owner_is_current(publisher) -> bool:
+	if not is_instance_valid(_packet_backend) or not is_instance_valid(_packet_chunk): return false
+	var current: Dictionary=publisher.resolve_chunk_render_packet_backend(_packet_owner_cell)
+	return current.get("status")=="ready" and is_same(current.get("backend"),_packet_backend) \
+		and is_same(current.get("chunk"),_packet_chunk)
+
 func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 	if budget_usec < 1 or budget_usec > 4000:
 		return {"status":"failed","reason":"invalid_slice_budget"}
@@ -61,6 +107,9 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 		var atomic_started := Time.get_ticks_usec()
 		var stage := state
 		_step(publisher)
+		if state=="failed" and is_instance_valid(_packet_backend) and _packet_generation>0:
+			_packet_backend.call("abort_packet",_packet_source_id,_packet_generation)
+			_packet_backend=null
 		var elapsed := Time.get_ticks_usec()-atomic_started
 		max_atomic_usec = maxi(max_atomic_usec, elapsed)
 		publisher._record_publication_stage("static_flush_"+stage,elapsed,str(_transforms.size()) if stage in ["group","upload"] else "")
@@ -81,16 +130,34 @@ func _step(publisher) -> void:
 			state = "group"
 		"group":
 			if _group_index >= _keys.size():
-				state = "metadata_begin"
+				state = "ready" if _replay_only else "metadata_begin"
 				return
 			var group: Dictionary = _groups[_keys[_group_index]]
-			_transforms = group.transforms
-			_custom = group.customData
+			_transforms = group.get("transforms",[])
+			_custom = group.get("customData",[])
 			_segments = group.get("preparedSegments",{})
 			_buffer = PackedFloat32Array()
 			_material = group.material
-			if _transforms.is_empty():
+			if _transforms.is_empty() and int(group.get("packetInstanceCount",0))<=0:
 				_group_index += 1
+				return
+			if publisher.static_packet_group_eligible(group,parent):
+				_packet_owner_cell=group.ownerCell
+				_packet_source_revision=String(group.sourceRevision)
+				var site_identity: String=publisher.publication_site_id if not publisher.publication_site_id.is_empty() else publisher.source_blueprint_id
+				_packet_source_id="building:%s:%s:%d,%d:%s:%s" % [site_identity,String(group.sourcePartId),
+					_packet_owner_cell.x,_packet_owner_cell.y,
+					(String(group.materialKey)+"|"+String(group.renderTier)).sha256_text(),publisher.source_blueprint_id]
+				_packet_segment_index=0
+				_packet_instance_count=0
+				var segment_indices: Array = _segments.keys()
+				segment_indices.sort()
+				_packet_segments=[]
+				for segment_index: Variant in segment_indices:
+					var segment: Dictionary = _segments[segment_index]
+					_packet_segments.append({"id":"segment:%06d" % int(segment_index),"segment":segment})
+					_packet_instance_count+=int(segment.instanceCount)
+				state="packet_owner"
 				return
 			_mesh = publisher.create_mesh_batch()
 			_mesh.transform_format = MultiMesh.TRANSFORM_3D
@@ -132,6 +199,123 @@ func _step(publisher) -> void:
 			_mesh = null
 			_group_index += 1
 			state = "group"
+		"packet_owner":
+			var packet_group: Dictionary=_groups[_keys[_group_index]]
+			var owner: Dictionary = publisher.resolve_chunk_render_packet_backend(_packet_owner_cell)
+			if owner.get("status")=="pending": return
+			if owner.get("status")!="ready":
+				if String(owner.get("reason","")) in ["current_world_scene_unavailable","current_world_chunk_registry_missing"]:
+					_mesh = publisher.create_mesh_batch()
+					_mesh.transform_format = MultiMesh.TRANSFORM_3D
+					_mesh.use_custom_data = true
+					_mesh.instance_count = _transforms.size()
+					publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
+					_mesh.mesh = publisher.unit_box
+					_instance_index = 0
+					state = "instances"
+					return
+				state="failed"; reason=String(owner.get("reason","chunk_packet_owner_unavailable")); return
+			_packet_backend=owner.backend as Node
+			_packet_chunk=owner.chunk as Node3D
+			if not is_instance_valid(_packet_backend) or not is_instance_valid(_packet_chunk):
+				state="failed"; reason="chunk_packet_owner_lost"; return
+			var installed: Dictionary = _packet_backend.call("installed_snapshot",_packet_source_id)
+			_packet_generation=publisher.next_chunk_static_packet_generation(installed)
+			_packet_local_to_chunk=_packet_chunk.global_transform.affine_inverse()*parent.global_transform
+			_packet_hash=HashingContext.new()
+			var policy: Dictionary=publisher.static_packet_policy(String(packet_group.renderTier))
+			var transform_bytes:=PackedFloat32Array([
+				_packet_local_to_chunk.basis.x.x,_packet_local_to_chunk.basis.y.x,_packet_local_to_chunk.basis.z.x,_packet_local_to_chunk.origin.x,
+				_packet_local_to_chunk.basis.x.y,_packet_local_to_chunk.basis.y.y,_packet_local_to_chunk.basis.z.y,_packet_local_to_chunk.origin.y,
+				_packet_local_to_chunk.basis.x.z,_packet_local_to_chunk.basis.y.z,_packet_local_to_chunk.basis.z.z,_packet_local_to_chunk.origin.z
+			]).to_byte_array()
+			var packet_mesh: Mesh=packet_group.get("mesh",publisher.unit_box)
+			var mesh_size: Vector3=packet_mesh.size if packet_mesh is BoxMesh else publisher.unit_box.size
+			var mesh_bytes:=PackedFloat32Array([mesh_size.x,mesh_size.y,mesh_size.z]).to_byte_array()
+			var header: String="%s\n%s\n%s\n%d\n%d\n%s\n%s\n%s\n%s" % [
+				_packet_source_id,_packet_source_revision,str(_packet_owner_cell),_packet_segments.size(),_packet_instance_count,
+				String(packet_group.materialKey),String(packet_group.renderTier),str(policy),"unit_box_v1"]
+			if _packet_hash.start(HashingContext.HASH_SHA256)!=OK \
+					or _packet_hash.update(header.to_utf8_buffer())!=OK \
+					or _packet_hash.update(transform_bytes)!=OK or _packet_hash.update(mesh_bytes)!=OK:
+				state="failed"; reason="chunk_packet_digest_start_failed"; return
+			state="packet_hash"
+		"packet_hash":
+			if _packet_segment_index>=_packet_segments.size():
+				_packet_digest=_packet_hash.finish().hex_encode()
+				state="packet_begin"
+				return
+			var entry: Dictionary=_packet_segments[_packet_segment_index]
+			var segment: Dictionary=entry.segment
+			var batch_id: String=entry.id
+			var bounds: AABB=segment.bounds
+			var geometry_bytes:=PackedFloat32Array([bounds.position.x,bounds.position.y,bounds.position.z,
+				bounds.size.x,bounds.size.y,bounds.size.z]).to_byte_array()
+			var buffer_bytes:=PackedFloat32Array(segment.buffer).to_byte_array()
+			if _packet_hash.update((batch_id+"\n"+String(_groups[_keys[_group_index]].renderTier)+"\n").to_utf8_buffer())!=OK \
+					or _packet_hash.update(geometry_bytes)!=OK or _packet_hash.update(buffer_bytes)!=OK:
+				state="failed"; reason="chunk_packet_digest_update_failed"; return
+			_packet_segment_index+=1
+		"packet_begin":
+			if not _packet_owner_is_current(publisher): state="failed"; reason="chunk_packet_owner_replaced_before_begin"; return
+			var packet_group: Dictionary=_groups[_keys[_group_index]]
+			publisher.expect_chunk_static_packet(String(packet_group.sourcePartId),_packet_source_id,_packet_owner_cell,
+				_packet_generation,_packet_source_revision,_packet_digest,_replay_only)
+			var begin: Dictionary=_packet_backend.call("begin_packet",_packet_source_id,_packet_owner_cell,_packet_generation,
+				_packet_source_revision,_packet_digest,_packet_local_to_chunk,_packet_segments.size(),_packet_instance_count)
+			if begin.get("status")=="backpressure":
+				publisher._record_publication_stage("static_flush_packet_backpressure",0,String(begin.get("reason",""))+":"+_packet_source_id)
+				return
+			if begin.get("reason")=="stale_packet_generation":
+				_packet_generation=publisher.next_chunk_static_packet_generation(_packet_backend.call("installed_snapshot",_packet_source_id))
+				publisher.expect_chunk_static_packet(String(packet_group.sourcePartId),_packet_source_id,_packet_owner_cell,
+					_packet_generation,_packet_source_revision,_packet_digest,_replay_only)
+				return
+			if begin.get("status") not in ["ready_to_append","ready_to_commit"]:
+				state="failed"; reason=String(begin.get("reason","chunk_packet_begin_failed")); return
+			_packet_segment_index=0
+			state="packet_append" if not _packet_segments.is_empty() else "packet_advance"
+		"packet_append":
+			if not _packet_owner_is_current(publisher): state="failed"; reason="chunk_packet_owner_replaced_during_append"; return
+			if _packet_segment_index>=_packet_segments.size(): state="packet_advance"; return
+			var entry: Dictionary=_packet_segments[_packet_segment_index]
+			var segment: Dictionary=entry.segment
+			var group: Dictionary=_groups[_keys[_group_index]]
+			var tier:=String(group.renderTier)
+			var policy: Dictionary=publisher.static_packet_policy(tier)
+			var appended: Dictionary=_packet_backend.call("append_batch",_packet_source_id,_packet_generation,entry.id,
+				group.get("mesh",publisher.unit_box),group.material,PackedFloat32Array(segment.buffer),segment.bounds,tier,
+				bool(policy.castShadows),float(policy.visibilityRange),float(policy.fadeMargin))
+			if appended.get("status")=="backpressure": return
+			if appended.get("status")!="accepted":
+				state="failed"; reason=String(appended.get("reason","chunk_packet_append_failed")); return
+			_packet_segment_index+=1
+		"packet_advance":
+			if not _packet_owner_is_current(publisher): state="failed"; reason="chunk_packet_owner_replaced_during_upload"; return
+			var advanced: Dictionary=_packet_backend.call("advance_packet",_packet_source_id,_packet_generation,1)
+			if advanced.get("status")=="pending": return
+			if advanced.get("status")=="failed": state="failed"; reason=String(advanced.get("reason","chunk_packet_upload_failed")); return
+			if advanced.get("status")=="ready_to_commit": state="packet_commit"
+		"packet_commit":
+			if not _packet_owner_is_current(publisher): state="failed"; reason="chunk_packet_owner_replaced_before_commit"; return
+			if not publisher.validate_static_flush_source(): state="failed"; reason="stale_static_flush_source"; return
+			if not _publication_boundary.is_empty() and not publisher._publication_boundary_is_current(_publication_boundary):
+				state="failed"; reason="publication_boundary_owner_changed"; return
+			var committed: Dictionary=_packet_backend.call("commit_packet",_packet_source_id,_packet_generation)
+			if committed.get("status")=="backpressure": return
+			if committed.get("status")!="ready" or not _packet_backend.call("receipt_installed",_packet_source_id,
+					_packet_generation,_packet_source_revision,_packet_digest):
+				state="failed"; reason=String(committed.get("reason","chunk_packet_receipt_rejected")); return
+			var group: Dictionary=_groups[_keys[_group_index]]
+			publisher.record_chunk_static_packet_receipt(String(group.sourcePartId),_packet_source_id,_packet_owner_cell,
+				_packet_generation,_packet_source_revision,_packet_digest,_packet_backend,_packet_chunk)
+			if not _replay_only:
+				publisher.retain_chunk_static_packet_recipe(_packet_source_id,group,_packet_segments,publisher.unit_box)
+			_packet_backend=null
+			_packet_chunk=null
+			_packet_segments=[]
+			_group_index+=1
+			state="group"
 		"metadata_begin":
 			# Each prefix dictionary is independent. Its nested record values are
 			# immutable, allowing exact unchanged records to be shared safely.
@@ -265,7 +449,32 @@ func _step(publisher) -> void:
 			publisher.incremental_static_flush_count += 1
 			if not _publication_boundary.is_empty() and not publisher._commit_publication_boundary(_publication_boundary):
 				state="failed"; reason="publication_boundary_owner_changed"; return
-			state = "ready"
+			state = "packet_retire_begin" if not _publication_boundary.is_empty() else "ready"
+		"packet_retire_begin":
+			_packet_retire_parts=publisher.chunk_static_packet_part_ids()
+			_packet_retire_part_index=0
+			_packet_retire_sources=[]
+			_packet_retire_source_index=0
+			state="packet_retire"
+		"packet_retire":
+			if _packet_retire_part_index>=_packet_retire_parts.size():
+				state="ready"
+				return
+			var part_id: String=_packet_retire_parts[_packet_retire_part_index]
+			if _packet_retire_sources.is_empty():
+				_packet_retire_sources=publisher.chunk_static_packet_source_ids(part_id)
+				_packet_retire_source_index=0
+				if _packet_retire_sources.is_empty():
+					_packet_retire_part_index+=1
+				return
+			if _packet_retire_source_index>=_packet_retire_sources.size():
+				_packet_retire_part_index+=1
+				_packet_retire_sources=[]
+				_packet_retire_source_index=0
+				return
+			if not publisher.retire_chunk_static_packet_if_unexpected(part_id,_packet_retire_sources[_packet_retire_source_index]):
+				state="failed"; reason="chunk_packet_retirement_not_acknowledged"; return
+			_packet_retire_source_index+=1
 
 static func _immutable_leaf(value: Variant) -> bool:
 	# Godot's value-only Variant types through NodePath; later enum members

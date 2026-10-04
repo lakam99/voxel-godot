@@ -2543,6 +2543,26 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					# readiness acknowledgement; a later demand revision can demote it
 					# before it publishes another packet.
 					if entry.phase not in ["publishing","scene_ready"] or not ready.has(region): continue
+					var replay_started:=Time.get_ticks_usec()
+					var replay: Dictionary=entry.job.advance_chunk_static_packet_replay(mini(remaining,SCENE_JOB_SLICE_USEC))
+					_record_scene_unit("static_packet_replay",replay_started)
+					if replay.get("status")=="failed":
+						_failures[region]={"binding":entry.binding,"reason":String(replay.get("reason","static_packet_replay_failed")),
+							"sourceId":String(replay.get("sourceId",""))}
+						_retire_scene(region)
+						progressed=true
+						break
+					if replay.get("status")=="pending_budget":
+						# A replay may be waiting for its owner chunk or native packet
+						# backpressure. Rotate immediately so it cannot consume this
+						# frame's whole service budget by retrying the same scene.
+						_scene_cursor=(index+1)%regions.size()
+						_prefer_retirement=true
+						return
+					if replay.get("status")=="completed":
+						_scene_cursor=(index+1)%regions.size()
+						progressed=true
+						break
 					var demand_started := Time.get_ticks_usec()
 					var demand_ready := _refresh_scene_group_demand(entry)
 					_record_scene_unit("demand_refresh",demand_started)

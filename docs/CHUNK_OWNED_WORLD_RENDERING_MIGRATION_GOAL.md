@@ -1,6 +1,6 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. A revision-bound native chunk packet owner is registered, and building source packets carry owner-cell/bounds metadata; production packet installation, readiness receipts, and live-game acceptance remain open.**
+Status: **Active; chunk-priority and static-source/readiness cutovers are present. Canonical far-LOD tree impostors have a native chunk-owned publication path with headed receipt, lifecycle, and synthetic queue LOD-transition evidence. Worker-prepared, single-owner-cell building batches now have packet installation, revision-exact readiness, stale-packet retirement, per-advance bounded chunk-unload replay, and site-teardown release in code. Packet release now preserves its receipt until acknowledgement. Source-verified native GDExtension contracts cover packet lifecycle and the `Main.gd` chunk-container creation/retirement seam; the latter uses stubbed terrain admission. Actual `VoxelTerrainRuntime` replay through the resident streamer, source artifact memory, cross-cell fragments, and live-game acceptance remain open.**
 
 ## Goal
 
@@ -235,17 +235,60 @@ while retaining the old accepted representation until replacement
 acknowledgement. Trees remain a candidate only when their recipe, transform,
 collision, prop ID, and removal contracts can be preserved inside that ordering.
 
-The current building path already prepares immutable masonry, paving, and roof
-instance segments on an owned worker and uploads completed `MultiMesh` batches
-in bounded main-thread slices. It still merges by material and render tier under
-the site scene root. The first chunk-owned building slice should therefore use
-one packet-eligible, single-owner-cell masonry group, admitted through the
-existing physical-group dependency closure. Carry its source binding, member
-bindings, canonical material ID/version, render tier, owner cell, deterministic
-instance order, bounds, and explicit empty/non-empty batch counts through packet
-installation and its revision-bound receipt. Resolve Godot material resources on
-the main thread. Keep collision, doors, interactions, furnishings, and navigation
-under their current site/actor owners.
+The building path prepares immutable masonry, paving, and roof instance segments
+on an owned worker. `BuildingStaticBatchFlush` now routes eligible prepared
+segments to `ChunkRenderPacketBackend` in bounded append/upload/commit steps.
+Eligibility requires a stable source binding and material cache key plus segment
+bounds fully inside the source's declared owner cell. The chunk-local root
+transform is derived from the live site/chunk transforms, and the scene visual
+receipt rechecks the backend generation, source revision, packet digest, chunk
+instance, and installed packet before accepting a packet-backed member. Other
+groups still follow the site-root path until they have equivalent ownership
+proof. The publisher now retains immutable prepared segments for per-advance
+bounded chunk-unload replay through the resident scene scheduler; physical group
+receipts remain independent. The focused fake-backend replay contract passes
+five checks, including release-failure retention and acknowledged retry, and the
+scene-job orchestration contract passes 606 checks. A native GDExtension
+contract passes twelve checks through both `BuildingStaticBatchFlush` and the
+actual `ChunkRenderPacketBackend`: it verifies chunk attachment, owner-cell
+rejection, install/replace, stale-release rejection, chunk owner destruction
+and recreation, resident building packet replay, and acknowledged release. Its
+launch verifies the loaded debug DLL's build manifest names the exact current
+C++ source hash. This proves the production building flush/replay protocol
+against native packet nodes; it does not yet exercise `MainRuntimeTools` terrain
+chunk streaming selection or `VoxelTerrainRuntime` admission/release. A follow-up
+16-check contract now extends the real `Main.gd` chain, creates a chunk through
+`create_voxel_authority_chunk_container`, verifies the native packet owner and
+deferred prop request, then retires it through the production chunk-retirement
+helper and confirms terrain release is called before registry removal and owner
+destruction. The fixture stubs terrain admission, so it does not yet prove the
+actual `VoxelTerrainRuntime` or resident Citadel scheduler replaying the packet
+after streamer-driven unload/reload. Cross-cell ownership and live gameplay also
+remain open. The repeatable command is
+`node tools/run-native-chunk-render-packet-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/native-chunk-packet-main-runtime-seam-final2`;
+its report is `report.json`, and the watchdog recorded exit 0, clean shutdown,
+and authoritative zero owned-process members. Source artifact memory still lacks an aggregate budget. Replay recipes reference the same
+immutable segment buffers retained by prepared masonry/surface or physical-family
+artifacts, so evicting only replay descriptors would not reclaim those buffers.
+Any memory budget must also release/rebuild the owning source artifacts safely.
+Obsolete packet
+IDs are scheduled for release after each committed scene boundary, and tracked packet
+generations are released incrementally when the owning site job retires. The
+backend's explicit zero-batch packet API is not used; removal currently retires
+prior IDs after a new accepted scene boundary. Collision, doors, interactions,
+furnishings, and navigation retain their existing authorities.
+
+Packet release now retains its receipt and replay recipe until the native owner
+acknowledges `released`; a failed generation match is surfaced as a retirement
+failure instead of silently dropping ownership bookkeeping. The focused fake
+backend contract covers failure retention and successful retry. The resident
+scene job and publisher hold canonical packet artifacts that can support a
+capture-only replay for masonry, paving, and roof families, but there is no
+bounded artifact-eviction/rebuild lifecycle. Re-running normal part publication
+is unsafe because it can republish collision, metadata, and physical boundaries.
+Any memory-control path must coordinate the lifetime of replay references and
+their owning prepared artifacts; missing source authority must remain an explicit
+pending/failure state, never empty success.
 
 The canonical static owner grid is 32 terrain cells (43.2m) in XZ. Resolve a
 member's unique owner from its world-space anchor with negative-safe floor
@@ -261,15 +304,26 @@ preserving source demand needed by still-visible intersecting cells.
 registered in the native terrain extension with bounded staged packets,
 revision/digest receipts, explicit commit/abort/release, and attachment checks
 against the actual `Chunk_x_z` parent. Streamed chunk containers create this
-owner when the extension is available. Building worker entries now retain and
-validate the authoritative spatial dependency's owner cell and bounds; static
-batch grouping also preserves source-part identity. This is preparatory
-ownership data only: `BuildingStaticBatchFlush` still installs its normal
-site-root batches, and no production building packet yet uses the native owner
-or gates scene readiness on its receipt. Debug and release native builds pass;
-the owned worker contract passes 141 checks and the scene-job packet contract
-passes 606 checks. These synthetic contracts do not prove chunk rendering,
-readiness handoff, or live gameplay.
+owner when the extension is available. Building worker entries retain and
+validate owner-cell/bounds data. The production flush now detects eligible
+prepared segments, hashes source, material key, render policy, mesh dimensions,
+site-to-chunk transform, bounds, and instance buffers incrementally, retries
+backpressure without advancing the cursor, revalidates the live chunk owner,
+and stores a generation-exact receipt. The visual readiness callback requires
+that exact receipt for packet-backed members while preserving existing site-root
+and collision witnesses. Stale packet IDs are released incrementally after each
+committed scene boundary; tracked packet generations are also released
+incrementally as the site job retires. Cancellation aborts the staged
+generation and retains the flush payload for retirement. The GDScript path now
+passes its scene-job orchestration contract and a synthetic fake-backend
+unload/recreate replay contract. Replay waits rotate the site scheduler instead
+of spinning one blocked owner through the frame budget, and receipt validation
+uses a lookup-only chunk resolver so readiness checks cannot attach renderer
+nodes as a side effect. Those contracts do not establish native
+renderer integration, cross-cell fragment coverage, or live gameplay. The
+service contract currently has three failed frozen-source fixture/hash checks;
+it still compiled and ran through the edited scheduler, and its watchdog proved
+clean process shutdown.
 
 The approved ordered architecture plan and maturity plan are maintained in the
 separate `voxel-godot-docs` repository at

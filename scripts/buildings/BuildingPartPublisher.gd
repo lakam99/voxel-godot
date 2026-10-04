@@ -1,6 +1,9 @@
 extends RefCounted
 class_name BuildingPartPublisher
 
+static var _global_chunk_packet_generation := 0
+const MAX_PACKET_REPLAY_SOURCE_CHECKS_PER_ADVANCE := 8
+
 ## Scene publication for material-aware construction parts. It intentionally
 ## consumes only BuildingPart data: the visual recipe and collision shape share
 ## one record, and board/brick detail is instanced per parent part.
@@ -55,6 +58,7 @@ var static_visual_part_transform := Transform3D.IDENTITY
 var static_visual_part_tier := "structural"
 var static_visual_owner_cell := Vector2i.ZERO
 var static_visual_source_part_id := ""
+var static_visual_source_revision := ""
 var static_visual_transform_count := 0
 var static_batch_peak_instances := 0
 var incremental_progress_callback: Callable
@@ -88,6 +92,16 @@ var _source_part_boundaries: Dictionary = {}
 var _publication_retirement: Array = []
 var _static_record_cache: Dictionary = {}
 var _static_record_cache_stats: Dictionary = {"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
+var _chunk_static_packet_receipts: Dictionary = {}
+var _chunk_static_packet_expected: Dictionary = {}
+var _chunk_static_packet_pending_expected: Dictionary = {}
+var _chunk_static_packet_recipes: Dictionary = {}
+var _chunk_static_packet_recipe_order: Array[String] = []
+var _chunk_static_packet_recipe_slots: Dictionary = {}
+var _chunk_static_packet_replay_cursor := 0
+var _chunk_static_packet_retirement_keys: Array[String] = []
+var _chunk_static_packet_retirement_index := 0
+var _chunk_static_packet_retirement_prepared := false
 var _prepared_static_records: Dictionary = {}
 var _prepared_static_bindings: Dictionary = {}
 var resumable_scene_publication := false
@@ -591,6 +605,8 @@ func clear_published() -> void:
 	_pending_masonry=null
 	_pending_roof=null
 	_pending_part_index=-1
+	var cancelled_static_flush=_static_flush
+	if cancelled_static_flush!=null: cancelled_static_flush.cancel()
 	_static_flush = null
 	_static_metadata_dirty = false
 	_publication_epoch = 0
@@ -598,8 +614,18 @@ func clear_published() -> void:
 	_last_publication_boundary = {}
 	_source_part_boundaries = {}
 	_publication_retirement = []
+	if cancelled_static_flush!=null: _publication_retirement.append(cancelled_static_flush)
 	_static_record_cache={}
 	_static_record_cache_stats={"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
+	_chunk_static_packet_expected={}
+	_chunk_static_packet_pending_expected={}
+	_chunk_static_packet_recipes={}
+	_chunk_static_packet_recipe_order=[]
+	_chunk_static_packet_recipe_slots={}
+	_chunk_static_packet_replay_cursor=0
+	_chunk_static_packet_retirement_keys=[]
+	_chunk_static_packet_retirement_index=0
+	_chunk_static_packet_retirement_prepared=false
 	_prepared_static_records={}
 	_prepared_static_bindings={}
 	_finish_validated = false
@@ -627,6 +653,7 @@ func clear_published() -> void:
 	static_visual_part_tier = "structural"
 	static_visual_owner_cell = Vector2i.ZERO
 	static_visual_source_part_id = ""
+	static_visual_source_revision = ""
 	static_visual_transform_count = 0
 	static_batch_peak_instances = 0
 	incremental_total_parts = 0
@@ -819,9 +846,11 @@ func publish_static_part(part, parent: Node3D) -> void:
 	if not _masonry_part_valid(part): return
 	var previous_owner_cell := static_visual_owner_cell
 	var previous_source_part_id := static_visual_source_part_id
+	var previous_source_revision := static_visual_source_revision
 	var world_anchor: Vector3 = parent.global_transform * part.position
 	static_visual_owner_cell = _owner_cell_for_anchor(world_anchor)
 	static_visual_source_part_id = String(part.id)
+	static_visual_source_revision = PublicationPreparation.static_record_binding(part.snapshot())
 	if _physical_packet_mode and (not _physical_packet_owner_cells_by_part_id.has(String(part.id)) \
 			or _physical_packet_owner_cells_by_part_id[String(part.id)] != static_visual_owner_cell):
 		_paving_reject("physical_packet_owner_cell_mismatch")
@@ -874,6 +903,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 		static_visual_part_tier = "structural"
 	static_visual_owner_cell = previous_owner_cell
 	static_visual_source_part_id = previous_source_part_id
+	static_visual_source_revision = previous_source_revision
 
 
 func static_collision_batch(parent: Node3D) -> StaticBody3D:
@@ -1891,12 +1921,17 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 
 func collect_prepared_static_visual_segment(segment, material: Material) -> void:
 	if material==null or segment.instanceCount==0: return
+	var material_key := stable_static_material_key(material)
 	var key := _static_visual_batch_key(material,static_visual_part_tier,static_visual_owner_cell,static_visual_source_part_id)
 	var group: Dictionary = static_visual_batches.get(key,{})
 	if group.is_empty(): group={"material":material,"transforms":[],"customData":[],"renderTier":static_visual_part_tier,
-		"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id}
+		"ownerCell":static_visual_owner_cell,"sourcePartId":static_visual_source_part_id,
+		"sourceRevision":static_visual_source_revision,"materialKey":material_key}
 	if group.get("ownerCell") != static_visual_owner_cell or String(group.get("sourcePartId","")) != static_visual_source_part_id:
 		_paving_reject("prepared_static_batch_owner_cell_mismatch")
+		return
+	if String(group.get("sourceRevision","")) != static_visual_source_revision or String(group.get("materialKey","")) != material_key:
+		_paving_reject("prepared_static_batch_source_identity_mismatch")
 		return
 	if not group.has("preparedSegments"): group.preparedSegments={}
 	group.preparedSegments[group.transforms.size()] = segment
@@ -1908,12 +1943,272 @@ func collect_prepared_static_visual_segment(segment, material: Material) -> void
 static func _static_visual_batch_key(material: Material, tier: String, owner_cell: Vector2i, source_part_id: String) -> String:
 	return "%s|%s|%d,%d|%s" % [material.get_instance_id(),tier,owner_cell.x,owner_cell.y,source_part_id]
 
+
+func stable_static_material_key(material: Material) -> String:
+	if material == null: return ""
+	var matches: Array[String] = []
+	for key: Variant in material_cache:
+		if is_same(material_cache[key],material): matches.append(String(key))
+	matches.sort()
+	return matches[0] if not matches.is_empty() else ""
+
+
+func static_packet_group_eligible(group: Dictionary, parent: Node3D) -> bool:
+	if parent == null or not group.get("preparedSegments") is Dictionary or group.preparedSegments.is_empty(): return false
+	if String(group.get("sourcePartId","" )).is_empty() or String(group.get("sourceRevision","" )).is_empty() \
+			or String(group.get("materialKey","" )).is_empty(): return false
+	var owner_cell: Vector2i = group.get("ownerCell",Vector2i.ZERO)
+	var cell_size: float = SpatialDependencies.OWNER_SIZE
+	var min_x := float(owner_cell.x)*cell_size
+	var min_z := float(owner_cell.y)*cell_size
+	var max_x := min_x+cell_size
+	var max_z := min_z+cell_size
+	for segment: Variant in group.preparedSegments.values():
+		if not segment is Dictionary or not segment.get("bounds") is AABB: return false
+		var world_bounds: AABB = parent.global_transform * segment.bounds
+		if world_bounds.position.x < min_x-0.001 or world_bounds.end.x > max_x+0.001 \
+				or world_bounds.position.z < min_z-0.001 or world_bounds.end.z > max_z+0.001:
+			return false
+	return true
+
+
+func static_packet_policy(tier: String) -> Dictionary:
+	var visibility_end := 240.0
+	var fade_margin := 18.0
+	var casts_shadows := true
+	match tier:
+		"silhouette":
+			visibility_end=360.0; fade_margin=24.0
+		"detail":
+			visibility_end=140.0; fade_margin=14.0; casts_shadows=false
+	return {"visibilityRange":visibility_end,"fadeMargin":fade_margin,"castShadows":casts_shadows}
+
+
+func record_chunk_static_packet_receipt(source_part_id: String, source_id: String, owner_cell: Vector2i,
+		generation: int, source_revision: String, packet_digest: String, backend: Node, chunk: Node3D) -> void:
+	if source_part_id.is_empty() or not is_instance_valid(backend) or not is_instance_valid(chunk): return
+	var receipts: Dictionary = _chunk_static_packet_receipts.get(source_part_id,{})
+	receipts[source_id]={"sourceId":source_id,"ownerCell":owner_cell,"generation":generation,
+		"sourceRevision":source_revision,"packetDigest":packet_digest,"backend":weakref(backend),
+		"chunk":weakref(chunk),"chunkInstanceId":chunk.get_instance_id()}
+	_chunk_static_packet_receipts[source_part_id]=receipts
+	_chunk_static_packet_retirement_prepared=false
+
+
+func next_chunk_static_packet_generation(installed_snapshot: Dictionary) -> int:
+	_global_chunk_packet_generation=maxi(_global_chunk_packet_generation,int(installed_snapshot.get("generation",0)))+1
+	return _global_chunk_packet_generation
+
+
+func expect_chunk_static_packet(source_part_id: String, source_id: String, owner_cell: Vector2i,
+		generation: int, source_revision: String, packet_digest: String, immediate := false) -> void:
+	if source_part_id.is_empty() or source_id.is_empty() or generation<=0 or source_revision.is_empty() or packet_digest.is_empty(): return
+	var destination: Dictionary = _chunk_static_packet_expected.get(source_part_id,{}) if immediate \
+		else _chunk_static_packet_pending_expected.get(source_part_id,{})
+	destination[source_id]={"ownerCell":owner_cell,"generation":generation,
+		"sourceRevision":source_revision,"packetDigest":packet_digest}
+	if immediate: _chunk_static_packet_expected[source_part_id]=destination
+	else: _chunk_static_packet_pending_expected[source_part_id]=destination
+
+
+func has_chunk_static_packet_expectation(source_part_id: String) -> bool:
+	return not _chunk_static_packet_expected.get(source_part_id,{}).is_empty()
+
+
+func chunk_static_packet_receipts_live(source_part_id: String) -> bool:
+	var receipts: Dictionary = _chunk_static_packet_receipts.get(source_part_id,{})
+	var expected: Dictionary = _chunk_static_packet_expected.get(source_part_id,{})
+	if receipts.is_empty() or expected.is_empty() or receipts.size()!=expected.size(): return false
+	for source_id: String in expected:
+		if not chunk_static_packet_receipt_live(source_part_id,source_id): return false
+	return true
+
+
+func chunk_static_packet_receipt_live(source_part_id: String, source_id: String) -> bool:
+	var value: Variant=_chunk_static_packet_receipts.get(source_part_id,{}).get(source_id)
+	var target: Variant=_chunk_static_packet_expected.get(source_part_id,{}).get(source_id)
+	if not value is Dictionary or not target is Dictionary \
+			or not value.get("backend") is WeakRef or not value.get("chunk") is WeakRef: return false
+	if value.get("ownerCell")!=target.get("ownerCell") or int(value.get("generation",0))!=int(target.get("generation",0)) \
+			or String(value.get("sourceRevision",""))!=String(target.get("sourceRevision","")) \
+			or String(value.get("packetDigest",""))!=String(target.get("packetDigest","")): return false
+	var backend: Node=value.backend.get_ref() as Node
+	var chunk: Node3D=value.chunk.get_ref() as Node3D
+	if not is_instance_valid(backend) or not is_instance_valid(chunk) or backend.get_parent()!=chunk \
+			or chunk.get_instance_id()!=int(value.get("chunkInstanceId",0)) \
+			or chunk.name!="Chunk_%d_%d" % [value.ownerCell.x,value.ownerCell.y] \
+			or not backend.has_method("receipt_installed") \
+			or not backend.call("receipt_installed",value.sourceId,int(value.generation),value.sourceRevision,value.packetDigest): return false
+	var current: Dictionary=resolve_existing_chunk_render_packet_backend(value.ownerCell)
+	return current.get("status")=="ready" and is_same(current.get("backend"),backend) and is_same(current.get("chunk"),chunk)
+
+
+func retain_chunk_static_packet_recipe(source_id: String, group: Dictionary, packet_segments: Array, mesh: Mesh) -> void:
+	if source_id.is_empty() or group.is_empty() or packet_segments.is_empty() or mesh==null: return
+	var segments: Dictionary={}
+	var instance_count:=0
+	for index in range(packet_segments.size()):
+		var entry: Dictionary=packet_segments[index]
+		var source: Dictionary=entry.get("segment",{})
+		if source.is_empty() or not source.get("buffer") is Array or not source.buffer.is_read_only() \
+				or not source.get("bounds") is AABB or not source.is_read_only(): return
+		var segment: Dictionary={"buffer":source.buffer,"bounds":source.bounds,
+			"instanceCount":int(source.instanceCount)}
+		segment.make_read_only()
+		segments[index]=segment
+		instance_count+=int(segment.instanceCount)
+	segments.make_read_only()
+	var recipe: Dictionary={"sourceId":source_id,"sourcePartId":String(group.get("sourcePartId","")),
+		"sourceRevision":String(group.get("sourceRevision","")),"ownerCell":group.get("ownerCell",Vector2i.ZERO),
+		"materialKey":String(group.get("materialKey","")),"material":group.get("material"),
+		"mesh":mesh,"renderTier":String(group.get("renderTier","structural")),"preparedSegments":segments,
+		"packetInstanceCount":instance_count}
+	if recipe.sourcePartId.is_empty() or recipe.sourceRevision.is_empty() or recipe.materialKey.is_empty() \
+			or not recipe.material is Material or instance_count<=0: return
+	recipe.make_read_only()
+	if not _chunk_static_packet_recipes.has(source_id):
+		_chunk_static_packet_recipe_slots[source_id]=_chunk_static_packet_recipe_order.size()
+		_chunk_static_packet_recipe_order.append(source_id)
+	_chunk_static_packet_recipes[source_id]=recipe
+
+
+func advance_chunk_static_packet_replay(parent: Node3D, budget_usec: int = 2500) -> Dictionary:
+	if not is_instance_valid(parent) or parent.is_queued_for_deletion(): return {"status":"failed","reason":"static_packet_replay_parent_lost"}
+	if _static_flush!=null:
+		if not bool(_static_flush._replay_only): return {"status":"busy"}
+		var replay= _static_flush
+		var replay_source_id:=String(replay.replay_source_id)
+		var in_flight: Dictionary=replay.advance(self,budget_usec)
+		if in_flight.get("status") in ["ready","failed"]:
+			_static_flush=null
+			if in_flight.get("status")=="ready": return {"status":"completed","sourceId":replay_source_id}
+			var reason:=String(in_flight.get("reason","chunk_packet_replay_failed"))
+			if reason.contains("chunk_packet_owner_replaced") or reason in ["chunk_packet_owner_lost","chunk_packet_begin_failed"]:
+				return {"status":"pending_owner","reason":reason,"sourceId":replay_source_id}
+			return {"status":"failed","reason":reason,"sourceId":replay_source_id}
+		return {"status":"pending_budget","reason":in_flight.get("reason",""),"sourceId":replay_source_id}
+	var waiting_for_owner:=false
+	var checked:=0
+	var source_check_count:=mini(MAX_PACKET_REPLAY_SOURCE_CHECKS_PER_ADVANCE,_chunk_static_packet_recipe_order.size())
+	while checked<source_check_count:
+		if _chunk_static_packet_replay_cursor>=_chunk_static_packet_recipe_order.size(): _chunk_static_packet_replay_cursor=0
+		var source_id: String=_chunk_static_packet_recipe_order[_chunk_static_packet_replay_cursor]
+		_chunk_static_packet_replay_cursor+=1
+		checked+=1
+		if not _chunk_static_packet_recipes.has(source_id): continue
+		var recipe: Dictionary=_chunk_static_packet_recipes.get(source_id,{})
+		var part_id:=String(recipe.get("sourcePartId",""))
+		if not _chunk_static_packet_expected.get(part_id,{}).has(source_id) or chunk_static_packet_receipt_live(part_id,source_id): continue
+		var owner: Dictionary=resolve_chunk_render_packet_backend(recipe.get("ownerCell",Vector2i.ZERO))
+		if owner.get("status")=="pending":
+			waiting_for_owner=true
+			continue
+		if owner.get("status")!="ready":
+			if String(owner.get("reason","")) in ["current_world_scene_unavailable","current_world_chunk_registry_missing"]:
+				waiting_for_owner=true
+				continue
+			return {"status":"failed","reason":String(owner.get("reason","chunk_packet_owner_unavailable")),"sourceId":source_id}
+		var flush=StaticBatchFlush.new()
+		flush.begin_replay(recipe,parent)
+		if flush.state=="failed": return {"status":"failed","reason":flush.reason,"sourceId":source_id}
+		_static_flush=flush
+		var result: Dictionary=advance_chunk_static_packet_replay(parent,budget_usec)
+		return result
+	return {"status":"pending_owner" if waiting_for_owner else "idle","checkedSources":checked}
+
+
+func chunk_static_packet_part_ids() -> Array[String]:
+	var result: Array[String]=[]
+	for part_id: Variant in _chunk_static_packet_receipts: result.append(String(part_id))
+	result.sort()
+	return result
+
+
+func _remove_chunk_static_packet_recipe(source_id: String) -> void:
+	_chunk_static_packet_recipes.erase(source_id)
+	if not _chunk_static_packet_recipe_slots.has(source_id): return
+	var index:=int(_chunk_static_packet_recipe_slots[source_id])
+	var last_index:=_chunk_static_packet_recipe_order.size()-1
+	var last_id:=_chunk_static_packet_recipe_order[last_index]
+	_chunk_static_packet_recipe_slots.erase(source_id)
+	if index!=last_index:
+		_chunk_static_packet_recipe_order[index]=last_id
+		_chunk_static_packet_recipe_slots[last_id]=index
+	_chunk_static_packet_recipe_order.pop_back()
+	if _chunk_static_packet_replay_cursor>index: _chunk_static_packet_replay_cursor-=1
+	if _chunk_static_packet_replay_cursor>=_chunk_static_packet_recipe_order.size(): _chunk_static_packet_replay_cursor=0
+
+
+func chunk_static_packet_source_ids(source_part_id: String) -> Array[String]:
+	var result: Array[String]=[]
+	var receipts: Dictionary=_chunk_static_packet_receipts.get(source_part_id,{})
+	for source_id: Variant in receipts: result.append(String(source_id))
+	result.sort()
+	return result
+
+
+func retire_chunk_static_packet_if_unexpected(source_part_id: String, source_id: String) -> bool:
+	if _chunk_static_packet_expected.get(source_part_id,{}).has(source_id): return true
+	var receipts: Dictionary=_chunk_static_packet_receipts.get(source_part_id,{})
+	var receipt: Dictionary=receipts.get(source_id,{})
+	if receipt.is_empty():
+		_remove_chunk_static_packet_recipe(source_id)
+		return true
+	if not _release_chunk_static_packet_receipt(source_id,receipt): return false
+	receipts.erase(source_id)
+	if receipts.is_empty(): _chunk_static_packet_receipts.erase(source_part_id)
+	else: _chunk_static_packet_receipts[source_part_id]=receipts
+	_remove_chunk_static_packet_recipe(source_id)
+	_chunk_static_packet_retirement_prepared=false
+	return true
+
+
+func has_pending_chunk_static_packet_retirement() -> bool:
+	if not _chunk_static_packet_retirement_prepared:
+		_chunk_static_packet_retirement_keys=[]
+		for part_id: String in _chunk_static_packet_receipts:
+			for source_id: String in _chunk_static_packet_receipts[part_id]:
+				_chunk_static_packet_retirement_keys.append(part_id+"\n"+source_id)
+		_chunk_static_packet_retirement_keys.sort()
+		_chunk_static_packet_retirement_index=0
+		_chunk_static_packet_retirement_prepared=true
+	return _chunk_static_packet_retirement_index<_chunk_static_packet_retirement_keys.size()
+
+
+func retire_next_chunk_static_packet() -> bool:
+	if not has_pending_chunk_static_packet_retirement(): return true
+	var pair: PackedStringArray=_chunk_static_packet_retirement_keys[_chunk_static_packet_retirement_index].split("\n",true,1)
+	if pair.size()==2:
+		var receipts: Dictionary=_chunk_static_packet_receipts.get(pair[0],{})
+		var receipt: Dictionary=receipts.get(pair[1],{})
+		if not receipt.is_empty() and not _release_chunk_static_packet_receipt(pair[1],receipt): return false
+		receipts.erase(pair[1])
+		if receipts.is_empty(): _chunk_static_packet_receipts.erase(pair[0])
+		_remove_chunk_static_packet_recipe(pair[1])
+		_chunk_static_packet_retirement_index+=1
+	return true
+
+
+func _release_chunk_static_packet_receipt(source_id: String, receipt: Dictionary) -> bool:
+	var backend: Node=receipt.backend.get_ref() as Node if receipt.get("backend") is WeakRef else null
+	if not is_instance_valid(backend): return true # Its owning chunk and native packet tree are already gone.
+	var chunk: Node3D=receipt.chunk.get_ref() as Node3D if receipt.get("chunk") is WeakRef else null
+	if not is_instance_valid(chunk) or backend.get_parent()!=chunk or not backend.has_method("release_packet"):
+		return false
+	var released: Variant=backend.call("release_packet",source_id,int(receipt.get("generation",0)))
+	if released is Dictionary: return String(released.get("status",""))=="released"
+	return released is bool and released
+
 func _owner_cell_for_anchor(anchor: Vector3) -> Vector2i:
 	return Vector2i(floori(anchor.x/SpatialDependencies.OWNER_SIZE),floori(anchor.z/SpatialDependencies.OWNER_SIZE))
 
 
 func resolve_chunk_render_packet_backend(owner_cell: Vector2i) -> Dictionary:
 	return ChunkRenderPacketOwnerScript.resolve_current_scene_backend(owner_cell)
+
+
+func resolve_existing_chunk_render_packet_backend(owner_cell: Vector2i) -> Dictionary:
+	return ChunkRenderPacketOwnerScript.resolve_existing_scene_backend(owner_cell)
 
 
 func static_render_tier_for_part(part) -> String:
@@ -1958,11 +2253,12 @@ func flush_static_batches(parent: Node3D) -> void:
 func _begin_static_flush(parent: Node3D, notify_progress: bool, explicit_boundary := false) -> void:
 	if _static_flush!=null or parent==null: return
 	if static_visual_batches.is_empty() and not _static_metadata_dirty \
+			and _chunk_static_packet_receipts.is_empty() \
 			and (not explicit_boundary or _pending_publication_boundary.is_empty()): return
 	_ensure_publication_boundary()
 	# Completed direct-node records need no static upload/metadata copy. Their
 	# exact same source validation still precedes the one atomic receipt commit.
-	if static_visual_batches.is_empty() and not _static_metadata_dirty:
+	if static_visual_batches.is_empty() and not _static_metadata_dirty and _chunk_static_packet_receipts.is_empty():
 		var boundary: Dictionary = _pending_publication_boundary
 		if not validate_static_flush_source():
 			_paving_reject("stale_static_flush_source")
@@ -2028,6 +2324,11 @@ func _publication_boundary_is_current(boundary: Dictionary) -> bool:
 
 func _commit_publication_boundary(boundary: Dictionary) -> bool:
 	if not _publication_boundary_is_current(boundary): return false
+	for source_part_id: String in boundary.get("sourcePartIds",[]):
+		var pending: Dictionary=_chunk_static_packet_pending_expected.get(source_part_id,{})
+		if pending.is_empty(): _chunk_static_packet_expected.erase(source_part_id)
+		else: _chunk_static_packet_expected[source_part_id]=pending
+		_chunk_static_packet_pending_expected.erase(source_part_id)
 	boundary.sourcePartIds.make_read_only()
 	boundary.committed=true
 	boundary.make_read_only()

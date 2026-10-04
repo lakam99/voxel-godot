@@ -322,6 +322,18 @@ func own_node_root() -> Node3D:
 	return _root if is_instance_valid(_root) else null
 
 
+## Repairs only missing chunk-owned static packets for this resident source.
+## Physical group receipts remain valid and independent of render-chunk lifetime.
+func advance_chunk_static_packet_replay(budget_usec: int = 2500) -> Dictionary:
+	if budget_usec < 1 or budget_usec > 4000: return {"status":"failed","reason":"invalid_slice_budget"}
+	if _cancelled or _phase not in ["packet_wait","ready"] \
+			or _building==null or not _scene_owner_live(): return {"status":"idle"}
+	var parent: Node3D=_parent.get_ref() as Node3D if _parent is WeakRef else null
+	if not _valid_parent(parent) or not is_instance_valid(_root) or _root.is_queued_for_deletion():
+		return {"status":"idle"}
+	return _building.advance_chunk_static_packet_replay(_root,budget_usec)
+
+
 ## Source-owned durable removal of a generated site tree. Such a member has
 ## no visual obligation after the same publisher acknowledged its removal.
 func visual_member_omitted(member_id: String, expected_binding: Dictionary) -> bool:
@@ -380,14 +392,17 @@ func visual_receipt_installed(source_identity: String, source_revision: String,
 		var source = witness.get("source",null)
 		var part_id := member_id.trim_prefix("building:")
 		var epoch: int = _building.source_part_publication_epoch(part_id) if _building != null else 0
+		var packet_expected: bool = _building.has_chunk_static_packet_expectation(part_id)
+		var packet_live: bool = packet_expected and _building.chunk_static_packet_receipts_live(part_id)
+		var scene_renderable := _visible_witness_renderable(witness.get("nodes",[])) != null \
+			or _visible_witness_renderable(_boundary_witnesses.get(epoch,[])) != null
 		live = live and source != null and epoch > 0 \
 			and epoch == int(witness.get("publicationEpoch",0)) \
 			and int(witness.sourceIndex) < _blueprint.parts.size() \
 			and _blueprint.parts[int(witness.sourceIndex)] == source \
 			and _building_geometry(source) == witness.geometry \
 			and _boundary_live_with_context(epoch,proof) \
-			and (_visible_witness_renderable(witness.get("nodes",[])) != null \
-				or _visible_witness_renderable(_boundary_witnesses.get(epoch,[])) != null)
+			and (not packet_expected or packet_live) and (packet_live or scene_renderable)
 	_finish_physical_proof(proof)
 	return live
 
@@ -2324,6 +2339,11 @@ func _detach_step() -> bool:
 		return true
 	if _furniture != null and not _furniture.published_parts.is_empty():
 		_furniture.published_parts.pop_back()
+		return true
+	if _building != null and _building.has_pending_chunk_static_packet_retirement():
+		if not _building.retire_next_chunk_static_packet():
+			_cleanup_reason = "chunk_packet_retirement_not_acknowledged"
+			return false
 		return true
 	if _building != null:
 		_building.static_collision_body = null

@@ -17,6 +17,49 @@ class PendingMasonry extends RefCounted:
 class StalePublisher extends RecordingPublisher:
 	var source_valid: bool = true
 	func validate_static_flush_source() -> bool: return source_valid
+class PacketBackend extends Node:
+	var installed: Dictionary={}
+	var staged: Dictionary={}
+	var release_status: Variant={"status":"released"}
+	func installed_snapshot(source_id: String) -> Dictionary: return installed.get(source_id,{"generation":0})
+	func begin_packet(source_id: String, owner_cell: Vector2i, generation: int, source_revision: String,
+			digest: String, _transform: Transform3D, segment_count: int, instance_count: int) -> Dictionary:
+		staged[source_id]={"ownerCell":owner_cell,"generation":generation,"sourceRevision":source_revision,
+			"packetDigest":digest,"segmentCount":segment_count,"instanceCount":instance_count,"segments":0}
+		return {"status":"ready_to_append" if segment_count>0 else "ready_to_commit"}
+	func append_batch(source_id: String, _generation: int, _batch_id: String, _mesh: Mesh, _material: Material,
+			_buffer: PackedFloat32Array, _bounds: AABB, _tier: String, _shadow: bool,
+			_visibility: float, _fade: float) -> Dictionary:
+		staged[source_id].segments+=1
+		return {"status":"accepted"}
+	func advance_packet(_source_id: String, _generation: int, _max_segments: int) -> Dictionary:
+		return {"status":"ready_to_commit"}
+	func commit_packet(source_id: String, generation: int) -> Dictionary:
+		installed[source_id]=staged[source_id].duplicate(true)
+		staged.erase(source_id)
+		installed[source_id].generation=generation
+		return {"status":"ready"}
+	func receipt_installed(source_id: String, generation: int, source_revision: String, digest: String) -> bool:
+		var value: Dictionary=installed.get(source_id,{})
+		return not value.is_empty() and int(value.generation)==generation \
+			and String(value.sourceRevision)==source_revision and String(value.packetDigest)==digest
+	func abort_packet(source_id: String, _generation: int) -> bool:
+		staged.erase(source_id)
+		return true
+	func release_packet(source_id: String, _generation: int) -> Variant:
+		if release_status is bool and release_status or release_status is Dictionary and release_status.get("status")=="released":
+			installed.erase(source_id)
+		return release_status
+class ReplayPublisher extends Publisher:
+	var current_chunk: Node3D
+	var current_backend: PacketBackend
+	func resolve_chunk_render_packet_backend(_owner_cell: Vector2i) -> Dictionary:
+		if not is_instance_valid(current_chunk) or not is_instance_valid(current_backend): return {"status":"pending"}
+		return {"status":"ready","chunk":current_chunk,"backend":current_backend}
+	func resolve_existing_chunk_render_packet_backend(_owner_cell: Vector2i) -> Dictionary:
+		if not is_instance_valid(current_chunk) or not is_instance_valid(current_backend): return {"status":"pending"}
+		return {"status":"ready","chunk":current_chunk,"backend":current_backend}
+	func validate_static_flush_source() -> bool: return true
 const ORIGINAL="res://artifacts/citadel-runtime-integration/publication-submission-reference-01/BuildingPartPublisherOriginal.gd"
 const ORIGINAL_SHA="9db413eae5c45ab4ec65d3c310255c032850fb87bcf781c276d9304b07c37cc4"
 class RecordingPublisher extends Publisher:
@@ -30,6 +73,15 @@ var metrics: Dictionary = {}
 func _initialize() -> void: call_deferred("run")
 func check(key: String, value: bool) -> void: checks[key]=value
 func run() -> void:
+	if OS.get_environment("BUILDING_STATIC_FLUSH_REPLAY_ONLY")=="1":
+		chunk_packet_replay_controls()
+		var focused: Dictionary={"evidence":"synthetic_chunk_packet_replay_contract","checks":checks,"passed":not checks.values().has(false)}
+		var focused_path:=OS.get_environment("BUILDING_STATIC_FLUSH_REPORT")
+		var focused_file:=FileAccess.open(focused_path,FileAccess.WRITE)
+		focused_file.store_string(JSON.stringify(focused,"\t")); focused_file.close()
+		print("STATIC PACKET REPLAY ",JSON.stringify(focused))
+		quit(0 if focused.passed else 1)
+		return
 	for budget: int in [1,2500,4000]:
 		var parent:=Node3D.new()
 		root.add_child(parent)
@@ -130,6 +182,7 @@ func run() -> void:
 	publication_boundary_controls()
 	publication_boundary_rejections()
 	publication_boundary_pending_part()
+	chunk_packet_replay_controls()
 	original_submission_parity()
 	var report: Dictionary = {"evidence":"synthetic_static_batch_flush","checks":checks,"metrics":metrics,"passed":not checks.values().has(false)}
 	var path:=OS.get_environment("BUILDING_STATIC_FLUSH_REPORT")
@@ -137,6 +190,68 @@ func run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("STATIC FLUSH ",JSON.stringify(report))
 	quit(0 if report.passed else 1)
+
+func chunk_packet_replay_controls() -> void:
+	var parent:=Node3D.new(); root.add_child(parent)
+	var publisher:=ReplayPublisher.new()
+	publisher.source_blueprint_id="replay-blueprint"
+	publisher.publication_site_id="replay-site"
+	publisher.unit_box=BoxMesh.new()
+	var old_chunk:=Node3D.new(); old_chunk.name="Chunk_0_0"; root.add_child(old_chunk)
+	var old_backend:=PacketBackend.new(); old_chunk.add_child(old_backend)
+	publisher.current_chunk=old_chunk; publisher.current_backend=old_backend
+	var material:=StandardMaterial3D.new()
+	var buffer: Array[float]=[]
+	for value in [1.0,0.0,0.0,1.0, 0.0,1.0,0.0,1.0, 0.0,0.0,1.0,1.0, 1.0,1.0,1.0,1.0]: buffer.append(value)
+	buffer.make_read_only()
+	var segment: Dictionary={"buffer":buffer,"bounds":AABB(Vector3(0.5,0.0,0.5),Vector3.ONE),"instanceCount":1}
+	segment.make_read_only()
+	var segments: Dictionary={0:segment}
+	var group: Dictionary={"material":material,"transforms":[Transform3D.IDENTITY],"customData":[Color.WHITE],
+		"renderTier":"structural","ownerCell":Vector2i.ZERO,"sourcePartId":"replay-wall",
+		"sourceRevision":"revision-1","materialKey":"material-key","preparedSegments":segments}
+	publisher.static_visual_batches={"group":group}
+	publisher._pending_publication_boundary={"epoch":1,"sourcePartIds":["replay-wall"],"committed":false}
+	publisher._finish_validated=true
+	publisher._begin_static_flush(parent,false,true)
+	var turns:=0
+	while publisher.has_pending_static_flush() and turns<100:
+		publisher.advance_static_flush(parent,4000); turns+=1
+	var ids: Array[String]=publisher.chunk_static_packet_source_ids("replay-wall")
+	var source_id:=ids[0] if not ids.is_empty() else ""
+	check("static_packet_initial_receipt_installed",not source_id.is_empty() \
+		and publisher.chunk_static_packet_receipt_live("replay-wall",source_id) \
+		and publisher._chunk_static_packet_recipes.has(source_id))
+	var retained: Dictionary=publisher._chunk_static_packet_recipes.get(source_id,{})
+	check("static_packet_replay_recipe_owns_frozen_segments",not retained.is_empty() \
+		and retained.preparedSegments[0].buffer.is_read_only() and retained.preparedSegments[0].is_read_only())
+	old_chunk.free()
+	publisher.current_chunk=Node3D.new(); publisher.current_chunk.name="Chunk_0_0"; root.add_child(publisher.current_chunk)
+	publisher.current_backend=PacketBackend.new(); publisher.current_chunk.add_child(publisher.current_backend)
+	var replay: Dictionary={"status":"pending_budget"}
+	turns=0
+	while replay.status=="pending_budget" and turns<100:
+		replay=publisher.advance_chunk_static_packet_replay(parent,4000); turns+=1
+	check("static_packet_replayed_after_chunk_recreation",replay.get("status")=="completed" \
+		and publisher.current_backend.receipt_installed(source_id,
+			int(publisher._chunk_static_packet_expected["replay-wall"][source_id].generation),
+			String(publisher._chunk_static_packet_expected["replay-wall"][source_id].sourceRevision),
+			String(publisher._chunk_static_packet_expected["replay-wall"][source_id].packetDigest)) \
+		and publisher.chunk_static_packet_receipt_live("replay-wall",source_id))
+	publisher._chunk_static_packet_expected["replay-wall"].erase(source_id)
+	publisher.current_backend.release_status={"status":"failed","reason":"installed_generation_mismatch"}
+	check("static_packet_failed_release_retains_retry_receipt",\
+		not publisher.retire_chunk_static_packet_if_unexpected("replay-wall",source_id) \
+		and publisher._chunk_static_packet_receipts.get("replay-wall",{}).has(source_id) \
+		and publisher._chunk_static_packet_recipes.has(source_id) \
+		and publisher.current_backend.installed.has(source_id))
+	publisher.current_backend.release_status={"status":"released"}
+	check("static_packet_release_ack_clears_receipt_and_recipe",\
+		publisher.retire_chunk_static_packet_if_unexpected("replay-wall",source_id) \
+		and not publisher._chunk_static_packet_receipts.get("replay-wall",{}).has(source_id) \
+		and not publisher._chunk_static_packet_recipes.has(source_id) \
+		and not publisher.current_backend.installed.has(source_id))
+	parent.free(); publisher.current_chunk.free()
 
 func drain_publication_boundary(publisher, parent: Node3D, budget: int) -> Dictionary:
 	var outcome: Dictionary = {}

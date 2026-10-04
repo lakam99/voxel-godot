@@ -22,6 +22,26 @@ static func attach_to_chunk(chunk: Node3D) -> Dictionary:
 
 
 static func resolve_current_scene_backend(owner_cell: Vector2i) -> Dictionary:
+	var chunk_result := _resolve_current_scene_chunk(owner_cell)
+	if chunk_result.get("status") != "ready": return chunk_result
+	var chunk: Node3D = chunk_result.chunk
+	var attached := attach_to_chunk(chunk)
+	if attached.get("status") != "ready":
+		attached["ownerCell"] = owner_cell
+		return attached
+	return {"status":"ready","backend":attached.backend,"chunk":chunk,"ownerCell":owner_cell}
+
+
+static func resolve_existing_scene_backend(owner_cell: Vector2i) -> Dictionary:
+	var chunk_result := _resolve_current_scene_chunk(owner_cell)
+	if chunk_result.get("status") != "ready": return chunk_result
+	var chunk: Node3D = chunk_result.chunk
+	var backend := chunk.get_node_or_null(BACKEND_NODE) as Node3D
+	if backend == null: return {"status":"pending","reason":"chunk_packet_backend_not_attached","ownerCell":owner_cell}
+	return {"status":"ready","backend":backend,"chunk":chunk,"ownerCell":owner_cell}
+
+
+static func _resolve_current_scene_chunk(owner_cell: Vector2i) -> Dictionary:
 	var scene := Engine.get_main_loop() as SceneTree
 	if scene == null or scene.current_scene == null:
 		return {"status":"pending","reason":"current_world_scene_unavailable"}
@@ -40,8 +60,4 @@ static func resolve_current_scene_backend(owner_cell: Vector2i) -> Dictionary:
 		return {"status":"pending","reason":"owner_chunk_not_loaded","ownerCell":owner_cell}
 	if String(chunk.name) != "Chunk_%d_%d" % [owner_cell.x,owner_cell.y]:
 		return {"status":"failed","reason":"owner_chunk_identity_mismatch"}
-	var attached := attach_to_chunk(chunk)
-	if attached.get("status") != "ready":
-		attached["ownerCell"] = owner_cell
-		return attached
-	return {"status":"ready","backend":attached.backend,"chunk":chunk,"ownerCell":owner_cell}
+	return {"status":"ready","chunk":chunk,"ownerCell":owner_cell}
