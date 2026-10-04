@@ -277,10 +277,8 @@ func _advance_contribution() -> Dictionary:
 			"sectionKey":section})
 	var built := _build_candidate(immutable_capture,
 		String(_active_contribution.sourcePartId), String(_active_contribution.sourceRevision))
-	if built.get("status") != "ready" or not built.get("contribution") is Dictionary:
-		if built.get("status") == "empty":
-			return _block_active_contribution("terrain_empty_section_requires_exact_empty_manifest", {
-				"sectionKey":section, "reason":String(built.get("reason", ""))})
+	if built.get("status") not in ["ready", "empty"] \
+			or (built.get("status") == "ready" and not built.get("contribution") is Dictionary):
 		_active_contribution.clear()
 		return built
 	var latest: Dictionary = _runtime.capture_static_section_sources(
@@ -294,7 +292,34 @@ func _advance_contribution() -> Dictionary:
 			or not _runtime.terrain_capture_authority_is_current(immutable_capture):
 		_active_contribution.clear()
 		return _pending("terrain_contribution_stale_after_mesh_prepare", {"sectionKey":section})
-	var contribution: Dictionary = built.contribution.duplicate(false)
+	var contribution: Dictionary
+	if built.get("status") == "empty":
+		var source_part_id := String(_active_contribution.sourcePartId)
+		var source_revision := String(_active_contribution.sourceRevision)
+		var source_id := "resident-terrain:%d,%d,%d" % [section.x, section.y, section.z]
+		var section_origin := Vector3(section * SECTION_SIZE) * CELL
+		var empty_row := {"sourceId":source_id, "sourcePartId":source_part_id,
+			"sourceRevision":source_revision,
+			"ownerCell":SectionGrid.logical_owner_cell_for_world_position(section_origin),
+			"sectionKey":section}
+		empty_row.make_read_only()
+		var explicit_empty: Array[Dictionary] = [empty_row]
+		explicit_empty.make_read_only()
+		var no_inputs: Array[Dictionary] = []
+		no_inputs.make_read_only()
+		var no_compatibility: Dictionary = {}
+		no_compatibility.make_read_only()
+		var no_bindings: Dictionary = {}
+		no_bindings.make_read_only()
+		var authority_revisions: Dictionary = {source_part_id:source_revision}
+		authority_revisions.make_read_only()
+		contribution = {"providerId":"terrain", "sectionKey":section,
+			"authoritySourceRevisions":authority_revisions, "inputs":no_inputs,
+			"compatibilityByKey":no_compatibility, "materialBindings":no_bindings,
+			"meshBindings":no_bindings, "resourceBindings":no_bindings,
+			"explicitEmptyContributors":explicit_empty}
+	else:
+		contribution = built.contribution.duplicate(false)
 	contribution["coverageRevision"] = String(_active_contribution.coverageRevision)
 	contribution["authorityRevision"] = String(_active_contribution.providerRevision)
 	contribution.make_read_only()
@@ -304,7 +329,8 @@ func _advance_contribution() -> Dictionary:
 		"coverageRevision":String(_active_contribution.coverageRevision),
 		"sourcePartId":String(_active_contribution.sourcePartId),
 		"sourceRevision":String(_active_contribution.sourceRevision),
-		"materialDigest":String(built.materialDigest)}
+		"materialDigest":String(built.get("materialDigest", "")),
+		"explicitEmpty":built.get("status") == "empty"}
 	sealed.make_read_only()
 	_contributions_by_section[section] = sealed
 	while _contributions_by_section.size() > MAX_RETAINED_RESULTS:
@@ -312,7 +338,8 @@ func _advance_contribution() -> Dictionary:
 	_active_contribution.clear()
 	return {"status":"prepared", "sectionKey":section,
 		"sourceRevision":String(sealed.sourceRevision),
-		"meshBuildUsec":int(built.meshBuildUsec)}
+		"explicitEmpty":bool(sealed.explicitEmpty),
+		"meshBuildUsec":int(built.get("meshBuildUsec", 0))}
 
 
 func _cached_contribution_is_current(cache: Dictionary, world_id: String,
@@ -328,6 +355,8 @@ func _cached_contribution_is_current(cache: Dictionary, world_id: String,
 	var capture: Dictionary = cache.get("capture", {})
 	if not _runtime.terrain_capture_authority_is_current(capture):
 		return false
+	if bool(cache.get("explicitEmpty", false)):
+		return true
 	var material: Material = _runtime.terrain.material_override if is_instance_valid(_runtime.terrain) else null
 	return is_instance_valid(material) and _material_digest(material) == String(cache.get("materialDigest", ""))
 

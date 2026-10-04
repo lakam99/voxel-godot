@@ -42,8 +42,39 @@ func _run() -> void:
 		and snapshot.get("renderLayers", []).size() == 3,
 		{"schema":candidate.get("schema", ""), "digest":candidate.get("contentManifestDigest", ""),
 		"layerCount":snapshot.get("renderLayers", []).size()})
+	var terrain_empty_contributions := _with_explicit_empty_terrain(census, contributions)
+	var terrain_empty_result := Assembler.assemble(census, SECTION,
+		terrain_empty_contributions, 2)
+	var terrain_empty_candidate: Dictionary = terrain_empty_result.get("candidate", {})
+	var terrain_empty_snapshot: Dictionary = terrain_empty_candidate.get("candidate", {}).get("snapshot", {})
+	var terrain_empty_manifest: Array = terrain_empty_snapshot.get("manifest", [])
+	var terrain_empty_manifest_row: Dictionary = {}
+	for row_value: Variant in terrain_empty_manifest:
+		if row_value is Dictionary and String(row_value.get("sourcePartId", "")) == "terrain:0,0,0":
+			terrain_empty_manifest_row = row_value
+	_check("exact_empty_provider_member_is_manifested_in_shared_section_candidate",
+		terrain_empty_result.get("status") == "ready"
+		and int(terrain_empty_candidate.get("inputCount", -1)) == 1
+		and terrain_empty_snapshot.get("contributorCount") == 2
+		and terrain_empty_manifest_row.get("batchKeys", []).is_empty()
+		and terrain_empty_manifest_row.get("ranges", []).is_empty()
+		and terrain_empty_manifest_row.get("sourceRevision") == "terrain-r1",
+		{"assemblyStatus":String(terrain_empty_result.get("status", "")),
+			"manifest":terrain_empty_manifest})
+	var omitted_empty: Array = terrain_empty_contributions.duplicate()
+	var terrain_without_empty: Dictionary = terrain_empty_contributions[0].duplicate(false)
+	terrain_without_empty.erase("explicitEmptyContributors")
+	terrain_without_empty.make_read_only()
+	omitted_empty[0] = terrain_without_empty
+	omitted_empty.make_read_only()
+	var missing_empty_result: Dictionary = Assembler.assemble(census, SECTION,
+		omitted_empty, 3)
+	_check("missing_geometry_without_explicit_empty_stays_retryable",
+		missing_empty_result.get("status") == "pending"
+		and missing_empty_result.get("reason") == "section_source_geometry_or_explicit_empty_missing",
+		missing_empty_result)
 	var missing_provider: Dictionary = Assembler.assemble(census, SECTION,
-		_read_only([contributions[0]]), 2)
+		_read_only([contributions[0]]), 4)
 	_check("missing_provider_is_retryable_without_partial_candidate",
 		missing_provider.get("status") == "pending"
 		and bool(missing_provider.get("retryable", false)), missing_provider)
@@ -177,6 +208,34 @@ func _contributions(census: Dictionary) -> Array:
 			"meshBindings":meshes, "resourceBindings":resources}
 		row.make_read_only()
 		result.append(row)
+	result.make_read_only()
+	return result
+
+
+func _with_explicit_empty_terrain(census: Dictionary, base: Array) -> Array:
+	var result: Array = base.duplicate()
+	var terrain: Dictionary = base[0].duplicate(false)
+	var source_part_id := "terrain:0,0,0"
+	var empty_row := {"sourceId":"resident-terrain:0,0,0",
+		"sourcePartId":source_part_id,
+		"sourceRevision":String(census.sourceRevisions.get(source_part_id, "")),
+		"ownerCell":Grid.logical_owner_cell_for_world_position(Vector3.ZERO),
+		"sectionKey":SECTION}
+	empty_row.make_read_only()
+	var explicit_empty: Array[Dictionary] = [empty_row]
+	explicit_empty.make_read_only()
+	var no_inputs: Array[Dictionary] = []
+	no_inputs.make_read_only()
+	var no_bindings: Dictionary = {}
+	no_bindings.make_read_only()
+	terrain["inputs"] = no_inputs
+	terrain["compatibilityByKey"] = no_bindings
+	terrain["materialBindings"] = no_bindings
+	terrain["meshBindings"] = no_bindings
+	terrain["resourceBindings"] = no_bindings
+	terrain["explicitEmptyContributors"] = explicit_empty
+	terrain.make_read_only()
+	result[0] = terrain
 	result.make_read_only()
 	return result
 

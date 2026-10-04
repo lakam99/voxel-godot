@@ -12,7 +12,8 @@ const SCHEMA := "prepared-static-section-snapshot-envelope/v1"
 
 
 static func build_replacements(partition_result: Dictionary, compatibility_by_key: Dictionary,
-		impacted_section_keys: Array, candidate_generation: int, world_id: String) -> Dictionary:
+		impacted_section_keys: Array, candidate_generation: int, world_id: String,
+		explicit_empty_contributors_by_section: Dictionary = {}) -> Dictionary:
 	if not partition_result.is_read_only():
 		return _failed("mutable_partition_result")
 	if not compatibility_by_key.is_read_only():
@@ -117,7 +118,43 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 			output_groups.get(section_key, {}))
 		if contributors.get("status") != "ready":
 			return contributors
-		var assembled: Dictionary = Snapshot.assemble(section_key, contributors.contributors)
+		var complete_contributors: Array[Dictionary] = contributors.contributors.duplicate()
+		var explicit_empty_value: Variant = explicit_empty_contributors_by_section.get(section_key, [])
+		if not explicit_empty_value is Array:
+			return _failed("explicit_empty_section_manifest_mutable_or_missing")
+		if not explicit_empty_value.is_read_only():
+			if explicit_empty_contributors_by_section.has(section_key):
+				return _failed("explicit_empty_section_manifest_mutable_or_missing")
+			explicit_empty_value.make_read_only()
+		var seen_contributors: Dictionary = {}
+		for contributor_value: Variant in complete_contributors:
+			seen_contributors[String(contributor_value.get("sourcePartId", ""))] = true
+		for empty_value: Variant in explicit_empty_value:
+			if not empty_value is Dictionary or not empty_value.is_read_only():
+				return _failed("explicit_empty_section_contributor_mutable_or_invalid")
+			var empty: Dictionary = empty_value
+			var source_id := String(empty.get("sourceId", ""))
+			var source_part_id := String(empty.get("sourcePartId", ""))
+			var source_revision := String(empty.get("sourceRevision", ""))
+			var owner_cell_value: Variant = empty.get("ownerCell")
+			if source_id.is_empty() or source_part_id.is_empty() or source_revision.is_empty() \
+					or empty.get("sectionKey") != section_key or not owner_cell_value is Vector2i \
+					or seen_contributors.has(source_part_id):
+				return _failed("explicit_empty_section_manifest_identity_invalid")
+			seen_contributors[source_part_id] = true
+			var empty_batches: Array = []
+			empty_batches.make_read_only()
+			var explicit_contributor := {"instanceAttributeLayout":Snapshot.INSTANCE_ATTRIBUTE_LAYOUT,
+				"sourceId":source_id, "sourcePartId":source_part_id,
+				"sourceRevision":source_revision, "ownerCell":owner_cell_value,
+				"sectionKey":section_key, "bufferSpace":"section_local",
+				"batches":empty_batches}
+			explicit_contributor.make_read_only()
+			complete_contributors.append(explicit_contributor)
+		complete_contributors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return String(a.get("sourceId", "")) < String(b.get("sourceId", "")))
+		complete_contributors.make_read_only()
+		var assembled: Dictionary = Snapshot.assemble(section_key, complete_contributors)
 		if assembled.get("status") != "ready":
 			return _failed("section_snapshot_assembly_failed:" + String(assembled.get("reason", "unknown")))
 		var snapshot: Dictionary = assembled.snapshot

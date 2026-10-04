@@ -64,6 +64,7 @@ static func assemble(census: Dictionary, section_key: Vector3i,
 	var materials: Dictionary = {}
 	var meshes: Dictionary = {}
 	var inputs: Array[Dictionary] = []
+	var explicit_empty_contributors: Array[Dictionary] = []
 	var provider_coverage: Array = []
 	for contribution_value: Variant in contributions:
 		if not contribution_value is Dictionary or not contribution_value.is_read_only():
@@ -107,17 +108,42 @@ static func assemble(census: Dictionary, section_key: Vector3i,
 			if observed_source_parts.has(source_part_id):
 				return _failed("section_source_part_owned_by_multiple_providers:" + source_part_id)
 			observed_source_parts[source_part_id] = provider_id
-		if inputs_value.size() != expected_members.size() and not expected_members.is_empty():
-			# Each declared contributor must supply geometry. A census member with
-			# no render input is not an explicit visual-empty success.
-			var input_members: Dictionary = {}
-			for input_value: Variant in inputs_value:
-				if input_value is Dictionary:
-					input_members[String(input_value.get("sourcePartId", ""))] = true
-			for source_part_value: Variant in expected_members:
-				if not input_members.has(String(source_part_value)):
-					return _pending("section_source_has_no_render_geometry", {
-						"providerId":provider_id, "sourcePartId":String(source_part_value)})
+		var empty_values: Variant = contribution.get("explicitEmptyContributors", [])
+		if not empty_values is Array:
+			return _failed("section_provider_explicit_empty_manifest_invalid:" + provider_id)
+		if not contribution.has("explicitEmptyContributors") and not empty_values.is_read_only():
+			empty_values.make_read_only()
+		if not empty_values.is_read_only():
+			return _failed("section_provider_explicit_empty_manifest_mutable:" + provider_id)
+		var empty_by_part: Dictionary = {}
+		for empty_value: Variant in empty_values:
+			if not empty_value is Dictionary or not empty_value.is_read_only():
+				return _failed("section_provider_explicit_empty_entry_invalid:" + provider_id)
+			var empty_row: Dictionary = empty_value
+			var empty_source_id := String(empty_row.get("sourceId", ""))
+			var empty_part_id := String(empty_row.get("sourcePartId", ""))
+			var empty_revision := String(empty_row.get("sourceRevision", ""))
+			if empty_source_id.is_empty() or empty_part_id.is_empty() \
+					or empty_revision.is_empty() or empty_row.get("sectionKey") != section_key \
+					or not empty_row.get("ownerCell") is Vector2i \
+					or not expected_members.has(empty_part_id) \
+					or String(authority_revisions_value.get(empty_part_id, "")) != empty_revision \
+					or empty_by_part.has(empty_part_id):
+				return _failed("section_provider_explicit_empty_identity_invalid:" + provider_id)
+			empty_by_part[empty_part_id] = empty_row
+		var input_members: Dictionary = {}
+		for input_value: Variant in inputs_value:
+			if input_value is Dictionary:
+				input_members[String(input_value.get("sourcePartId", ""))] = true
+		for source_part_value: Variant in expected_members:
+			var expected_part_id := String(source_part_value)
+			var has_input := input_members.has(expected_part_id)
+			var has_empty := empty_by_part.has(expected_part_id)
+			if has_input == has_empty:
+				return _pending("section_source_geometry_or_explicit_empty_missing", {
+					"providerId":provider_id, "sourcePartId":expected_part_id})
+		for empty_part_id: Variant in empty_by_part:
+			explicit_empty_contributors.append(empty_by_part[empty_part_id])
 		var resource_result := _merge_provider_resources(contribution,
 			compatibility_value, compatibility_by_key, materials, meshes)
 		if resource_result.get("status") != "ready":
@@ -178,9 +204,14 @@ static func assemble(census: Dictionary, section_key: Vector3i,
 				"sourcePartId":String(output_value.get("sourcePartId", ""))})
 	var impacted_sections: Array[Vector3i] = [section_key]
 	impacted_sections.make_read_only()
+	explicit_empty_contributors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return String(a.get("sourceId", "")) < String(b.get("sourceId", "")))
+	explicit_empty_contributors.make_read_only()
+	var explicit_empty_by_section: Dictionary = {section_key:explicit_empty_contributors}
+	explicit_empty_by_section.make_read_only()
 	var replacements := SnapshotBuilder.build_replacements(partition,
 		compatibility_by_key, impacted_sections, candidate_generation,
-		String(census.worldId))
+		String(census.worldId), explicit_empty_by_section)
 	if replacements.get("status") != "ready":
 		return _failed("whole_section_snapshot_build_failed:" + String(replacements.get("reason", "unknown")))
 	var replacement_rows: Array = replacements.get("replacements", [])
