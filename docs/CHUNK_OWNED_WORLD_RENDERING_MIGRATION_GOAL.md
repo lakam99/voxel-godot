@@ -869,9 +869,9 @@ manifest now counts opaque, cutout, and translucent layers (including explicit
 empty layers); alpha-scissor content installs, while nonempty translucent
 content remains rejected until sorting is implemented. The coordinator no
 longer rejects a source update spanning multiple sections: report
-`artifacts/citadel-runtime-integration/native-chunk-packet-multisection-coordinator-verified-20261004/report.json`
-passed 43/43 checks, including two live section-slot receipts before source
-ledger acceptance and incomplete-census rejection. This proves fixture-level
+`artifacts/citadel-runtime-integration/native-chunk-packet-multichunk-coordinator-verified-20261004/report.json`
+passed 43/43 checks, including live section-slot receipts from separate render
+owners before source-ledger acceptance and incomplete-census rejection. This proves fixture-level
 candidate installation only. Production producers remain unconnected; normal
 game visual, traversal, and performance acceptance remains open. The canonical
 charter records the stale-mid-boundary retry risk and full stage gates at
