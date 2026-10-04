@@ -6,6 +6,9 @@ extends SceneTree
 const Coordinator := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const MainRuntime := preload("res://scripts/MainRuntimeTools.gd")
 const SectionGrid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
+const TerrainRuntime := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
+const TerrainVolume := preload("res://scripts/TerrainVolumeService.gd")
+const WorldGeneration := preload("res://scripts/WorldGenerationSystem.gd")
 
 
 class FixtureCoordinator extends "res://scripts/world/WorldStaticSectionCoordinator.gd":
@@ -136,6 +139,80 @@ func run() -> void:
 		{"remaining":signal_coordinator._visible_section_demands.keys()})
 	fake_terrain.free()
 	main_runtime.free()
+	var edited_coordinator = FixtureCoordinator.new()
+	edited_coordinator.configure(world_id + ":terrain-edit")
+	var volume := TerrainVolume.new()
+	var world := WorldGeneration.new()
+	world.terrain_volume_service = volume
+	var edit_runtime := MainRuntime.new()
+	edit_runtime.world_generation_system = world
+	edit_runtime.world_static_section_coordinator = edited_coordinator
+	var voxel_runtime := TerrainRuntime.new()
+	voxel_runtime.main = edit_runtime
+	edit_runtime.voxel_terrain_runtime = voxel_runtime
+	var resident_sections: Array[Vector3i] = []
+	for z in range(-1, 2):
+		for y in range(-1, 2):
+			for x in range(-1, 2):
+				var resident_key := Vector3i(x, y, z)
+				resident_sections.append(resident_key)
+				voxel_runtime.published_mesh_blocks[resident_key] = true
+				voxel_runtime.mesh_block_revisions[resident_key] = 1
+	voxel_runtime.connect_terrain_volume_revision_signal()
+	edit_runtime.connect_voxel_terrain_section_demand_signal()
+	volume.set_cell_state(Vector3i.ZERO,
+		{"solid":true, "density":1.0, "material":"stone"}, "section_render_invalidation_contract")
+	var exact_halo_sections_redemanded := true
+	var exact_halo_revision_count := 0
+	for z in range(-1, 1):
+		for y in range(-1, 1):
+			for x in range(-1, 1):
+				var affected_key := Vector3i(x, y, z)
+				exact_halo_sections_redemanded = exact_halo_sections_redemanded \
+					and edited_coordinator._visible_section_demands.has(affected_key)
+				exact_halo_revision_count += int(
+					int(voxel_runtime.mesh_block_revisions.get(affected_key, 0)) > 1)
+	check("authoritative_terrain_revision_invalidates_resident_core_and_transvoxel_halo",
+		exact_halo_sections_redemanded and exact_halo_revision_count == 8
+		and edited_coordinator._visible_section_demands.size() == 8,
+		{"residentSections":resident_sections.size(),
+			"redemandedSections":edited_coordinator._visible_section_demands.size(),
+			"exactExpectedHaloSections":8,
+			"revisions":voxel_runtime.mesh_block_revisions})
+	voxel_runtime.free()
+	edit_runtime.free()
+	var priority_coordinator = FixtureCoordinator.new()
+	priority_coordinator.configure(world_id + ":urgent-recompile")
+	var edited_section := Vector3i(8, 0, 0)
+	var installed_candidate := {"sectionKey":edited_section, "generation":4}
+	priority_coordinator._production_candidates_by_section[edited_section] = installed_candidate
+	priority_coordinator.request_visible_section_demand(edited_section, 10, 900.0)
+	var installed_demand: Dictionary = priority_coordinator._visible_section_demands[edited_section]
+	installed_demand["stage"] = "installed"
+	installed_demand["installedGeneration"] = 4
+	installed_demand["queued"] = false
+	priority_coordinator._visible_section_demands[edited_section] = installed_demand
+	priority_coordinator._visible_section_demand_queue.clear()
+	priority_coordinator._visible_section_demand_head = 0
+	priority_coordinator._visible_section_demand_tail = 0
+	priority_coordinator._visible_section_demand_count = 0
+	for index in range(3):
+		priority_coordinator.request_visible_section_demand(
+			Vector3i(index, 0, 0), 1, 0.01 + float(index))
+	var revision_request: Dictionary = priority_coordinator.request_visible_section_demand(
+		edited_section, 11, 900.0)
+	var selected_recompile: Dictionary = priority_coordinator._take_next_visible_section_demand()
+	var refreshed_demand: Dictionary = priority_coordinator._visible_section_demands[edited_section]
+	check("installed_section_revision_change_preempts_first_time_nearby_sections",
+		revision_request.get("status") == "queued"
+		and bool(refreshed_demand.get("urgentRecompile", false))
+		and float(refreshed_demand.get("priority", INF)) == 0.0
+		and selected_recompile.get("status") == "ready"
+		and selected_recompile.get("sectionKey") == edited_section
+		and priority_coordinator._production_candidates_by_section.get(edited_section) == installed_candidate,
+		{"request":revision_request, "selected":selected_recompile,
+			"demand":refreshed_demand,
+			"previousCandidateRetained":priority_coordinator._production_candidates_by_section.get(edited_section) == installed_candidate})
 	var demand: Dictionary = coordinator.request_visible_section_demand(section_far, 11, 900.0)
 	check("native_mesh_section_demand_enters_retryable_coordinator_queue",
 		configured.get("status") == "ready" and roster_configured.get("status") == "ready"
@@ -266,6 +343,8 @@ func run() -> void:
 		"representation_retained":bool(first_invalidation.get("previousRepresentationRetained", false)),
 		"waiting":invalidated_state.get("stage") == "waiting",
 		"still_queued":bool(invalidated_state.get("queued", false)),
+		"urgent_recompile":bool(invalidated_state.get("urgentRecompile", false)),
+		"urgent_priority":float(invalidated_state.get("priority", INF)) == 0.0,
 		"old_generation_retained":int(invalidated_state.get("installedGeneration", 0)) == prior_generation,
 		"old_candidate_retained":is_same(lifecycle._production_candidates_by_section[installed_key], prior_candidate),
 		"index_uses_source_id_not_source_part_id":lifecycle._visible_sections_by_source_id.has("ecology:prop:fixture")

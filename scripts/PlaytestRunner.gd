@@ -963,6 +963,11 @@ func run_production_section_candidate_diagnostic() -> void:
         "nativeSnapshot":native_snapshot,
         "nativeReceiptCurrent":native_receipt_current,
         "receiptBackedInstall":matching_receipt}
+    if matching_receipt:
+        var edit_refresh: Dictionary = await _exercise_production_terrain_section_edit_refresh(
+            coordinator, terrain_runtime, section_key, installed_generation, manifest_digest)
+        report["terrainEditRefresh"] = edit_refresh
+        matching_receipt = bool(edit_refresh.get("passed", false))
     report["elapsedMs"] = float(Time.get_ticks_usec() - started_usec) / 1000.0
     report["status"] = "passed" if matching_receipt else \
         ("pending" if install.get("status") in ["pending", "pending_owner"] \
@@ -981,6 +986,104 @@ func run_production_section_candidate_diagnostic() -> void:
         "status":report.status, "receiptBackedInstall":matching_receipt,
         "elapsedMs":report.elapsedMs})
     add_result("production_section_candidate_diagnostic", matching_receipt, JSON.stringify(report))
+
+
+func _exercise_production_terrain_section_edit_refresh(coordinator: Object,
+        terrain_runtime: Object, section_key: Vector3i, previous_generation: int,
+        previous_manifest_digest: String) -> Dictionary:
+    var main_node = main
+    var world = main_node.get("world_generation_system") if is_instance_valid(main_node) else null
+    if world == null or not world.has_method("get_cell_state") \
+            or not world.has_method("set_cell_state") or not world.has_method("save_section_delta"):
+        return {"passed":false, "stage":"edit_setup", "reason":"terrain_edit_authority_missing"}
+    var target_cell := section_key * 16 + Vector3i(8, 8, 8)
+    var before: Dictionary = world.call("get_cell_state", target_cell)
+    var edited := before.duplicate(true)
+    edited["solid"] = not bool(before.get("solid", false))
+    edited["density"] = 1.0 if bool(edited.solid) else -1.0
+    var existing_material := String(before.get("material", "stone"))
+    edited["material"] = existing_material if existing_material != "air" else "stone"
+    var accepted: Dictionary = world.call("set_cell_state", target_cell, edited,
+        "production_section_edit_refresh_diagnostic")
+    if accepted.is_empty():
+        return {"passed":false, "stage":"edit_admission", "reason":"terrain_edit_not_accepted",
+            "targetCell":[target_cell.x, target_cell.y, target_cell.z], "before":before}
+    var expected_signature: String = terrain_runtime.call("edit_signature", accepted)
+    var core_key: Vector3i = terrain_runtime.call("section_key_for_cell", target_cell)
+    var edit_applied := false
+    var demand_state: Dictionary = {}
+    var installed_candidate: Dictionary = {}
+    var receipt: Dictionary = {}
+    var installed_after_edit := false
+    for frame_index in range(3600):
+        await get_tree().process_frame
+        if not is_instance_valid(coordinator) or not is_instance_valid(terrain_runtime):
+            return {"passed":false, "stage":"runtime_lifetime",
+                "reason":"terrain_edit_runtime_retired", "frameIndex":frame_index}
+        var applied: Dictionary = terrain_runtime.get("applied_edit_signatures")
+        var pending: Dictionary = terrain_runtime.get("pending_edit_sections")
+        var pending_core: Dictionary = pending.get(core_key, {}) if pending is Dictionary else {}
+        edit_applied = String(applied.get(target_cell, "")) == expected_signature \
+            and pending_core.is_empty()
+        var demands: Dictionary = coordinator.get("_visible_section_demands")
+        demand_state = demands.get(section_key, {}) if demands is Dictionary else {}
+        var candidates: Dictionary = coordinator.get("_production_candidates_by_section")
+        installed_candidate = candidates.get(section_key, {}) if candidates is Dictionary else {}
+        var receipts: Dictionary = coordinator.get("_production_candidate_receipts")
+        receipt = receipts.get(section_key, {}) if receipts is Dictionary else {}
+        var generation := int(installed_candidate.get("generation", 0))
+        var digest := String(installed_candidate.get("contentManifestDigest", ""))
+        installed_after_edit = edit_applied and generation > previous_generation \
+            and digest != previous_manifest_digest \
+            and String(demand_state.get("stage", "")) == "installed" \
+            and bool(coordinator.call("_receipt_is_live", installed_candidate, receipt))
+        if installed_after_edit:
+            break
+        if String(demand_state.get("stage", "")) == "blocked":
+            break
+        if frame_index > 0 and frame_index % 120 == 0:
+            mark_progress("terrain_section_edit_refresh_%s" % String(demand_state.get("stage", "waiting")))
+    var delta: Dictionary = world.call("save_section_delta", core_key)
+    var delta_contains_target := false
+    var delta_cells: Array = delta.get("cells", [])
+    for cell_value in delta_cells:
+        if not (cell_value is Dictionary):
+            continue
+        var record: Dictionary = cell_value
+        var serialized_cell: Variant = record.get("cell")
+        if serialized_cell is Vector3i and serialized_cell == target_cell:
+            delta_contains_target = true
+            break
+        if serialized_cell is Array and serialized_cell == [target_cell.x, target_cell.y, target_cell.z]:
+            delta_contains_target = true
+            break
+    var current_state: Dictionary = world.call("get_cell_state", target_cell)
+    var terrain_node = terrain_runtime.get("terrain")
+    var collision_publisher_enabled := is_instance_valid(terrain_node) \
+        and bool(terrain_node.get("generate_collisions"))
+    return {"passed":installed_after_edit and delta_contains_target \
+            and bool(current_state.get("edited", false)) and collision_publisher_enabled,
+        "stage":"fresh_receipt" if installed_after_edit else "waiting_or_blocked",
+        "targetCell":[target_cell.x, target_cell.y, target_cell.z],
+        "before":before, "accepted":accepted,
+        "editAppliedToResidentVoxelData":edit_applied,
+        "pendingEditSectionCount":(terrain_runtime.get("pending_edit_sections") as Dictionary).size(),
+        "previousGeneration":previous_generation,
+        "installedGeneration":int(installed_candidate.get("generation", 0)),
+        "previousManifestDigest":previous_manifest_digest,
+        "installedManifestDigest":String(installed_candidate.get("contentManifestDigest", "")),
+        "demandStage":String(demand_state.get("stage", "missing")),
+        "demandLastReason":String(demand_state.get("lastReason", "")),
+        "demandLastInstallReason":String(demand_state.get("lastInstallReason", "")),
+        "demandLastInstallStatus":String(demand_state.get("lastInstallStatus", "")),
+        "demandTerrainRevision":demand_state.get("terrainRevision", ""),
+        "targetMeshBlockRevision":int(terrain_runtime.get("mesh_block_revisions").get(section_key, 0)),
+        "receiptLive":bool(coordinator.call("_receipt_is_live", installed_candidate, receipt)) \
+            if not installed_candidate.is_empty() else false,
+        "saveDeltaContainsEditedCell":delta_contains_target,
+        "durableEditedStateCurrent":bool(current_state.get("edited", false)),
+        "collisionPublisherStillEnabled":collision_publisher_enabled,
+        "doesNotProve":"collision contact parity, fluid/light parity, old Voxel Tools visual retirement, save/reload roundtrip, visual quality, traversal or performance"}
 
 func run() -> void:
     var only_section := OS.get_environment("VOXEL_PLAYTEST_ONLY").strip_edges()

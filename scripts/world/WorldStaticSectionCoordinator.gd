@@ -104,9 +104,13 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 	var state: Dictionary = _visible_section_demands.get(section_key, {})
 	var revision := str(terrain_revision)
 	if state.is_empty():
-		state = {"terrainRevision":revision, "priority":camera_distance_squared,
+		var has_installed_candidate := _production_candidates_by_section.has(section_key)
+		state = {"terrainRevision":revision,
+			"priority":0.0 if has_installed_candidate else camera_distance_squared,
 			"stage":"waiting", "attempts":0,
 			"nextAttemptFrame":Engine.get_process_frames(), "queued":false}
+		if has_installed_candidate:
+			state["urgentRecompile"] = true
 		if _dirty_source_sections.has(section_key):
 			state["sourceInvalidation"] = _dirty_source_sections[section_key].duplicate(true)
 		_visible_section_demands[section_key] = state
@@ -116,6 +120,12 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 		if String(state.get("terrainRevision", "")) != revision:
 			_cancel_pending_production_candidate(section_key)
 			state["terrainRevision"] = revision
+			if _production_candidates_by_section.has(section_key):
+				# A replacement for installed world content is latency-sensitive:
+				# keep the old receipt live, but let its revision catch up before
+				# spending the bounded capture lane on first-time distant sections.
+				state["urgentRecompile"] = true
+				state["priority"] = 0.0
 			state["stage"] = "waiting"
 			state["attempts"] = 0
 			state["lastReason"] = ""
@@ -160,6 +170,12 @@ func invalidate_visible_section_source(section_key: Vector3i, provider_id: Strin
 	state["nextAttemptFrame"] = Engine.get_process_frames()
 	state["sourceInvalidation"] = {"providerId":provider_id, "sourceId":source_id,
 		"sourceRevision":source_revision, "requestedFrame":Engine.get_process_frames()}
+	if _production_candidates_by_section.has(section_key):
+		# Source invalidations and terrain-revision requests are two entry points
+		# to the same replacement lifecycle. Keep the installed representation
+		# visible, but give its replacement the same urgent queue priority.
+		state["urgentRecompile"] = true
+		state["priority"] = 0.0
 	state.erase("candidateGeneration")
 	state.erase("blockedReason")
 	if not bool(state.get("queued", false)):
@@ -388,7 +404,15 @@ func _take_next_visible_section_demand() -> Dictionary:
 	var selected: Dictionary = {}
 	var initial: Dictionary = _closest_visible_demand(initial_candidates)
 	var recompile: Dictionary = _closest_visible_demand(recompile_candidates)
-	if not recompile.is_empty() and (initial.is_empty() \
+	var urgent_recompiles: Array[Dictionary] = []
+	for row: Dictionary in recompile_candidates:
+		if bool(row.state.get("urgentRecompile", false)):
+			urgent_recompiles.append(row)
+	var urgent_recompile: Dictionary = _closest_visible_demand(urgent_recompiles)
+	if not urgent_recompile.is_empty():
+		selected = urgent_recompile
+		_visible_section_recompile_quota = maxi(0, _visible_section_recompile_quota - 1)
+	elif not recompile.is_empty() and (initial.is_empty() \
 			or float(recompile.priority) < float(initial.priority) \
 			and _visible_section_recompile_quota > 0):
 		selected = recompile
@@ -697,6 +721,7 @@ func _reconcile_visible_section_candidate_outcome(section_key: Vector3i,
 			"backendInstanceId":int(receipt.get("backendInstanceId", 0)),
 			"chunkInstanceId":int(receipt.get("chunkInstanceId", 0)),
 			"ownerCell":receipt.get("ownerCell", Vector2i.ZERO)}
+		state.erase("urgentRecompile")
 		state["queued"] = false
 	elif bool(outcome.get("requiresReassembly", false)) \
 			or (status in ["failed", "cancelled"] and bool(outcome.get("retryable", false))):

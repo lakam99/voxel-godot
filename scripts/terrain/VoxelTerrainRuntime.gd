@@ -663,6 +663,7 @@ var site_traversal_last_poll_usec := 0
 
 func setup(main_node) -> Dictionary:
 	main = main_node
+	connect_terrain_volume_revision_signal()
 	collision_owner_generation += 1
 	configured_seed = String(main.get("seed_text"))
 	if not required_classes_available():
@@ -715,6 +716,7 @@ func setup(main_node) -> Dictionary:
 	update_viewer_position()
 	terrain.mesh_block_entered.connect(on_mesh_block_entered)
 	terrain.mesh_block_exited.connect(on_mesh_block_exited)
+	connect_terrain_volume_revision_signal()
 	authority_ready = true
 	return {"ok": true, "backend": "VoxelTerrain", "mesher": "VoxelMesherTransvoxel"}
 
@@ -1842,6 +1844,59 @@ func on_mesh_block_exited(block_position: Vector3i) -> void:
 	invalidate_gameplay_publications_for_mesh_block(block_position)
 
 
+func connect_terrain_volume_revision_signal() -> bool:
+	var service = volume_service()
+	if service == null or not service.has_signal("terrain_section_revision_changed"):
+		return false
+	var callback := Callable(self, "on_terrain_volume_section_revision_changed")
+	if not service.is_connected("terrain_section_revision_changed", callback):
+		service.connect("terrain_section_revision_changed", callback)
+	return true
+
+
+func on_terrain_volume_section_revision_changed(_section_key: Vector3i,
+		_volume_revision: int, changed_min_cell: Vector3i,
+		changed_max_cell: Vector3i) -> void:
+	# The event identifies the edited volume bounds within a dirty 16^3 section.
+	# Refresh only render candidates whose one-low/two-high Transvoxel capture
+	# sample volume intersects those exact changed cells.
+	_notify_terrain_capture_blocks_for_cell_bounds(changed_min_cell, changed_max_cell)
+
+
+func _notify_terrain_capture_blocks_for_cell_bounds(changed_min: Vector3i,
+		changed_max: Vector3i) -> void:
+	var low := Vector3i(
+		ceili(float(changed_min.x - 17) / NATIVE_MESH_BLOCK_SIZE_CELLS),
+		ceili(float(changed_min.y - 17) / NATIVE_MESH_BLOCK_SIZE_CELLS),
+		ceili(float(changed_min.z - 17) / NATIVE_MESH_BLOCK_SIZE_CELLS))
+	var high := Vector3i(
+		floori(float(changed_max.x + 1) / NATIVE_MESH_BLOCK_SIZE_CELLS),
+		floori(float(changed_max.y + 1) / NATIVE_MESH_BLOCK_SIZE_CELLS),
+		floori(float(changed_max.z + 1) / NATIVE_MESH_BLOCK_SIZE_CELLS))
+	for z in range(low.z, high.z + 1):
+		for y in range(low.y, high.y + 1):
+			for x in range(low.x, high.x + 1):
+				_notify_terrain_capture_block_revision(Vector3i(x, y, z))
+
+
+func _notify_terrain_capture_blocks_for_changed_cells(cell_values: Array) -> void:
+	var affected_cells := {}
+	for cell_value in cell_values:
+		if not (cell_value is Vector3i):
+			continue
+		affected_cells[cell_value] = true
+	for cell_value in affected_cells.keys():
+		_notify_terrain_capture_blocks_for_cell_bounds(cell_value, cell_value)
+
+
+func _notify_terrain_capture_block_revision(block_position: Vector3i) -> void:
+	if not published_mesh_blocks.has(block_position):
+		return
+	mesh_publication_serial += 1
+	mesh_block_revisions[block_position] = mesh_publication_serial
+	visible_mesh_block_revision_changed.emit(block_position, mesh_publication_serial)
+
+
 func request_terrain_section_shadow_install(block_position: Vector3i) -> Dictionary:
 	if not authority_ready or terrain_section_shadow_publisher == null:
 		return {"status":"failed", "reason":"terrain_section_shadow_publisher_unavailable"}
@@ -2686,6 +2741,7 @@ func apply_edit_batch(changes: Dictionary) -> bool:
 		else:
 			applied_edit_signatures[cell] = signature
 	tool.paste(min_cell, buffer, channels_mask)
+	_notify_terrain_capture_blocks_for_changed_cells(changes.keys())
 	var affected_game_chunks := {}
 	for cell_value in changes.keys():
 		var cell: Vector3i = cell_value

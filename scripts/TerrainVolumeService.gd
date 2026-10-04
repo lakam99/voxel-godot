@@ -1,6 +1,9 @@
 extends RefCounted
 class_name TerrainVolumeService
 
+signal terrain_section_revision_changed(section_key: Vector3i, revision: int,
+	changed_min_cell: Vector3i, changed_max_cell: Vector3i)
+
 const SECTION_SIZE := 16
 const SECTION_CELL_COUNT := SECTION_SIZE * SECTION_SIZE * SECTION_SIZE
 const UNDERGROUND_AIR_BIOME := "underground_air"
@@ -629,12 +632,14 @@ func fluid_mesh_payload_state(state: Dictionary) -> Dictionary:
 		return empty_state
 	return state
 
-func mark_fluid_section_changed(cell: Vector3i) -> void:
+func mark_fluid_section_changed(cell: Vector3i, notify_section_candidate := true) -> void:
 	fluid_revision += 1
 	var section_key := section_key_for_cell(cell)
 	fluid_section_revisions[section_key] = fluid_revision
 	update_section_column_revision(fluid_section_column_revisions, section_key, fluid_revision)
 	fluid_dirty_cells[cell] = true
+	if notify_section_candidate:
+		terrain_section_revision_changed.emit(section_key, fluid_revision, cell, cell)
 
 func elapsed_ms_since(started_usec: int) -> float:
 	return float(Time.get_ticks_usec() - started_usec) / 1000.0
@@ -2204,6 +2209,22 @@ func mark_section_dirty(section_key: Vector3i, flags := {}) -> void:
 	section_revisions[section_key] = revision
 	update_section_column_revision(section_column_revisions, section_key, revision)
 	dirty_sections[section_key] = entry
+	var section_min := section_key * SECTION_SIZE
+	var section_max := section_min + Vector3i.ONE * (SECTION_SIZE - 1)
+	var changed_min := section_min
+	var changed_max := section_max
+	if flags is Dictionary:
+		if flags.get("cell") is Vector3i:
+			changed_min = flags.cell
+			changed_max = flags.cell
+		elif flags.get("boxMin") is Vector3i and flags.get("boxMax") is Vector3i:
+			changed_min = flags.boxMin
+			changed_max = flags.boxMax
+	changed_min = Vector3i(maxi(changed_min.x, section_min.x),
+		maxi(changed_min.y, section_min.y), maxi(changed_min.z, section_min.z))
+	changed_max = Vector3i(mini(changed_max.x, section_max.x),
+		mini(changed_max.y, section_max.y), mini(changed_max.z, section_max.z))
+	terrain_section_revision_changed.emit(section_key, revision, changed_min, changed_max)
 
 func save_section_delta(section_key: Vector3i) -> Dictionary:
 	_refresh_durable_delta_section(section_key)
