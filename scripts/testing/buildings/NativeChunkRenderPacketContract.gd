@@ -18,6 +18,26 @@ var diagnostics: Dictionary = {}
 
 class SceneRegistry extends Node3D:
 	var chunks: Dictionary={}
+	var static_section_render_root: Node3D
+	var static_section_render_owners: Dictionary={}
+
+	func get_static_section_render_owner(owner_cell: Vector2i,
+			create_if_missing := true) -> Dictionary:
+		var owner: Node3D=static_section_render_owners.get(owner_cell) as Node3D
+		if is_instance_valid(owner):
+			return {"status":"ready","owner":owner,
+				"backend":owner.get_node_or_null("ChunkRenderPacketBackend")}
+		if not create_if_missing:
+			return {"status":"pending","reason":"static_section_owner_not_loaded"}
+		owner=Node3D.new()
+		owner.name="Chunk_%d_%d" % [owner_cell.x,owner_cell.y]
+		owner.position=Vector3(owner_cell.x*StaticRenderSectionGrid.STREAM_CHUNK_SIZE_METERS,
+			0.0,owner_cell.y*StaticRenderSectionGrid.STREAM_CHUNK_SIZE_METERS)
+		static_section_render_root.add_child(owner)
+		var attached: Dictionary=PacketOwner.attach_to_chunk(owner)
+		if attached.get("status")!="ready": return attached
+		static_section_render_owners[owner_cell]=owner
+		return {"status":"ready","owner":owner,"backend":attached.backend}
 
 class MainRuntimeHarness extends "res://scripts/Main.gd":
 	func _ready() -> void: pass
@@ -50,6 +70,9 @@ func _run() -> void:
 	var scene := SceneRegistry.new()
 	scene.name="NativeChunkPacketContractScene"
 	root.add_child(scene)
+	scene.static_section_render_root=Node3D.new()
+	scene.static_section_render_root.name="StaticSectionOwners"
+	scene.add_child(scene.static_section_render_root)
 	current_scene=scene
 	var first_chunk := _make_chunk(scene,OWNER_CELL)
 	var first_owner := PacketOwner.attach_to_chunk(first_chunk)
@@ -132,6 +155,7 @@ func _run() -> void:
 	var section_snapshot: Dictionary=section_candidate.snapshot
 	var section_bindings_started: Dictionary=PacketOwner.begin_static_section_install(section_candidate,
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
+	var section_backend: Node=section_bindings_started.get("backend") as Node
 	var section_session: Variant=section_bindings_started.get("session")
 	var section_result: Dictionary={"status":section_bindings_started.get("status","failed")}
 	var section_turns:=0
@@ -140,7 +164,8 @@ func _run() -> void:
 		section_result=section_session.advance(4)
 		section_turns+=1
 	var section_slot_id:=StaticSectionInstallSession.slot_id("native-section-contract-world",Vector3i.ZERO)
-	var section_backend_snapshot: Dictionary=backend.call("installed_snapshot",section_slot_id)
+	var section_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id) \
+		if is_instance_valid(section_backend) else {"status":"missing"}
 	var section_receipts: Array[Dictionary]=[]
 	if section_result.get("status")=="installed" and section_result.get("receipt") is Dictionary:
 		section_receipts.append(section_result.receipt)
@@ -153,7 +178,7 @@ func _run() -> void:
 		section_begin.get("status")=="ready" and section_admission.get("status")=="accepted" \
 		and section_prepared.get("status")=="prepared" \
 		and section_session is RefCounted and section_session.state=="installed" \
-		and backend.call("receipt_installed",section_slot_id,1,
+		and section_backend.call("receipt_installed",section_slot_id,1,
 			"native-section-contract-world:1",String(section_candidate.contentManifestDigest)) \
 		and section_backend_snapshot.get("status")=="ready" \
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
@@ -206,7 +231,7 @@ func _run() -> void:
 			coordinator_census,coordinator_materials,coordinator_meshes,4)
 		coordinator_turns+=1
 	var coordinator_slot_id:=StaticSectionInstallSession.slot_id(coordinator_world,Vector3i.ZERO)
-	var coordinator_backend_snapshot: Dictionary=backend.call("installed_snapshot",coordinator_slot_id)
+	var coordinator_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",coordinator_slot_id)
 	diagnostics["worldCoordinatorInstall"]={"configured":coordinator_configured,
 		"enqueued":coordinator_enqueued,"segmentAdmitted":coordinator_segment_admitted,
 		"lastAdvance":coordinator_install,"turns":coordinator_turns,
@@ -219,7 +244,7 @@ func _run() -> void:
 		and coordinator_backend_snapshot.get("status")=="ready" \
 		and int(coordinator_backend_snapshot.get("generation",0))==1 \
 		and coordinator.status().get("committedSourcePartIds",[]).has(coordinator_part_id) \
-		and backend.call("receipt_installed",coordinator_slot_id,1,
+		and section_backend.call("receipt_installed",coordinator_slot_id,1,
 			"%s:1" % coordinator_world,String(coordinator_backend_snapshot.get("packetDigest",""))))
 	var stale_declaration_segment: Dictionary=coordinator_declaration_segment.duplicate(false)
 	stale_declaration_segment["segmentId"]="coordinator-segment-2"
@@ -247,7 +272,7 @@ func _run() -> void:
 	incomplete_census.make_read_only()
 	var incomplete_result: Dictionary=coordinator.advance_boundary(stale_revisions,
 		incomplete_census,coordinator_materials,coordinator_meshes,4)
-	var retained_coordinator_slot: Dictionary=backend.call("installed_snapshot",coordinator_slot_id)
+	var retained_coordinator_slot: Dictionary=section_backend.call("installed_snapshot",coordinator_slot_id)
 	diagnostics["worldCoordinatorIncompleteCensus"]={"result":incomplete_result,
 		"status":coordinator.status(),"backend":retained_coordinator_slot}
 	_check("world_coordinator_rejects_incomplete_source_census_without_replacing_slot",
@@ -265,7 +290,7 @@ func _run() -> void:
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
 	var cancelled_session: Variant=cancelled_started.get("session")
 	var cancel_receipt: Dictionary=cancelled_session.cancel() if cancelled_session is RefCounted else {"status":"missing"}
-	var retained_after_cancel: Dictionary=backend.call("installed_snapshot",section_slot_id)
+	var retained_after_cancel: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
 	_check("cancelled_section_replacement_keeps_previous_native_root_visible",
 		cancel_receipt.get("status")=="cancelled" \
 		and retained_after_cancel.get("status")=="ready" \
@@ -279,19 +304,19 @@ func _run() -> void:
 	var owner_swap_started: Dictionary=PacketOwner.begin_static_section_install(cancelled_candidate,
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
 	var owner_swap_session: Variant=owner_swap_started.get("session")
-	var previous_registry_chunk: Variant=scene.chunks[OWNER_CELL]
+	var previous_section_owner: Variant=scene.static_section_render_owners[OWNER_CELL]
 	var replacement_registry_chunk:=Node3D.new()
 	replacement_registry_chunk.name="Chunk_0_0"
-	scene.chunks[OWNER_CELL]=replacement_registry_chunk
+	scene.static_section_render_owners[OWNER_CELL]=replacement_registry_chunk
 	var owner_swap_result: Dictionary=owner_swap_session.advance(4) if owner_swap_session is RefCounted \
 		else {"status":"missing"}
-	scene.chunks[OWNER_CELL]=previous_registry_chunk
+	scene.static_section_render_owners[OWNER_CELL]=previous_section_owner
 	replacement_registry_chunk.free()
 	_check("section_install_revalidates_registry_owner_before_upload",
 		owner_swap_started.get("status")=="ready" \
 		and owner_swap_result.get("status")=="failed" \
 		and owner_swap_result.get("reason")=="section_install_owner_replaced" \
-		and int(backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
+		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
 	var cross_chunk_snapshot: Dictionary=section_snapshot.duplicate(false)
 	var cross_chunk_dependencies: Array[Vector2i]=[OWNER_CELL,Vector2i(1,0)]
 	cross_chunk_dependencies.make_read_only()
@@ -305,10 +330,14 @@ func _run() -> void:
 	cross_chunk_candidate.make_read_only()
 	var cross_chunk_start: Dictionary=PacketOwner.begin_static_section_install(cross_chunk_candidate,
 		{"native-section-material":section_material},{"unit-box-v1":section_mesh})
-	_check("section_candidate_waits_for_cross_chunk_dependency_pin",
-		cross_chunk_start.get("status")=="failed" \
-		and cross_chunk_start.get("reason")=="section_residency_dependency_not_pinned" \
-		and int(backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
+	var cross_chunk_session: Variant=cross_chunk_start.get("session")
+	var cross_chunk_cancel: Dictionary=cross_chunk_session.cancel() \
+		if cross_chunk_session is RefCounted else {"status":"missing"}
+	_check("section_owner_accepts_cross_chunk_manifest_and_retains_old_slot_on_cancel",
+		cross_chunk_start.get("status")=="ready" \
+		and cross_chunk_cancel.get("status")=="cancelled" \
+		and cross_chunk_start.get("chunk")!=first_chunk \
+		and int(section_backend.call("installed_snapshot",section_slot_id).get("generation",0))==1)
 	var instance_transform:=Transform3D(Basis.IDENTITY,Vector3(0.5,0.5,0.5))
 	var buffer: Array[float]=[]
 	for value: float in InstanceBuffer.encode(instance_transform,Color.WHITE): buffer.append(value)
@@ -485,6 +514,10 @@ func _run() -> void:
 	chunk_root.name="ChunkRoot"
 	main.add_child(chunk_root)
 	main.chunk_root=chunk_root
+	var static_section_root:=Node3D.new()
+	static_section_root.name="StaticSectionOwners"
+	main.add_child(static_section_root)
+	main.static_section_render_root=static_section_root
 	var terrain_runtime := VoxelTerrainRuntime.new()
 	terrain_runtime.main=main
 	terrain_runtime.site_gate=AdmissionGateStub.new()
@@ -503,6 +536,32 @@ func _run() -> void:
 	_check("main_runtime_creates_chunk_owned_native_backend",is_instance_valid(streamed_chunk) \
 		and streamed_chunk.get_parent()==chunk_root \
 		and streamed_chunk.has_node("ChunkRenderPacketBackend"))
+	var section_owner_result: Dictionary=main.get_static_section_render_owner(Vector2i(1,0),true)
+	var static_section_owner: Node3D=section_owner_result.get("owner") as Node3D
+	diagnostics["mainRuntimeSectionOwner"]={"result":section_owner_result,
+		"rootValid":is_instance_valid(main.static_section_render_root),
+		"rootInsideTree":main.static_section_render_root.is_inside_tree() if is_instance_valid(main.static_section_render_root) else false,
+		"ownerInsideTree":static_section_owner.is_inside_tree() if is_instance_valid(static_section_owner) else false,
+		"ownerPosition":static_section_owner.position if is_instance_valid(static_section_owner) else Vector3.ZERO,
+		"ownerParentMatches":static_section_owner.get_parent()==static_section_root if is_instance_valid(static_section_owner) else false,
+		"ownerHasBackend":static_section_owner.has_node("ChunkRenderPacketBackend") if is_instance_valid(static_section_owner) else false,
+		"ownerDistinctFromGameplay":static_section_owner!=main.chunks.get(Vector2i(1,0)) if is_instance_valid(static_section_owner) else false,
+		"ownerPositionMatches":static_section_owner.position.x==Vector2i(1,0).x*StaticRenderSectionGrid.STREAM_CHUNK_SIZE_METERS if is_instance_valid(static_section_owner) else false,
+		"expectedPositionX":StaticRenderSectionGrid.STREAM_CHUNK_SIZE_METERS}
+	_check("main_runtime_creates_independent_static_section_owner",
+		section_owner_result.get("status")=="ready" \
+		and is_instance_valid(static_section_owner) \
+		and static_section_owner.get_parent()==static_section_root \
+		and static_section_owner!=main.chunks.get(Vector2i(1,0)) \
+		and static_section_owner.has_node("ChunkRenderPacketBackend") \
+		and is_equal_approx(static_section_owner.position.x,
+			Vector2i(1,0).x*StaticRenderSectionGrid.STREAM_CHUNK_SIZE_METERS))
+	main.prune_static_section_render_owners({Vector2i(1,0):true})
+	var retained_static_owner: bool=main.static_section_render_owners.has(Vector2i(1,0))
+	main.prune_static_section_render_owners({})
+	_check("main_runtime_retires_static_section_owner_after_render_demand",
+		retained_static_owner and not main.static_section_render_owners.has(Vector2i(1,0)) \
+		and static_section_owner.is_queued_for_deletion())
 	_check("main_runtime_admits_and_requests_production_chunk",terrain_runtime.site_gate!=null \
 		and terrain_runtime.desired_gameplay_chunks.has(OWNER_CELL) \
 		and terrain_runtime.pending_gameplay_chunks.has(OWNER_CELL) \

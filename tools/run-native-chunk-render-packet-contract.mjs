@@ -80,7 +80,9 @@ cli(async () => {
     && checks.cancelled_section_replacement_keeps_previous_native_root_visible === true
     && checks.native_section_slot_rejects_reused_generation === true
     && checks.section_install_revalidates_registry_owner_before_upload === true
-    && checks.section_candidate_waits_for_cross_chunk_dependency_pin === true
+    && checks.section_owner_accepts_cross_chunk_manifest_and_retains_old_slot_on_cancel === true
+    && checks.main_runtime_creates_independent_static_section_owner === true
+    && checks.main_runtime_retires_static_section_owner_after_render_demand === true
     && checks.world_coordinator_candidate_installs_and_promotes_through_native_renderer === true
     && checks.world_coordinator_rejects_incomplete_source_census_without_replacing_slot === true,
   'Native chunk packet lifecycle contract failed.');

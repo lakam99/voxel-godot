@@ -64,11 +64,9 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 	for dependency_value: Variant in dependencies_value:
 		if not dependency_value is Vector2i:
 			return _failed("invalid_section_residency_dependency")
-		# This backend is attached to one streamed chunk. Until dependency pinning
-		# is supplied by the world section owner, reject candidates spanning other
-		# chunks rather than allowing unload to hide still-visible geometry.
-		if Vector2i(dependency_value) != expected_owner:
-			return _failed("section_residency_dependency_not_pinned")
+	# These are capture/source coverage keys, not installed-owner leases. The
+	# section root is independently owned and the immutable candidate plus its
+	# exact contributor revisions survive source gameplay-chunk retirement.
 	var batches_value: Variant = snapshot.get("batches")
 	if not batches_value is Dictionary or not batches_value.is_read_only():
 		return _failed("invalid_section_batch_manifest")
@@ -207,7 +205,7 @@ func _receipt(backend: Node, chunk: Node3D) -> Dictionary:
 		"contentManifestDigest":String(_candidate.contentManifestDigest),
 		"ownerCell":_owner_cell, "backendInstanceId":backend.get_instance_id(),
 		"chunkInstanceId":chunk.get_instance_id(),
-		"residencyDependencies":_candidate.snapshot.streamChunkDependencies.duplicate()}
+		"sourceCaptureChunkKeys":_candidate.snapshot.streamChunkDependencies.duplicate()}
 	receipt.make_read_only()
 	return receipt
 
@@ -231,17 +229,14 @@ func _current_chunk() -> Node3D:
 			or _current_backend() == null or _current_backend().get_parent() != chunk:
 		return null
 	var scene := Engine.get_main_loop() as SceneTree
-	if scene == null or scene.current_scene == null:
+	if scene == null or scene.current_scene == null \
+			or not scene.current_scene.has_method("get_static_section_render_owner"):
 		return null
-	var exposes_chunk_registry := false
-	for property: Dictionary in scene.current_scene.get_property_list():
-		if String(property.get("name", "")) == "chunks":
-			exposes_chunk_registry = true
-			break
-	if not exposes_chunk_registry:
-		return null
-	var chunks: Variant = scene.current_scene.get("chunks")
-	if not chunks is Dictionary or not is_same(chunks.get(_owner_cell), chunk):
+	var resolved: Variant = scene.current_scene.call("get_static_section_render_owner",
+		_owner_cell, false)
+	if not resolved is Dictionary or resolved.get("status") != "ready" \
+			or not is_same(resolved.get("owner"), chunk) \
+			or not is_same(resolved.get("backend"), _current_backend()):
 		return null
 	return chunk
 

@@ -501,7 +501,7 @@ func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
 	var owner_cell := SectionGrid.chunk_key_for_section(section_key)
 	if receipt.get("ownerCell") != owner_cell:
 		return false
-	var current: Dictionary = PacketOwner.resolve_existing_scene_backend(owner_cell)
+	var current: Dictionary = PacketOwner.resolve_existing_static_section_backend(owner_cell)
 	if current.get("status") != "ready":
 		return false
 	var backend: Node = current.backend as Node

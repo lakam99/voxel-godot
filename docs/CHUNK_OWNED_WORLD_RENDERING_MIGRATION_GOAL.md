@@ -166,11 +166,20 @@ not met.
 |---|---|---|
 | 0. Source map and baseline | **Complete** | Producer-to-renderer maps, authority/revision/lifecycle audits, and the per-source baseline are recorded in the charter. |
 | 1. Close the candidate contract | **Partial** | The contributor ledger and immutable manifest/snapshot builders exist. Still needs a coordinator-owned expected contributor census, cross-domain/layer completeness, and caller-side live source/owner revalidation. |
-| 2. Section-slot installation | **Partial** | The native GDExtension installs section-keyed opaque candidates and retains the previous root through cancellation. It has no normal-world producer callsite, multi-layer install contract, or dependency pinning. |
+| 2. Section-slot installation | **Partial** | The native GDExtension installs section-keyed opaque candidates under independent render-demand owners and retains the previous root through cancellation. Cross-chunk captured candidates no longer pin gameplay chunks. There is still no normal-world producer callsite or multi-layer install contract; exact source-capture revisions/epochs remain to be added. |
 | 3. Integrate smooth terrain | **Not started** | Capture resident authoritative SDF/material data with halo revisions, mesh it through the configured Transvoxel path, then prove terrain visual/edit/collision/fluid parity before retiring the old visual slot. |
 | 4. Cut over construction | **Not started** | A world-owned coordinator must aggregate contributors from concurrent scene jobs; replace per-source production commits only after all affected section replacements and replays are acknowledged. |
 | 5. Admit ecology and static props | **Not started** | Canonical tree recipes, foliage/detail attributes, natural prop visuals and removal/save identity must enter the same complete section candidates; actor simulation remains separate. |
 | 6. Readiness, performance and legacy retirement | **Not started** | Wire current section receipts into readiness/unload replay; pass headed visual/traversal and representative performance checks; retire old publishers only after parity. |
+
+The independent owner/candidate seam passed 33/33 focused checks at
+`artifacts/citadel-runtime-integration/native-chunk-packet-section-owner-contract-verified-20261004/report.json`.
+It proves the candidate is installed through the native renderer, cancellation
+keeps the old installed root, cross-chunk source coverage is accepted, owner
+replacement is rejected, and incomplete census replacement is rejected. It is
+still a fixture/bridge result: no production producer is wired, rendering is
+opaque-only, and headed visual, traversal and performance acceptance remain
+untested.
 
 The 2026-10-04 native renderer seam recheck passed 29/29 checks at
 `artifacts/citadel-runtime-integration/native-chunk-packet-section-coordinator-preintegration-20261004/report.json`.

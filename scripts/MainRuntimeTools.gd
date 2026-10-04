@@ -3,6 +3,7 @@ extends "res://scripts/MainDiscoveryFlow.gd"
 const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 const ChunkPropSpawnPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
 const ChunkRenderPacketOwnerScript := preload("res://scripts/world/ChunkRenderPacketOwner.gd")
+const StaticRenderSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 
 var chunk_prop_spawn_queue_turn := 0
 var last_chunk_prop_spawn_key: Variant = null
@@ -34,6 +35,64 @@ const STREAMING_SOLID_PLACEHOLDER_DEPTH_CELLS := 80
 
 var last_streaming_exterior_full_refresh_frame := -1000000
 var voxel_terrain_runtime: Node3D
+
+## Static render-section owners live beside gameplay chunks and are retired by
+## render demand. A section can cross several gameplay chunks; its immutable
+## candidate remains installed under one canonical render owner without
+## retaining all source simulation chunks.
+func get_static_section_render_owner(owner_cell: Vector2i,
+        create_if_missing := true) -> Dictionary:
+    if static_section_render_root == null or not is_instance_valid(static_section_render_root) \
+            or not static_section_render_root.is_inside_tree():
+        return {"status":"pending","reason":"static_section_owner_root_unavailable",
+            "ownerCell":owner_cell}
+    var owner: Node3D = static_section_render_owners.get(owner_cell) as Node3D
+    if is_instance_valid(owner) and owner.is_inside_tree() and not owner.is_queued_for_deletion():
+        var backend := owner.get_node_or_null(ChunkRenderPacketOwnerScript.BACKEND_NODE) as Node3D
+        if backend == null:
+            var attached: Dictionary = ChunkRenderPacketOwnerScript.attach_to_chunk(owner)
+            if attached.get("status") != "ready": return attached
+            backend = attached.backend as Node3D
+        return {"status":"ready","owner":owner,"backend":backend,"ownerCell":owner_cell}
+    static_section_render_owners.erase(owner_cell)
+    if not create_if_missing:
+        return {"status":"pending","reason":"static_section_owner_not_loaded",
+            "ownerCell":owner_cell}
+    owner = Node3D.new()
+    owner.name = "Chunk_%d_%d" % [owner_cell.x, owner_cell.y]
+    owner.position = Vector3(owner_cell.x * StaticRenderSectionGridScript.STREAM_CHUNK_SIZE_METERS,
+        0.0, owner_cell.y * StaticRenderSectionGridScript.STREAM_CHUNK_SIZE_METERS)
+    owner.set_meta("static_section_render_owner", true)
+    owner.set_meta("static_section_owner_cell", owner_cell)
+    static_section_render_root.add_child(owner)
+    var attached: Dictionary = ChunkRenderPacketOwnerScript.attach_to_chunk(owner)
+    if attached.get("status") != "ready":
+        owner.queue_free()
+        return attached
+    static_section_render_owners[owner_cell] = owner
+    return {"status":"ready","owner":owner,"backend":attached.backend,
+        "ownerCell":owner_cell}
+
+
+func retire_static_section_render_owner(owner_cell: Vector2i) -> bool:
+    var owner: Node3D = static_section_render_owners.get(owner_cell) as Node3D
+    if not is_instance_valid(owner):
+        static_section_render_owners.erase(owner_cell)
+        return true
+    static_section_render_owners.erase(owner_cell)
+    owner.queue_free()
+    return true
+
+
+func prune_static_section_render_owners(retained_gameplay_chunks: Dictionary) -> int:
+    var retired := 0
+    for owner_value: Variant in static_section_render_owners.keys():
+        var owner_cell := Vector2i(owner_value)
+        if retained_gameplay_chunks.has(owner_cell):
+            continue
+        if retire_static_section_render_owner(owner_cell): retired += 1
+    return retired
+
 
 func setup_playtest_camp_case(cell: Vector2i) -> void:
     if inventory_system:
@@ -548,6 +607,7 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 create_chunk(chunk_key.x, chunk_key.y)
             else:
                 queue_chunk_load(chunk_key)
+    prune_static_section_render_owners(needed)
     for chunk_key: Vector2i in needed:
         if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
     if monitor != null:

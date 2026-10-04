@@ -117,6 +117,15 @@ var moisture_noise: FastNoiseLite
 var temp_noise: FastNoiseLite
 
 var chunk_root: Node3D
+var static_section_render_root: Node3D
+var static_section_render_owners: Dictionary = {}
+
+func clear_static_section_render_owners() -> void:
+    for owner_value: Variant in static_section_render_owners.keys():
+        var owner: Node3D = static_section_render_owners[owner_value] as Node3D
+        if is_instance_valid(owner):
+            owner.queue_free()
+    static_section_render_owners.clear()
 var block_root: Node3D
 var prop_root: Node3D
 var water: MeshInstance3D
@@ -486,6 +495,10 @@ func _run_deferred_startup_boot() -> void:
     chunk_root = Node3D.new()
     chunk_root.name = "Chunks"
     add_child(chunk_root)
+    static_section_render_root = Node3D.new()
+    static_section_render_root.name = "StaticSectionOwners"
+    add_child(static_section_render_root)
+    static_section_render_owners.clear()
     prop_root = Node3D.new()
     prop_root.name = "Props"
     add_child(prop_root)
@@ -4002,7 +4015,9 @@ func retire_generated_scenes_before_world_reset() -> bool:
             if not navigation.advance_publication().get("busy",true): break
             await startup_loading_yield("Clearing previous navigation")
     if structure_system == null:
-        return navigation == null or navigation.finish_publication_reset()
+        var navigation_ready: bool = navigation == null or navigation.finish_publication_reset()
+        if navigation_ready: clear_static_section_render_owners()
+        return navigation_ready
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
     deadline = Time.get_ticks_msec() + 30000
@@ -4010,7 +4025,10 @@ func retire_generated_scenes_before_world_reset() -> bool:
         if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
         # startup_loading_yield already advances this queue once per frame.
         await startup_loading_yield("Clearing previous landmarks")
-    return not shutdown_requested and (navigation == null or navigation.finish_publication_reset())
+    var reset_ready: bool = not shutdown_requested \
+        and (navigation == null or navigation.finish_publication_reset())
+    if reset_ready: clear_static_section_render_owners()
+    return reset_ready
 
 func wait_for_async_save_before_quit() -> void:
     if save_system == null or not save_system.has_method("has_async_save_pending"):
