@@ -19,6 +19,22 @@ real renderer installation or live startup improvement. The published
 canonical charter records the Minecraft 26.2 comparison, reports and next
 gates.
 
+Progress note — 2026-10-05: overall status remains **1/7 stages complete**;
+Stage 0 is complete, Stages 1–5 remain partial, and Stage 6 has not started.
+Game commit `a86e9b72` adds the node-free, resumable `TreeRecipeSectionCompiler`
+from the sealed canonical tree recipe. Its headed contract passed 9/9 checks,
+emitting 17 compatible batches across 9 center-owned sections (1,804 one-unit
+advances or 76 advances at a 24-unit slice). This proves recipe-to-section
+values only, not ecology census/contribution, real native install, old visual
+retention, save/replay or performance. Minecraft source review confirmed the
+missing translucent boundary is architectural: our native `MultiMesh` batch
+shares one mesh/index order across independent instances, while Minecraft
+retains per-face sort state and camera-dependent section index buffers. The
+current fail-closed fluid layer remains correct until a camera-token-bound
+candidate and atomic native replacement exist. Canonical docs commits
+`77b2bd9` and `cac182d` record this renderer design and the tree queue/provider
+integration stage.
+
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository in [`section-owned-world-rendering-charter.md`](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md) and locally at
 `C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
