@@ -459,16 +459,20 @@ func _closest_visible_demand(rows: Array[Dictionary]) -> Dictionary:
 
 static func _visible_section_admission_details(admission: Dictionary) -> Dictionary:
 	var result := {}
-	for key in ["providerId", "chunk", "snapshotRemovedPropsRevision",
+	for key in ["providerId", "chunk", "sourceId", "sourcePartId", "cell", "blockType",
+			"missingCategories", "categoryEvidence",
+			"snapshotRemovedPropsRevision",
 			"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision",
-			"requestedSection", "ownedSection", "sourcePartId"]:
+			"requestedSection", "ownedSection"]:
 		if admission.has(key):
 			result[key] = admission[key]
 	if admission.has("providerReason"):
 		result["providerReason"] = String(admission.get("providerReason", ""))
 	var provider_details: Variant = admission.get("providerDetails", {})
 	if provider_details is Dictionary:
-		for key in ["chunk", "snapshotRemovedPropsRevision", "currentRemovedPropsRevision",
+		for key in ["chunk", "sourceId", "sourcePartId", "cell", "blockType",
+				"missingCategories", "categoryEvidence",
+				"snapshotRemovedPropsRevision", "currentRemovedPropsRevision",
 				"snapshotSourceRevision", "currentSourceRevision",
 				"snapshotValidationStatus", "snapshotValidationReason"]:
 			if provider_details.has(key):

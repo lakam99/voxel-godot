@@ -124,7 +124,9 @@ func _capture_sections_impl(requested_sections: Array,
 		var coverage_status := String(provider.get("status", ""))
 		if coverage_status == "pending":
 			var provider_details := {}
-			for detail_key in ["chunk", "snapshotRemovedPropsRevision",
+			for detail_key in ["chunk", "sourceId", "sourcePartId", "cell", "blockType",
+					"missingCategories", "categoryEvidence",
+					"snapshotRemovedPropsRevision",
 					"currentRemovedPropsRevision", "snapshotSourceRevision", "currentSourceRevision"]:
 				if provider.has(detail_key):
 					provider_details[detail_key] = provider[detail_key]

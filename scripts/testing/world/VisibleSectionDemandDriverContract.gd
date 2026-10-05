@@ -59,12 +59,19 @@ class EmptySectionProvider extends RefCounted:
 	var provider_id := ""
 	var configured_world_id := ""
 	var authority_revision := 1
+	var pending_capture_calls := 0
+	var capture_calls := 0
 
 	func configure(next_provider_id: String, world_id: String) -> void:
 		provider_id = next_provider_id
 		configured_world_id = world_id
 
 	func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+		capture_calls += 1
+		if pending_capture_calls > 0:
+			pending_capture_calls -= 1
+			return {"status":"pending", "reason":"fixture_incremental_capture_pending",
+				"retryable":true}
 		if world_id != configured_world_id:
 			return {"status":"pending", "reason":"fixture_world_mismatch", "retryable":true}
 		var sections: Dictionary = {}
@@ -108,6 +115,8 @@ class StaleSnapshotProvider extends RefCounted:
 	func capture_static_section_sources(_world_id: String, _sections: Array) -> Dictionary:
 		return {"status":"pending", "retryable":true,
 			"reason":"ecology_chunk_source_snapshot_revision_stale",
+			"sourceId":"fixture:tree:oak-3", "sourcePartId":"fixture:tree:oak-3:foliage",
+			"cell":Vector3i(17, 8, -4), "blockType":"canopyMesh",
 			"chunk":Vector2i(2, -1), "snapshotRemovedPropsRevision":3,
 			"currentRemovedPropsRevision":3, "snapshotSourceRevision":"terrain-5",
 			"currentSourceRevision":"terrain-6",
@@ -123,6 +132,40 @@ func _initialize() -> void:
 
 func run() -> void:
 	var world_id := "seed:visible-section-demand-contract:1"
+	var retry_world := world_id + ":next-frame-retry"
+	var retry_coordinator = FixtureCoordinator.new()
+	retry_coordinator.configure(retry_world)
+	var retry_required: Array[String] = ["terrain", "ecology"]
+	retry_required.make_read_only()
+	retry_coordinator.configure_source_roster(retry_required)
+	var retry_terrain := EmptySectionProvider.new()
+	retry_terrain.configure("terrain", retry_world)
+	retry_terrain.pending_capture_calls = 1
+	var retry_ecology := EmptySectionProvider.new()
+	retry_ecology.configure("ecology", retry_world)
+	retry_coordinator.register_source_provider("terrain", retry_terrain,
+		"capture_static_section_sources")
+	retry_coordinator.register_source_provider("ecology", retry_ecology,
+		"capture_static_section_sources")
+	var retry_section := Vector3i(40, 0, 0)
+	retry_coordinator.request_visible_section_demand(retry_section, 1, 1.0)
+	var first_retry_frame := Engine.get_process_frames()
+	var first_retry_advance: Dictionary = retry_coordinator.advance_visible_section_candidate_demands(1)
+	var retry_state: Dictionary = retry_coordinator._visible_section_demands[retry_section]
+	var scheduled_retry_frame := int(retry_state.get("nextAttemptFrame", -1))
+	var second_retry_advance: Dictionary = retry_coordinator.advance_visible_section_candidate_demands(1)
+	check("retryable_source_census_is_parked_for_thirty_publication_frames",
+		first_retry_advance.get("status") == "advanced"
+		and first_retry_advance.results[0].admission.get("providerReason", "")
+			== "fixture_incremental_capture_pending"
+		and scheduled_retry_frame - first_retry_frame == 30
+		and second_retry_advance.get("status") == "idle"
+		and retry_terrain.capture_calls == 1,
+		{"firstAdvance":first_retry_advance, "secondAdvance":second_retry_advance,
+			"firstRetryFrame":first_retry_frame,
+			"scheduledRetryFrame":scheduled_retry_frame,
+			"currentFrame":Engine.get_process_frames(),
+			"captureCalls":retry_terrain.capture_calls})
 	var stale_roster := SourceRoster.new()
 	var stale_provider := StaleSnapshotProvider.new()
 	stale_roster.bind_world(world_id + ":stale-snapshot", ["ecology_and_static_props"])
@@ -136,6 +179,9 @@ func run() -> void:
 			and stale_census.get("providerReason") == "ecology_chunk_source_snapshot_revision_stale"
 			and stale_details.get("snapshotSourceRevision") == "terrain-5"
 			and stale_details.get("currentSourceRevision") == "terrain-6"
+			and stale_details.get("sourcePartId") == "fixture:tree:oak-3:foliage"
+			and stale_details.get("cell") == Vector3i(17, 8, -4)
+			and stale_details.get("blockType") == "canopyMesh"
 			and stale_details.get("snapshotValidationStatus") == "ready",
 		stale_census)
 	var adjacent_admission_details := Coordinator._visible_section_admission_details({
@@ -280,7 +326,9 @@ func run() -> void:
 		"status":"pending", "providerId":"ecology_and_static_props",
 		"reason":"static_source_provider_pending",
 		"providerReason":"ecology_chunk_source_snapshot_revision_stale",
-		"providerDetails":{"chunk":Vector2i(2, -1), "snapshotRemovedPropsRevision":3,
+		"providerDetails":{"chunk":Vector2i(2, -1), "sourcePartId":"fixture:tree:oak-3:foliage",
+			"cell":Vector3i(17, 8, -4), "blockType":"canopyMesh",
+			"snapshotRemovedPropsRevision":3,
 			"currentRemovedPropsRevision":3, "snapshotSourceRevision":"old",
 			"currentSourceRevision":"new", "snapshotValidationStatus":"ready"},
 		"unboundedPayload":PackedByteArray([1, 2, 3])})
@@ -288,6 +336,9 @@ func run() -> void:
 		bounded_admission_details.get("providerReason") == "ecology_chunk_source_snapshot_revision_stale"
 			and bounded_admission_details.get("snapshotSourceRevision") == "old"
 			and bounded_admission_details.get("currentSourceRevision") == "new"
+			and bounded_admission_details.get("sourcePartId") == "fixture:tree:oak-3:foliage"
+			and bounded_admission_details.get("cell") == Vector3i(17, 8, -4)
+			and bounded_admission_details.get("blockType") == "canopyMesh"
 			and bounded_admission_details.get("snapshotValidationStatus") == "ready"
 			and not bounded_admission_details.has("unboundedPayload"), bounded_admission_details)
 	var demand: Dictionary = coordinator.request_visible_section_demand(section_far, 11, 900.0)
