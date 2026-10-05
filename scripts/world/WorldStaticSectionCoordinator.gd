@@ -57,6 +57,8 @@ var _visible_section_demand_queue_token := 0
 var _visible_section_demand_attempts := 0
 var _visible_section_recompile_quota := 2
 var _visible_section_demand_wake_rounds := 0
+var _translucent_camera_position := Vector3.ZERO
+var _has_translucent_camera_snapshot := false
 
 
 func configure(world_id: String) -> Dictionary:
@@ -130,6 +132,7 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 			state["attempts"] = 0
 			state["lastReason"] = ""
 			state.erase("blockedReason")
+			state.erase("continuationHint")
 			state["nextAttemptFrame"] = Engine.get_process_frames()
 			state.erase("candidateGeneration")
 			state.erase("installedGeneration")
@@ -178,6 +181,7 @@ func invalidate_visible_section_source(section_key: Vector3i, provider_id: Strin
 		state["priority"] = 0.0
 	state.erase("candidateGeneration")
 	state.erase("blockedReason")
+	state.erase("continuationHint")
 	if not bool(state.get("queued", false)):
 		_enqueue_visible_section_demand(section_key, state)
 	_visible_section_demands[section_key] = state
@@ -329,6 +333,8 @@ func refresh_visible_section_demand_priorities(camera_position: Vector3,
 		max_updates := 16) -> Dictionary:
 	if not camera_position.is_finite() or max_updates < 1 or max_updates > 64:
 		return _failed("invalid_visible_section_priority_refresh")
+	_translucent_camera_position = camera_position
+	_has_translucent_camera_snapshot = true
 	var updated := 0
 	var refresh_count := mini(max_updates, _visible_section_demand_count)
 	for _index in range(refresh_count):
@@ -351,6 +357,31 @@ func refresh_visible_section_demand_priorities(camera_position: Vector3,
 			_visible_section_demands[section_key] = state
 	return {"status":"advanced" if updated > 0 else "idle", "updatedCount":updated,
 		"pendingDemandCount":_visible_section_demands.size()}
+
+
+## Supplies the active camera snapshot and Minecraft-style section-relative
+## translucent-sort identity. The class changes only when the camera crosses a
+## render-section boundary relative to this section, so small camera movement
+## does not repeatedly invalidate staged installs. Producers sort their
+## canonical face groups against cameraPosition; install sessions compare the
+## class revision before upload/commit and request a replacement when it changes.
+func current_translucent_pov_snapshot(section_key: Vector3i) -> Dictionary:
+	if not _has_translucent_camera_snapshot or _world_id.is_empty():
+		return {"status":"pending", "reason":"translucent_camera_snapshot_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var camera_section := SectionGrid.key_for_world_position(_translucent_camera_position)
+	var pov_class := Vector3i(
+		clampi(camera_section.x - section_key.x, -1, 1),
+		clampi(camera_section.y - section_key.y, -1, 1),
+		clampi(camera_section.z - section_key.z, -1, 1))
+	# Stable POV identity (1..27), rather than a frame counter, mirrors
+	# Minecraft's TranslucencyPointOfView and cannot starve work while the player
+	# moves within the same relative section class.
+	var pov_revision := pov_class.x + 1 + (pov_class.y + 1) * 3 \
+		+ (pov_class.z + 1) * 9 + 1
+	return {"status":"ready", "sectionKey":section_key,
+		"cameraPosition":_translucent_camera_position,
+		"povClass":pov_class, "revision":pov_revision}
 
 
 ## Admit at most a small number of visible demands. Selection examines a bounded
@@ -379,6 +410,7 @@ func advance_visible_section_candidate_demands(max_attempts := 1,
 			state["stage"] = "candidate_queued"
 			state["candidateGeneration"] = _production_candidate_generation
 			state.erase("blockedReason")
+			state.erase("continuationHint")
 		else:
 			var retryable: bool = admission.get("status") == "pending" \
 				or bool(admission.get("retryable", false))
@@ -387,8 +419,18 @@ func advance_visible_section_candidate_demands(max_attempts := 1,
 				state.erase("blockedReason")
 			else:
 				state["blockedReason"] = String(admission.get("reason", admission.get("status", "failed")))
-			state["nextAttemptFrame"] = Engine.get_process_frames() \
-				+ VISIBLE_SECTION_DEMAND_RETRY_FRAMES
+			var continuation_value: Variant = admission.get("continuationHint", null)
+			var has_continuation: bool = continuation_value is Dictionary \
+				and continuation_value.is_read_only() \
+				and String(continuation_value.get("schema", "")) \
+					== "static-section-provider-continuation/v1"
+			if retryable and has_continuation:
+				state["continuationHint"] = continuation_value
+				state["nextAttemptFrame"] = Engine.get_process_frames() + 1
+			else:
+				state.erase("continuationHint")
+				state["nextAttemptFrame"] = Engine.get_process_frames() \
+					+ VISIBLE_SECTION_DEMAND_RETRY_FRAMES
 			if retryable:
 				_enqueue_visible_section_demand(section_key, state)
 		_visible_section_demands[section_key] = state
@@ -447,7 +489,11 @@ func _take_next_visible_section_demand(urgent_only := false) -> Dictionary:
 			_visible_section_demands[section_key] = state
 		var row := {"sectionKey":section_key, "state":state,
 			"priority":float(state.get("priority", INF))}
-		if _production_candidates_by_section.has(section_key):
+		var continuation_value: Variant = state.get("continuationHint", null)
+		var has_continuation: bool = continuation_value is Dictionary \
+			and not (continuation_value as Dictionary).is_empty()
+		if _production_candidates_by_section.has(section_key) \
+				or has_continuation:
 			recompile_candidates.append(row)
 		else:
 			initial_candidates.append(row)
@@ -517,6 +563,10 @@ static func _visible_section_admission_details(admission: Dictionary) -> Diction
 	if validation_value is Dictionary:
 		result["snapshotValidationStatus"] = String(validation_value.get("status", ""))
 		result["snapshotValidationReason"] = String(validation_value.get("reason", ""))
+	var continuation_value: Variant = admission.get("continuationHint", null)
+	if continuation_value is Dictionary and continuation_value.is_read_only():
+		result["continuationStage"] = String(continuation_value.get("stage", ""))
+		result["continuationCursor"] = int(continuation_value.get("cursor", -1))
 	return result
 
 
@@ -734,7 +784,10 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		job["stage"] = "installing"
 		_production_candidate_jobs[section_key] = job
 		session = started.session
-	var step: Dictionary = session.advance(max_upload_units)
+	var pov_snapshot := current_translucent_pov_snapshot(section_key)
+	var current_pov_revision := int(pov_snapshot.get("revision", -1)) \
+		if pov_snapshot.get("status") == "ready" else -1
+	var step: Dictionary = session.advance(max_upload_units, current_pov_revision)
 	if step.get("status") == "pending":
 		job["stage"] = String(step.get("stage", "installing"))
 		_production_candidate_jobs[section_key] = job
@@ -753,6 +806,18 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		_reconcile_visible_section_candidate_outcome(section_key,
 			int(candidate.get("generation", 0)), owner_replaced)
 		return owner_replaced
+	if step.get("status") == "failed" \
+			and String(step.get("reason", "")) == "section_translucent_pov_revision_stale":
+		# The section slot still owns its previous installed visual. Discard this
+		# camera-sorted candidate and reassemble from the provider's canonical
+		# unsorted groups for the current POV class rather than blocking the demand.
+		_production_candidate_jobs.erase(section_key)
+		var pov_stale := {"status":"failed", "reason":String(step.reason),
+			"sectionKey":section_key, "retryable":true,
+			"requiresReassembly":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), pov_stale)
+		return pov_stale
 	if step.get("status") != "installed":
 		_production_candidate_jobs.erase(section_key)
 		var install_failure := _failed("complete_section_candidate_install_failed:" +

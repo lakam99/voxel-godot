@@ -48,7 +48,7 @@ class FakeInstalledSession extends RefCounted:
 			"backendInstanceId":101, "chunkInstanceId":202, "ownerCell":Vector2i(2, 0)}
 		receipt.make_read_only()
 
-	func advance(_max_upload_units: int) -> Dictionary:
+	func advance(_max_upload_units: int, _current_translucent_pov_revision := -1) -> Dictionary:
 		return {"status":"installed", "receipt":receipt}
 
 	func cancel() -> Dictionary:
@@ -60,6 +60,7 @@ class EmptySectionProvider extends RefCounted:
 	var configured_world_id := ""
 	var authority_revision := 1
 	var pending_capture_calls := 0
+	var pending_continuation := false
 	var capture_calls := 0
 
 	func configure(next_provider_id: String, world_id: String) -> void:
@@ -70,8 +71,14 @@ class EmptySectionProvider extends RefCounted:
 		capture_calls += 1
 		if pending_capture_calls > 0:
 			pending_capture_calls -= 1
-			return {"status":"pending", "reason":"fixture_incremental_capture_pending",
-				"retryable":true}
+			var pending := {"status":"pending",
+				"reason":"fixture_incremental_capture_pending", "retryable":true}
+			if pending_continuation:
+				var hint := {"schema":"static-section-provider-continuation/v1",
+					"stage":"fixture_capture", "cursor":capture_calls}
+				hint.make_read_only()
+				pending["continuationHint"] = hint
+			return pending
 		if world_id != configured_world_id:
 			return {"status":"pending", "reason":"fixture_world_mismatch", "retryable":true}
 		var sections: Dictionary = {}
@@ -187,6 +194,27 @@ func _initialize() -> void:
 
 func run() -> void:
 	var world_id := "seed:visible-section-demand-contract:1"
+	var pov_coordinator = Coordinator.new()
+	var pov_without_camera := pov_coordinator.current_translucent_pov_snapshot(Vector3i.ZERO)
+	pov_coordinator.configure(world_id + ":pov")
+	pov_coordinator.refresh_visible_section_demand_priorities(Vector3(1.0, 1.0, 1.0), 1)
+	var pov_first := pov_coordinator.current_translucent_pov_snapshot(Vector3i.ZERO)
+	pov_coordinator.refresh_visible_section_demand_priorities(Vector3(2.0, 2.0, 2.0), 1)
+	var pov_same_class := pov_coordinator.current_translucent_pov_snapshot(Vector3i.ZERO)
+	pov_coordinator.refresh_visible_section_demand_priorities(
+		Vector3(SectionGrid.SECTION_SIZE_METERS + 1.0, 2.0, 2.0), 1)
+	var pov_crossed_boundary := pov_coordinator.current_translucent_pov_snapshot(Vector3i.ZERO)
+	check("translucent_pov_uses_current_camera_and_stable_section_relative_class",
+		pov_without_camera.get("status") == "pending"
+		and pov_first.get("status") == "ready"
+		and pov_first.get("cameraPosition") == Vector3(1.0, 1.0, 1.0)
+		and pov_first.get("povClass") == Vector3i.ZERO
+		and pov_first.get("revision") == 14
+		and pov_same_class.get("revision") == pov_first.get("revision")
+		and pov_crossed_boundary.get("povClass") == Vector3i(1, 0, 0)
+		and pov_crossed_boundary.get("revision") != pov_first.get("revision"),
+		{"withoutCamera":pov_without_camera, "first":pov_first,
+			"sameClass":pov_same_class, "crossedBoundary":pov_crossed_boundary})
 	var retry_world := world_id + ":next-frame-retry"
 	var retry_coordinator = FixtureCoordinator.new()
 	retry_coordinator.configure(retry_world)
@@ -220,7 +248,50 @@ func run() -> void:
 			"firstRetryFrame":first_retry_frame,
 			"scheduledRetryFrame":scheduled_retry_frame,
 			"currentFrame":Engine.get_process_frames(),
-			"captureCalls":retry_terrain.capture_calls})
+		"captureCalls":retry_terrain.capture_calls})
+	var continuation_world := world_id + ":resumable-capture"
+	var continuation_coordinator = FixtureCoordinator.new()
+	continuation_coordinator.configure(continuation_world)
+	var continuation_required: Array[String] = ["terrain", "ecology"]
+	continuation_required.make_read_only()
+	continuation_coordinator.configure_source_roster(continuation_required)
+	var continuation_terrain := EmptySectionProvider.new()
+	continuation_terrain.configure("terrain", continuation_world)
+	continuation_terrain.pending_capture_calls = 1
+	continuation_terrain.pending_continuation = true
+	var continuation_ecology := EmptySectionProvider.new()
+	continuation_ecology.configure("ecology", continuation_world)
+	continuation_coordinator.register_source_provider("terrain", continuation_terrain,
+		"capture_static_section_sources")
+	continuation_coordinator.register_source_provider("ecology", continuation_ecology,
+		"capture_static_section_sources")
+	var continuation_section := Vector3i(2, 0, 0)
+	var farther_initial_section := Vector3i(8, 0, 0)
+	continuation_coordinator.request_visible_section_demand(continuation_section, 1, 1.0)
+	var continuation_first_frame := Engine.get_process_frames()
+	var continuation_first: Dictionary = continuation_coordinator.advance_visible_section_candidate_demands(1)
+	var continuation_state: Dictionary = continuation_coordinator._visible_section_demands[
+		continuation_section]
+	continuation_coordinator.request_visible_section_demand(farther_initial_section, 1, 100.0)
+	var fresh_turn: Dictionary = continuation_coordinator._take_next_visible_section_demand()
+	var fresh_turn_is_fair: bool = fresh_turn.get("sectionKey") == farther_initial_section
+	while Engine.get_process_frames() <= continuation_first_frame:
+		await process_frame
+	var continuation_turn: Dictionary = continuation_coordinator._take_next_visible_section_demand()
+	check("resumable_provider_cursor_gets_next_frame_retry_with_initial_compile_fairness",
+		continuation_first.get("status") == "advanced"
+			and String(continuation_state.get("continuationHint", {}).get("stage", "")) \
+				== "fixture_capture"
+			and int(continuation_state.get("nextAttemptFrame", -1)) \
+				- continuation_first_frame == 1
+			and fresh_turn_is_fair
+			and continuation_turn.get("sectionKey") == continuation_section,
+		{"firstAdvance":continuation_first,
+			"continuationHint":continuation_state.get("continuationHint", {}),
+			"nextAttemptFrame":continuation_state.get("nextAttemptFrame", -1),
+			"firstFrame":continuation_first_frame,
+			"currentFrame":Engine.get_process_frames(),
+			"freshTurn":fresh_turn, "continuationTurn":continuation_turn})
 	var fluid_coordinator := FixtureCoordinator.new()
 	fluid_coordinator.configure(world_id + ":fluid-proof-wakeup")
 	var fluid_section := Vector3i(6, 2, -3)
