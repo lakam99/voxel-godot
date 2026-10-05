@@ -2142,8 +2142,27 @@ func advance_terrain_section_fluid_probes() -> Dictionary:
 	terrain_section_fluid_proofs[section_key] = proof
 	while terrain_section_fluid_proofs.size() > MAX_TERRAIN_SECTION_FLUID_PROOFS:
 		terrain_section_fluid_proofs.erase(terrain_section_fluid_proofs.keys()[0])
+	var demand_wake := _wake_visible_section_demand_for_current_fluid_proof(
+		section_key, proof)
 	return {"status":"ready", "section":section_key,
-		"hasFluid":bool(proof.hasFluid), "signature":String(proof.signature)}
+		"hasFluid":bool(proof.hasFluid), "signature":String(proof.signature),
+		"demandWake":demand_wake}
+
+
+func _wake_visible_section_demand_for_current_fluid_proof(section_key: Vector3i,
+		proof: Dictionary) -> Dictionary:
+	if not _terrain_section_fluid_proof_is_current(section_key, proof):
+		return {"status":"ignored", "reason":"fluid_proof_not_current",
+			"sectionKey":section_key}
+	if not is_instance_valid(main):
+		return {"status":"unavailable", "reason":"world_static_section_coordinator_unavailable",
+			"sectionKey":section_key}
+	var coordinator = main.get("world_static_section_coordinator")
+	if coordinator == null or not coordinator.has_method("wake_visible_section_demand"):
+		return {"status":"unavailable", "reason":"world_static_section_coordinator_unavailable",
+			"sectionKey":section_key}
+	return coordinator.call("wake_visible_section_demand", section_key,
+		"exact_terrain_fluid_proof_current", String(proof.get("signature", "")))
 
 
 func _terrain_section_fluid_proof_is_current(section_key: Vector3i, proof_value: Variant) -> bool:

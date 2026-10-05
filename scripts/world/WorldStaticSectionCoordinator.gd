@@ -291,6 +291,37 @@ func withdraw_visible_section_demand(section_key: Vector3i) -> Dictionary:
 		"installedRepresentationRetained":_production_candidates_by_section.has(section_key)}
 
 
+## Wake one currently demanded section after one of its exact producer proofs
+## becomes current. This only removes that demand's retry delay; the next attempt
+## still captures and validates the full authoritative source census.
+func wake_visible_section_demand(section_key: Vector3i, reason: String,
+		wake_token: String) -> Dictionary:
+	if reason.strip_edges().is_empty() or wake_token.strip_edges().is_empty():
+		return _failed("invalid_visible_section_demand_wake_reason")
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	if state.is_empty():
+		return {"status":"ignored", "reason":"section_not_demanded",
+			"sectionKey":section_key}
+	if String(state.get("lastWakeToken", "")) == wake_token:
+		return {"status":"duplicate", "sectionKey":section_key,
+			"queued":bool(state.get("queued", false))}
+	if state.get("stage") != "waiting":
+		return {"status":"ignored", "reason":"section_demand_not_waiting",
+			"sectionKey":section_key, "stage":String(state.get("stage", ""))}
+	if bool(state.get("eventWake", false)):
+		return {"status":"duplicate", "sectionKey":section_key,
+			"queued":bool(state.get("queued", false))}
+	state["nextAttemptFrame"] = Engine.get_process_frames()
+	state["eventWake"] = true
+	state["lastWakeReason"] = reason
+	state["lastWakeToken"] = wake_token
+	if not bool(state.get("queued", false)):
+		_enqueue_visible_section_demand(section_key, state)
+	_visible_section_demands[section_key] = state
+	return {"status":"woken", "sectionKey":section_key,
+		"reason":reason, "queueToken":int(state.get("queueToken", -1))}
+
+
 ## Refresh queued priorities from the live camera with a fixed work cap. This
 ## rotates only current pending demands and never enumerates the full resident
 ## terrain mesh-block dictionary.
@@ -406,9 +437,14 @@ func _take_next_visible_section_demand(urgent_only := false) -> Dictionary:
 		_visible_section_demands[section_key] = state
 		if state.get("stage") != "waiting":
 			continue
-		if not wake_allows_retry and int(state.get("nextAttemptFrame", 0)) > current_frame:
+		var event_wake := bool(state.get("eventWake", false))
+		if not event_wake and not wake_allows_retry \
+				and int(state.get("nextAttemptFrame", 0)) > current_frame:
 			_enqueue_visible_section_demand(section_key, state)
 			continue
+		if event_wake:
+			state.erase("eventWake")
+			_visible_section_demands[section_key] = state
 		var row := {"sectionKey":section_key, "state":state,
 			"priority":float(state.get("priority", INF))}
 		if _production_candidates_by_section.has(section_key):

@@ -123,6 +123,61 @@ class StaleSnapshotProvider extends RefCounted:
 			"snapshotValidation":{"status":"ready", "reason":""}}
 
 
+class FakeFluidRevisionAuthority extends RefCounted:
+	var revision := 1
+	var fluid_revision := 1
+
+	func exact_fluid_section_revision(_section_key: Vector3i) -> int:
+		return 0
+
+
+class FakeFluidWorldGeneration extends RefCounted:
+	var terrain_volume_service: FakeFluidRevisionAuthority
+	var has_fluid := false
+	var stale_payload := false
+	var probe_sequence := 0
+	var probe_section_key := Vector3i.ZERO
+
+	func begin_exact_fluid_payload_for_meshing_chunk(_x: int, _z: int, _size: int,
+			_min_y: int, _max_y: int, _step: int) -> Dictionary:
+		probe_sequence += 1
+		probe_section_key = Vector3i(floori(float(_x) / 16.0),
+			floori(float(_min_y) / 16.0), floori(float(_z) / 16.0))
+		return {"probeSequence":probe_sequence}
+
+	func advance_exact_fluid_payload_state(state: Dictionary, _budget_ms: float,
+			_max_cells: int) -> Dictionary:
+		var rows: Array[Dictionary] = [{"sectionKey":probe_section_key, "revision":0}]
+		rows[0].make_read_only()
+		rows.make_read_only()
+		var payload := {"immutable":true, "hasFluid":has_fluid,
+			"revision":int(terrain_volume_service.revision) - int(stale_payload),
+			"fluidRevision":int(terrain_volume_service.fluid_revision),
+			"sectionRevisions":rows, "signature":"fixture-fluid-%d" % probe_sequence}
+		return {"complete":true, "state":state, "payload":payload}
+
+
+class FakeFluidSiteGate extends RefCounted:
+	func current() -> bool:
+		return true
+
+
+class FakeFluidAdmission extends RefCounted:
+	var world_seed := "fluid-wakeup-seed"
+
+
+class FakeFluidStructureSystem extends RefCounted:
+	var citadel_terrain_admission := FakeFluidAdmission.new()
+
+
+class FakeFluidRuntimeMain extends Node:
+	var seed_text := "fluid-wakeup-seed"
+	var seed_hash := 71
+	var structure_system := FakeFluidStructureSystem.new()
+	var world_generation_system: FakeFluidWorldGeneration
+	var world_static_section_coordinator: FixtureCoordinator
+
+
 var checks: Array[Dictionary] = []
 
 
@@ -166,6 +221,105 @@ func run() -> void:
 			"scheduledRetryFrame":scheduled_retry_frame,
 			"currentFrame":Engine.get_process_frames(),
 			"captureCalls":retry_terrain.capture_calls})
+	var fluid_coordinator := FixtureCoordinator.new()
+	fluid_coordinator.configure(world_id + ":fluid-proof-wakeup")
+	var fluid_section := Vector3i(6, 2, -3)
+	var stale_fluid_section := Vector3i(7, 2, -3)
+	var fluid_demand := fluid_coordinator.request_visible_section_demand(
+		fluid_section, 1, 40.0)
+	var stale_fluid_demand := fluid_coordinator.request_visible_section_demand(
+		stale_fluid_section, 1, 41.0)
+	var fluid_main := FakeFluidRuntimeMain.new()
+	fluid_main.world_static_section_coordinator = fluid_coordinator
+	var fluid_generation := FakeFluidWorldGeneration.new()
+	fluid_generation.terrain_volume_service = FakeFluidRevisionAuthority.new()
+	fluid_main.world_generation_system = fluid_generation
+	var fluid_runtime := TerrainRuntime.new()
+	fluid_runtime.main = fluid_main
+	fluid_runtime.configured_seed = fluid_main.seed_text
+	fluid_runtime.site_gate = FakeFluidSiteGate.new()
+	fluid_runtime.authority_ready = true
+	var delayed_fluid_demand: Dictionary = fluid_coordinator._visible_section_demands[fluid_section]
+	delayed_fluid_demand["nextAttemptFrame"] = Engine.get_process_frames() + 30
+	fluid_coordinator._visible_section_demands[fluid_section] = delayed_fluid_demand
+	var delayed_other_demand: Dictionary = fluid_coordinator._visible_section_demands[stale_fluid_section]
+	delayed_other_demand["nextAttemptFrame"] = Engine.get_process_frames() + 30
+	fluid_coordinator._visible_section_demands[stale_fluid_section] = delayed_other_demand
+	fluid_runtime.request_terrain_section_fluid_probe(fluid_section)
+	var current_fluid_proof: Dictionary = fluid_runtime.advance_terrain_section_fluid_probes()
+	var current_fluid_demand: Dictionary = fluid_coordinator._visible_section_demands[fluid_section]
+	var duplicate_fluid_request: Dictionary = fluid_runtime.request_terrain_section_fluid_probe(fluid_section)
+	var duplicate_fluid_wake: Dictionary = fluid_coordinator.wake_visible_section_demand(
+		fluid_section, "exact_terrain_fluid_proof_current",
+		String(current_fluid_proof.get("signature", "")))
+	check("accepted_current_fluid_proof_wakes_only_its_delayed_demand_once",
+		fluid_demand.get("status") == "queued"
+			and stale_fluid_demand.get("status") == "queued"
+			and current_fluid_proof.get("status") == "ready"
+			and current_fluid_proof.get("demandWake", {}).get("status") == "woken"
+			and current_fluid_demand.get("eventWake", false)
+			and int(current_fluid_demand.get("nextAttemptFrame", -1)) == Engine.get_process_frames()
+			and int(fluid_coordinator._visible_section_demands[stale_fluid_section].nextAttemptFrame)
+				> Engine.get_process_frames()
+			and duplicate_fluid_request.get("status") == "ready"
+			and duplicate_fluid_wake.get("status") == "duplicate"
+			and fluid_coordinator._visible_section_demand_count == 2,
+		{"proof":current_fluid_proof, "duplicateProbeRequest":duplicate_fluid_request,
+			"duplicateWake":duplicate_fluid_wake, "demand":current_fluid_demand,
+			"otherDemand":fluid_coordinator._visible_section_demands[stale_fluid_section],
+			"queueCount":fluid_coordinator._visible_section_demand_count})
+	var selected_fluid_demand: Dictionary = fluid_coordinator._take_next_visible_section_demand()
+	var selected_after_wake: Dictionary = fluid_coordinator._visible_section_demands.get(
+		selected_fluid_demand.get("sectionKey", Vector3i.ZERO), {})
+	var duplicate_after_dequeue: Dictionary = fluid_coordinator.wake_visible_section_demand(
+		fluid_section, "exact_terrain_fluid_proof_current",
+		String(current_fluid_proof.get("signature", "")))
+	check("event_wake_bypasses_only_its_section_retry_delay_once",
+		selected_fluid_demand.get("status") == "ready"
+			and selected_fluid_demand.get("sectionKey") == fluid_section
+			and not selected_after_wake.has("eventWake")
+			and duplicate_after_dequeue.get("status") == "duplicate"
+			and fluid_coordinator._visible_section_demand_count == 1
+			and not fluid_coordinator._visible_section_demands[stale_fluid_section].has("eventWake"),
+		{"selected":selected_fluid_demand, "selectedState":selected_after_wake,
+			"duplicateAfterDequeue":duplicate_after_dequeue,
+			"otherState":fluid_coordinator._visible_section_demands[stale_fluid_section]})
+	var missing_demand_wake: Dictionary = fluid_coordinator.wake_visible_section_demand(
+		Vector3i(90, 0, 0), "exact_terrain_fluid_proof_current", "fixture-no-demand-proof")
+	check("fluid_proof_for_non_demanded_section_is_ignored",
+		missing_demand_wake.get("status") == "ignored"
+			and missing_demand_wake.get("reason") == "section_not_demanded"
+			and fluid_coordinator._visible_section_demand_count == 1,
+		{"wake":missing_demand_wake,
+			"queueCount":fluid_coordinator._visible_section_demand_count})
+	fluid_generation.stale_payload = true
+	fluid_runtime.request_terrain_section_fluid_probe(stale_fluid_section)
+	var stale_fluid_proof: Dictionary = fluid_runtime.advance_terrain_section_fluid_probes()
+	check("stale_exact_fluid_proof_does_not_wake_demand",
+		stale_fluid_proof.get("status") == "pending"
+			and stale_fluid_proof.get("reason") == "exact_fluid_section_probe_revision_changed"
+			and not fluid_coordinator._visible_section_demands[stale_fluid_section].has("eventWake")
+			and fluid_coordinator._visible_section_demand_count == 1,
+		{"proof":stale_fluid_proof,
+			"demand":fluid_coordinator._visible_section_demands[stale_fluid_section],
+			"queueCount":fluid_coordinator._visible_section_demand_count})
+	fluid_generation.stale_payload = false
+	fluid_generation.has_fluid = true
+	var fluid_bearing_section := Vector3i(8, 2, -3)
+	fluid_coordinator.request_visible_section_demand(fluid_bearing_section, 1, 42.0)
+	fluid_runtime.request_terrain_section_fluid_probe(fluid_bearing_section)
+	var fluid_bearing_proof: Dictionary = fluid_runtime.advance_terrain_section_fluid_probes()
+	var fluid_bearing_census: Dictionary = fluid_runtime.capture_static_section_sources(
+		"seed:%s:%d" % [fluid_main.seed_text, fluid_main.seed_hash], [fluid_bearing_section])
+	check("fluid_bearing_proof_wakes_demand_but_census_remains_pending_for_unsupported_layer",
+		fluid_bearing_proof.get("status") == "ready"
+			and fluid_bearing_proof.get("hasFluid", false)
+			and fluid_bearing_proof.get("demandWake", {}).get("status") == "woken"
+			and fluid_bearing_census.get("status") == "pending"
+			and fluid_bearing_census.get("reason") == "terrain_fluid_section_layer_not_supported",
+		{"proof":fluid_bearing_proof, "census":fluid_bearing_census})
+	fluid_runtime.free()
+	fluid_main.free()
 	var stale_roster := SourceRoster.new()
 	var stale_provider := StaleSnapshotProvider.new()
 	stale_roster.bind_world(world_id + ":stale-snapshot", ["ecology_and_static_props"])
