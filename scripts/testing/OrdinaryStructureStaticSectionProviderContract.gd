@@ -5,6 +5,7 @@ const Adapter := preload("res://scripts/world/OrdinaryStructureSectionGeometryAd
 const SourceRosterScript := preload("res://scripts/world/StaticSectionSourceRoster.gd")
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const StructureScript := preload("res://scripts/StructureSystem.gd")
+const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 
 
 func _visual_recipe_input(block_type: String, options: Dictionary = {}) -> Dictionary:
@@ -96,7 +97,7 @@ func run() -> void:
 	system.main = world
 	var source_id := "town:0,0"
 	var cell := Vector3i(2, 0, 3)
-	var body := _make_body(source_id, cell, "stoneBlock")
+	var body := _make_body(world, source_id, cell, "stoneBlock")
 	body.position = Vector3(cell) * world.CELL
 	world.add_child(body)
 	world.blocks[cell] = body
@@ -159,13 +160,37 @@ func run() -> void:
 			"reason":contribution_result.get("reason", ""),
 			"inputCount":contribution.get("inputs", []).size()})
 	var first_coverage := String(section_row.get("coverageRevision", ""))
-	var acknowledged: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO, first_coverage)
+	var rejected_receipt := {}
+	rejected_receipt.make_read_only()
+	var rejected_ack := provider.acknowledge_section_install(Vector3i.ZERO,
+		first_coverage, rejected_receipt)
+	check("missing_native_receipt_keeps_the_body_visual_visible",
+		rejected_ack.get("status") == "failed"
+		and (body.get_child(0) as MeshInstance3D).visible,
+		rejected_ack)
+	var replaced_body := _make_body(world, source_id, cell, "stoneBlock")
+	replaced_body.position = body.position
+	world.add_child(replaced_body)
+	world.blocks[cell] = replaced_body
+	var stale_owner_ack := provider.acknowledge_section_install(Vector3i.ZERO,
+		first_coverage, _installed_receipt(Vector3i.ZERO))
+	check("replaced_body_owner_keeps_old_visual_visible_and_ack_retryable",
+		stale_owner_ack.get("status") == "pending"
+		and String(stale_owner_ack.get("reason", "")) == "ordinary_section_live_owner_revision_changed"
+		and (body.get_child(0) as MeshInstance3D).visible,
+		stale_owner_ack)
+	world.blocks[cell] = body
+	replaced_body.queue_free()
+	var acknowledged: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO,
+		first_coverage, _installed_receipt(Vector3i.ZERO))
 	check("membership_baseline_advances_only_on_explicit_install_ack",
 		acknowledged.get("status") == "acknowledged"
-		and int(acknowledged.get("memberCount", 0)) == 1,
+		and int(acknowledged.get("memberCount", 0)) == 1
+		and not (body.get_child(0) as MeshInstance3D).visible
+		and body.is_inside_tree(),
 		acknowledged)
 	var boundary_cell := Vector3i(16, 0, 3)
-	var boundary_body := _make_body(source_id, boundary_cell, "stoneBlock")
+	var boundary_body := _make_body(world, source_id, boundary_cell, "stoneBlock")
 	boundary_body.position = Vector3(boundary_cell) * world.CELL
 	world.add_child(boundary_body)
 	world.blocks[boundary_cell] = boundary_body
@@ -193,7 +218,21 @@ func run() -> void:
 			"overlapsWestSection":boundary_overlaps_west,
 			"westMembers":west_members, "eastMembers":east_members})
 	var boundary_ack := provider.acknowledge_section_install(Vector3i(1, 0, 0),
-		String(east_row.get("coverageRevision", "")))
+		String(east_row.get("coverageRevision", "")),
+		_installed_receipt(Vector3i(1, 0, 0)))
+	var hidden_boundary_sections := _capture_sections_until_settled(provider,
+		"seed:ordinary-provider", [Vector3i.ZERO, Vector3i(1, 0, 0)])
+	check("retired_boundary_visual_replays_from_actual_mesh_support",
+		boundary_ack.get("status") == "acknowledged"
+		and not boundary_mesh.visible
+		and hidden_boundary_sections.get("status") == "complete"
+		and not hidden_boundary_sections.sections.get(Vector3i.ZERO, {}).get(
+			"sourcePartIds", []).has(boundary_part_id)
+		and hidden_boundary_sections.sections.get(Vector3i(1, 0, 0), {}).get(
+			"sourcePartIds", []).has(boundary_part_id),
+		{"status":hidden_boundary_sections.get("status", ""),
+			"westMembers":hidden_boundary_sections.sections.get(Vector3i.ZERO, {}).get("sourcePartIds", []),
+			"eastMembers":hidden_boundary_sections.sections.get(Vector3i(1, 0, 0), {}).get("sourcePartIds", [])})
 	var boundary_removed_key := system._ordinary_visual_block_key(source_id,
 		boundary_cell, "stoneBlock")
 	system.removed_generated_structure_blocks[boundary_removed_key] = true
@@ -213,7 +252,8 @@ func run() -> void:
 		{"westTombstones":west_tombstones, "eastTombstones":east_tombstones})
 	var boundary_empty_row: Dictionary = boundary_removal.get("sections", {}).get(Vector3i(1, 0, 0), {})
 	provider.acknowledge_section_install(Vector3i(1, 0, 0),
-		String(boundary_empty_row.get("coverageRevision", "")))
+		String(boundary_empty_row.get("coverageRevision", "")),
+		_installed_receipt(Vector3i(1, 0, 0)))
 	var out_of_bounds_options := {"world_x":float(cell.x) * world.CELL + world.CELL * 1.1}
 	var out_of_bounds_position := Vector3(out_of_bounds_options.world_x,
 		float(cell.y) * world.CELL, float(cell.z) * world.CELL)
@@ -244,7 +284,7 @@ func run() -> void:
 		{"bodyLive":body.get_parent() == world, "colliderLive":collider.get_parent() == body})
 
 	var unsupported_cell := Vector3i(3, 0, 3)
-	var chest := _make_body(source_id, unsupported_cell, "chest")
+	var chest := _make_body(world, source_id, unsupported_cell, "chest")
 	chest.position = Vector3(unsupported_cell) * world.CELL
 	world.add_child(chest)
 	world.blocks[unsupported_cell] = chest
@@ -285,7 +325,8 @@ func run() -> void:
 		and String(tombstones[0].get("sourceRevision", "")).length() == 64,
 		{"status":empty_after_remove.get("status", ""), "row":empty_row, "tombstones":tombstones})
 	var ack_empty := provider.acknowledge_section_install(Vector3i.ZERO,
-		String(empty_row.get("coverageRevision", "")))
+		String(empty_row.get("coverageRevision", "")),
+		_installed_receipt(Vector3i.ZERO))
 	var after_ack := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
 	check("accepted_empty_replacement_consumes_tombstone", ack_empty.get("status") == "acknowledged"
 		and after_ack.get("removalsBySection", {}).get(Vector3i.ZERO, []).is_empty(), after_ack)
@@ -331,15 +372,29 @@ func _capture_until_pending(provider: Object, world_id: String,
 	return _capture_until_settled(provider, world_id, section)
 
 
-func _make_body(source_id: String, cell: Vector3i, block_type: String) -> StaticBody3D:
+func _installed_receipt(section: Vector3i) -> Dictionary:
+	var receipt := {"status":"installed", "sectionKey":section,
+		"contentManifestDigest":"synthetic-contract-manifest"}
+	receipt.make_read_only()
+	return receipt
+
+
+func _make_body(world: FixtureMain, source_id: String, cell: Vector3i,
+		block_type: String, options: Dictionary = {}) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.set_meta("cell", cell)
 	body.set_meta("block_type", block_type)
 	body.set_meta("generated", true)
 	body.set_meta("generated_visual_source_id", source_id)
+	var sealed_options: Dictionary = StructureScript._sealed_ordinary_visual_value(options)
+	var recipe: Dictionary = VisualRecipe.resolve_member(world, block_type, cell, sealed_options)
 	var visual := MeshInstance3D.new()
-	visual.mesh = BoxMesh.new()
-	visual.material_override = StandardMaterial3D.new()
+	visual.mesh = recipe.get("mesh")
+	visual.material_override = recipe.get("material")
+	visual.transform = recipe.get("meshLocalTransform", Transform3D.IDENTITY)
+	var content_digest := String(recipe.get("contentDigest", ""))
+	visual.set_meta("ordinary_structure_recipe_content_digest", content_digest)
+	body.set_meta("ordinary_structure_recipe_content_digest", content_digest)
 	body.add_child(visual)
 	return body
 

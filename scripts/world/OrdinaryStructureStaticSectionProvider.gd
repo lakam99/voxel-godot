@@ -11,6 +11,7 @@ const SourceCapture := preload("res://scripts/world/OrdinaryStructureVisualSourc
 const Partitioner := preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 
 const PROVIDER_ID := "ordinary-structures"
 const SCHEMA := "ordinary-structure-static-section-provider/v1"
@@ -181,7 +182,7 @@ func acknowledge_section_install(section_key: Vector3i,
 	if snapshot.is_empty() or coverage_revision.is_empty() \
 			or _coverage_revision(section_key, snapshot) != coverage_revision:
 		return _failed("ordinary_section_install_acknowledgement_stale")
-	if not receipt.is_empty() and (not receipt.is_read_only() \
+	if receipt.is_empty() or (not receipt.is_read_only() \
 			or receipt.get("status") != "installed" \
 			or receipt.get("sectionKey") != section_key \
 			or String(receipt.get("contentManifestDigest", "")).is_empty()):
@@ -208,11 +209,152 @@ func acknowledge_section_install(section_key: Vector3i,
 			"authoritySourceId":authority_source_id, "sourceRevision":revision}
 	if installed.size() != snapshot.sourceRevisions.size():
 		return _failed("ordinary_section_install_member_declaration_count_mismatch")
+	var context := _context(_world_id)
+	if context.is_empty():
+		return _pending("ordinary_section_install_owner_changed")
+	if not _snapshot_lifecycle_is_current(snapshot, context):
+		return _pending("ordinary_section_install_lifecycle_stale", {
+			"section":section_key})
+	var retirements: Array[Dictionary] = []
+	var live_owners: Dictionary = snapshot.prepared.get("liveOwnersByPart", {})
+	for part_id_value: Variant in installed:
+		var part_id := String(part_id_value)
+		var owner_row: Dictionary = live_owners.get(part_id, {})
+		if String(owner_row.get("sourceRevision", "")) \
+				!= String(installed[part_id].get("sourceRevision", "")):
+			return _pending("ordinary_section_live_owner_revision_mismatch", {
+				"sourcePartId":part_id, "section":section_key})
+		var live_check := _current_live_recipe_visual(context, owner_row)
+		if live_check.get("status") != "ready":
+			return _pending(String(live_check.get("reason",
+				"ordinary_section_visual_retirement_owner_stale")), {
+				"sourcePartId":part_id, "section":section_key})
+		retirements.append({"partId":part_id, "visual":live_check.visual,
+			"sourceRevision":String(owner_row.get("sourceRevision", ""))})
+	# The roster calls this only after the coordinator validates the live native
+	# receipt. Validate every body and source revision before retiring any visual.
+	for retirement: Dictionary in retirements:
+		var visual := retirement.visual as MeshInstance3D
+		visual.visible = false
+		visual.set_meta("ordinary_structure_section_owned", true)
+		visual.set_meta("ordinary_structure_section_retired_source_revision",
+			String(retirement.sourceRevision))
 	installed.make_read_only()
 	_installed_members_by_section[section_id] = {
 		"coverageRevision":coverage_revision, "members":installed}
 	return {"status":"acknowledged", "section":section_key,
 		"coverageRevision":coverage_revision, "memberCount":installed.size()}
+
+
+func _capture_live_recipe_visual(main: Object, captured: Dictionary,
+		cell: Vector3i, block_type: String) -> Dictionary:
+	var body_ref: WeakRef = captured.get("body") as WeakRef
+	var body := body_ref.get_ref() as StaticBody3D if body_ref != null else null
+	var input: Dictionary = captured.get("sourceInput", {})
+	var recipe_input: Dictionary = input.get("visualRecipeInput", {})
+	var options: Dictionary = recipe_input.get("options", {})
+	var recipe: Dictionary = VisualRecipe.resolve_member(main, block_type, cell, options)
+	if not is_instance_valid(body) or recipe.get("status") != "ready":
+		return _pending("ordinary_section_live_recipe_visual_owner_or_recipe_missing")
+	var expected_digest := String(recipe.get("contentDigest", ""))
+	if expected_digest.is_empty() \
+			or String(body.get_meta("ordinary_structure_recipe_content_digest", "")) != expected_digest:
+		return _pending("ordinary_section_live_recipe_visual_body_digest_mismatch")
+	var matches: Array[MeshInstance3D] = []
+	var mesh_nodes: Array[MeshInstance3D] = []
+	var stack: Array[Node] = [body]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child_value: Variant in node.get_children():
+			if child_value is Node:
+				stack.append(child_value)
+		if node is MeshInstance3D:
+			var mesh_node := node as MeshInstance3D
+			mesh_nodes.append(mesh_node)
+			if mesh_node.get_parent() == body \
+					and String(mesh_node.get_meta("ordinary_structure_recipe_content_digest", "")) == expected_digest:
+				matches.append(mesh_node)
+	if mesh_nodes.size() != 1 or matches.size() != 1:
+		return _pending("ordinary_section_live_recipe_visual_cardinality_mismatch", {
+			"meshNodeCount":mesh_nodes.size(), "matchingNodeCount":matches.size()})
+	var visual := matches[0]
+	var input_buffer: Array = input.get("buffer", [])
+	var expected_transform := Attributes.decode_transform(input_buffer, 0)
+	if visual.mesh != recipe.get("mesh") \
+			or visual.material_override != recipe.get("material") \
+			or not _transform_approximately_equal(visual.transform, expected_transform) \
+			or (not visual.visible \
+				and not bool(visual.get_meta("ordinary_structure_section_owned", false))):
+		return _pending("ordinary_section_live_recipe_visual_resource_mismatch")
+	return {"status":"ready", "bodyInstanceId":body.get_instance_id(),
+		"visual":weakref(visual), "visualInstanceId":visual.get_instance_id(),
+		"contentDigest":expected_digest}
+
+
+func _current_live_recipe_visual(context: Dictionary, owner_row: Dictionary) -> Dictionary:
+	if context.is_empty() or owner_row.is_empty():
+		return _pending("ordinary_section_live_owner_binding_missing")
+	var body_ref: WeakRef = owner_row.get("body") as WeakRef
+	var body := body_ref.get_ref() as StaticBody3D if body_ref != null else null
+	var visual_ref: WeakRef = owner_row.get("visual") as WeakRef
+	var visual := visual_ref.get_ref() as MeshInstance3D if visual_ref != null else null
+	var source_id := String(owner_row.get("authoritySourceId", ""))
+	var cell: Variant = owner_row.get("cell")
+	var block_type := String(owner_row.get("blockType", ""))
+	var source_revision := String(owner_row.get("sourceRevision", ""))
+	if not is_instance_valid(body) or not is_instance_valid(visual) \
+			or not cell is Vector3i or source_id.is_empty() or source_revision.is_empty() \
+			or body.get_instance_id() != int(owner_row.get("bodyInstanceId", 0)) \
+			or visual.get_instance_id() != int(owner_row.get("visualInstanceId", 0)) \
+			or visual.get_parent() != body or not body.is_inside_tree() \
+			or body.is_queued_for_deletion() or visual.is_queued_for_deletion():
+		return _pending("ordinary_section_live_owner_replaced")
+	var sources: Dictionary = context.system.get("ordinary_visual_sources")
+	var source: Dictionary = sources.get(source_id, {})
+	var blocks: Dictionary = context.main.get("blocks")
+	if source.is_empty() or int(source.get("revision", -1)) \
+			!= int(owner_row.get("authoritySourceRevision", -2)) \
+			or blocks.get(cell) != body \
+			or body.get_meta("cell", null) != cell \
+			or String(body.get_meta("generated_visual_source_id", "")) != source_id \
+			or String(body.get_meta("block_type", "")) != block_type \
+			or bool(body.get_meta("player_placed", false)) \
+			or String(body.get_meta("ordinary_structure_recipe_content_digest", "")) \
+				!= String(owner_row.get("visualContentDigest", "")) \
+			or String(visual.get_meta("ordinary_structure_recipe_content_digest", "")) \
+				!= String(owner_row.get("visualContentDigest", "")) \
+			or visual.mesh != owner_row.get("mesh") \
+			or visual.material_override != owner_row.get("material") \
+			or not _transform_approximately_equal(body.global_transform,
+				owner_row.get("sourceToWorld")) \
+			or not _transform_approximately_equal(visual.transform,
+				owner_row.get("visualTransform")):
+		return _pending("ordinary_section_live_owner_revision_changed")
+	if not visual.visible and not bool(visual.get_meta("ordinary_structure_section_owned", false)):
+		return _pending("ordinary_section_live_visual_hidden_without_receipt")
+	return {"status":"ready", "visual":visual}
+
+
+func _transform_approximately_equal(a: Transform3D, b: Transform3D) -> bool:
+	return a.origin.distance_squared_to(b.origin) <= 0.000001 \
+		and a.basis.x.distance_squared_to(b.basis.x) <= 0.000001 \
+		and a.basis.y.distance_squared_to(b.basis.y) <= 0.000001 \
+		and a.basis.z.distance_squared_to(b.basis.z) <= 0.000001
+
+
+func _snapshot_lifecycle_is_current(snapshot: Dictionary, context: Dictionary) -> bool:
+	var prepared: Dictionary = snapshot.get("prepared", {})
+	var lifecycle: Dictionary = prepared.get("lifecycle", {})
+	var bounds: Variant = lifecycle.get("bounds")
+	if lifecycle.is_empty() or not bounds is Rect2i:
+		return false
+	var system: Object = context.system
+	return String(context.main.get("seed_text")) == String(lifecycle.get("seed", "")) \
+		and int(system.get("ordinary_visual_revision")) == int(lifecycle.get("ordinaryRevision", -1)) \
+		and int(system.get("regional_source_generation")) == int(lifecycle.get("generation", -1)) \
+		and int(system.get("regional_source_revision")) == int(lifecycle.get("regionalRevision", -1)) \
+		and system.call("region_dependency_scheduling_revision", bounds) \
+			== lifecycle.get("dependencyRevision")
 
 
 func _begin_job(section: Vector3i, context: Dictionary) -> Dictionary:
@@ -302,6 +444,14 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			var batch_key := String(input.get("batchKey", ""))
 			if batch_key.is_empty():
 				return _failed("ordinary_section_batch_key_missing")
+			var source_record: Dictionary = (context.system.get("ordinary_visual_sources") as Dictionary).get(source_id, {})
+			var live_visual := _capture_live_recipe_visual(context.main, captured,
+				Vector3i(cell_value), String(raw.get("blockType", "")))
+			if live_visual.get("status") != "ready":
+				job.candidateIndex = int(job.candidateIndex) - 1
+				return _pending(String(live_visual.get("reason",
+					"ordinary_section_live_recipe_visual_pending")), {
+					"sourceId":source_id, "cell":cell_value})
 			job.resourcesByBatch[batch_key] = resource
 			job.compatibilityByKey[batch_key] = captured.compatibility
 			job.meshBindings[String(captured.compatibility.meshResourceKey)] = captured.mesh
@@ -309,7 +459,20 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			job.sourceRevisions[part_id] = String(input.get("sourceRevision", ""))
 			job.sourceRows[part_id] = {"input":input, "manifest":captured.manifest,
 				"mesh":captured.mesh, "material":captured.material,
-				"compatibility":captured.compatibility}
+				"compatibility":captured.compatibility,
+				"liveOwner":{"body":captured.body,
+					"bodyInstanceId":int(live_visual.get("bodyInstanceId", 0)),
+					"visual":live_visual.get("visual"),
+					"visualInstanceId":int(live_visual.get("visualInstanceId", 0)),
+					"mesh":captured.mesh, "material":captured.material,
+					"sourceToWorld":input.get("sourceToWorld"),
+					"visualTransform":Attributes.decode_transform(input.get("buffer", []), 0),
+					"authoritySourceId":source_id,
+					"authoritySourceRevision":int(source_record.get("revision", -1)),
+					"cell":Vector3i(cell_value),
+					"blockType":String(raw.get("blockType", "")),
+					"visualContentDigest":String(live_visual.get("contentDigest", "")),
+					"sourceRevision":String(input.get("sourceRevision", ""))}}
 		if int(job.candidateIndex) < job.candidates.size():
 			return _pending("ordinary_section_geometry_capture_budget", {
 				"section":job.section, "cursor":int(job.candidateIndex),
@@ -350,6 +513,7 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		var owned_meshes: Dictionary = {}
 		var owned_materials: Dictionary = {}
 		var owned_revisions: Dictionary = {}
+		var live_owners_by_part: Dictionary = {}
 		var declarations: Array[Dictionary] = []
 		var prepared_segments: Array[Dictionary] = []
 		for part_id: String in ordered_ids:
@@ -363,6 +527,13 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			owned_meshes[String(compatibility.meshResourceKey)] = job.meshBindings[String(compatibility.meshResourceKey)]
 			owned_materials[String(compatibility.materialKey)] = job.materialBindings[String(compatibility.materialKey)]
 			owned_revisions[part_id] = String(input.sourceRevision)
+			var live_owner: Dictionary = source_row.get("liveOwner", {})
+			if live_owner.is_empty() \
+					or String(live_owner.get("sourceRevision", "")) != String(input.sourceRevision):
+				return _failed("ordinary_section_live_owner_binding_missing", {
+					"sourcePartId":part_id})
+			live_owner.make_read_only()
+			live_owners_by_part[part_id] = live_owner
 			var segment_declaration := _segment_declaration(input, compatibility)
 			segment_declaration.make_read_only()
 			var segment_declarations: Array[Dictionary] = [segment_declaration]
@@ -381,14 +552,24 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		owned_meshes.make_read_only()
 		owned_materials.make_read_only()
 		owned_revisions.make_read_only()
+		live_owners_by_part.make_read_only()
 		declarations.make_read_only()
 		prepared_segments.make_read_only()
 		var owned_partition: Dictionary = Partitioner.partition(owned_inputs).get("result", {})
 		if owned_partition.is_empty():
 			return _failed("ordinary_section_owned_partition_missing")
+		var lifecycle := {"seed":String(job.seed),
+			"ordinaryRevision":int(job.ordinaryRevision),
+			"generation":int(job.generation),
+			"regionalRevision":int(job.regionalRevision),
+			"dependencyRevision":job.dependencyRevision,
+			"bounds":job.bounds}
+		lifecycle.make_read_only()
 		var prepared := {"schema":SCHEMA, "sectionKey":section,
 			"coverageScope":"ordinary_generated_static_geometry",
+			"lifecycle":lifecycle,
 			"memberIds":ordered_ids, "sourceRevisions":owned_revisions,
+			"liveOwnersByPart":live_owners_by_part,
 			"inputs":owned_inputs, "declarations":declarations,
 			"preparedSegments":prepared_segments,
 			"partition":owned_partition,
@@ -461,7 +642,9 @@ func _candidate_intersects_section(candidate: Dictionary, section: Vector3i,
 					stack.append(child_value)
 			if node is MeshInstance3D:
 				var mesh_node := node as MeshInstance3D
-				if mesh_node.visible and mesh_node.is_visible_in_tree() and mesh_node.mesh != null:
+				# Visibility changes after receipt retirement, but the recipe geometry
+				# still determines its owner section during unload/replay census.
+				if mesh_node.mesh != null:
 					found_mesh = true
 					if section_bounds.intersects(mesh_node.global_transform * mesh_node.mesh.get_aabb()):
 						return true
