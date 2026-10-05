@@ -89,10 +89,15 @@ class FixtureStructure extends RefCounted:
 
 
 var checks: Array[Dictionary] = []
+var legacy_accent_fallback_calls := 0
 
 
 func _initialize() -> void:
 	call_deferred("run")
+
+
+func _record_legacy_accent_fallback() -> void:
+	legacy_accent_fallback_calls += 1
 
 
 func run() -> void:
@@ -158,6 +163,24 @@ func run() -> void:
 			-world.CELL * 0.50, 0.0, world.CELL * 0.43)
 		and corner_members[2].meshLocalTransform.origin == Vector3(
 			-world.CELL * 0.43, 0.0, world.CELL * 0.50), corner_recipe)
+	check("successful_corner_recipe_suppresses_legacy_accent_fallback",
+		corner_recipe.get("status") == "ready"
+		and not VisualRecipe.invoke_legacy_accent_fallback(true,
+			Callable(self, "_record_legacy_accent_fallback"))
+		and legacy_accent_fallback_calls == 0
+		and corner_members.size() == 3,
+		{"recipeStatus":corner_recipe.get("status", ""),
+			"recipeSegments":corner_ids,
+			"fallbackCalls":legacy_accent_fallback_calls})
+	var unsupported_accent_recipe: Dictionary = VisualRecipe.resolve_member(world,
+		"glass", Vector3i.ZERO, StructureScript._sealed_ordinary_visual_value({
+			"accentRole":"windowFrame", "windowAxis":"x"}))
+	check("pending_recipe_keeps_legacy_window_accent_fallback_enabled",
+		unsupported_accent_recipe.get("status") == "pending"
+		and VisualRecipe.invoke_legacy_accent_fallback(false,
+			Callable(self, "_record_legacy_accent_fallback"))
+		and legacy_accent_fallback_calls == 1,
+		unsupported_accent_recipe)
 	var fence_recipe: Dictionary = VisualRecipe.resolve_member(world, "woodBlock",
 		Vector3i(0, 0, 0), StructureScript._sealed_ordinary_visual_value({
 			"accentRole":"fencePost", "fenceAxis":"z",

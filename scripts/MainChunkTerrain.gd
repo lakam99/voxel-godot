@@ -975,7 +975,9 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
         add_ore_block_visual(body, block_type, mesh_size, mesh_offset)
     else:
         add_block_mesh(body, mesh_size, mesh_offset, block_type)
-    add_block_accent_visuals(body, block_type, options)
+    OrdinaryStructureBlockVisualRecipeScript.invoke_legacy_accent_fallback(
+        ordinary_recipe_visual_installed,
+        Callable(self, "add_block_accent_visuals").bind(body, block_type, options))
 
     var shape := BoxShape3D.new()
     shape.size = collider_size

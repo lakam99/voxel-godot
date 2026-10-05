@@ -856,6 +856,15 @@ func run_production_section_candidate_diagnostic() -> void:
             "reason":String(ordinary_fixture.get("reason", "fixture_unavailable"))}
         add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
         return
+    var accent_visual_gate: Dictionary = ordinary_fixture.get("accentVisualGate", {})
+    report["ordinaryAccentVisualGate"] = accent_visual_gate
+    if not bool(accent_visual_gate.get("passed", false)):
+        report["status"] = "failed"
+        report["firstBlocker"] = {"stage":"ordinary_accent_visuals",
+            "reason":"canonical_corner_recipe_members_not_exact_or_legacy_accent_duplicated",
+            "detail":accent_visual_gate}
+        add_result("production_section_candidate_diagnostic", false, JSON.stringify(report))
+        return
     var census: Dictionary = {}
     var last_pending_signature := ""
     var unchanged_pending_samples := 0
@@ -8021,9 +8030,9 @@ func underground_volume_focus_chunk_lookup(cells: Array[Vector2i]) -> Dictionary
 func _install_ordinary_recipe_fixture(section_key: Vector3i,
         player_body: CharacterBody3D) -> Dictionary:
     ## Diagnostic-only source created through Main's production block constructor
-    ## and StructureSystem's ordinary-source ledger. This proves one complete
-    ## opaque base-block recipe reaches the native section installer; it does not
-    ## stand in for a generated building's full decorated member manifest.
+    ## and StructureSystem's ordinary-source ledger. The corner-timber recipe
+    ## verifies the production constructor creates one exact, nonduplicated
+    ## three-member opaque visual before checking native section installation.
     if not is_instance_valid(main) or not is_instance_valid(player_body):
         return {"status":"pending", "reason":"ordinary_fixture_world_or_player_missing"}
     var structure_system: Object = main.get("structure_system")
@@ -8085,26 +8094,52 @@ func _install_ordinary_recipe_fixture(section_key: Vector3i,
         (float(target.y) - 0.5) * cell_size, float(target.z) * cell_size)
     var options := {"generated":true, "generatedTier":"section_recipe_proof",
         "generatedVisualSourceId":source_id, "world_x":world_position.x,
-        "world_y":world_position.y, "world_z":world_position.z}
+        "world_y":world_position.y, "world_z":world_position.z,
+        "accentRole":"cornerTimber", "cornerX":-1, "cornerZ":1,
+        "cornerTrimMaterial":"trimWood"}
     structure_system.call("_begin_ordinary_visual_source", source_id)
     structure_system.set("active_structure_visual_source_id", source_id)
-    var body: StaticBody3D = main.call("create_block", target, "stoneBlock", options)
-    structure_system.call("_record_ordinary_visual_block", target, "stoneBlock",
+    var body: StaticBody3D = main.call("create_block", target, "woodBlock", options)
+    structure_system.call("_record_ordinary_visual_block", target, "woodBlock",
         body, options)
     structure_system.set("active_structure_visual_source_id", "")
     if not is_instance_valid(body):
         return {"status":"pending", "reason":"ordinary_fixture_block_creation_failed",
             "cell":target}
     structure_system.call("_complete_ordinary_visual_source", source_id)
+    var recipe_segments: Array[String] = []
+    var legacy_corner_visual_count := 0
+    var visible_mesh_count := 0
+    for child_value: Variant in body.get_children():
+        var mesh_node := child_value as MeshInstance3D
+        if not is_instance_valid(mesh_node) or mesh_node.mesh == null:
+            continue
+        if mesh_node.visible:
+            visible_mesh_count += 1
+        var segment_id := String(mesh_node.get_meta(
+            "ordinary_structure_recipe_segment_id", ""))
+        if not segment_id.is_empty():
+            recipe_segments.append(segment_id)
+        elif String(mesh_node.get_meta("visual_role", "")) == "cornerTimber":
+            legacy_corner_visual_count += 1
+    recipe_segments.sort()
+    var accent_visual_gate := {"passed":recipe_segments == ["base",
+        "corner_timber_x", "corner_timber_z"] and visible_mesh_count == 3
+        and legacy_corner_visual_count == 0,
+        "recipeSegments":recipe_segments,
+        "visibleMeshCount":visible_mesh_count,
+        "legacyCornerVisualCount":legacy_corner_visual_count,
+        "bodyInstanceId":body.get_instance_id()}
     var source_part_id := "ordinary:%s:cell:%d,%d,%d" % [
         source_id, target.x, target.y, target.z]
     return {"status":"ready", "sourceId":source_id,
-        "sourcePartId":source_part_id, "blockType":"stoneBlock", "cell":target,
+        "sourcePartId":source_part_id, "blockType":"woodBlock", "cell":target,
         "worldPosition":[world_position.x, world_position.y, world_position.z],
         "sectionKey":section_key,
-        "creationPath":"diagnostic town-region source -> Main.create_block -> StructureSystem ordinary emission ledger",
+        "creationPath":"diagnostic town-region source -> Main.create_block canonical corner recipe -> StructureSystem ordinary emission ledger",
         "sourceDiscovery":"test-scoped empty town-cache slot descriptor",
-        "generatedTownLayoutProven":false}
+        "generatedTownLayoutProven":false,
+        "accentVisualGate":accent_visual_gate}
 
 func underground_volume_summary(found: Dictionary) -> Dictionary:
     var sample: Dictionary = found.get("sample", {}) if found.has("sample") else {}

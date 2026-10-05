@@ -65,6 +65,14 @@ static func generated_block_type_inventory() -> Array[String]:
 	return result
 
 
+static func invoke_legacy_accent_fallback(recipe_visual_installed: bool,
+		fallback: Callable) -> bool:
+	if recipe_visual_installed or not fallback.is_valid():
+		return false
+	fallback.call()
+	return true
+
+
 static func resolve_shared_resources(main: Object, material_key: String) -> Dictionary:
 	if not is_instance_valid(main) or not main.has_method("block_visual_mesh") \
 			or not main.has_method("block_visual_material"):
