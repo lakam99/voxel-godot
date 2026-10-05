@@ -233,6 +233,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		priority_scheduled_count += 1
 	var task := {
 		"body": weakref(body),
+		"bodyGlobalTransform": body.global_transform,
 		# Tree props are static for the life of this queued visual. Cache the
 		# immutable world position so priority selection never dereferences scene
 		# nodes in its hot loop.
@@ -263,7 +264,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		task["recipe"] = cached_recipe
 		enqueue_completed_task(task)
 		recipe_cache_reused_count += 1
-		body.set_meta("tree_visual_state", "recipe_cached")
+		_set_tree_preparation_state(body, "recipe_cached")
 		return true
 	var lod_source_recipe: Dictionary = recipe_cache.fetch_compatible_lod_source(
 		recipe_identity_key,
@@ -272,10 +273,75 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 	if not lod_source_recipe.is_empty():
 		task["lodSourceRecipe"] = lod_source_recipe
 		lod_recipe_derivation_requested_count += 1
-		body.set_meta("tree_visual_state", "recipe_lod_derivation_queued")
+		_set_tree_preparation_state(body, "recipe_lod_derivation_queued")
 	enqueue_pending_task(task)
 	if not task.has("lodSourceRecipe"):
-		body.set_meta("tree_visual_state", "queued")
+		_set_tree_preparation_state(body, "queued")
+	return true
+
+
+func _has_accepted_tree_visual(body: StaticBody3D) -> bool:
+	if not is_instance_valid(body):
+		return false
+	var current_state := String(body.get_meta("tree_visual_state", ""))
+	var current_source := String(body.get_meta("visual_source", ""))
+	if current_state == "published" and current_source == "procedural_tree_recipe":
+		return is_instance_valid(body.get_node_or_null("GeneratedTreeVisual"))
+	return current_state == "section_owned" \
+		and current_source == "chunk_owned_static_section"
+
+
+func _set_tree_preparation_state(body: StaticBody3D, state: String) -> void:
+	# Keep the adapter's currentness gate bound to the still-visible accepted
+	# representation while a replacement task is preparing off to the side.
+	if _has_accepted_tree_visual(body):
+		return
+	body.set_meta("tree_visual_state", state)
+
+
+func _section_task_matches_current_producer(task: Dictionary, body: StaticBody3D,
+		request: Dictionary, recipe: Dictionary) -> bool:
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or bool(body.get_meta("tree_publication_cancelled", false)):
+		return false
+	var enqueue_generation := int(task.get("enqueueSequence", 0))
+	var expected_generation := int(body.get_meta(
+		"tree_section_recipe_input_expected_generation", 0))
+	if expected_generation > 0 and enqueue_generation != expected_generation:
+		return false
+	if enqueue_generation > 0 and expected_generation != enqueue_generation:
+		return false
+	if String(body.get_meta("prop_id", "")) != String(request.get("treeId", "")) \
+			or not request.get("treeWorldPosition", Vector3.INF) is Vector3 \
+			or not (request.get("treeWorldPosition") as Vector3).is_equal_approx(body.global_position) \
+			or not body.global_transform.is_equal_approx(task.get(
+				"bodyGlobalTransform", body.global_transform) as Transform3D):
+		return false
+	var task_recipe_signature := String(recipe.get("signature", ""))
+	var request_tier := String(request.get("renderLodTier", ""))
+	var lod_value: Variant = recipe.get("renderLod", {})
+	if task_recipe_signature.is_empty() or request_tier.is_empty() \
+			or not lod_value is Dictionary \
+			or String(lod_value.get("tier", request_tier)) != request_tier:
+		return false
+	if bool(task.get("sectionOwnedCompile", false)):
+		var input_value: Variant = task.get("sectionRecipeInputRecord", null)
+		if not input_value is Dictionary or not input_value.is_read_only():
+			return false
+		var input: Dictionary = input_value
+		var input_body_ref := input.get("body") as WeakRef
+		if String(input.get("schema", "")) != TREE_SECTION_RECIPE_INPUT_SCHEMA \
+				or int(input.get("producerGeneration", 0)) != enqueue_generation \
+				or int(input.get("bodyInstanceId", 0)) != body.get_instance_id() \
+				or input_body_ref == null or input_body_ref.get_ref() != body \
+				or String(input.get("recipeSignature", "")) != task_recipe_signature \
+				or String(input.get("renderLodTier", "")) != request_tier \
+				or not (input.get("bodyGlobalTransform", Transform3D.IDENTITY) as Transform3D).is_equal_approx(body.global_transform):
+			return false
+		var retained_input := tree_section_recipe_input_record_for_body(body)
+		if retained_input.is_empty() \
+				or String(retained_input.get("contentRevision", "")) != String(input.get("contentRevision", "")):
+			return false
 	return true
 
 ## Cancel this exact scene instance without harvesting it or waiting for recipe
@@ -799,6 +865,8 @@ func seal_prepared_section_value_record(task: Dictionary,
 		return {"status":"pending", "reason":"prepared_tree_section_values_incomplete"}
 	var request: Dictionary = request_value
 	var recipe: Dictionary = recipe_value
+	if not _section_task_matches_current_producer(task, body, request, recipe):
+		return {"status":"pending", "reason":"prepared_tree_producer_generation_stale"}
 	var prop_id := String(request.get("treeId", ""))
 	var seed := String(request.get("worldSeed", ""))
 	var tier := String(request.get("renderLodTier", ""))
@@ -834,6 +902,7 @@ func seal_prepared_section_value_record(task: Dictionary,
 	var frozen_members: Array = _freeze_section_value(members_value)
 	var record := {"schema":"prepared-tree-section-artifact/v1",
 		"artifactGeneration":prepared_section_generation,
+		"producerGeneration":int(task.get("enqueueSequence", 0)),
 		"sourceId":"%s:tree:%s" % [seed, prop_id], "propId":prop_id,
 		"body":weakref(body), "bodyInstanceId":body.get_instance_id(),
 		"bodyGlobalTransform":body.global_transform,
@@ -850,8 +919,28 @@ func retain_prepared_section_value_record(record: Dictionary) -> Dictionary:
 		return {"status":"failed", "reason":"prepared_tree_record_invalid"}
 	var body_ref := record.get("body") as WeakRef
 	var body: StaticBody3D = body_ref.get_ref() as StaticBody3D if body_ref != null else null
-	if not is_instance_valid(body) or int(record.get("bodyInstanceId", 0)) != body.get_instance_id():
+	var producer_generation := int(record.get("producerGeneration", 0))
+	var expected_generation := int(body.get_meta(
+		"tree_section_recipe_input_expected_generation", 0)) if is_instance_valid(body) else 0
+	var request_value: Variant = record.get("request", {})
+	var record_request: Dictionary = request_value if request_value is Dictionary else {}
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or bool(body.get_meta("tree_publication_cancelled", false)) \
+			or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+			or (expected_generation > 0 and producer_generation != expected_generation) \
+			or (producer_generation > 0 and expected_generation != producer_generation) \
+			or not (record.get("bodyGlobalTransform", Transform3D.IDENTITY) as Transform3D).is_equal_approx(body.global_transform) \
+			or not (record_request.get("treeWorldPosition", Vector3.INF) as Vector3).is_equal_approx(body.global_position) \
+			or String(body.get_meta("prop_id", "")) != String(record.get("propId", "")):
 		return {"status":"pending", "reason":"prepared_tree_body_replaced"}
+	for existing_value: Variant in prepared_section_value_records:
+		if not existing_value is Dictionary:
+			continue
+		var existing: Dictionary = existing_value
+		var existing_body_ref := existing.get("body") as WeakRef
+		if existing_body_ref != null and existing_body_ref.get_ref() == body \
+				and int(existing.get("producerGeneration", 0)) > producer_generation:
+			return {"status":"pending", "reason":"prepared_tree_record_superseded"}
 	for index in range(prepared_section_value_records.size() - 1, -1, -1):
 		var existing: Dictionary = prepared_section_value_records[index]
 		var existing_body_ref := existing.get("body") as WeakRef
@@ -958,7 +1047,7 @@ func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> boo
 		task["recipe"] = cached_recipe
 		enqueue_completed_task(task)
 		recipe_cache_reused_count += 1
-		body.set_meta("tree_visual_state", "recipe_cached")
+		_set_tree_preparation_state(body, "recipe_cached")
 	else:
 		var lod_source_recipe: Dictionary = recipe_cache.fetch_compatible_lod_source(
 			String(task.get("recipeIdentityKey", "")),
@@ -967,10 +1056,10 @@ func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> boo
 		if not lod_source_recipe.is_empty():
 			task["lodSourceRecipe"] = lod_source_recipe
 			lod_recipe_derivation_requested_count += 1
-			body.set_meta("tree_visual_state", "recipe_lod_derivation_queued")
+			_set_tree_preparation_state(body, "recipe_lod_derivation_queued")
 		enqueue_pending_task(task)
 		if not task.has("lodSourceRecipe"):
-			body.set_meta("tree_visual_state", "queued")
+			_set_tree_preparation_state(body, "queued")
 	return true
 
 func _process(_delta: float) -> void:
@@ -1004,11 +1093,11 @@ func start_pending_workers() -> void:
 		var start_error := thread.start(worker_callable.bindv(worker_arguments))
 		if start_error != OK:
 			failed_count += 1
-			body.set_meta("tree_visual_state", "failed")
+			_set_tree_preparation_state(body, "failed")
 			continue
 		task["thread"] = thread
 		task["workerService"] = worker_service
-		body.set_meta("tree_visual_state", "building")
+		_set_tree_preparation_state(body, "building")
 		active.append(task)
 
 func enqueue_pending_task(task: Dictionary) -> void:
@@ -1210,7 +1299,7 @@ func collect_completed_workers() -> void:
 		else:
 			var body: StaticBody3D = _publication_body(task)
 			if body != null and is_instance_valid(body):
-				body.set_meta("tree_visual_state", "failed")
+				_set_tree_preparation_state(body, "failed")
 			failed_count += 1
 	active = still_active
 func task_precedes(left: Dictionary, right: Dictionary) -> bool:
@@ -1710,7 +1799,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			String(request.get("treeId", "procedural-tree"))
 		)
 		if root == null:
-			body.set_meta("tree_visual_state", "failed")
+			_set_tree_preparation_state(body, "failed")
 			failed_count += 1
 			return
 		root.name = "GeneratedTreeVisual"
@@ -1727,7 +1816,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			task["visual"] = root
 			task["woodRoot"] = section_wood_root
 			task["renderStage"] = "bole"
-			body.set_meta("tree_visual_state", "assembling_section_values")
+			_set_tree_preparation_state(body, "assembling_section_values")
 			publication_stage_counts["root"] = int(publication_stage_counts.get("root", 0)) + 1
 			continue_publication_task(task)
 			return
@@ -1749,18 +1838,18 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		task["visual"] = root
 		task["woodRoot"] = wood_root
 		task["renderStage"] = "bole"
-		body.set_meta("tree_visual_state", "assembling")
+		_set_tree_preparation_state(body, "assembling")
 		publication_stage_counts["root"] = int(publication_stage_counts.get("root", 0)) + 1
 		continue_publication_task(task)
 		return
 	var visual: Node3D = task.get("visual", null) as Node3D
 	if visual == null or not is_instance_valid(visual):
-		body.set_meta("tree_visual_state", "failed")
+		_set_tree_preparation_state(body, "failed")
 		failed_count += 1
 		return
 	var wood_root: Node3D = task.get("woodRoot", null) as Node3D
 	if wood_root == null or not is_instance_valid(wood_root):
-		body.set_meta("tree_visual_state", "failed")
+		_set_tree_preparation_state(body, "failed")
 		failed_count += 1
 		return
 	var branches: Array[Dictionary] = []
@@ -1779,7 +1868,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		if not task.has("boleBuildState"):
 			var initial_bole_build_state: Dictionary = visual_factory.begin_runtime_bole_build(branches)
 			if initial_bole_build_state.is_empty():
-				body.set_meta("tree_visual_state", "failed")
+				_set_tree_preparation_state(body, "failed")
 				failed_count += 1
 				return
 			# Graph partitioning is deterministic but can be the expensive part of a
@@ -1792,7 +1881,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		if bole_build_state.is_empty():
 			# A staged state must never be lost silently; this also protects a
 			# future chunk-cancellation path from publishing a partial trunk.
-			body.set_meta("tree_visual_state", "failed")
+			_set_tree_preparation_state(body, "failed")
 			failed_count += 1
 			return
 		if bool(task.get("boleBuildComplete", false)):
@@ -1853,7 +1942,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			return
 		var distal_build_state: Dictionary = task.get("distalBuildState", {})
 		if distal_build_state.is_empty():
-			body.set_meta("tree_visual_state", "failed")
+			_set_tree_preparation_state(body, "failed")
 			failed_count += 1
 			return
 		if bool(task.get("distalBuildComplete", false)):
@@ -1910,7 +1999,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			return
 		var foliage_build_state: Dictionary = task.get("foliageBuildState", {})
 		if foliage_build_state.is_empty():
-			body.set_meta("tree_visual_state", "failed")
+			_set_tree_preparation_state(body, "failed")
 			failed_count += 1
 			return
 		if bool(task.get("foliageBuildComplete", false)):
@@ -1956,7 +2045,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		if sealed.get("status") == "ready":
 			var retained := retain_prepared_section_value_record(sealed.record)
 			if retained.get("status") == "retained":
-				body.set_meta("tree_visual_state", "section_candidate_pending")
+				_set_tree_preparation_state(body, "section_candidate_pending")
 				body.set_meta("tree_recipe_signature", String(sealed.record.get(
 					"recipeSignature", "")))
 				body.set_meta("tree_render_lod_tier", String(sealed.record.get("tier", "")))
@@ -1973,7 +2062,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		var failure_reason := String(sealed.get("reason",
 			"prepared_tree_section_values_incomplete"))
 		body.set_meta("tree_section_value_failure_reason", failure_reason)
-		body.set_meta("tree_visual_state", "section_compile_failed")
+		_set_tree_preparation_state(body, "section_compile_failed")
 		var rejected_visual: Node3D = task.get("visual", null) as Node3D
 		if is_instance_valid(rejected_visual) and rejected_visual.get_parent() == null:
 			rejected_visual.free()

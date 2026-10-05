@@ -160,14 +160,19 @@ static func _capture_tree_record(queue: Object, main: Object, world_id: String,
 	var section_owned := bool(queue_record.get("sectionOwned", false))
 	var published_visual_valid := body_state == "published" \
 		and body_source == "procedural_tree_recipe"
-	var section_visual_valid := section_owned and body_state == "section_owned" \
-		and body_source == "chunk_owned_static_section"
+	var section_visual_valid := body_state == "section_owned" \
+		and body_source == "chunk_owned_static_section" \
+		and (section_owned or not require_published)
+	var accepted_visual_valid := published_visual_valid or section_visual_valid
+	var prepared_for_current_body := prepared_transform is Transform3D \
+		and (prepared_transform as Transform3D).is_equal_approx(body.global_transform)
+	var prepared_state_valid := accepted_visual_valid \
+		or body_state == "section_candidate_pending"
 	if not body.is_inside_tree() or body.is_queued_for_deletion() \
 			or bool(body.get_meta("tree_publication_cancelled", false)) \
 			or (require_published and not published_visual_valid and not section_visual_valid) \
-			or (not require_published and (body_state != "section_candidate_pending" \
-				or not prepared_transform is Transform3D \
-				or not (prepared_transform as Transform3D).is_equal_approx(body.global_transform))):
+			or (not require_published and (not prepared_state_valid \
+				or not prepared_for_current_body)):
 		return _pending("tree_body_not_currently_publishable", {"sourceId":source_id})
 	if queue_record.is_empty():
 		return _pending("tree_queue_prepared_record_missing" if not require_published \

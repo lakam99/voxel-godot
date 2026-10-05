@@ -320,6 +320,47 @@ func run() -> void:
 		and not prepared_census_revision.is_empty() \
 		and prepared_census_revision == ecology._tree_section_source_revision(
 			tree_candidate, prepared_capture))
+	var old_tree_visual := body.get_node_or_null("GeneratedTreeVisual") as Node3D
+	if old_tree_visual == null:
+		old_tree_visual = Node3D.new()
+		old_tree_visual.name = "GeneratedTreeVisual"
+		body.add_child(old_tree_visual)
+	body.set_meta("tree_visual_state", "published")
+	body.set_meta("visual_source", "procedural_tree_recipe")
+	var prepared_capture_during_replacement := Adapter.capture_from_prepared_record(queue,
+		authority, world_id, body, prepared_record, RemovedProps.capture(authority))
+	check("new_candidate_is_censusable_while_the_old_tree_visual_remains_current",
+		prepared_capture_during_replacement.get("status") == "ready" \
+		and body.get_node_or_null("GeneratedTreeVisual") == old_tree_visual \
+		and String(body.get_meta("tree_visual_state", "")) == "published")
+	body.set_meta("tree_visual_state", "section_candidate_pending")
+	var superseded_generation := int(prepared_record.get("producerGeneration", 0)) + 1
+	body.set_meta("tree_section_recipe_input_expected_generation", superseded_generation)
+	var stale_preparation := queue.seal_prepared_section_value_record({
+		"enqueueSequence":superseded_generation - 1,
+		"bodyGlobalTransform":body.global_transform,
+		"request":request.duplicate(true), "recipe":recipe,
+		"sectionValueMembers":prepared_members, "sectionValueCapturePending":"",
+		"sectionOwnedCompile":true}, body)
+	var rejected_old_artifact := queue.retain_prepared_section_value_record(prepared_record)
+	check("superseded_tree_generation_cannot_seal_or_replace_retained_candidate",
+		stale_preparation.get("status") == "pending" \
+		and stale_preparation.get("reason") == "prepared_tree_producer_generation_stale" \
+		and rejected_old_artifact.get("status") == "pending" \
+		and queue.prepared_section_value_record_for_body(body).get("artifactGeneration", 0) \
+			== prepared_record.get("artifactGeneration", -1))
+	body.remove_meta("tree_section_recipe_input_expected_generation")
+	var accepted_visual_body := StaticBody3D.new()
+	accepted_visual_body.set_meta("tree_visual_state", "published")
+	accepted_visual_body.set_meta("visual_source", "procedural_tree_recipe")
+	var accepted_visual := Node3D.new()
+	accepted_visual.name = "GeneratedTreeVisual"
+	accepted_visual_body.add_child(accepted_visual)
+	queue._set_tree_preparation_state(accepted_visual_body, "section_compile_failed")
+	check("replacement_failure_preserves_last_accepted_per_tree_visual_state",
+		String(accepted_visual_body.get_meta("tree_visual_state", "")) == "published" \
+		and accepted_visual_body.get_node_or_null("GeneratedTreeVisual") == accepted_visual)
+	accepted_visual_body.free()
 	var prepared_receipts := {}
 	for section_key: Vector3i in prepared_sections:
 		var receipt := {"status":"installed",
