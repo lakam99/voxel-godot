@@ -7,6 +7,7 @@ cli(async () => {
   prepare(c, 'userdata', false);
   launchRecord(c, [
     'scripts/testing/OrdinaryStructureSectionGeometryAdapterContract.gd',
+    'scripts/MainChunkTerrain.gd',
     'scripts/world/OrdinaryStructureSectionGeometryAdapter.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
@@ -14,6 +15,13 @@ cli(async () => {
     'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderMeshFingerprint.gd',
     'scripts/StructureSystem.gd',
+    'scripts/world/OrdinaryStructureBlockVisualRecipe.gd',
+    'scripts/visual/StaticItemAssetRegistry.gd',
+    'assets/generated/static/static-item-manifest.json',
+    'assets/generated/static/workbench.glb',
+    'assets/generated/static/bed.glb',
+    'assets/generated/static/traderStall.glb',
+    'assets/generated/static/spikeTrap.glb',
     'tools/visible-world/run-ordinary-section-geometry-adapter-contract.mjs',
     'tools/lib/building-runner.mjs',
     'tools/run-godot-scene-watchdog.mjs'

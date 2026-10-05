@@ -14,7 +14,9 @@ const SnapshotBuilder := preload("res://scripts/world/PreparedStaticSectionSnaps
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 const BUILDING_MATERIAL_SHADER_PATH := "res://resources/visual/building_material.gdshader"
 
-const ALLOWED_BLOCK_TYPES: Array[String] = ["cobblestonePath", "stoneBlock", "woodBlock"]
+const ALLOWED_BLOCK_TYPES: Array[String] = ["cobblestonePath", "stoneBlock",
+	"woodBlock", "workbench", "bed", "traderStall", "spikeTrap",
+	"copperVein", "ironVein"]
 const SCHEMA := "ordinary-static-geometry-source/v1"
 ## The section discovery query includes owner cells one cell past each edge.
 ## Keep the allowlist inside that bound so a source outside the query cannot
@@ -136,6 +138,7 @@ static func capture_block(structure_system: Object, main: Object,
 				"reason":String(mesh_identity.get("reason", ""))})
 		var mesh_bounds: AABB = member.meshLocalBounds
 		var world_bounds: AABB = member.worldBounds
+		var cast_shadows := bool(member.get("castShadows", true))
 		if not _valid_bounds(mesh_bounds) or not _valid_bounds(world_bounds):
 			return _pending("ordinary_geometry_mesh_bounds_invalid", {
 				"sourceId":source_id, "cell":cell, "segmentId":segment_suffix})
@@ -155,14 +158,14 @@ static func capture_block(structure_system: Object, main: Object,
 			return _failed("ordinary_geometry_revision_hash_failed")
 		var mesh_key: String = "ordinary-mesh:" + String(mesh_identity.contentDigest)
 		var material_key: String = "ordinary-material:" + String(material_identity.digest)
-		var pipeline_revision := "ordinary-static-mesh/v1"
+		var pipeline_revision := "ordinary-static-mesh/v2"
 		var mesh_pipeline_key := "%s|pipeline=%s|layer=opaque|sort=none" % [mesh_key, pipeline_revision]
 		var compatibility := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 			"materialKey":material_key, "renderTier":"structural",
 			"meshResourceKey":mesh_key, "meshContentDigest":String(mesh_identity.contentDigest),
 			"meshKey":mesh_pipeline_key, "pipelineRevision":pipeline_revision,
 			"renderLayer":"opaque", "translucentSortPolicy":"none",
-			"meshLocalBounds":mesh_bounds, "castShadows":true,
+			"meshLocalBounds":mesh_bounds, "castShadows":cast_shadows,
 			"visibilityRangeEnd":100000.0, "fadeMargin":0.0}
 		var batch_key := SnapshotBuilder.batch_compatibility_key(compatibility)
 		if batch_key.is_empty():
@@ -197,7 +200,7 @@ static func capture_block(structure_system: Object, main: Object,
 			"renderTier":"structural",
 			"pipelineRevision":pipeline_revision,
 			"compatibilityKey":batch_key,
-			"castShadows":true,
+			"castShadows":cast_shadows,
 			"visibilityRangeEnd":100000.0,
 			"fadeMargin":0.0,
 			"buffer":buffer,
@@ -209,7 +212,8 @@ static func capture_block(structure_system: Object, main: Object,
 			"meshDigest":String(mesh_identity.contentDigest),
 			"materialDigest":String(material_identity.digest)})
 		member_rows.append([segment_suffix, source_revision,
-			String(mesh_identity.contentDigest), material_identity.digest])
+			String(mesh_identity.contentDigest), material_identity.digest,
+			cast_shadows])
 		if inputs.size() == 1:
 			first_mesh = mesh
 			first_material = material

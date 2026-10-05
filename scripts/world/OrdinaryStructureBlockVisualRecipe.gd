@@ -6,7 +6,8 @@ class_name OrdinaryStructureBlockVisualRecipe
 ## only the sealed transform/color ABI and revision-bound resource bindings.
 
 const SUPPORTED_BLOCK_TYPES: Array[String] = [
-	"cobblestonePath", "stoneBlock", "woodBlock"]
+	"cobblestonePath", "stoneBlock", "woodBlock", "workbench", "bed",
+	"traderStall", "spikeTrap", "copperVein", "ironVein"]
 ## Explicit completeness classification for block families emitted by
 ## StructureSystem. Static families may remain unsupported by the section
 ## adapter; those still pend instead of being treated as empty coverage.
@@ -126,6 +127,9 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 		if options.has(option_key):
 			return _pending("ordinary_block_visual_option_not_supported", {
 				"blockType":block_type, "option":option_key})
+	if not is_instance_valid(main) or not main.has_method("block_shadow_policy"):
+		return _pending("ordinary_block_visual_shadow_policy_authority_unavailable", {
+			"blockType":block_type})
 	var sealed_options := _seal_dictionary(options)
 	var recipe_digest := _recipe_digest(block_type, sealed_options)
 	if recipe_digest.is_empty():
@@ -146,39 +150,41 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 		return _pending("ordinary_block_visual_source_transform_invalid", {"cell":cell})
 	var source_to_world := block_root.global_transform * Transform3D(
 		Basis(Vector3.UP, facing), position)
-	var specs := _member_specs(block_type, options, shape)
-	if specs.get("status") != "ready":
-		return specs
 	var members: Array[Dictionary] = []
+	var asset_capture := _generated_static_asset_members(main, block_type,
+		cell_size, source_to_world)
+	if asset_capture.get("status") == "ready":
+		members = asset_capture.get("members", [])
+	elif asset_capture.get("status") == "pending":
+		return asset_capture
+	else:
+		var specs := _member_specs(block_type, options, shape)
+		if specs.get("status") != "ready":
+			return specs
+		members = _resolve_procedural_members(main, block_type, cell,
+			sealed_options, source_to_world, specs.get("members", []))
+		if members.is_empty():
+			return _pending("ordinary_block_visual_member_resources_unavailable", {
+				"blockType":block_type})
 	var member_payloads: Array = []
-	for spec_value: Variant in specs.get("members", []):
-		if not spec_value is Dictionary:
-			return _failed("ordinary_block_visual_member_spec_invalid")
-		var spec: Dictionary = spec_value
-		var resources := resolve_shared_resources(main, String(spec.materialKey))
-		if resources.get("status") != "ready":
-			return resources
-		var mesh: Mesh = resources.mesh
-		var mesh_local_transform: Transform3D = spec.localTransform
-		var mesh_bounds := mesh.get_aabb()
-		if not _finite_aabb(mesh_bounds):
-			return _pending("ordinary_block_visual_mesh_bounds_invalid", {
-				"blockType":block_type, "segmentId":String(spec.segmentId)})
-		var member := {"segmentId":String(spec.segmentId),
-			"visualName":String(spec.visualName), "visualRole":String(spec.visualRole),
-			"materialKey":String(spec.materialKey), "mesh":mesh,
-			"material":resources.material,
-			"meshLocalTransform":mesh_local_transform,
-			"meshLocalBounds":mesh_bounds,
-			"worldBounds":source_to_world * (mesh_local_transform * mesh_bounds),
-			"castShadows":true}
-		member.make_read_only()
-		members.append(member)
-		member_payloads.append([String(spec.segmentId), String(spec.materialKey),
-			mesh.get_class(), mesh.resource_path, mesh_local_transform, mesh_bounds,
-			String(spec.visualRole), true])
 	if members.is_empty():
 		return _failed("ordinary_block_visual_member_list_empty")
+	for member_value: Variant in members:
+		if not member_value is Dictionary or not member_value.is_read_only():
+			return _failed("ordinary_block_visual_member_not_sealed")
+		var member: Dictionary = member_value
+		var mesh: Mesh = member.get("mesh") as Mesh
+		var material: Material = member.get("material") as Material
+		var mesh_local_transform: Transform3D = member.get("meshLocalTransform",
+			Transform3D.IDENTITY)
+		var mesh_bounds: AABB = member.get("meshLocalBounds", AABB())
+		if not is_instance_valid(mesh) or not is_instance_valid(material) \
+				or not _finite_aabb(mesh_bounds):
+			return _pending("ordinary_block_visual_mesh_or_material_invalid", {
+				"blockType":block_type, "segmentId":String(member.get("segmentId", ""))})
+		member_payloads.append([String(member.segmentId), String(member.materialKey),
+			mesh.get_class(), mesh.resource_path, mesh_local_transform, mesh_bounds,
+			String(member.get("visualRole", "")), bool(member.get("castShadows", true))])
 	members.make_read_only()
 	var first: Dictionary = members[0]
 	var payload := [RECIPE_SCHEMA, block_type, cell, sealed_options, recipe_digest,
@@ -198,11 +204,267 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 		"size":shape.size, "offset":shape.offset}
 
 
+static func _resolve_procedural_members(main: Object, block_type: String,
+		cell: Vector3i, options: Dictionary, source_to_world: Transform3D,
+		specs: Array) -> Array[Dictionary]:
+	var members: Array[Dictionary] = []
+	for spec_value: Variant in specs:
+		if not spec_value is Dictionary:
+			return []
+		var spec: Dictionary = spec_value
+		var resources := resolve_shared_resources(main, String(spec.get("materialKey", "")))
+		if resources.get("status") != "ready":
+			return []
+		var mesh: Mesh = resources.mesh
+		var mesh_local_transform: Transform3D = spec.get("localTransform", Transform3D.IDENTITY)
+		var mesh_bounds := mesh.get_aabb()
+		if not _finite_aabb(mesh_bounds):
+			return []
+		var member := {"segmentId":String(spec.get("segmentId", "")),
+			"visualName":String(spec.get("visualName", "")),
+			"visualRole":String(spec.get("visualRole", "")),
+			"materialKey":String(spec.get("materialKey", "")), "mesh":mesh,
+			"material":resources.material, "meshLocalTransform":mesh_local_transform,
+			"meshLocalBounds":mesh_bounds,
+			"worldBounds":source_to_world * (mesh_local_transform * mesh_bounds),
+			"castShadows":_block_material_cast_shadows(main,
+				String(spec.get("materialKey", "")))}
+		member.make_read_only()
+		members.append(member)
+	return members
+
+
+static func _generated_static_asset_members(main: Object, block_type: String,
+		cell_size: float, source_to_world: Transform3D) -> Dictionary:
+	var registry: Variant = main.get("static_item_asset_registry")
+	if registry == null or not is_instance_valid(registry) \
+			or not registry.has_method("has_asset") or not registry.has_method("instantiate_item"):
+		return {"status":"unavailable"}
+	if not bool(registry.call("has_asset", block_type)):
+		return {"status":"unavailable"}
+	var asset_root := registry.call("instantiate_item", block_type) as Node3D
+	if not is_instance_valid(asset_root):
+		return _pending("ordinary_block_static_asset_instantiation_failed", {
+			"blockType":block_type})
+	asset_root.scale = Vector3.ONE * cell_size
+	var root_transform: Transform3D = asset_root.transform
+	var members: Array[Dictionary] = []
+	var result := _collect_static_asset_members(asset_root, root_transform,
+		block_type, source_to_world, "", members, true)
+	asset_root.free()
+	if result.get("status") != "ready":
+		return result
+	if members.is_empty():
+		return _pending("ordinary_block_static_asset_has_no_mesh_members", {
+			"blockType":block_type})
+	members.make_read_only()
+	return {"status":"ready", "members":members,
+		"assetId":block_type}
+
+
+static func _block_material_cast_shadows(main: Object, material_key: String) -> bool:
+	if not is_instance_valid(main) or not main.has_method("block_shadow_policy"):
+		return true
+	return int(main.call("block_shadow_policy", material_key)) \
+		!= GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+static func _collect_static_asset_members(node: Node, node_to_root: Transform3D,
+		asset_id: String, source_to_world: Transform3D, node_path: String,
+		members: Array[Dictionary], parent_visible: bool) -> Dictionary:
+	var visible_through_hierarchy := parent_visible
+	if node is Node3D:
+		visible_through_hierarchy = parent_visible and (node as Node3D).visible
+	if node is GeometryInstance3D and not node is MeshInstance3D:
+		return _pending("ordinary_block_static_asset_geometry_type_unsupported", {
+			"assetId":asset_id, "nodePath":node_path, "class":node.get_class()})
+	if node is MeshInstance3D:
+		var mesh_instance := node as MeshInstance3D
+		if not visible_through_hierarchy:
+			return _pending("ordinary_block_static_asset_mesh_not_visible_in_source", {
+				"assetId":asset_id, "nodePath":node_path,
+				"nodeVisible":mesh_instance.visible,
+				"visibleThroughHierarchy":visible_through_hierarchy})
+		var mesh := mesh_instance.mesh
+		if not is_instance_valid(mesh) or mesh.get_surface_count() != 1:
+			return _pending("ordinary_block_static_asset_mesh_surface_unsupported", {
+				"assetId":asset_id, "nodePath":node_path,
+				"surfaceCount":mesh.get_surface_count() if is_instance_valid(mesh) else -1})
+		var material: Material = mesh_instance.material_override
+		if material == null:
+			material = mesh_instance.get_surface_override_material(0)
+		if material == null:
+			material = mesh.surface_get_material(0)
+		if not is_instance_valid(material):
+			return _pending("ordinary_block_static_asset_surface_material_missing", {
+				"assetId":asset_id, "nodePath":node_path})
+		var local_bounds := mesh.get_aabb()
+		var mesh_local_transform := node_to_root
+		if not _finite_aabb(local_bounds):
+			return _pending("ordinary_block_static_asset_mesh_bounds_invalid", {
+				"assetId":asset_id, "nodePath":node_path})
+		var segment_id := "asset:%s:%s:surface:0" % [asset_id, node_path]
+		var material_key := "static-item:%s:%s" % [asset_id,
+			String(material.resource_path)]
+		var member := {"segmentId":segment_id,
+			"visualName":mesh_instance.name, "visualRole":"generatedStaticAsset",
+			"materialKey":material_key, "mesh":mesh, "material":material,
+			"meshLocalTransform":mesh_local_transform,
+			"meshLocalBounds":local_bounds,
+			"worldBounds":source_to_world * (mesh_local_transform * local_bounds),
+			"castShadows":mesh_instance.cast_shadow \
+				!= GeometryInstance3D.SHADOW_CASTING_SETTING_OFF}
+		member.make_read_only()
+		members.append(member)
+	for child_index in range(node.get_child_count()):
+		var child: Node = node.get_child(child_index)
+		if not child is Node3D:
+			return _pending("ordinary_block_static_asset_nonspatial_child_unsupported", {
+				"assetId":asset_id, "nodePath":node_path, "child":child.name})
+		var child_path := String(child.name) + "#" + str(child_index)
+		if not node_path.is_empty():
+			child_path = node_path + "/" + child_path
+		var child_transform: Transform3D = node_to_root * (child as Node3D).transform
+		var child_result := _collect_static_asset_members(child,
+			child_transform, asset_id, source_to_world, child_path, members,
+			visible_through_hierarchy)
+		if child_result.get("status") != "ready":
+			return child_result
+	return {"status":"ready"}
+
+
 static func _member_specs(block_type: String, options: Dictionary,
 		shape: Dictionary) -> Dictionary:
 	var cell_size := float(shape.cellSize)
 	var specs: Array[Dictionary] = []
-	if options.has("roofRole") and block_type in ["woodBlock", "stoneBlock"]:
+	if block_type == "workbench":
+		_append_spec(specs, "bench_top", "BenchTop", "generatedStaticUtility",
+			"workbench", Vector3(cell_size * 1.18, cell_size * 0.16,
+				cell_size * 0.92), Vector3(0.0, cell_size * 0.29, 0.0))
+		_append_spec(specs, "bench_top_trim", "BenchTopTrim", "generatedStaticUtility",
+			"door", Vector3(cell_size * 1.24, cell_size * 0.06,
+				cell_size * 0.98), Vector3(0.0, cell_size * 0.41, 0.0))
+		_append_spec(specs, "bench_lower_shelf", "BenchLowerShelf", "generatedStaticUtility",
+			"workbench", Vector3(cell_size * 0.82, cell_size * 0.08,
+				cell_size * 0.58), Vector3(0.0, -cell_size * 0.20, 0.0))
+		for x_offset in [-0.43, 0.43]:
+			for z_offset in [-0.31, 0.31]:
+				_append_spec(specs, "bench_leg_%s_%s" % [str(x_offset), str(z_offset)],
+					"BenchLeg", "generatedStaticUtility", "door",
+					Vector3(cell_size * 0.10, cell_size * 0.58, cell_size * 0.10),
+					Vector3(float(x_offset) * cell_size, -cell_size * 0.10,
+						float(z_offset) * cell_size))
+		for x_offset in [-0.28, 0.28]:
+			_append_spec(specs, "bench_rail_%s" % str(x_offset), "BenchRail",
+				"generatedStaticUtility", "door",
+				Vector3(cell_size * 0.08, cell_size * 0.08, cell_size * 0.78),
+				Vector3(float(x_offset) * cell_size, cell_size * 0.11, 0.0))
+		_append_spec(specs, "bench_stone_tool", "BenchStoneTool", "generatedStaticUtility",
+			"stoneBlock", Vector3(cell_size * 0.38, cell_size * 0.035,
+				cell_size * 0.08), Vector3(-cell_size * 0.25,
+				cell_size * 0.52, -cell_size * 0.22))
+		_append_spec(specs, "bench_wood_tool", "BenchWoodTool", "generatedStaticUtility",
+			"woodBlock", Vector3(cell_size * 0.08, cell_size * 0.04,
+				cell_size * 0.34), Vector3(cell_size * 0.25,
+				cell_size * 0.52, cell_size * 0.10))
+		_append_spec(specs, "bench_stone_tool_small", "BenchStoneToolSmall",
+			"generatedStaticUtility", "stoneBlock",
+			Vector3(cell_size * 0.12, cell_size * 0.06, cell_size * 0.12),
+			Vector3(cell_size * 0.34, cell_size * 0.53, -cell_size * 0.18))
+	elif block_type == "bed":
+		_append_spec(specs, "bed_frame", "BedFrame", "generatedStaticUtility", "door",
+			Vector3(cell_size * 1.18, cell_size * 0.12, cell_size * 0.78),
+			Vector3(0.0, -cell_size * 0.35, 0.0))
+		for x_offset in [-0.48, 0.48]:
+			for z_offset in [-0.30, 0.30]:
+				_append_spec(specs, "bed_leg_%s_%s" % [str(x_offset), str(z_offset)],
+					"BedLeg", "generatedStaticUtility", "door",
+					Vector3(cell_size * 0.08, cell_size * 0.34, cell_size * 0.08),
+					Vector3(float(x_offset) * cell_size, -cell_size * 0.49,
+						float(z_offset) * cell_size))
+		_append_spec(specs, "bed_pillow", "BedPillow", "generatedStaticUtility",
+			"bedPillow", Vector3(cell_size * 1.10, cell_size * 0.18,
+				cell_size * 0.72), Vector3(cell_size * 0.02,
+				-cell_size * 0.21, 0.0))
+		_append_spec(specs, "bed_blanket", "BedBlanket", "generatedStaticUtility",
+			"bedBlanket", Vector3(cell_size * 0.74, cell_size * 0.20,
+				cell_size * 0.74), Vector3(cell_size * 0.18,
+				-cell_size * 0.12, 0.0))
+		_append_spec(specs, "bed_headboard", "BedHeadboard", "generatedStaticUtility",
+			"door", Vector3(cell_size * 0.16, cell_size * 0.56,
+				cell_size * 0.82), Vector3(-cell_size * 0.57,
+				-cell_size * 0.18, 0.0))
+	elif block_type == "traderStall":
+		_append_spec(specs, "stall_counter", "StallCounter", "generatedStaticUtility",
+			"traderStall", Vector3(cell_size * 1.08, cell_size * 0.32,
+				cell_size * 0.64), Vector3(0.0, -cell_size * 0.34, 0.0))
+		for x_offset in [-0.45, 0.45]:
+			for z_offset in [-0.30, 0.30]:
+				_append_spec(specs, "stall_post_%s_%s" % [str(x_offset), str(z_offset)],
+					"StallPost", "generatedStaticUtility", "traderStall",
+					Vector3(cell_size * 0.07, cell_size * 1.05, cell_size * 0.07),
+					Vector3(float(x_offset) * cell_size, cell_size * 0.06,
+						float(z_offset) * cell_size))
+		_append_spec(specs, "stall_canopy", "StallCanopy", "generatedStaticUtility",
+			"traderCloth", Vector3(cell_size * 1.24, cell_size * 0.12,
+				cell_size * 0.86), Vector3(0.0, cell_size * 0.62, 0.0))
+		for index in range(-2, 3):
+			var cloth_key := "traderClothLight" if index % 2 == 0 else "traderCloth"
+			_append_spec(specs, "stall_valance_%d" % index, "StallValance",
+				"generatedStaticUtility", cloth_key,
+				Vector3(cell_size * 0.18, cell_size * 0.16, cell_size * 0.05),
+				Vector3(float(index) * cell_size * 0.20, cell_size * 0.50,
+					cell_size * 0.45))
+		_append_spec(specs, "stall_crate", "TraderCrateVisual", "generatedStaticUtility",
+			"woodBlock", Vector3(cell_size * 0.34, cell_size * 0.26,
+				cell_size * 0.34), Vector3(-cell_size * 0.42,
+				-cell_size * 0.02, -cell_size * 0.50))
+		_append_spec(specs, "stall_barrel", "TraderBarrelVisual", "generatedStaticUtility",
+			"door", Vector3(cell_size * 0.26, cell_size * 0.42,
+				cell_size * 0.26), Vector3(cell_size * 0.44,
+				-cell_size * 0.03, -cell_size * 0.48))
+	elif block_type == "spikeTrap":
+		_append_spec(specs, "trap_base", "TrapBase", "generatedStaticUtility",
+			"spikeTrap", Vector3(cell_size * 0.86, cell_size * 0.10,
+				cell_size * 0.86), Vector3(0.0, -cell_size * 0.44, 0.0))
+		for x_offset in [-0.24, 0.0, 0.24]:
+			for z_offset in [-0.24, 0.0, 0.24]:
+				_append_spec(specs, "trap_spike_%s_%s" % [str(x_offset), str(z_offset)],
+					"TrapSpike", "generatedStaticUtility", "anvil",
+					Vector3(cell_size * 0.08, cell_size * 0.34, cell_size * 0.08),
+					Vector3(float(x_offset) * cell_size, -cell_size * 0.24,
+						float(z_offset) * cell_size), Vector3(0.35, 0.0, 0.35))
+	elif block_type in ["copperVein", "ironVein"]:
+		var seam_specs := [
+			{"id":"a", "pos":Vector3(-shape.size.x * 0.22,
+				shape.size.y * 0.18, -shape.size.z * 0.51),
+				"size":Vector3(shape.size.x * 0.52, shape.size.y * 0.075,
+					shape.size.z * 0.035), "rotation":0.18},
+			{"id":"b", "pos":Vector3(shape.size.x * 0.18,
+				-shape.size.y * 0.10, -shape.size.z * 0.51),
+				"size":Vector3(shape.size.x * 0.66, shape.size.y * 0.075,
+					shape.size.z * 0.035), "rotation":-0.24},
+			{"id":"c", "pos":Vector3(shape.size.x * 0.02,
+				shape.size.y * 0.34, -shape.size.z * 0.51),
+				"size":Vector3(shape.size.x * 0.34, shape.size.y * 0.065,
+					shape.size.z * 0.035), "rotation":0.55}]
+		_append_spec(specs, "ore_base", "OreBase", "generatedStaticOre",
+			"oreBase", shape.size, shape.offset)
+		for seam_value: Variant in seam_specs:
+			var seam: Dictionary = seam_value
+			_append_spec(specs, "ore_seam_%s" % seam.id, "OreBlockSeam",
+				"generatedStaticOre", block_type, seam.size,
+				shape.offset + seam.pos, Vector3(0.0, 0.0, float(seam.rotation)))
+		var glow_material := "ironOreGlow" if block_type == "ironVein" else "copperOreGlow"
+		for x_offset in [-0.18, 0.16]:
+			_append_spec(specs, "ore_glint_%s" % str(x_offset), "OreBlockGlint",
+				"generatedStaticOre", glow_material,
+				Vector3(shape.size.x * 0.10, shape.size.y * 0.10,
+					shape.size.z * 0.045),
+				shape.offset + Vector3(float(x_offset) * shape.size.x,
+					shape.size.y * (0.04 if x_offset < 0.0 else 0.30),
+					-shape.size.z * 0.52))
+	elif options.has("roofRole") and block_type in ["woodBlock", "stoneBlock"]:
 		var role := String(options.get("roofRole", "slope"))
 		var axis := String(options.get("roofAxis", "x"))
 		var roof_material := String(options.get("roofMaterial",
@@ -285,10 +547,10 @@ static func _member_specs(block_type: String, options: Dictionary,
 
 static func _append_spec(specs: Array[Dictionary], segment_id: String,
 		visual_name: String, visual_role: String, material_key: String,
-		size: Vector3, offset: Vector3) -> void:
+		size: Vector3, offset: Vector3, rotation: Vector3 = Vector3.ZERO) -> void:
 	var spec := {"segmentId":segment_id, "visualName":visual_name,
 		"visualRole":visual_role, "materialKey":material_key,
-		"localTransform":Transform3D(Basis.from_scale(size), offset)}
+		"localTransform":Transform3D(Basis.from_euler(rotation).scaled(size), offset)}
 	spec.make_read_only()
 	specs.append(spec)
 

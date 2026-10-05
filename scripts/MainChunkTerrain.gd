@@ -43,7 +43,9 @@ func add_ordinary_structure_recipe_visuals(parent: Node3D,
         mesh_instance.mesh = member.mesh
         mesh_instance.material_override = member.material
         mesh_instance.transform = member.meshLocalTransform
-        mesh_instance.cast_shadow = block_shadow_policy(material_key)
+        mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+            if bool(member.get("castShadows", true)) \
+            else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
         mesh_instance.set_meta("visual_role", String(member.get("visualRole", "block")))
         mesh_instance.set_meta("material_key", material_key)
         mesh_instance.set_meta("ordinary_structure_recipe_segment_id",

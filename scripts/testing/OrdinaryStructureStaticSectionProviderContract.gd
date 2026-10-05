@@ -8,6 +8,7 @@ const StructureScript := preload("res://scripts/StructureSystem.gd")
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 const SourceCaptureScript := preload("res://scripts/world/OrdinaryStructureVisualSourceCapture.gd")
 const CoordinatorScript := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
+const AssetRegistryScript := preload("res://scripts/visual/StaticItemAssetRegistry.gd")
 const EXPECTED_CAPTURE_PHASES := ["town_regions", "standalone_regions", "sources",
 	"cells", "sort_cells", "hash", "validate"]
 
@@ -34,6 +35,7 @@ class FixtureMain extends Node3D:
 		"woodBlock":StandardMaterial3D.new(), "cobblestonePath":StandardMaterial3D.new(),
 		"roofWood":StandardMaterial3D.new(), "roofStone":StandardMaterial3D.new(),
 		"trimWood":StandardMaterial3D.new(), "trimStone":StandardMaterial3D.new()}
+	var static_item_asset_registry: Object
 
 	func _init() -> void:
 		block_root = self
@@ -41,6 +43,8 @@ class FixtureMain extends Node3D:
 		materials["roofStone"].albedo_color = Color(0.25, 0.27, 0.30)
 		materials["trimWood"].albedo_color = Color(0.22, 0.10, 0.04)
 		materials["trimStone"].albedo_color = Color(0.13, 0.15, 0.17)
+		static_item_asset_registry = AssetRegistryScript.new()
+		static_item_asset_registry.setup()
 
 	func block_visual_mesh(_key: String) -> Mesh:
 		if not meshes.has("base"):
@@ -49,6 +53,12 @@ class FixtureMain extends Node3D:
 
 	func block_visual_material(key: String) -> Material:
 		return materials.get(key, materials.stoneBlock)
+
+	func block_shadow_policy(material_key: String) -> int:
+		if material_key in ["glass", "flame", "furnaceGlow", "wardLantern",
+			"sanctuaryBeacon", "riftAnchor", "copperOreGlow", "ironOreGlow"]:
+			return GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		return GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 	func block_collision_profile(_block_type: String) -> Dictionary:
 		return {"size":Vector3.ONE * CELL * 0.96, "offset":Vector3.ZERO}
@@ -685,6 +695,7 @@ func run() -> void:
 		{"status":completed_throughput_capture.get("status", ""),
 			"geometryStats":final_geometry_stats})
 	await _run_coordinator_throughput_integration()
+	await _run_opaque_family_provider_receipt_integration()
 
 	var passed := true
 	for row: Dictionary in checks:
@@ -859,6 +870,186 @@ func _run_coordinator_throughput_integration() -> void:
 	integration_world.queue_free()
 
 
+func _run_opaque_family_provider_receipt_integration() -> void:
+	var family_world := FixtureMain.new()
+	root.add_child(family_world)
+	for z in range(-2, 2):
+		for x in range(-2, 2):
+			family_world.town_region_cache[Vector2i(x, z)] = {}
+	family_world.town_region_cache[Vector2i.ZERO] = {
+		"key":"0,0", "x":-4, "z":-4, "width":24, "depth":24}
+	var family_system := FixtureStructure.new()
+	family_system.main = family_world
+	var source_id := "town:0,0"
+	var block_types: Array[String] = ["cobblestonePath", "stoneBlock", "woodBlock",
+		"workbench", "bed", "traderStall", "spikeTrap", "copperVein", "ironVein"]
+	var expected_member_counts := {"cobblestonePath":1, "stoneBlock":1,
+		"woodBlock":1, "workbench":9, "bed":4, "traderStall":11,
+		"spikeTrap":10, "copperVein":6, "ironVein":6}
+	var expected_cells: Dictionary = {}
+	var recipe_inputs: Dictionary = {}
+	var cell_positions: Array[Vector3i] = [Vector3i(2, 4, 2), Vector3i(5, 4, 2),
+		Vector3i(8, 4, 2), Vector3i(11, 4, 2), Vector3i(14, 4, 2),
+		Vector3i(2, 4, 5), Vector3i(5, 4, 5), Vector3i(8, 4, 5),
+		Vector3i(11, 4, 5)]
+	var collision_shapes: Array[CollisionShape3D] = []
+	for index in block_types.size():
+		var block_type := block_types[index]
+		var cell := cell_positions[index]
+		var body := _make_body(family_world, source_id, cell, block_type)
+		body.position = Vector3(cell) * family_world.CELL
+		var profile: Dictionary = family_world.block_collision_profile(block_type)
+		var collider_shape := BoxShape3D.new()
+		collider_shape.size = profile.get("size", Vector3.ONE * family_world.CELL * 0.96)
+		var collider := CollisionShape3D.new()
+		collider.shape = collider_shape
+		collider.position = profile.get("offset", Vector3.ZERO)
+		body.add_child(collider)
+		collision_shapes.append(collider)
+		family_world.add_child(body)
+		family_world.blocks[cell] = body
+		expected_cells[cell] = block_type
+		recipe_inputs[cell] = _visual_recipe_input(block_type)
+	family_system.ordinary_visual_sources[source_id] = {
+		"completed":true, "expected":expected_cells,
+		"visualRecipeInputs":recipe_inputs, "omitted":{}, "failed":{}, "revision":1}
+	var provider := ProviderScript.new()
+	var configured: Dictionary = provider.configure("seed:ordinary-family-receipt",
+		family_system, family_world)
+	var capture := _capture_until_settled(provider, "seed:ordinary-family-receipt",
+		Vector3i.ZERO)
+	var section_row: Dictionary = capture.get("sections", {}).get(Vector3i.ZERO, {})
+	var prepared: Dictionary = capture.get("preparedSections", {}).get(Vector3i.ZERO, {})
+	var actual_instance_count := int(prepared.get("inputs", []).size())
+	var expected_instance_count := 0
+	for count_value: Variant in expected_member_counts.values():
+		expected_instance_count += int(count_value)
+	var family_manifest_rows: Array[Dictionary] = []
+	var all_family_manifests_exact := true
+	for index in block_types.size():
+		var block_type := block_types[index]
+		var cell: Vector3i = cell_positions[index]
+		var body := family_world.blocks.get(cell) as StaticBody3D
+		var source_part_id := "ordinary:%s:cell:%d,%d,%d" % [source_id,
+			cell.x, cell.y, cell.z]
+		var owner_input_count := 0
+		var owner_inputs_opaque := true
+		var owner_inputs_shadow_match := true
+		for input_value: Variant in prepared.get("inputs", []):
+			if not input_value is Dictionary:
+				owner_inputs_opaque = false
+				continue
+			var input: Dictionary = input_value
+			if String(input.get("sourcePartId", "")) != source_part_id:
+				continue
+			owner_input_count += 1
+			owner_inputs_opaque = owner_inputs_opaque \
+				and String(input.get("renderLayer", "")) == "opaque" \
+				and String(input.get("translucentSortPolicy", "")) == "none"
+			var matching_visual: MeshInstance3D
+			for child: Node in body.get_children():
+				if child is MeshInstance3D and String(child.get_meta(
+					"ordinary_structure_recipe_segment_id", "")).is_empty() == false \
+					and String(input.get("segmentId", "")).ends_with(":" + String(
+						child.get_meta("ordinary_structure_recipe_segment_id", ""))):
+					matching_visual = child as MeshInstance3D
+					break
+			owner_inputs_shadow_match = owner_inputs_shadow_match \
+				and is_instance_valid(matching_visual) \
+				and bool(input.get("castShadows", false)) \
+					== (matching_visual.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+		var body_visual_count := 0
+		var body_visuals_visible := true
+		for child: Node in body.get_children():
+			if child is MeshInstance3D:
+				body_visual_count += 1
+				body_visuals_visible = body_visuals_visible and child.visible
+		var expected_count := int(expected_member_counts[block_type])
+		var row_passed := owner_input_count == expected_count \
+			and body_visual_count == expected_count and owner_inputs_opaque \
+			and body_visuals_visible and owner_inputs_shadow_match
+		all_family_manifests_exact = all_family_manifests_exact and row_passed
+		family_manifest_rows.append({"blockType":block_type,
+			"sourcePartId":source_part_id, "inputCount":owner_input_count,
+			"expectedInputCount":expected_count,
+			"liveRecipeVisualCount":body_visual_count,
+			"allInputsOpaque":owner_inputs_opaque,
+			"packetShadowsMatchLiveVisuals":owner_inputs_shadow_match,
+			"allOldVisualsVisible":body_visuals_visible, "passed":row_passed})
+	var members_ready: bool = capture.get("status") == "complete" \
+		and configured.get("status") == "ready" \
+		and section_row.get("status") == "complete" \
+		and section_row.get("sourcePartIds", []).size() == block_types.size() \
+		and actual_instance_count == expected_instance_count \
+		and prepared.get("preparedSegments", []).size() == expected_instance_count
+	var all_visuals_visible_before_ack := true
+	var live_collision_count := 0
+	for cell_value: Variant in expected_cells:
+		var body := family_world.blocks.get(cell_value) as StaticBody3D
+		for child: Node in body.get_children():
+			if child is MeshInstance3D and not child.visible:
+				all_visuals_visible_before_ack = false
+			if child is CollisionShape3D and is_instance_valid(child.shape):
+				live_collision_count += 1
+	check("all_opaque_families_enter_provider_manifest_with_complete_recipe_members",
+		members_ready and all_family_manifests_exact and all_visuals_visible_before_ack \
+			and live_collision_count == block_types.size(),
+		{"status":capture.get("status", ""), "reason":capture.get("reason", ""),
+			"sourceCount":section_row.get("sourcePartIds", []).size(),
+			"expectedSourceCount":block_types.size(),
+			"memberCount":actual_instance_count,
+			"expectedMemberCount":expected_instance_count,
+			"assetRegistryReady":family_world.static_item_asset_registry.is_ready(),
+			"families":family_manifest_rows,
+			"allOldVisualsVisibleBeforeAck":all_visuals_visible_before_ack,
+			"liveCollisionCount":live_collision_count})
+	var coverage_revision := String(section_row.get("coverageRevision", ""))
+	var shadow_owner := family_world.blocks.get(cell_positions[7]) as StaticBody3D
+	var shadow_visual: MeshInstance3D
+	for child: Node in shadow_owner.get_children():
+		if child is MeshInstance3D and String(child.get_meta(
+			"ordinary_structure_recipe_segment_id", "")) == "ore_glint_-0.18":
+			shadow_visual = child as MeshInstance3D
+			break
+	var original_shadow_setting := shadow_visual.cast_shadow
+	shadow_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	var stale_shadow_ack: Dictionary = provider.acknowledge_section_install(
+		Vector3i.ZERO, coverage_revision, _installed_receipt(Vector3i.ZERO))
+	shadow_visual.cast_shadow = original_shadow_setting
+	check("live_shadow_policy_change_rejects_stale_install_receipt",
+		stale_shadow_ack.get("status") == "pending" \
+			and stale_shadow_ack.get("reason") == "ordinary_section_live_visual_member_stale"
+			and shadow_visual.cast_shadow == original_shadow_setting,
+		stale_shadow_ack)
+	var acknowledged: Dictionary = provider.acknowledge_section_install(
+		Vector3i.ZERO, coverage_revision, _installed_receipt(Vector3i.ZERO))
+	var all_visuals_retired_after_ack := true
+	var all_gameplay_owners_retained := true
+	var live_collision_count_after_ack := 0
+	for cell_value: Variant in expected_cells:
+		var body := family_world.blocks.get(cell_value) as StaticBody3D
+		all_gameplay_owners_retained = all_gameplay_owners_retained \
+			and is_instance_valid(body) and body.is_inside_tree() \
+			and body.get_meta("cell", null) == cell_value \
+			and family_world.blocks.get(cell_value) == body
+		for child: Node in body.get_children():
+			if child is MeshInstance3D and child.visible:
+				all_visuals_retired_after_ack = false
+			if child is CollisionShape3D and is_instance_valid(child.shape):
+				live_collision_count_after_ack += 1
+	check("only_exact_provider_receipt_retires_family_visuals_and_retains_live_owners",
+		acknowledged.get("status") == "acknowledged" \
+			and all_visuals_retired_after_ack and all_gameplay_owners_retained \
+			and live_collision_count_after_ack == collision_shapes.size(),
+		{"status":acknowledged.get("status", ""),
+			"reason":acknowledged.get("reason", ""),
+			"allReplacementVisualsRetired":all_visuals_retired_after_ack,
+			"allGameplayOwnersRetained":all_gameplay_owners_retained,
+			"collisionCount":live_collision_count_after_ack,
+			"expectedCollisionCount":collision_shapes.size()})
+	family_world.queue_free()
+
+
 func _installed_receipt(section: Vector3i) -> Dictionary:
 	var receipt := {"status":"installed", "sectionKey":section,
 		"contentManifestDigest":"synthetic-contract-manifest"}
@@ -886,6 +1077,9 @@ func _make_body(world: FixtureMain, source_id: String, cell: Vector3i,
 		visual.mesh = member.get("mesh")
 		visual.material_override = member.get("material")
 		visual.transform = member.get("meshLocalTransform", Transform3D.IDENTITY)
+		visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if bool(member.get("castShadows", true)) \
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		visual.set_meta("ordinary_structure_recipe_segment_id",
 			String(member.get("segmentId", "")))
 		visual.set_meta("ordinary_structure_recipe_content_digest", content_digest)
@@ -900,6 +1094,11 @@ func check(name: String, passed: bool, details: Dictionary) -> void:
 		"providerId":String(details.get("providerId", "")),
 		"allRoofMembersRetired":bool(details.get("allRoofMembersRetired", false)),
 		"visibleSegments":details.get("visibleSegments", [])}
+	for key in ["assetRegistryReady", "families", "expectedSourceCount",
+		"expectedMemberCount", "allOldVisualsVisibleBeforeAck",
+		"liveCollisionCount", "allReplacementVisualsRetired",
+		"allGameplayOwnersRetained", "collisionCount", "expectedCollisionCount"]:
+		if details.has(key): evidence[key] = details[key]
 	for key in ["targetCandidateCount", "targetProgressHistory", "advancedSections",
 			"geometryJobRestartCount", "geometryJobInvalidationCount",
 			"geometryJobCompleteCount"]:

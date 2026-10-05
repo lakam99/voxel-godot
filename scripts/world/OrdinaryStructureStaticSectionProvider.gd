@@ -941,11 +941,19 @@ func _capture_live_recipe_visual(main: Object, captured: Dictionary,
 		var visual := visuals_by_segment.get(segment_id) as MeshInstance3D
 		var input_buffer: Array = source_input.get("buffer", [])
 		var expected_transform := Attributes.decode_transform(input_buffer, 0)
+		var expected_casts_shadow := bool(member.get("castShadows", true))
+		var compatibility: Dictionary = binding.get("compatibility", {})
 		if binding.get("mesh") != member.get("mesh") \
 				or binding.get("material") != member.get("material") \
+				or bool(source_input.get("castShadows", not expected_casts_shadow)) \
+					!= expected_casts_shadow \
+				or bool(compatibility.get("castShadows", not expected_casts_shadow)) \
+					!= expected_casts_shadow \
 				or not String(source_input.get("segmentId", "")).ends_with(":" + segment_id) \
 				or not is_instance_valid(visual) or visual.mesh != member.get("mesh") \
 				or visual.material_override != member.get("material") \
+				or (visual.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF) \
+					!= expected_casts_shadow \
 				or not _transform_approximately_equal(visual.transform, expected_transform) \
 				or (not visual.visible \
 					and not bool(visual.get_meta("ordinary_structure_section_owned", false))):
@@ -954,6 +962,7 @@ func _capture_live_recipe_visual(main: Object, captured: Dictionary,
 		var row := {"segmentId":segment_id, "visual":weakref(visual),
 			"visualInstanceId":visual.get_instance_id(), "mesh":member.get("mesh"),
 			"material":member.get("material"), "transform":visual.transform,
+			"castShadows":expected_casts_shadow,
 			"sourceRevision":String(source_input.get("sourceRevision", "")),
 			"sourceInput":source_input,
 			"sectionKey":Grid.key_for_world_position(
@@ -1010,6 +1019,8 @@ func _current_live_recipe_visual(context: Dictionary, owner_row: Dictionary,
 				or visual.is_queued_for_deletion() \
 				or visual.mesh != row.get("mesh") \
 				or visual.material_override != row.get("material") \
+				or (visual.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF) \
+					!= bool(row.get("castShadows", true)) \
 				or not _transform_approximately_equal(visual.transform,
 					row.get("transform")) \
 				or String(visual.get_meta("ordinary_structure_recipe_segment_id", "")) \
