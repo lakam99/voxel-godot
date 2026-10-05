@@ -503,7 +503,6 @@ func capture_static_section_sources(world_id: String,
 				"section":section, "censusWindow":window})
 		if not job.is_empty() and not _job_is_current(job, context):
 			_record_geometry_invalidation()
-			_invalidate_section_snapshot(section_id)
 			job = {}
 		if job.is_empty():
 			job = _begin_job(section, context, census)
