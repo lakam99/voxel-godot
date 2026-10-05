@@ -1436,6 +1436,8 @@ func enqueue_completed_task(task: Dictionary) -> void:
 	# Seal deterministic section inputs at worker completion, ahead of the legacy
 	# staged node/mesh publisher. The existing publisher remains active as the
 	# visual fallback until the section compiler and native receipts take over.
+	if not task.has("sectionOwnedCompile"):
+		task["sectionOwnedCompile"] = section_owned_publication_enabled
 	if section_owned_publication_enabled and not task.has("sectionRecipeInputRecord"):
 		var recipe_body: StaticBody3D = _publication_body(task)
 		var recipe_value: Variant = task.get("recipe", null)
@@ -1691,6 +1693,7 @@ func continue_publication_task(task: Dictionary) -> void:
 func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 	var request: Dictionary = task.get("request", {})
 	var recipe: Dictionary = task.get("recipe", {})
+	var compile_to_section := bool(task.get("sectionOwnedCompile", false))
 	var stage := String(task.get("renderStage", "root"))
 	if stage == "root":
 		var visual_factory = publication_service.get_visual_factory()
@@ -1714,6 +1717,20 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		root.position = Vector3.ZERO
 		root.rotation = Vector3.ZERO
 		root.scale = Vector3.ONE
+		if compile_to_section and not bool(recipe.get("runtimeImpostor", false)):
+			# Section-owned output finishes directly into sealed resources. This
+			# detached root carries transform identity only; it creates no per-tree
+			# render instances and is discarded after its section artifact is sealed.
+			var section_wood_root := Node3D.new()
+			section_wood_root.name = "ProceduralTreeWood"
+			root.add_child(section_wood_root)
+			task["visual"] = root
+			task["woodRoot"] = section_wood_root
+			task["renderStage"] = "bole"
+			body.set_meta("tree_visual_state", "assembling_section_values")
+			publication_stage_counts["root"] = int(publication_stage_counts.get("root", 0)) + 1
+			continue_publication_task(task)
+			return
 		var wood_root := Node3D.new()
 		wood_root.name = "ProceduralTreeWood"
 		wood_root.set_meta("tree_wood_topology", "continuous_structural_wood_with_instanced_supported_twigs")
@@ -1779,14 +1796,24 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			failed_count += 1
 			return
 		if bool(task.get("boleBuildComplete", false)):
-			var completed_bole_visual: MeshInstance3D = visual_factory.finish_runtime_bole(
-				recipe,
-				bole_build_state,
-				String(request.get("biome", "forest"))
-			)
-			if completed_bole_visual != null:
-				wood_root.add_child(completed_bole_visual)
-				_append_section_value_member(task, completed_bole_visual, "bole")
+			if compile_to_section:
+				var bole_values: Dictionary = visual_factory.finish_runtime_bole_values(
+					recipe, bole_build_state, String(request.get("biome", "forest")))
+				if not bole_values.is_empty():
+					var bole_metadata: Dictionary = bole_values.get("metadata", {})
+					_append_section_value_member_from_values(task, "bole",
+						bole_values.get("mesh", null), null,
+						bole_values.get("material", null), bole_values.get("renderPolicy", {}),
+						int(bole_metadata.get("tree_wood_segment_count", -1)))
+			else:
+				var completed_bole_visual: MeshInstance3D = visual_factory.finish_runtime_bole(
+					recipe,
+					bole_build_state,
+					String(request.get("biome", "forest"))
+				)
+				if completed_bole_visual != null:
+					wood_root.add_child(completed_bole_visual)
+					_append_section_value_member(task, completed_bole_visual, "bole")
 			# `finish_runtime_bole` transfers the ArrayMesh to the attached visual.
 			# Do not keep the completed SurfaceTool/build-state graph alive until
 			# the local task happens to fall out of scope after commit: releasing it
@@ -1830,14 +1857,24 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			failed_count += 1
 			return
 		if bool(task.get("distalBuildComplete", false)):
-			var distal_visual: MultiMeshInstance3D = distal_factory.finish_runtime_distal_build(
-				distal_build_state,
-				recipe,
-				String(request.get("biome", "forest"))
-			)
-			if distal_visual != null:
-				wood_root.add_child(distal_visual)
-				_append_section_value_member(task, distal_visual, "branches")
+			if compile_to_section:
+				var distal_values: Dictionary = distal_factory.finish_runtime_distal_build_values(
+					distal_build_state, recipe, String(request.get("biome", "forest")))
+				if not distal_values.is_empty():
+					var distal_multimesh := distal_values.get("multiMesh", null) as MultiMesh
+					_append_section_value_member_from_values(task, "branches",
+						distal_multimesh.mesh if distal_multimesh != null else null,
+						distal_multimesh, distal_values.get("material", null),
+						distal_values.get("renderPolicy", {}), -1)
+			else:
+				var distal_visual: MultiMeshInstance3D = distal_factory.finish_runtime_distal_build(
+					distal_build_state,
+					recipe,
+					String(request.get("biome", "forest"))
+				)
+				if distal_visual != null:
+					wood_root.add_child(distal_visual)
+					_append_section_value_member(task, distal_visual, "branches")
 			# The visual now owns the MultiMesh. Release the detached builder and
 			# the typed branch projection before this stage returns, not when the
 			# completed task dictionary is later destroyed outside the budget.
@@ -1877,17 +1914,27 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 			failed_count += 1
 			return
 		if bool(task.get("foliageBuildComplete", false)):
-			var foliage_visual: Node3D = foliage_factory.finish_runtime_foliage_build(
-				foliage_build_state,
-				recipe,
-				String(request.get("biome", "forest"))
-			) as Node3D
-			if foliage_visual != null:
-				visual.add_child(foliage_visual)
-				if foliage_visual.get_child_count() == 1 \
-						and foliage_visual.get_child(0) is MultiMeshInstance3D:
-					_append_section_value_member(task,
-						foliage_visual.get_child(0) as MultiMeshInstance3D, "foliage")
+			if compile_to_section:
+				var foliage_values: Dictionary = foliage_factory.finish_runtime_foliage_build_values(
+					foliage_build_state, recipe, String(request.get("biome", "forest")))
+				if not foliage_values.is_empty() and not bool(foliage_values.get("headlessVisualProxy", false)):
+					var foliage_multimesh := foliage_values.get("multiMesh", null) as MultiMesh
+					_append_section_value_member_from_values(task, "foliage",
+						foliage_multimesh.mesh if foliage_multimesh != null else null,
+						foliage_multimesh, foliage_values.get("material", null),
+						foliage_values.get("renderPolicy", {}), -1)
+			else:
+				var foliage_visual: Node3D = foliage_factory.finish_runtime_foliage_build(
+					foliage_build_state,
+					recipe,
+					String(request.get("biome", "forest"))
+				) as Node3D
+				if foliage_visual != null:
+					visual.add_child(foliage_visual)
+					if foliage_visual.get_child_count() == 1 \
+							and foliage_visual.get_child(0) is MultiMeshInstance3D:
+						_append_section_value_member(task,
+							foliage_visual.get_child(0) as MultiMeshInstance3D, "foliage")
 			# Same ownership transfer as the wood stages: the attached node owns
 			# the finished MultiMesh, so retire the detached state while this timed
 			# finalization slice is active.
@@ -1904,7 +1951,7 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 		task["foliageBuildComplete"] = true
 		continue_publication_task(task)
 		return
-	if stage == "commit" and section_owned_publication_enabled:
+	if stage == "commit" and compile_to_section:
 		var sealed := seal_prepared_section_value_record(task, body)
 		if sealed.get("status") == "ready":
 			var retained := retain_prepared_section_value_record(sealed.record)
@@ -1920,6 +1967,18 @@ func advance_publication_task(task: Dictionary, body: StaticBody3D) -> void:
 					visual.free()
 				tree_section_values_prepared.emit(body)
 				return
+		# Section-owned mode has no per-tree geometry graph to fall back to. Reject
+		# the incomplete artifact rather than promoting an empty root. The previous
+		# visual remains attached; a first-time tree retains its collision proxy.
+		var failure_reason := String(sealed.get("reason",
+			"prepared_tree_section_values_incomplete"))
+		body.set_meta("tree_section_value_failure_reason", failure_reason)
+		body.set_meta("tree_visual_state", "section_compile_failed")
+		var rejected_visual: Node3D = task.get("visual", null) as Node3D
+		if is_instance_valid(rejected_visual) and rejected_visual.get_parent() == null:
+			rejected_visual.free()
+		failed_count += 1
+		return
 	commit_published_visual(task, body, visual, request, recipe)
 
 func commit_published_visual(task: Dictionary, body: StaticBody3D, visual: Node3D,
@@ -1966,6 +2025,46 @@ func _append_section_value_member(task: Dictionary, instance: GeometryInstance3D
 		return
 	var members: Array = task.get("sectionValueMembers", [])
 	members.append(captured.member)
+	task["sectionValueMembers"] = members
+
+
+func _append_section_value_member_from_values(task: Dictionary, role: String,
+		mesh: Mesh, multi_mesh: MultiMesh, material: Material,
+		render_policy: Dictionary, producer_element_count: int) -> void:
+	var transforms: Array[Transform3D] = []
+	var colors: Array[Color] = []
+	var custom_values: Array[Color] = []
+	if multi_mesh == null:
+		transforms.append(Transform3D.IDENTITY)
+		colors.append(Color.WHITE)
+		custom_values.append(Color(0.0, 0.0, 0.0, 1.0))
+	else:
+		if not multi_mesh.use_custom_data \
+				or multi_mesh.transform_format != MultiMesh.TRANSFORM_3D:
+			task["sectionValueCapturePending"] = "tree_section_multimesh_layout_unsupported"
+			return
+		for index: int in range(multi_mesh.instance_count):
+			transforms.append(multi_mesh.get_instance_transform(index))
+			colors.append(multi_mesh.get_instance_color(index) if multi_mesh.use_colors else Color.WHITE)
+			custom_values.append(multi_mesh.get_instance_custom_data(index))
+	if not is_instance_valid(mesh) or material == null or transforms.is_empty():
+		task["sectionValueCapturePending"] = "tree_section_member_resources_missing"
+		return
+	transforms.make_read_only()
+	colors.make_read_only()
+	custom_values.make_read_only()
+	var member := {"schema":"tree-section-render-member/v1", "role":role,
+		"mesh":mesh, "material":material, "localTransform":Transform3D.IDENTITY,
+		"transforms":transforms, "colors":colors, "customData":custom_values,
+		"producerElementCount":producer_element_count,
+		"visibilityRangeEnd":float(render_policy.get("visibilityRangeEnd", 0.0)),
+		"fadeMargin":float(render_policy.get("visibilityRangeEndMargin", 0.0)),
+		"castShadows":int(render_policy.get("castShadow",
+			GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)) \
+			!= GeometryInstance3D.SHADOW_CASTING_SETTING_OFF}
+	member.make_read_only()
+	var members: Array = task.get("sectionValueMembers", [])
+	members.append(member)
 	task["sectionValueMembers"] = members
 
 
