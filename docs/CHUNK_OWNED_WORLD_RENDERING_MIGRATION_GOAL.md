@@ -2,6 +2,18 @@
 
 Status: **Active; 1 of 7 stages is complete (Stage 0); Stages 1–5 are partial and Stage 6 has not started. A tutorial-free headed diagnostic installed the previously mismatched pebble source into section `(-1, 0, 0)` with a current native receipt, then passed terrain edit replacement. A telemetry replay completed the exact fluid proof in seven census attempts; an earlier run took 134 attempts/117.9 seconds, and that outlier remains unexplained. Tree census and contribution now share a resource-aware Mesh/Material/texture and instance-value producer revision; focused tree/ecology contracts pass, and a headed synthetic native fixture cancels a stale staged replacement after resource mutation while retaining the previous root. A fresh-seed tutorial-free live sprint had a complete initial view, then 7 of 324 tree candidates pending after turning; traversal stopped at 42.67 m on a generated-prop capsule collision. Production tree contribution receipts and representative freshness/performance acceptance remain open, alongside legacy per-source visual retirement, complete generated-building membership, live harvest/reload replacement, full terrain collision/fluid/light parity, renderer memory budgets, and exact source-capture epochs.**
 
+Progress note — 2026-10-05: the full migration remains **1/7 stages complete**;
+Stages 1–5 are partial and Stage 6 has not started. Game commit `b081f2de`
+adds a section-local event wake when an exact revision-current terrain fluid
+proof is accepted. Its synthetic visible-section demand contract passed 31/31
+checks, including stale/duplicate/non-demanded cases and preserving pending
+state for fluid-bearing sections. This improves retry latency only; it does
+not prove fluid layer rendering or resolve the ordinary/tree census backlog.
+The next production cutover shares a value-only ordinary-source membership
+census across adjacent section jobs while keeping per-section geometry and
+live owner validation. See the published canonical charter's “shared
+ordinary-source census window” stage plan below.
+
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository in [`section-owned-world-rendering-charter.md`](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md) and locally at
 `C:\Users\arkam\Documents\voxel-godot-docs\migrations\chunk-owned-rendering\section-owned-world-rendering-charter.md`.
