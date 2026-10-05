@@ -331,8 +331,19 @@ func run() -> void:
 		authority, world_id, body, prepared_record, RemovedProps.capture(authority))
 	check("new_candidate_is_censusable_while_the_old_tree_visual_remains_current",
 		prepared_capture_during_replacement.get("status") == "ready" \
+		and not ecology._tree_census_source_revision(tree_candidate,
+			prepared_publication).is_empty() \
 		and body.get_node_or_null("GeneratedTreeVisual") == old_tree_visual \
 		and String(body.get_meta("tree_visual_state", "")) == "published")
+	var expected_prepared_generation := int(body.get_meta(
+		"tree_section_recipe_input_expected_generation", 0))
+	body.set_meta("tree_section_recipe_input_expected_generation",
+		int(prepared_record.get("producerGeneration", 0)) + 1)
+	check("stale_prepared_tree_generation_is_not_censusable_during_replacement",
+		ecology._tree_census_source_revision(tree_candidate,
+			prepared_publication).is_empty())
+	body.set_meta("tree_section_recipe_input_expected_generation",
+		expected_prepared_generation)
 	body.set_meta("tree_visual_state", "section_candidate_pending")
 	var superseded_generation := int(prepared_record.get("producerGeneration", 0)) + 1
 	body.set_meta("tree_section_recipe_input_expected_generation", superseded_generation)

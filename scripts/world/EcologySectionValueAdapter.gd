@@ -1231,6 +1231,15 @@ func _tree_census_source_revision(candidate: Dictionary,
 	var tier := String(record.get("tier", ""))
 	var recipe_signature := String(record.get("recipeSignature", ""))
 	var prop_id := String(candidate.get("propId", ""))
+	var visual_state := String(body.get_meta("tree_visual_state", ""))
+	var visual_source := String(body.get_meta("visual_source", ""))
+	var has_current_accepted_visual := (visual_state == "published" \
+		and visual_source == "procedural_tree_recipe" \
+		and is_instance_valid(body.get_node_or_null("GeneratedTreeVisual"))) \
+		or (visual_state == "section_owned" \
+		and visual_source == "chunk_owned_static_section")
+	var prepared_state_is_current := visual_state == "section_candidate_pending" \
+		or has_current_accepted_visual
 	var main: Object = _main_authority_ref.get_ref() if _main_authority_ref != null else null
 	if not is_instance_valid(main) or not request is Dictionary or prop_id.is_empty() \
 			or String((request as Dictionary).get("treeId", "")) != prop_id \
@@ -1249,7 +1258,12 @@ func _tree_census_source_revision(candidate: Dictionary,
 				or (not section_owned and (String(body.get_meta("tree_visual_state", "")) != "published" \
 					or String(body.get_meta("visual_source", "")) != "procedural_tree_recipe")))) \
 			or (prepared and (String(record.get("schema", "")) != "prepared-tree-section-artifact/v1" \
-				or String(body.get_meta("tree_visual_state", "")) != "section_candidate_pending" \
+				or not prepared_state_is_current \
+				or int(record.get("artifactGeneration", 0)) <= 0 \
+				or int(record.get("bodyInstanceId", 0)) != body.get_instance_id() \
+				or (int(body.get_meta("tree_section_recipe_input_expected_generation", 0)) > 0 \
+					and int(record.get("producerGeneration", 0)) != int(body.get_meta(\
+						"tree_section_recipe_input_expected_generation", 0))) \
 				or not record.get("bodyGlobalTransform") is Transform3D \
 				or not (record.bodyGlobalTransform as Transform3D).is_equal_approx(body.global_transform) \
 				or recipe_signature != String(record.get("recipeSignature", "")))) \
