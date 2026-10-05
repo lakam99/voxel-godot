@@ -19,6 +19,9 @@ const MAX_SECTIONS_PER_CAPTURE := 8
 const DISCOVERY_MARGIN_CELLS := int(Adapter.MAX_HORIZONTAL_SUPPORT_CELLS)
 const DISCOVERY_ATOMS_PER_TURN := 128
 const MEMBERS_PER_TURN := 32
+const CENSUS_WINDOW_SECTIONS := 2
+const MAX_MEMBERSHIP_CENSUS_ENTRIES := 8
+const MAX_MEMBERSHIP_CENSUS_BYTES := 8 * 1024 * 1024
 
 var _world_id := ""
 var _system_ref: WeakRef
@@ -26,6 +29,14 @@ var _system_id := 0
 var _main_ref: WeakRef
 var _main_id := 0
 var _jobs: Dictionary = {}
+var _membership_censuses: Dictionary = {}
+var _membership_census_jobs: Dictionary = {}
+var _membership_census_clock := 0
+var _membership_census_build_count := 0
+var _membership_census_reuse_count := 0
+var _membership_census_overlap_reuse_count := 0
+var _membership_census_member_rows_built := 0
+var _membership_census_bytes := 0
 var _installed_members_by_section: Dictionary = {}
 var _latest_by_section: Dictionary = {}
 
@@ -49,6 +60,315 @@ func configure(world_id: String, structure_system: Object, main: Object) -> Dict
 	return {"status":"ready", "providerId":PROVIDER_ID, "worldId":_world_id}
 
 
+func membership_census_stats() -> Dictionary:
+	return {"buildCount":_membership_census_build_count,
+		"reuseCount":_membership_census_reuse_count,
+		"overlapReuseCount":_membership_census_overlap_reuse_count,
+		"memberRowsBuilt":_membership_census_member_rows_built,
+		"cachedEntryCount":_membership_censuses.size(),
+		"activeCaptureCount":_membership_census_jobs.size(),
+		"cachedBytes":_membership_census_bytes}
+
+
+func _advance_membership_census(window: Rect2i, membership_token: Array,
+		section: Vector3i, context: Dictionary) -> Dictionary:
+	var window_id := _window_id(window)
+	var token_digest := _sha256(var_to_bytes(membership_token))
+	if token_digest.is_empty():
+		return _failed("ordinary_membership_currentness_digest_failed", {
+			"section":section, "censusWindow":window})
+	var cache_key := window_id + "|" + token_digest
+	for existing_key_value: Variant in _membership_censuses.keys():
+		var existing_key := String(existing_key_value)
+		if existing_key.begins_with(window_id + "|") and existing_key != cache_key:
+			_remove_membership_census(existing_key)
+	for existing_key_value: Variant in _membership_census_jobs.keys():
+		var existing_key := String(existing_key_value)
+		if existing_key.begins_with(window_id + "|") and existing_key != cache_key:
+			_membership_census_jobs.erase(existing_key)
+	var cached: Dictionary = _membership_censuses.get(cache_key, {})
+	if not cached.is_empty():
+		if cached.get("membershipToken") == membership_token:
+			_membership_census_clock += 1
+			cached["lastUse"] = _membership_census_clock
+			_membership_censuses[cache_key] = cached
+			_membership_census_reuse_count += 1
+			return {"status":"complete", "census":cached.census,
+				"censusWindow":window, "cacheHit":true}
+		_remove_membership_census(cache_key)
+	var capture_job: Dictionary = _membership_census_jobs.get(cache_key, {})
+	if capture_job.is_empty():
+		if not _make_membership_census_room():
+			return _pending("ordinary_membership_census_capacity", {
+				"section":section, "censusWindow":window,
+				"activeCensusCount":_membership_censuses.size()})
+		var capture := SourceCapture.new()
+		capture.begin_membership(context.system, window)
+		if capture.advance(1, 1000).get("status") == "failed":
+			return _failed("ordinary_membership_census_begin_failed", {
+				"section":section, "censusWindow":window})
+		_membership_census_clock += 1
+		capture_job = {"window":window,
+			"membershipToken":membership_token.duplicate(true),
+			"tokenDigest":token_digest, "capture":capture,
+			"lastUse":_membership_census_clock}
+		_membership_census_jobs[cache_key] = capture_job
+		_membership_census_build_count += 1
+	var current_token := _membership_currentness_token(window, context)
+	if current_token.is_empty() or current_token != capture_job.get("membershipToken", []):
+		_remove_membership_census(cache_key)
+		return _pending("ordinary_membership_census_currentness_changed", {
+			"section":section, "censusWindow":window, "restart":true})
+	var capture: Object = capture_job.get("capture") as Object
+	if not is_instance_valid(capture):
+		_remove_membership_census(cache_key)
+		return _pending("ordinary_membership_census_capture_missing", {
+			"section":section, "censusWindow":window, "restart":true})
+	var advanced: Dictionary = capture.advance(DISCOVERY_ATOMS_PER_TURN, 3000)
+	if advanced.get("status") == "pending":
+		var reason := String(advanced.get("reason", "ordinary_visual_capture_budget"))
+		if reason != "ordinary_visual_capture_budget":
+			_remove_membership_census(cache_key)
+			return _pending(reason, {"section":section,
+				"censusWindow":window, "restart":true,
+				"stage":String(advanced.get("stage", "")),
+				"cursor":int(advanced.get("cursor", 0)),
+				"sourceId":String(advanced.get("sourceId", "")),
+				"cell":advanced.get("cell"),
+				"pendingSourceIds":advanced.get("pendingSourceIds", [])})
+		_membership_census_jobs[cache_key] = capture_job
+		return _pending(reason, {"section":section, "censusWindow":window,
+			"stage":String(advanced.get("stage", "")),
+			"cursor":int(advanced.get("cursor", 0)), "restart":false,
+			"cacheKey":token_digest})
+	if advanced.get("status") != "described" or not _membership_census_is_value_only(advanced):
+		_remove_membership_census(cache_key)
+		return _failed("ordinary_membership_census_result_invalid", {
+			"section":section, "censusWindow":window})
+	current_token = _membership_currentness_token(window, context)
+	if current_token.is_empty() or current_token != capture_job.get("membershipToken", []):
+		_remove_membership_census(cache_key)
+		return _pending("ordinary_membership_census_currentness_changed", {
+			"section":section, "censusWindow":window, "restart":true})
+	var census: Dictionary = advanced
+	var estimated_bytes := var_to_bytes(census).size()
+	_membership_census_member_rows_built += int(census.get("memberCount", 0))
+	if estimated_bytes <= MAX_MEMBERSHIP_CENSUS_BYTES:
+		_membership_census_jobs.erase(cache_key)
+		while _membership_census_bytes + estimated_bytes > MAX_MEMBERSHIP_CENSUS_BYTES:
+			if not _evict_oldest_complete_census(cache_key):
+				break
+		if _membership_census_bytes + estimated_bytes <= MAX_MEMBERSHIP_CENSUS_BYTES:
+			_membership_census_clock += 1
+			var sealed_membership_token: Array = _freeze_value(membership_token.duplicate(true))
+			var cached_entry := {"state":"complete",
+				"membershipToken":sealed_membership_token,
+				"census":census, "estimatedBytes":estimated_bytes,
+				"lastUse":_membership_census_clock}
+			_membership_census_bytes += estimated_bytes
+			_membership_censuses[cache_key] = cached_entry
+			return {"status":"complete", "census":census,
+				"censusWindow":window, "cacheHit":false}
+	# A large but valid snapshot may satisfy this request; it is not retained for
+	# reuse. The normal producer demand remains retryable if later sections need it.
+	_membership_census_jobs.erase(cache_key)
+	return {"status":"complete", "census":census,
+		"censusWindow":window, "cacheHit":false, "retained":false}
+
+
+func _make_membership_census_room() -> bool:
+	while _membership_census_jobs.size() + _membership_censuses.size() \
+			>= MAX_MEMBERSHIP_CENSUS_ENTRIES:
+		if not _evict_oldest_complete_census(""):
+			return false
+	return true
+
+
+func _evict_oldest_complete_census(excluded_key: String) -> bool:
+	var selected_key := ""
+	var selected_use := 9223372036854775807
+	for key_value: Variant in _membership_censuses:
+		var key := String(key_value)
+		if key == excluded_key:
+			continue
+		var entry: Dictionary = _membership_censuses[key]
+		if entry.get("state") != "complete":
+			continue
+		var last_use := int(entry.get("lastUse", 0))
+		if last_use < selected_use:
+			selected_key = key
+			selected_use = last_use
+	if selected_key.is_empty():
+		return false
+	_remove_membership_census(selected_key)
+	return true
+
+
+func _remove_membership_census(cache_key: String) -> void:
+	_membership_census_jobs.erase(cache_key)
+	var entry: Dictionary = _membership_censuses.get(cache_key, {})
+	if entry.is_empty():
+		return
+	_membership_census_bytes = maxi(0, _membership_census_bytes
+		- int(entry.get("estimatedBytes", 0)))
+	_membership_censuses.erase(cache_key)
+
+
+func _invalidate_membership_window(window: Rect2i) -> void:
+	var window_prefix := _window_id(window) + "|"
+	for key_value: Variant in _membership_censuses.keys():
+		var key := String(key_value)
+		if key.begins_with(window_prefix):
+			_remove_membership_census(key)
+	for key_value: Variant in _membership_census_jobs.keys():
+		var key := String(key_value)
+		if key.begins_with(window_prefix):
+			_membership_census_jobs.erase(key)
+
+
+func _invalidate_section_snapshot(section_id: String) -> void:
+	_jobs.erase(section_id)
+	_latest_by_section.erase(section_id)
+
+
+func _invalidate_stale_section_jobs(window: Rect2i, current_token: Array) -> void:
+	for section_id_value: Variant in _jobs.keys():
+		var section_id := String(section_id_value)
+		var job: Dictionary = _jobs.get(section_id, {})
+		if job.get("censusWindow") == window \
+				and job.get("membershipToken", []) != current_token:
+			_invalidate_section_snapshot(section_id)
+
+
+func _membership_census_is_value_only(census: Dictionary) -> bool:
+	return _value_tree_is_sealed(census)
+
+
+static func _freeze_value(value: Variant) -> Variant:
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		for key: Variant in dictionary.keys():
+			dictionary[key] = _freeze_value(dictionary[key])
+		dictionary.make_read_only()
+		return dictionary
+	if value is Array:
+		var array: Array = value
+		for index in array.size():
+			array[index] = _freeze_value(array[index])
+		array.make_read_only()
+		return array
+	return value
+
+
+func _value_tree_is_sealed(value: Variant) -> bool:
+	if value is Object or value is WeakRef or value is RID or value is Callable:
+		return false
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		if not dictionary.is_read_only():
+			return false
+		for key: Variant in dictionary:
+			if not _value_tree_is_sealed(key) \
+					or not _value_tree_is_sealed(dictionary[key]):
+				return false
+		return true
+	if value is Array:
+		var array: Array = value
+		if not array.is_read_only():
+			return false
+		for item: Variant in array:
+			if not _value_tree_is_sealed(item):
+				return false
+		return true
+	# Packed arrays are mutable and cannot be made read-only in Godot 4.6.
+	var value_type := typeof(value)
+	if value_type >= TYPE_PACKED_BYTE_ARRAY and value_type <= TYPE_PACKED_VECTOR4_ARRAY:
+		return false
+	return true
+
+
+func _membership_currentness_token(bounds: Rect2i, context: Dictionary) -> Array:
+	if context.is_empty() or not context.main.get("town_region_cache") is Dictionary:
+		return []
+	var main: Object = context.main
+	var system: Object = context.system
+	var town_size := int(main.get("TOWN_REGION_CELLS"))
+	var structure_size := int(main.get("STRUCTURE_REGION_CELLS"))
+	var spawn_chance := float(main.get("STRUCTURE_SPAWN_CHANCE"))
+	if town_size <= 0 or structure_size <= 0 or not is_finite(spawn_chance):
+		return []
+	var town_low := Vector2i(floori(float(bounds.position.x) / town_size),
+		floori(float(bounds.position.y) / town_size)) - Vector2i.ONE
+	var town_high := Vector2i(floori(float(bounds.end.x - 1) / town_size),
+		floori(float(bounds.end.y - 1) / town_size)) + Vector2i.ONE
+	var standalone_low := Vector2i(floori(float(bounds.position.x) / structure_size),
+		floori(float(bounds.position.y) / structure_size)) - Vector2i.ONE
+	var standalone_high := Vector2i(floori(float(bounds.end.x - 1) / structure_size),
+		floori(float(bounds.end.y - 1) / structure_size)) + Vector2i.ONE
+	if (town_high.x - town_low.x + 1) * (town_high.y - town_low.y + 1) > 256 \
+			or (standalone_high.x - standalone_low.x + 1) \
+			* (standalone_high.y - standalone_low.y + 1) > 256:
+		return []
+	var town_cache: Dictionary = main.get("town_region_cache")
+	var town_membership: Array = []
+	for z in range(town_low.y, town_high.y + 1):
+		for x in range(town_low.x, town_high.x + 1):
+			var key := Vector2i(x, z)
+			if not town_cache.has(key):
+				town_membership.append([key, false])
+				continue
+			var town: Variant = town_cache[key]
+			if not town is Dictionary:
+				return []
+			var row := [key, true]
+			if not town.is_empty():
+				var town_bounds: Variant = system.call("_regional_town_bounds", town)
+				var town_id := String(system.call("town_key_for", town))
+				if not town_bounds is Rect2i or town_id.is_empty():
+					return []
+				row.append([town_id, town_bounds])
+			town_membership.append(row)
+	var generated_value: Variant = system.get("generated_structures")
+	if not generated_value is Dictionary:
+		return []
+	var generated_structures: Dictionary = generated_value
+	var standalone_membership: Array = []
+	for z in range(standalone_low.y, standalone_high.y + 1):
+		for x in range(standalone_low.x, standalone_high.x + 1):
+			var key := Vector2i(x, z)
+			# Only this eligibility bit affects the ordinary source ID set. The
+			# candidate's spawn/influence bounds are deterministic from the seed.
+			standalone_membership.append([key, generated_structures.get(key, null) != false])
+	return [String(main.get("seed_text")), _world_id, bounds,
+		int(system.get("regional_source_generation")),
+		int(system.get("regional_source_revision")),
+		int(system.get("ordinary_visual_revision")), town_size, structure_size,
+		spawn_chance, town_membership, standalone_membership]
+
+
+func _membership_census_bounds_for_section(section: Vector3i) -> Rect2i:
+	var group_x := floori(float(section.x) / CENSUS_WINDOW_SECTIONS) * CENSUS_WINDOW_SECTIONS
+	var group_z := floori(float(section.z) / CENSUS_WINDOW_SECTIONS) * CENSUS_WINDOW_SECTIONS
+	var margin := DISCOVERY_MARGIN_CELLS
+	var low := Vector2i(group_x * Grid.SECTION_SIZE_CELLS - margin,
+		group_z * Grid.SECTION_SIZE_CELLS - margin)
+	var size := CENSUS_WINDOW_SECTIONS * Grid.SECTION_SIZE_CELLS + margin * 2
+	return Rect2i(low, Vector2i.ONE * size)
+
+
+func _section_discovery_bounds(section: Vector3i) -> Rect2i:
+	var margin := DISCOVERY_MARGIN_CELLS
+	var low := Vector2i(section.x * Grid.SECTION_SIZE_CELLS - margin,
+		section.z * Grid.SECTION_SIZE_CELLS - margin)
+	var size := Grid.SECTION_SIZE_CELLS + margin * 2
+	return Rect2i(low, Vector2i.ONE * size)
+
+
+func _window_id(bounds: Rect2i) -> String:
+	return "%d,%d,%d,%d" % [bounds.position.x, bounds.position.y,
+		bounds.size.x, bounds.size.y]
+
+
 ## Implements StaticSectionSourceRoster.capture_method. A section is complete
 ## only after deterministic source discovery is described, every intersecting
 ## expected visual has either a supported immutable geometry input or a
@@ -69,11 +389,35 @@ func capture_static_section_sources(world_id: String,
 	var source_revisions: Dictionary = {}
 	var prepared_sections: Dictionary = {}
 	var authority_rows: Array = []
+	# Capture and advance each shared window only once per provider call. This
+	# allows a batched multi-section request to make bounded progress without
+	# accidentally granting the same census one slice per section.
+	var census_by_window: Dictionary = {}
+	for section: Vector3i in sections:
+		var window := _membership_census_bounds_for_section(section)
+		var window_id := _window_id(window)
+		if census_by_window.has(window_id):
+			_membership_census_overlap_reuse_count += 1
+			continue
+		var membership_token := _membership_currentness_token(window, context)
+		if membership_token.is_empty():
+			return _pending("ordinary_membership_window_authority_unavailable", {
+				"section":section, "censusWindow":window})
+		_invalidate_stale_section_jobs(window, membership_token)
+		var census_result := _advance_membership_census(window, membership_token, section, context)
+		if census_result.get("status") != "complete":
+			return census_result
+		census_by_window[window_id] = census_result.census
 	for section: Vector3i in sections:
 		var section_id := _section_id(section)
 		var job: Dictionary = _jobs.get(section_id, {})
+		var window := _membership_census_bounds_for_section(section)
+		var census: Dictionary = census_by_window.get(_window_id(window), {})
+		if census.is_empty():
+			return _pending("ordinary_membership_window_census_missing", {
+				"section":section, "censusWindow":window})
 		if job.is_empty() or not _job_is_current(job, context):
-			job = _begin_job(section, context)
+			job = _begin_job(section, context, census)
 			if job.get("status") != "pending":
 				return job
 			_jobs[section_id] = job
@@ -144,6 +488,9 @@ func capture_static_section_contribution(census: Dictionary,
 	var snapshot: Dictionary = _latest_by_section.get(section_id, {})
 	if snapshot.is_empty() or snapshot.get("sectionKey") != section_key:
 		return _pending("ordinary_section_contribution_snapshot_missing")
+	var context := _context(_world_id)
+	if context.is_empty() or not _snapshot_lifecycle_is_current(snapshot, context):
+		return _pending("ordinary_section_contribution_snapshot_stale")
 	var prepared: Dictionary = snapshot.get("prepared", {})
 	if prepared.is_empty() or prepared.get("sectionKey") != section_key:
 		return _pending("ordinary_section_contribution_geometry_missing")
@@ -160,6 +507,14 @@ func capture_static_section_contribution(census: Dictionary,
 			or not prepared.get("compatibilityByKey", {}) is Dictionary \
 			or not prepared.get("compatibilityByKey", {}).is_read_only():
 		return _pending("ordinary_section_contribution_snapshot_unsealed")
+	var live_owners: Dictionary = prepared.get("liveOwnersByPart", {})
+	for part_id_value: Variant in prepared.get("memberIds", []):
+		var part_id := String(part_id_value)
+		var owner_row: Dictionary = live_owners.get(part_id, {})
+		if owner_row.is_empty() or _current_live_recipe_visual(context, owner_row).get("status") != "ready":
+			_invalidate_section_snapshot(section_id)
+			return _pending("ordinary_section_contribution_live_owner_stale", {
+				"sourcePartId":part_id})
 	var contribution := {"providerId":PROVIDER_ID, "sectionKey":section_key,
 		"coverageRevision":coverage_revision, "authorityRevision":provider_revision,
 		"authoritySourceRevisions":authority_revisions,
@@ -353,62 +708,67 @@ func _snapshot_lifecycle_is_current(snapshot: Dictionary, context: Dictionary) -
 		and int(system.get("ordinary_visual_revision")) == int(lifecycle.get("ordinaryRevision", -1)) \
 		and int(system.get("regional_source_generation")) == int(lifecycle.get("generation", -1)) \
 		and int(system.get("regional_source_revision")) == int(lifecycle.get("regionalRevision", -1)) \
-		and system.call("region_dependency_scheduling_revision", bounds) \
-			== lifecycle.get("dependencyRevision")
+		and _membership_currentness_token(bounds, context) == lifecycle.get("membershipToken", [])
 
 
-func _begin_job(section: Vector3i, context: Dictionary) -> Dictionary:
-	var capture = SourceCapture.new()
-	var bounds := _discovery_bounds(section)
-	if bounds.size.x <= 0 or bounds.size.y <= 0:
-		return _failed("ordinary_section_discovery_bounds_invalid")
-	capture.begin(context.system, bounds)
-	if capture.advance(1, 1000).get("status") == "failed":
-		return _failed("ordinary_section_source_discovery_failed")
-	return {"status":"pending", "phase":"discover", "section":section,
-		"bounds":bounds, "capture":capture, "candidateIndex":0,
+func _begin_job(section: Vector3i, context: Dictionary, census: Dictionary) -> Dictionary:
+	var window_value: Variant = census.get("bounds", null)
+	var bounds := _section_discovery_bounds(section)
+	if not window_value is Rect2i or bounds.size.x <= 0 or bounds.size.y <= 0 \
+			or census.get("censusSchema") != "ordinary-source-membership-census/v1" \
+			or not census.get("members") is Array \
+			or not census.get("members").is_read_only():
+		return _failed("ordinary_section_membership_census_invalid")
+	var census_window: Rect2i = window_value
+	var membership_token := _membership_currentness_token(census_window, context)
+	var candidates: Array[Dictionary] = []
+	for member_value: Variant in census.members:
+		if not member_value is Dictionary or not member_value.is_read_only():
+			return _failed("ordinary_section_membership_row_unsealed")
+		var member: Dictionary = member_value
+		var cell_value: Variant = member.get("cell", null)
+		var source_id := String(member.get("sourceId", ""))
+		var block_type := String(member.get("blockType", ""))
+		var part_id := String(member.get("memberId", ""))
+		if not cell_value is Vector3i or source_id.is_empty() or block_type.is_empty() \
+				or part_id.is_empty() or String(member.get("recipeDigest", "")).length() != 64 \
+				or not member.get("recipeInput") is Dictionary \
+				or not member.get("recipeInput").is_read_only():
+			return _failed("ordinary_section_membership_row_invalid")
+		var cell: Vector3i = cell_value
+		var body := (context.main.get("blocks") as Dictionary).get(cell) as Node3D
+		if not _valid_ordinary_owner_body(body, source_id, block_type): body = null
+		var representation := context.system.call("_ordinary_visible_renderable", body) as Node3D \
+			if is_instance_valid(body) else null
+		candidates.append({"candidateId":part_id,
+			"positionXZ":Vector2(float(cell.x) + 0.5, float(cell.z) + 0.5),
+			"cell":cell, "sourceId":source_id, "blockType":block_type,
+			"sourceRevision":int(member.get("sourceRevision", -1)),
+			"recipeDigest":String(member.get("recipeDigest", "")),
+			"recipeInput":member.get("recipeInput"),
+			"owner":weakref(body) if is_instance_valid(body) else null,
+			"ownerId":body.get_instance_id() if is_instance_valid(body) else 0,
+			"representation":weakref(representation) if is_instance_valid(representation) else null,
+			"representationId":representation.get_instance_id() \
+				if is_instance_valid(representation) else 0})
+	return {"status":"pending", "phase":"capture_geometry", "section":section,
+		"bounds":census_window, "censusWindow":census_window,
+		"membershipToken":membership_token,
+		"candidateIndex":0, "candidates":candidates,
 		"seed":String(context.main.get("seed_text")),
 		"ordinaryRevision":int(context.system.get("ordinary_visual_revision")),
 		"generation":int(context.system.get("regional_source_generation")),
 		"regionalRevision":int(context.system.get("regional_source_revision")),
-		"dependencyRevision":context.system.call("region_dependency_scheduling_revision", bounds),
 		"inputs":[], "sourceRevisions":{}, "resourcesByBatch":{},
 		"meshBindings":{}, "materialBindings":{},
 		"compatibilityByKey":{}, "sourceRows":{},
-		"discoveryRevision":"", "snapshot":{}}
+		"discoveryRevision":String(census.get("sourceRevision", "")), "snapshot":{}}
 
 
 func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
-	var capture = job.get("capture")
-	if not is_instance_valid(capture) or not _job_is_current(job, context):
+	if not _job_is_current(job, context):
 		return _pending("ordinary_section_source_revision_changed", {
-			"section":job.get("section", Vector3i.ZERO)})
-	if String(job.phase) == "discover":
-		var discovered: Dictionary = capture.advance(DISCOVERY_ATOMS_PER_TURN, 3000)
-		if discovered.get("status") == "pending":
-			var reason := String(discovered.get("reason", "ordinary_section_discovery_budget"))
-			var pending_detail := {
-				"section":job.section,
-				"stage":String(discovered.get("stage", "discover")),
-				"cursor":int(discovered.get("cursor", 0)),
-				"restart":reason != "ordinary_visual_capture_budget"}
-			for detail_key in ["sourceId", "sourceCount", "candidateCount",
-					"pendingSourceIds", "retryable", "phaseUsec"]:
-				if discovered.has(detail_key):
-					pending_detail[detail_key] = discovered[detail_key]
-			return _pending(reason, pending_detail)
-		if discovered.get("status") == "failed":
-			return _failed(String(discovered.get("reason", "ordinary_section_discovery_failed")))
-		if discovered.get("status") != "described":
-			return _pending(String(discovered.get("reason", "ordinary_section_discovery_incomplete")), {
-				"section":job.section})
-		job.discoveryRevision = String(discovered.get("sourceRevision", ""))
-		if job.discoveryRevision.is_empty() or not discovered.get("candidates") is Array:
-			return _failed("ordinary_section_discovery_manifest_invalid")
-		job.candidates = discovered.candidates
-		job.phase = "capture_geometry"
-		return _pending("ordinary_section_geometry_capture_pending", {
-			"section":job.section, "candidateCount":job.candidates.size()})
+			"section":job.get("section", Vector3i.ZERO), "restart":true})
 	if String(job.phase) == "capture_geometry":
 		var processed := 0
 		while int(job.candidateIndex) < job.candidates.size() and processed < MEMBERS_PER_TURN:
@@ -445,6 +805,14 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			if batch_key.is_empty():
 				return _failed("ordinary_section_batch_key_missing")
 			var source_record: Dictionary = (context.system.get("ordinary_visual_sources") as Dictionary).get(source_id, {})
+			var current_recipe: Dictionary = input.get("visualRecipeInput", {})
+			if int(source_record.get("revision", -1)) != int(raw.get("sourceRevision", -2)) \
+					or String(input.get("visualRecipeDigest", "")) != String(raw.get("recipeDigest", "")) \
+					or String(current_recipe.get("digest", "")) != String(raw.get("recipeDigest", "")):
+				job.candidateIndex = int(job.candidateIndex) - 1
+				_invalidate_membership_window(job.censusWindow)
+				return _pending("ordinary_section_membership_member_revision_changed", {
+					"sourceId":source_id, "cell":cell_value, "restart":true})
 			var live_visual := _capture_live_recipe_visual(context.main, captured,
 				Vector3i(cell_value), String(raw.get("blockType", "")))
 			if live_visual.get("status") != "ready":
@@ -477,10 +845,9 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			return _pending("ordinary_section_geometry_capture_budget", {
 				"section":job.section, "cursor":int(job.candidateIndex),
 				"candidateCount":job.candidates.size()})
-		if not capture.eligible_for(context.system, job.bounds) \
-				or not _job_is_current(job, context):
+		if not _job_is_current(job, context):
 			return _pending("ordinary_section_source_revision_changed", {
-				"section":job.section})
+				"section":job.section, "restart":true})
 		var inputs: Array[Dictionary] = []
 		for row_value: Variant in job.sourceRows.values():
 			var row: Dictionary = row_value
@@ -562,7 +929,7 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			"ordinaryRevision":int(job.ordinaryRevision),
 			"generation":int(job.generation),
 			"regionalRevision":int(job.regionalRevision),
-			"dependencyRevision":job.dependencyRevision,
+			"membershipToken":job.membershipToken,
 			"bounds":job.bounds}
 		lifecycle.make_read_only()
 		var prepared := {"schema":SCHEMA, "sectionKey":section,
@@ -594,9 +961,9 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		job.phase = "complete"
 		return {"status":"complete", "snapshot":snapshot}
 	if String(job.phase) == "complete":
-		if not _job_is_current(job, context) or not capture.eligible_for(context.system, job.bounds):
+		if not _job_is_current(job, context):
 			return _pending("ordinary_section_source_revision_changed", {
-				"section":job.section})
+				"section":job.section, "restart":true})
 		return {"status":"complete", "snapshot":job.snapshot}
 	return _failed("ordinary_section_provider_job_phase_invalid")
 
@@ -616,14 +983,6 @@ func _segment_declaration(input: Dictionary, compatibility: Dictionary) -> Dicti
 		"visibilityRangeEnd":float(compatibility.visibilityRangeEnd),
 		"fadeMargin":float(compatibility.fadeMargin),
 		"compatibilityKey":String(compatibility.batchKey)}
-
-
-func _discovery_bounds(section: Vector3i) -> Rect2i:
-	var margin := DISCOVERY_MARGIN_CELLS
-	var low_x := section.x * Grid.SECTION_SIZE_CELLS - margin
-	var low_z := section.z * Grid.SECTION_SIZE_CELLS - margin
-	var size := Grid.SECTION_SIZE_CELLS + margin * 2
-	return Rect2i(Vector2i(low_x, low_z), Vector2i(size, size))
 
 
 func _candidate_intersects_section(candidate: Dictionary, section: Vector3i,
@@ -662,7 +1021,8 @@ func _candidate_intersects_section(candidate: Dictionary, section: Vector3i,
 
 
 func _job_is_current(job: Dictionary, context: Dictionary) -> bool:
-	if context.is_empty() or job.is_empty() or not job.get("bounds") is Rect2i:
+	if context.is_empty() or job.is_empty() or not job.get("censusWindow") is Rect2i \
+			or not job.get("membershipToken") is Array:
 		return false
 	return String(context.main.get("seed_text")) == String(job.get("seed", 
 		context.main.get("seed_text"))) \
@@ -670,7 +1030,7 @@ func _job_is_current(job: Dictionary, context: Dictionary) -> bool:
 		and int(context.system.get("regional_source_generation")) == int(job.get("generation", -1)) \
 		and int(context.system.get("regional_source_revision")) == int(job.get("regionalRevision", \
 			context.system.get("regional_source_revision"))) \
-		and context.system.call("region_dependency_scheduling_revision", job.bounds) == job.get("dependencyRevision")
+		and _membership_currentness_token(job.censusWindow, context) == job.membershipToken
 
 
 func _context(world_id: String) -> Dictionary:
@@ -683,6 +1043,14 @@ func _context(world_id: String) -> Dictionary:
 			or system.get("main") != main:
 		return {}
 	return {"system":system, "main":main}
+
+
+func _valid_ordinary_owner_body(body: Node3D, source_id: String,
+		block_type: String) -> bool:
+	return is_instance_valid(body) and body.is_inside_tree() \
+		and not body.is_queued_for_deletion() \
+		and String(body.get_meta("generated_visual_source_id", "")) == source_id \
+		and String(body.get_meta("block_type", "")) == block_type
 
 
 func _coverage_revision(section: Vector3i, snapshot: Dictionary) -> String:

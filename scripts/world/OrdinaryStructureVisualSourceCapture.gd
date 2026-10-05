@@ -6,6 +6,7 @@ class_name OrdinaryStructureVisualSourceCapture
 ## visible-world manifest and must be checked against their live owners there.
 const StandaloneSourceScript := preload("res://scripts/world/StandaloneStructureCandidate.gd")
 const CitadelPublicationServiceScript := preload("res://scripts/world/CitadelPublicationService.gd")
+const OrdinaryGeometryAdapter := preload("res://scripts/world/OrdinaryStructureSectionGeometryAdapter.gd")
 const MAX_EXPECTED_PER_SOURCE := 8192
 const MAX_EXPECTED_PER_QUERY := 16384
 
@@ -43,12 +44,29 @@ var _hasher: HashingContext
 var _hash_cursor := 0
 var _validation_cursor := 0
 var _output: Array[Dictionary] = []
+var _membership_only := false
+var _membership_sources: Array = []
+var _membership_rows: Array[Dictionary] = []
+var _membership_tombstones: Array[Dictionary] = []
 var _stage := ""
 var _result: Dictionary = {}
 var _phase_usec: Dictionary = {}
 
 
 func begin(system: Object, bounds: Rect2i) -> void:
+	_begin(system, bounds, false)
+
+
+## Captures producer membership as sealed values only. Unlike the legacy
+## observer result, this reusable census never retains Nodes or WeakRefs; each
+## section resolves current owners and recipe resources after selecting its
+## local members.
+func begin_membership(system: Object, bounds: Rect2i) -> void:
+	_begin(system, bounds, true)
+
+
+func _begin(system: Object, bounds: Rect2i, membership_only: bool) -> void:
+	_membership_only = membership_only
 	if not is_instance_valid(system) or not is_instance_valid(system.get("main")) \
 			or not CitadelPublicationServiceScript._bounded_region_rectangle(bounds):
 		_result = {"status": "failed", "reason": "invalid_ordinary_visual_source_bounds"}
@@ -113,9 +131,15 @@ func advance(max_atoms: int = 128, max_usec: int = 3000) -> Dictionary:
 			+ maxi(0, Time.get_ticks_usec() - atom_started)
 		atoms += 1
 		if not outcome.is_empty():
-			outcome["phaseUsec"] = _phase_usec.duplicate()
-			outcome["sliceUsec"] = maxi(0, Time.get_ticks_usec() - started)
-			_result = outcome
+			var reported: Dictionary = outcome.duplicate(false)
+			var phase_times: Dictionary = _phase_usec.duplicate(false)
+			if _membership_only:
+				phase_times.make_read_only()
+			reported["phaseUsec"] = phase_times
+			reported["sliceUsec"] = maxi(0, Time.get_ticks_usec() - started)
+			if _membership_only:
+				reported.make_read_only()
+			_result = reported
 			return _result
 	var budget := _pending_budget()
 	budget["sliceUsec"] = maxi(0, Time.get_ticks_usec() - started)
@@ -177,6 +201,8 @@ func _advance_one(system: Object, main: Object) -> Dictionary:
 				_pending_ids.append(_source_id)
 				return {}
 			_bindings.append([_source_id, int(_source.get("revision", 0))])
+			if _membership_only:
+				_membership_sources.append([_source_id, int(_source.get("revision", 0))])
 			var expected: Dictionary = _source.get("expected", {})
 			if expected.size() > MAX_EXPECTED_PER_SOURCE \
 					or _expected_scanned + expected.size() > MAX_EXPECTED_PER_QUERY:
@@ -228,7 +254,31 @@ func _advance_one(system: Object, main: Object) -> Dictionary:
 			if not _bounds.has_point(Vector2i(cell.x, cell.z)): return {}
 			var block_type := String((_source.expected as Dictionary)[cell])
 			var durable_id := String(system.call("_ordinary_visual_block_key", _source_id, cell, block_type))
-			if (system.get("removed_generated_structure_blocks") as Dictionary).has(durable_id): return {}
+			if (system.get("removed_generated_structure_blocks") as Dictionary).has(durable_id):
+				if _membership_only:
+					_membership_tombstones.append({"sourceId":_source_id,
+						"sourceRevision":int(_source.get("revision", 0)),
+						"cell":cell, "blockType":block_type,
+						"durableId":durable_id})
+				return {}
+			if _membership_only:
+				var recipes: Dictionary = _source.get("visualRecipeInputs", {})
+				var recipe_value: Variant = recipes.get(cell, null)
+				if not _valid_recipe_value(recipe_value, block_type):
+					return {"status":"pending", "reason":"ordinary_visual_recipe_input_pending",
+						"retryable":true, "sourceId":_source_id, "cell":cell}
+				var recipe_input: Dictionary = _freeze_value((recipe_value as Dictionary).duplicate(true))
+				var member_id := "ordinary:%s:cell:%d,%d,%d" % [
+					_source_id, cell.x, cell.y, cell.z]
+				_membership_rows.append({"memberId":member_id,
+					"sourceId":_source_id,
+					"sourceRevision":int(_source.get("revision", 0)),
+					"cell":cell, "blockType":block_type,
+					"recipeDigest":String(recipe_input.get("digest", "")),
+					"recipeInput":recipe_input})
+				_bindings.append([member_id, block_type,
+					String(recipe_input.get("digest", ""))])
+				return {}
 			var body := (main.get("blocks") as Dictionary).get(cell) as Node3D
 			if not _valid_body(body, _source_id, block_type): body = null
 			var representation := system.call("_ordinary_visible_renderable", body) as Node3D \
@@ -260,10 +310,42 @@ func _advance_one(system: Object, main: Object) -> Dictionary:
 			return {}
 		"validate":
 			if _validation_cursor >= _candidates.size():
-				if not _final_revision_matches(system):
+				if not _membership_only and not _final_revision_matches(system):
 					return {"status": "pending", "reason": "ordinary_visual_capture_source_changed",
 						"retryable": true, "stage": _stage}
 				var revision := _hasher.finish().hex_encode()
+				if _membership_only:
+					var frozen_members: Array[Dictionary] = []
+					for row: Dictionary in _membership_rows:
+						row.make_read_only()
+						frozen_members.append(row)
+					frozen_members.make_read_only()
+					var frozen_tombstones: Array[Dictionary] = []
+					for row: Dictionary in _membership_tombstones:
+						row.make_read_only()
+						frozen_tombstones.append(row)
+					frozen_tombstones.make_read_only()
+					var frozen_sources: Array = _membership_sources.duplicate(true)
+					for source_row: Variant in frozen_sources:
+						if source_row is Array:
+							source_row.make_read_only()
+					frozen_sources.make_read_only()
+					var pending_ids: Array[String] = _pending_ids.duplicate()
+					pending_ids.make_read_only()
+					var phase_times: Dictionary = _phase_usec.duplicate(false)
+					phase_times.make_read_only()
+					var membership_result := {"status":"pending" if not _pending_ids.is_empty() else "described",
+						"reason":"ordinary_visual_sources_pending" if not _pending_ids.is_empty() else "",
+						"censusSchema":"ordinary-source-membership-census/v1",
+						"sourceRevision":revision, "bounds":_bounds,
+						"sources":frozen_sources, "members":frozen_members,
+						"tombstones":frozen_tombstones,
+						"pendingSourceIds":pending_ids,
+						"sourceCount":_ids.size(), "memberCount":frozen_members.size(),
+						"tombstoneCount":frozen_tombstones.size(),
+						"phaseUsec":phase_times}
+					membership_result.make_read_only()
+					return membership_result
 				return {"status": "pending" if not _pending_ids.is_empty() else "described",
 					"reason": "ordinary_visual_sources_pending" if not _pending_ids.is_empty() else "",
 					"sourceRevision": revision, "candidates": _output,
@@ -347,3 +429,31 @@ func _pending_budget() -> Dictionary:
 		"cursor": _cell_cursor if _stage == "cells" else _sort_cursor \
 			if _stage == "sort_cells" else _hash_cursor if _stage == "hash" \
 			else _validation_cursor if _stage == "validate" else _source_index}
+
+
+func _valid_recipe_value(value: Variant, block_type: String) -> bool:
+	if not value is Dictionary or not value.is_read_only() \
+			or String(value.get("schema", "")) != "ordinary-structure-visual-recipe-input/v1" \
+			or String(value.get("blockType", "")) != block_type \
+			or String(value.get("digest", "")).length() != 64:
+		return false
+	var options: Variant = value.get("options", null)
+	return options is Dictionary and options.is_read_only() \
+		and OrdinaryGeometryAdapter._visual_recipe_digest(block_type, options) \
+			== String(value.get("digest", ""))
+
+
+static func _freeze_value(value: Variant) -> Variant:
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		for key: Variant in dictionary.keys():
+			dictionary[key] = _freeze_value(dictionary[key])
+		dictionary.make_read_only()
+		return dictionary
+	if value is Array:
+		var array: Array = value
+		for index in array.size():
+			array[index] = _freeze_value(array[index])
+		array.make_read_only()
+		return array
+	return value

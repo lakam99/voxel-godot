@@ -126,6 +126,15 @@ func run() -> void:
 		{"status":first.get("status", ""), "reason":first.get("reason", ""),
 			"memberIds":section_row.get("sourcePartIds", []),
 			"inputCount":prepared.get("inputs", []).size()})
+	var census_values_are_deeply_sealed := true
+	for entry_value: Variant in provider._membership_censuses.values():
+		var cached_entry: Dictionary = entry_value
+		if not _sealed_value_tree(cached_entry.get("census", {})):
+			census_values_are_deeply_sealed = false
+	check("shared_membership_cache_contains_only_deeply_sealed_values",
+		provider.membership_census_stats().get("cachedEntryCount", 0) > 0
+		and census_values_are_deeply_sealed,
+		provider.membership_census_stats())
 	var member_id := String(section_row.get("sourcePartIds", [""])[0]) \
 		if not section_row.get("sourcePartIds", []).is_empty() else ""
 	var expected_part_id := "ordinary:%s:cell:%d,%d,%d" % [source_id, cell.x, cell.y, cell.z]
@@ -179,8 +188,26 @@ func run() -> void:
 		and String(stale_owner_ack.get("reason", "")) == "ordinary_section_live_owner_revision_changed"
 		and (body.get_child(0) as MeshInstance3D).visible,
 		stale_owner_ack)
+	var stale_contribution: Dictionary = provider.capture_static_section_contribution(
+		roster_result, Vector3i.ZERO)
+	check("replacement_owner_invalidates_prepared_contribution_snapshot",
+		stale_contribution.get("status") == "pending"
+		and String(stale_contribution.get("reason", ""))
+			== "ordinary_section_contribution_live_owner_stale"
+		and (body.get_child(0) as MeshInstance3D).visible,
+		stale_contribution)
 	world.blocks[cell] = body
 	replaced_body.queue_free()
+	var owner_rebuilt: Dictionary = _capture_until_settled(provider,
+		"seed:ordinary-provider", Vector3i.ZERO)
+	var rebuilt_contribution: Dictionary = provider.capture_static_section_contribution(
+		roster_result, Vector3i.ZERO)
+	check("replacement_owner_is_recaptured_before_contributing_geometry",
+		owner_rebuilt.get("status") == "complete"
+		and rebuilt_contribution.get("status") == "ready",
+		{"status":owner_rebuilt.get("status", ""),
+			"contributionStatus":rebuilt_contribution.get("status", ""),
+			"reason":rebuilt_contribution.get("reason", "")})
 	var acknowledged: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO,
 		first_coverage, _installed_receipt(Vector3i.ZERO))
 	check("membership_baseline_advances_only_on_explicit_install_ack",
@@ -199,8 +226,10 @@ func run() -> void:
 		_visual_recipe_input("stoneBlock")
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
+	var overlap_stats_before: Dictionary = provider.membership_census_stats()
 	var boundary_sections := _capture_sections_until_settled(provider,
 		"seed:ordinary-provider", [Vector3i.ZERO, Vector3i(1, 0, 0)])
+	var overlap_stats_after: Dictionary = provider.membership_census_stats()
 	var west_row: Dictionary = boundary_sections.get("sections", {}).get(Vector3i.ZERO, {})
 	var east_row: Dictionary = boundary_sections.get("sections", {}).get(Vector3i(1, 0, 0), {})
 	var boundary_part_id := "ordinary:%s:cell:%d,%d,%d" % [source_id,
@@ -217,6 +246,19 @@ func run() -> void:
 		{"status":boundary_sections.get("status", ""),
 			"overlapsWestSection":boundary_overlaps_west,
 			"westMembers":west_members, "eastMembers":east_members})
+	check("overlapping_sections_share_one_resumable_membership_census",
+		int(overlap_stats_after.get("buildCount", 0))
+			== int(overlap_stats_before.get("buildCount", 0)) + 1
+		and int(overlap_stats_after.get("overlapReuseCount", 0))
+			== int(overlap_stats_before.get("overlapReuseCount", 0)) + 1
+		and int(overlap_stats_after.get("memberRowsBuilt", 0))
+			>= int(overlap_stats_before.get("memberRowsBuilt", 0)) + 2,
+		{"buildsBefore":overlap_stats_before.get("buildCount", 0),
+			"buildsAfter":overlap_stats_after.get("buildCount", 0),
+			"overlapReusesBefore":overlap_stats_before.get("overlapReuseCount", 0),
+			"overlapReusesAfter":overlap_stats_after.get("overlapReuseCount", 0),
+			"memberRowsBefore":overlap_stats_before.get("memberRowsBuilt", 0),
+			"memberRowsAfter":overlap_stats_after.get("memberRowsBuilt", 0)})
 	var boundary_ack := provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(east_row.get("coverageRevision", "")),
 		_installed_receipt(Vector3i(1, 0, 0)))
@@ -238,8 +280,10 @@ func run() -> void:
 	system.removed_generated_structure_blocks[boundary_removed_key] = true
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
+	var tombstone_stats_before: Dictionary = provider.membership_census_stats()
 	var boundary_removal := _capture_sections_until_settled(provider,
 		"seed:ordinary-provider", [Vector3i.ZERO, Vector3i(1, 0, 0)])
+	var tombstone_stats_after: Dictionary = provider.membership_census_stats()
 	var west_tombstones: Array = boundary_removal.get("removalsBySection", {}).get(Vector3i.ZERO, [])
 	var east_tombstones: Array = boundary_removal.get("removalsBySection", {}).get(Vector3i(1, 0, 0), [])
 	check("single_center_owned_boundary_source_removes_in_its_one_section_only",
@@ -250,6 +294,16 @@ func run() -> void:
 		and String(east_tombstones[0].get("sourcePartId", "")) == boundary_part_id
 		and String(east_tombstones[0].get("authoritySourceId", "")) == source_id,
 		{"westTombstones":west_tombstones, "eastTombstones":east_tombstones})
+	check("tombstone_revision_rebuilds_shared_membership_census",
+		int(tombstone_stats_after.get("buildCount", 0))
+			== int(tombstone_stats_before.get("buildCount", 0)) + 1
+		and int(tombstone_stats_after.get("memberRowsBuilt", 0))
+			< int(tombstone_stats_before.get("memberRowsBuilt", 0)) + 2,
+		{"buildsBefore":tombstone_stats_before.get("buildCount", 0),
+			"buildsAfter":tombstone_stats_after.get("buildCount", 0),
+			"memberRowsBefore":tombstone_stats_before.get("memberRowsBuilt", 0),
+			"memberRowsAfter":tombstone_stats_after.get("memberRowsBuilt", 0),
+			"tombstones":east_tombstones.size()})
 	var boundary_empty_row: Dictionary = boundary_removal.get("sections", {}).get(Vector3i(1, 0, 0), {})
 	provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(boundary_empty_row.get("coverageRevision", "")),
@@ -405,3 +459,22 @@ func check(name: String, passed: bool, details: Dictionary) -> void:
 		"reason":String(details.get("reason", "")),
 		"memberCount":int(details.get("memberCount", -1)),
 		"providerId":String(details.get("providerId", ""))}})
+
+
+func _sealed_value_tree(value: Variant) -> bool:
+	if value is Object or value is RID or value is Callable:
+		return false
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		if not dictionary.is_read_only(): return false
+		for key: Variant in dictionary:
+			if not _sealed_value_tree(key) or not _sealed_value_tree(dictionary[key]):
+				return false
+		return true
+	if value is Array:
+		var array: Array = value
+		if not array.is_read_only(): return false
+		for item: Variant in array:
+			if not _sealed_value_tree(item): return false
+		return true
+	return typeof(value) < TYPE_PACKED_BYTE_ARRAY
