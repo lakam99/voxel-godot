@@ -9,10 +9,15 @@ proof is accepted. Its synthetic visible-section demand contract passed 31/31
 checks, including stale/duplicate/non-demanded cases and preserving pending
 state for fluid-bearing sections. This improves retry latency only; it does
 not prove fluid layer rendering or resolve the ordinary/tree census backlog.
-The next production cutover shares a value-only ordinary-source membership
-census across adjacent section jobs while keeping per-section geometry and
-live owner validation. See the published canonical charter's “shared
-ordinary-source census window” stage plan below.
+Game commit `9754d8d0` implements the shared value-only ordinary-source
+membership census across adjacent section jobs while keeping per-section
+geometry capture and live-owner validation. The ordinary provider contract
+passed 23/23 and the producer capture contract passed 17 checks. These
+synthetic contracts prove adjacent sections reused one census, exact manifests,
+stale-owner rejection/recapture and tombstone invalidation; they do not prove
+real renderer installation or live startup improvement. The published
+canonical charter records the Minecraft 26.2 comparison, reports and next
+gates.
 
 The canonical architecture charter and staged exit gates are maintained in the
 documentation repository in [`section-owned-world-rendering-charter.md`](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md) and locally at
