@@ -24,6 +24,8 @@ const MAX_MEMBERSHIP_CENSUS_ENTRIES := 8
 const MAX_MEMBERSHIP_CENSUS_BYTES := 8 * 1024 * 1024
 const MAX_GEOMETRY_CAPTURE_CACHE_ENTRIES := 512
 const MAX_GEOMETRY_CAPTURE_CACHE_BYTES := 16 * 1024 * 1024
+const CENSUS_PHASE_NAMES := ["town_regions", "standalone_regions", "sources",
+	"cells", "sort_cells", "hash", "validate"]
 
 var _world_id := ""
 var _system_ref: WeakRef
@@ -42,6 +44,16 @@ var _membership_census_bytes := 0
 var _membership_census_advance_count := 0
 var _membership_census_advance_usec := 0
 var _membership_census_currentness_invalidations := 0
+var _membership_census_stage_usec := {"town_regions":0, "standalone_regions":0,
+	"sources":0, "cells":0, "sort_cells":0, "hash":0, "validate":0}
+var _geometry_advance_count := 0
+var _geometry_advance_usec := 0
+var _geometry_cursor_advance_count := 0
+var _geometry_stalled_advance_count := 0
+var _geometry_job_restart_count := 0
+var _geometry_job_invalidation_count := 0
+var _geometry_job_complete_count := 0
+var _last_geometry_progress: Dictionary = {}
 var _geometry_capture_cache: Dictionary = {}
 var _geometry_capture_cache_bytes := 0
 var _geometry_capture_cache_clock := 0
@@ -73,6 +85,10 @@ func configure(world_id: String, structure_system: Object, main: Object) -> Dict
 
 
 func membership_census_stats() -> Dictionary:
+	var stage_usec: Dictionary = _membership_census_stage_usec.duplicate(false)
+	stage_usec.make_read_only()
+	var last_progress: Dictionary = _last_geometry_progress.duplicate(false)
+	last_progress.make_read_only()
 	return {"buildCount":_membership_census_build_count,
 		"reuseCount":_membership_census_reuse_count,
 		"overlapReuseCount":_membership_census_overlap_reuse_count,
@@ -82,12 +98,53 @@ func membership_census_stats() -> Dictionary:
 		"cachedBytes":_membership_census_bytes,
 		"censusAdvanceCount":_membership_census_advance_count,
 		"censusAdvanceUsec":_membership_census_advance_usec,
+		"censusStageUsec":stage_usec,
 		"censusCurrentnessInvalidations":_membership_census_currentness_invalidations,
+		"geometryAdvanceCount":_geometry_advance_count,
+		"geometryAdvanceUsec":_geometry_advance_usec,
+		"geometryCursorAdvanceCount":_geometry_cursor_advance_count,
+		"geometryStalledAdvanceCount":_geometry_stalled_advance_count,
+		"geometryJobRestartCount":_geometry_job_restart_count,
+		"geometryJobInvalidationCount":_geometry_job_invalidation_count,
+		"geometryJobCompleteCount":_geometry_job_complete_count,
+		"lastGeometryProgress":last_progress,
 		"geometryCaptureCacheHits":_geometry_capture_cache_hits,
 		"geometryCaptureCacheMisses":_geometry_capture_cache_misses,
 		"geometryCaptureCacheEvictions":_geometry_capture_cache_evictions,
 		"geometryCaptureCacheEntries":_geometry_capture_cache.size(),
 		"geometryCaptureCacheBytes":_geometry_capture_cache_bytes}
+
+
+func _record_census_slice(value: Variant) -> void:
+	if not value is Dictionary:
+		return
+	var slice: Dictionary = value
+	for phase_name: String in CENSUS_PHASE_NAMES:
+		_membership_census_stage_usec[phase_name] = int(
+			_membership_census_stage_usec.get(phase_name, 0)) \
+			+ maxi(0, int(slice.get(phase_name, 0)))
+
+
+func _record_geometry_advance(section: Vector3i, cursor_before: int,
+		cursor_after: int, candidate_count: int, outcome: Dictionary,
+		elapsed_usec: int) -> void:
+	var cursor_delta := maxi(0, cursor_after - cursor_before)
+	_geometry_advance_count += 1
+	_geometry_advance_usec += maxi(0, elapsed_usec)
+	_geometry_cursor_advance_count += cursor_delta
+	if String(outcome.get("status", "")) == "pending" and cursor_delta == 0:
+		_geometry_stalled_advance_count += 1
+	_last_geometry_progress = {"sectionKey":_section_id(section),
+		"cursorBefore":cursor_before, "cursorAfter":cursor_after,
+		"candidateCount":candidate_count,
+		"status":String(outcome.get("status", "")),
+		"reason":String(outcome.get("reason", "")),
+		"elapsedUsec":maxi(0, elapsed_usec)}
+
+
+func _record_geometry_invalidation() -> void:
+	_geometry_job_invalidation_count += 1
+	_geometry_job_restart_count += 1
 
 
 func _advance_membership_census(window: Rect2i, membership_token: Array,
@@ -148,6 +205,7 @@ func _advance_membership_census(window: Rect2i, membership_token: Array,
 	var advanced: Dictionary = capture.advance(DISCOVERY_ATOMS_PER_TURN, 3000)
 	_membership_census_advance_count += 1
 	_membership_census_advance_usec += int(advanced.get("sliceUsec", 0))
+	_record_census_slice(advanced.get("slicePhaseUsec", {}))
 	if advanced.get("status") == "pending":
 		var reason := String(advanced.get("reason", "ordinary_visual_capture_budget"))
 		if reason != "ordinary_visual_capture_budget":
@@ -263,6 +321,7 @@ func _invalidate_stale_section_jobs(window: Rect2i, current_token: Array) -> voi
 		var job: Dictionary = _jobs.get(section_id, {})
 		if job.get("censusWindow") == window \
 				and job.get("membershipToken", []) != current_token:
+			_record_geometry_invalidation()
 			_invalidate_section_snapshot(section_id)
 
 
@@ -442,16 +501,31 @@ func capture_static_section_sources(world_id: String,
 		if census.is_empty():
 			return _pending("ordinary_membership_window_census_missing", {
 				"section":section, "censusWindow":window})
-		if job.is_empty() or not _job_is_current(job, context):
+		if not job.is_empty() and not _job_is_current(job, context):
+			_record_geometry_invalidation()
+			_invalidate_section_snapshot(section_id)
+			job = {}
+		if job.is_empty():
 			job = _begin_job(section, context, census)
 			if job.get("status") != "pending":
 				return job
 			_jobs[section_id] = job
+		var was_complete: bool = String(job.get("phase", "")) == "complete"
+		var cursor_before := int(job.get("candidateIndex", 0))
+		var geometry_started_usec := Time.get_ticks_usec()
 		var advanced := _advance_job(job, context)
+		_record_geometry_advance(section, cursor_before,
+			int(job.get("candidateIndex", cursor_before)),
+			int(job.get("candidates", []).size()), advanced,
+			maxi(0, Time.get_ticks_usec() - geometry_started_usec))
 		if advanced.get("status") != "complete":
 			if advanced.get("status") == "failed" or bool(advanced.get("restart", false)):
+				if bool(advanced.get("restart", false)):
+					_record_geometry_invalidation()
 				_jobs.erase(section_id)
 			return advanced
+		if not was_complete:
+			_geometry_job_complete_count += 1
 		var snapshot: Dictionary = advanced.snapshot
 		_latest_by_section[section_id] = snapshot
 		var member_ids: Array[String] = snapshot.memberIds.duplicate()

@@ -9,6 +9,8 @@ const CitadelPublicationServiceScript := preload("res://scripts/world/CitadelPub
 const OrdinaryGeometryAdapter := preload("res://scripts/world/OrdinaryStructureSectionGeometryAdapter.gd")
 const MAX_EXPECTED_PER_SOURCE := 8192
 const MAX_EXPECTED_PER_QUERY := 16384
+const CAPTURE_PHASE_NAMES := ["town_regions", "standalone_regions", "sources",
+	"cells", "sort_cells", "hash", "validate"]
 
 var _system_ref: WeakRef
 var _system_id := 0
@@ -112,14 +114,19 @@ func _begin(system: Object, bounds: Rect2i, membership_only: bool) -> void:
 
 func advance(max_atoms: int = 128, max_usec: int = 3000) -> Dictionary:
 	if not _result.is_empty(): return _result.duplicate(false)
+	var slice_phase_usec := _empty_phase_usec()
 	if max_atoms <= 0 or max_usec <= 0:
 		var no_budget := _pending_budget()
 		no_budget["sliceUsec"] = 0
+		no_budget["phaseUsec"] = _cumulative_phase_usec()
+		no_budget["slicePhaseUsec"] = _seal_phase_usec(slice_phase_usec)
 		return no_budget
 	var context := _context()
 	if context.is_empty():
 		_result = {"status": "pending", "reason": "ordinary_visual_capture_source_changed",
-			"retryable": true, "stage": _stage, "sliceUsec": 0}
+			"retryable": true, "stage": _stage, "sliceUsec": 0,
+			"phaseUsec":_cumulative_phase_usec(),
+			"slicePhaseUsec":_seal_phase_usec(slice_phase_usec)}
 		return _result
 	var started := Time.get_ticks_usec()
 	var atoms := 0
@@ -127,8 +134,9 @@ func advance(max_atoms: int = 128, max_usec: int = 3000) -> Dictionary:
 		var stage_before := _stage
 		var atom_started := Time.get_ticks_usec()
 		var outcome := _advance_one(context.system, context.main)
-		_phase_usec[stage_before] = int(_phase_usec.get(stage_before, 0)) \
-			+ maxi(0, Time.get_ticks_usec() - atom_started)
+		var atom_usec := maxi(0, Time.get_ticks_usec() - atom_started)
+		_phase_usec[stage_before] = int(_phase_usec.get(stage_before, 0)) + atom_usec
+		slice_phase_usec[stage_before] = int(slice_phase_usec.get(stage_before, 0)) + atom_usec
 		atoms += 1
 		if not outcome.is_empty():
 			var reported: Dictionary = outcome.duplicate(false)
@@ -136,6 +144,7 @@ func advance(max_atoms: int = 128, max_usec: int = 3000) -> Dictionary:
 			if _membership_only:
 				phase_times.make_read_only()
 			reported["phaseUsec"] = phase_times
+			reported["slicePhaseUsec"] = _seal_phase_usec(slice_phase_usec)
 			reported["sliceUsec"] = maxi(0, Time.get_ticks_usec() - started)
 			if _membership_only:
 				reported.make_read_only()
@@ -143,7 +152,29 @@ func advance(max_atoms: int = 128, max_usec: int = 3000) -> Dictionary:
 			return _result
 	var budget := _pending_budget()
 	budget["sliceUsec"] = maxi(0, Time.get_ticks_usec() - started)
+	budget["phaseUsec"] = _cumulative_phase_usec()
+	budget["slicePhaseUsec"] = _seal_phase_usec(slice_phase_usec)
 	return budget
+
+
+func _empty_phase_usec() -> Dictionary:
+	var result := {}
+	for phase_name: String in CAPTURE_PHASE_NAMES:
+		result[phase_name] = 0
+	return result
+
+
+func _seal_phase_usec(value: Dictionary) -> Dictionary:
+	var result := value.duplicate(false)
+	result.make_read_only()
+	return result
+
+
+func _cumulative_phase_usec() -> Dictionary:
+	var result := _phase_usec.duplicate(false)
+	if _membership_only:
+		result.make_read_only()
+	return result
 
 
 func eligible_for(system: Object, bounds: Rect2i) -> bool:

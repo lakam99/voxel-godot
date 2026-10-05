@@ -6,6 +6,9 @@ const SourceRosterScript := preload("res://scripts/world/StaticSectionSourceRost
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const StructureScript := preload("res://scripts/StructureSystem.gd")
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
+const SourceCaptureScript := preload("res://scripts/world/OrdinaryStructureVisualSourceCapture.gd")
+const EXPECTED_CAPTURE_PHASES := ["town_regions", "standalone_regions", "sources",
+	"cells", "sort_cells", "hash", "validate"]
 
 
 func _visual_recipe_input(block_type: String, options: Dictionary = {}) -> Dictionary:
@@ -101,6 +104,42 @@ func run() -> void:
 		"key":"0,0", "x":-4, "z":-4, "width":24, "depth":24}
 	var system := FixtureStructure.new()
 	system.main = world
+	var timing_probe = SourceCaptureScript.new()
+	timing_probe.begin_membership(system, Rect2i(Vector2i.ZERO, Vector2i.ONE))
+	var first_timing_slice: Dictionary = timing_probe.advance(1, 3000)
+	var second_timing_slice: Dictionary = timing_probe.advance(1, 3000)
+	var first_slice_usec: Dictionary = first_timing_slice.get("slicePhaseUsec", {})
+	var second_slice_usec: Dictionary = second_timing_slice.get("slicePhaseUsec", {})
+	var first_cumulative_usec: Dictionary = first_timing_slice.get("phaseUsec", {})
+	var second_cumulative_usec: Dictionary = second_timing_slice.get("phaseUsec", {})
+	var first_phase_keys: Array[String] = []
+	var second_phase_keys: Array[String] = []
+	for key_value: Variant in first_slice_usec:
+		first_phase_keys.append(String(key_value))
+	for key_value: Variant in second_slice_usec:
+		second_phase_keys.append(String(key_value))
+	first_phase_keys.sort()
+	second_phase_keys.sort()
+	var expected_phase_keys: Array[String] = []
+	for phase_value: Variant in EXPECTED_CAPTURE_PHASES:
+		expected_phase_keys.append(String(phase_value))
+	expected_phase_keys.sort()
+	var phase_usec_nonnegative := true
+	for phase_name: String in EXPECTED_CAPTURE_PHASES:
+		if int(first_slice_usec.get(phase_name, -1)) < 0 \
+				or int(second_slice_usec.get(phase_name, -1)) < 0:
+			phase_usec_nonnegative = false
+	check("budget_slices_report_bounded_fixed_stage_timing_and_stable_cumulative_totals",
+		first_timing_slice.get("reason") == "ordinary_visual_capture_budget"
+		and second_timing_slice.get("reason") == "ordinary_visual_capture_budget"
+		and first_phase_keys == expected_phase_keys
+		and second_phase_keys == expected_phase_keys
+		and first_slice_usec.is_read_only() and second_slice_usec.is_read_only()
+		and first_cumulative_usec.is_read_only() and second_cumulative_usec.is_read_only()
+		and phase_usec_nonnegative
+		and int(second_cumulative_usec.get("town_regions", 0))
+			>= int(first_cumulative_usec.get("town_regions", 0)),
+		{"first":first_timing_slice, "second":second_timing_slice})
 	var corner_recipe: Dictionary = VisualRecipe.resolve_member(world, "woodBlock",
 		Vector3i(0, 0, 0), StructureScript._sealed_ordinary_visual_value({
 			"accentRole":"cornerTimber", "cornerX":-1, "cornerZ":1,
@@ -500,6 +539,69 @@ func run() -> void:
 	var after_ack := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
 	check("accepted_empty_replacement_consumes_tombstone", ack_empty.get("status") == "acknowledged"
 		and after_ack.get("removalsBySection", {}).get(Vector3i.ZERO, []).is_empty(), after_ack)
+
+	var throughput_source: Dictionary = system.ordinary_visual_sources[source_id]
+	var throughput_expected: Dictionary = throughput_source.get("expected", {})
+	var throughput_recipes: Dictionary = throughput_source.get("visualRecipeInputs", {})
+	for index in range(33):
+		var throughput_cell := Vector3i(4 + index % 8, 0, 4 + int(index / 8))
+		var throughput_body := _make_body(world, source_id, throughput_cell, "stoneBlock")
+		throughput_body.position = Vector3(throughput_cell) * world.CELL
+		world.add_child(throughput_body)
+		world.blocks[throughput_cell] = throughput_body
+		throughput_expected[throughput_cell] = "stoneBlock"
+		throughput_recipes[throughput_cell] = _visual_recipe_input("stoneBlock")
+	throughput_source["revision"] = int(throughput_source.get("revision", 0)) + 1
+	system.ordinary_visual_revision += 1
+	var geometry_before: Dictionary = provider.membership_census_stats()
+	var first_geometry_slice: Dictionary = provider.capture_static_section_sources(
+		"seed:ordinary-provider", [Vector3i.ZERO])
+	var first_geometry_stats: Dictionary = provider.membership_census_stats()
+	var first_progress: Dictionary = first_geometry_stats.get("lastGeometryProgress", {})
+	var progress_hit_slice_budget: bool = first_geometry_slice.get("status") == "pending" \
+		and String(first_geometry_slice.get("reason", "")) \
+		== "ordinary_section_geometry_capture_budget" \
+		and int(first_progress.get("cursorAfter", 0)) > int(first_progress.get("cursorBefore", 0))
+	var restarts_before_token_change := int(first_geometry_stats.get("geometryJobRestartCount", 0))
+	var invalidations_before_token_change := int(
+		first_geometry_stats.get("geometryJobInvalidationCount", 0))
+	throughput_source["revision"] = int(throughput_source.get("revision", 0)) + 1
+	system.ordinary_visual_revision += 1
+	var restarted_geometry_slice: Dictionary = provider.capture_static_section_sources(
+		"seed:ordinary-provider", [Vector3i.ZERO])
+	var restarted_geometry_stats: Dictionary = provider.membership_census_stats()
+	var restarted_progress: Dictionary = restarted_geometry_stats.get("lastGeometryProgress", {})
+	check("geometry_cursor_progress_is_resumable_and_token_change_invalidates_once",
+		progress_hit_slice_budget
+		and int(restarted_geometry_stats.get("geometryJobRestartCount", 0))
+			== restarts_before_token_change + 1
+		and int(restarted_geometry_stats.get("geometryJobInvalidationCount", 0))
+			== invalidations_before_token_change + 1
+		and int(restarted_progress.get("cursorBefore", -1)) == 0
+		and int(restarted_progress.get("cursorAfter", 0)) > 0,
+		{"firstStatus":first_geometry_slice.get("status", ""),
+			"firstReason":first_geometry_slice.get("reason", ""),
+			"firstProgress":first_progress,
+			"restartedStatus":restarted_geometry_slice.get("status", ""),
+			"restartedProgress":restarted_progress,
+			"geometryBefore":geometry_before,
+			"geometryAfter":restarted_geometry_stats})
+	var completed_throughput_capture := _capture_until_settled(provider,
+		"seed:ordinary-provider", Vector3i.ZERO)
+	var final_geometry_stats: Dictionary = provider.membership_census_stats()
+	var final_progress: Dictionary = final_geometry_stats.get("lastGeometryProgress", {})
+	var final_stage_stats: Dictionary = final_geometry_stats.get("censusStageUsec", {})
+	check("geometry_continuation_completes_with_monotonic_bounded_counters",
+		completed_throughput_capture.get("status") == "complete"
+		and int(final_geometry_stats.get("geometryAdvanceCount", 0))
+			> int(geometry_before.get("geometryAdvanceCount", 0))
+		and int(final_geometry_stats.get("geometryCursorAdvanceCount", 0))
+			>= int(first_progress.get("cursorAfter", 0))
+		and int(final_geometry_stats.get("geometryJobCompleteCount", 0)) > 0
+		and final_progress.get("cursorAfter", 0) == final_progress.get("candidateCount", -1)
+		and final_stage_stats.is_read_only(),
+		{"status":completed_throughput_capture.get("status", ""),
+			"geometryStats":final_geometry_stats})
 
 	var passed := true
 	for row: Dictionary in checks:
