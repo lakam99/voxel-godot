@@ -299,6 +299,16 @@ func _set_tree_preparation_state(body: StaticBody3D, state: String) -> void:
 	body.set_meta("tree_visual_state", state)
 
 
+func _task_generation_is_current(task: Dictionary, body: StaticBody3D) -> bool:
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or bool(body.get_meta("tree_publication_cancelled", false)):
+		return false
+	var task_generation := int(task.get("enqueueSequence", 0))
+	var expected_generation := int(body.get_meta(
+		"tree_section_recipe_input_expected_generation", 0))
+	return task_generation == expected_generation
+
+
 func _section_task_matches_current_producer(task: Dictionary, body: StaticBody3D,
 		request: Dictionary, recipe: Dictionary) -> bool:
 	if not is_instance_valid(body) or body.is_queued_for_deletion() \
@@ -1081,6 +1091,9 @@ func start_pending_workers() -> void:
 		if body == null or not is_instance_valid(body):
 			cancelled_count += 1
 			continue
+		if not _task_generation_is_current(task, body):
+			cancelled_count += 1
+			continue
 		if retier_task_for_current_viewer(task, body):
 			continue
 		var worker_service = TreeSpawnServiceScript.new()
@@ -1281,6 +1294,10 @@ func collect_completed_workers() -> void:
 			still_active.append(task)
 			continue
 		var recipe_value = thread.wait_to_finish()
+		var completed_body: StaticBody3D = _publication_body(task)
+		if completed_body == null or not _task_generation_is_current(task, completed_body):
+			cancelled_count += 1
+			continue
 		if recipe_value is Dictionary and not (recipe_value as Dictionary).is_empty():
 			task["recipe"] = recipe_value
 			# Workers return one already-reduced recipe. The bounded queue cache owns
@@ -1448,7 +1465,8 @@ func publish_completed_recipes() -> void:
 		var body: StaticBody3D = _publication_body(task)
 		var validation_elapsed_usec := Time.get_ticks_usec() - validation_started_usec
 		record_publication_validation(validation_elapsed_usec)
-		if body == null or not is_instance_valid(body):
+		if body == null or not is_instance_valid(body) \
+				or not _task_generation_is_current(task, body):
 			var cancellation_started_usec := Time.get_ticks_usec()
 			release_staged_visual(task)
 			var cancellation_elapsed_usec := Time.get_ticks_usec() - cancellation_started_usec

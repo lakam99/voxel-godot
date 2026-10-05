@@ -72,6 +72,22 @@ func run_contract() -> void:
 		"lookupAfterMove":recipe_input_queue.tree_section_recipe_input_record_for_body(recipe_input_body).size(),
 		"retainAfterMove":recipe_input_queue.retain_tree_section_recipe_input_record(recipe_input_record).get("reason", "")
 	})
+	var stale_task_queue = TreePublicationQueueScript.new()
+	fixture.add_child(stale_task_queue)
+	var superseded_tree := tree_body("queue-superseded-generation")
+	fixture.add_child(superseded_tree)
+	superseded_tree.set_meta("tree_section_recipe_input_expected_generation", 2)
+	stale_task_queue.enqueue_pending_task({"body":weakref(superseded_tree),
+		"enqueueSequence":1, "publicationPosition":superseded_tree.global_position,
+		"request":request_for("queue-superseded-generation", "broadleaf", "bushy_oak", "forest")})
+	stale_task_queue.start_pending_workers()
+	add_result("superseded_generation_is_dropped_before_worker_admission",
+		stale_task_queue.pending_tasks.is_empty() and stale_task_queue.active.is_empty() \
+		and stale_task_queue.cancelled_count == 1, {
+		"pending":stale_task_queue.pending_tasks.size(),
+		"active":stale_task_queue.active.size(),
+		"cancelled":stale_task_queue.cancelled_count
+	})
 	var broadleaf := tree_body("queue-broadleaf")
 	var conifer := tree_body("queue-conifer")
 	fixture.add_child(broadleaf)
