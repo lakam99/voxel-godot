@@ -74,6 +74,16 @@ func run() -> void:
 	source.active_structure_visual_source_id = ""
 	check("identical_recipe_input_does_not_advance_source_revision",
 		int(source_row.get("revision", -1)) == recipe_source_revision, recipe_input)
+	source.active_structure_visual_source_id = source_id
+	source._record_ordinary_visual_block(cell, "woodBlock", body,
+		{"generatedVisualSourceId":source_id, "generated":true})
+	source.active_structure_visual_source_id = ""
+	var after_conflicting_overlap: Dictionary = source_row.get("visualRecipeInputs", {}).get(cell, {})
+	check("overlapping_wrong_type_request_cannot_rebind_existing_body_recipe",
+		String(source_row.expected.get(cell, "")) == "stoneBlock" \
+		and after_conflicting_overlap.get("blockType", "") == "stoneBlock" \
+		and after_conflicting_overlap.get("digest", "") == recipe_input.get("digest", "") \
+		and int(source_row.get("revision", -1)) == recipe_source_revision, after_conflicting_overlap)
 	var pending: Dictionary = source.region_ordinary_visual_source(bounds)
 	check("emitted_live_block_waits_for_producer_completion",
 		pending.status == "pending" and pending.pendingSourceIds.has(source_id), pending)

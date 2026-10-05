@@ -73,123 +73,171 @@ static func capture_block(structure_system: Object, main: Object,
 			return _failed(String(recipe.get("reason", "ordinary_geometry_visual_recipe_failed")))
 		return _pending(String(recipe.get("reason", "ordinary_geometry_visual_recipe_pending")), {
 			"sourceId":source_id, "cell":cell, "blockType":block_type})
-	var mesh := recipe.get("mesh") as Mesh
-	var material := recipe.get("material") as Material
 	var expected_transform: Transform3D = recipe.sourceToWorld
 	if not _transform_matches(body.global_transform, expected_transform):
 		return _pending("ordinary_geometry_live_body_transform_disagrees_with_recipe", {
 			"sourceId":source_id, "cell":cell})
-	if not is_instance_valid(mesh) or not is_instance_valid(material):
-		return _pending("ordinary_geometry_recipe_mesh_or_material_unavailable", {
-			"sourceId":source_id, "cell":cell})
-	if mesh.get_surface_count() != 1:
-		return _pending("ordinary_geometry_multisurface_material_not_migrated", {
-			"sourceId":source_id, "cell":cell,
-			"surfaceCount":mesh.get_surface_count()})
-	var material_identity := _material_identity(material)
-	if material_identity.is_empty():
-		return _pending("ordinary_geometry_material_fingerprint_unavailable", {
-			"sourceId":source_id, "cell":cell,
-			"materialClass":material.get_class()})
-	if not _material_is_opaque(material):
-		return _pending("ordinary_geometry_nonopaque_material_not_migrated", {
-			"sourceId":source_id, "cell":cell,
-			"materialClass":material.get_class()})
-	var mesh_identity := MeshFingerprint.inspect(mesh)
-	if mesh_identity.get("status") != "ready":
-		return _pending("ordinary_geometry_mesh_fingerprint_unavailable", {
-			"sourceId":source_id, "cell":cell,
-			"reason":String(mesh_identity.get("reason", ""))})
-	var mesh_bounds: AABB = recipe.meshLocalBounds
-	if not _valid_bounds(mesh_bounds):
-		return _pending("ordinary_geometry_mesh_bounds_invalid", {
+	var recipe_members: Array = recipe.get("members", [])
+	if recipe_members.is_empty():
+		return _pending("ordinary_geometry_recipe_member_list_empty", {
 			"sourceId":source_id, "cell":cell})
 	var cell_size := float(main.get("CELL"))
-	var world_bounds: AABB = recipe.worldBounds
 	var cell_origin := Vector3(cell) * cell_size
 	var support := Vector3.ONE * (cell_size * MAX_HORIZONTAL_SUPPORT_CELLS)
-	if not is_finite(cell_size) or cell_size <= 0.0 \
-			or world_bounds.position.x < cell_origin.x - support.x \
-			or world_bounds.end.x > cell_origin.x + support.x \
-			or world_bounds.position.z < cell_origin.z - support.z \
-			or world_bounds.end.z > cell_origin.z + support.z:
-		return _pending("ordinary_geometry_horizontal_support_exceeds_section_query", {
-			"sourceId":source_id, "cell":cell, "worldBounds":world_bounds,
-			"cellOrigin":cell_origin, "maxHorizontalSupport":support.x})
+	if not is_finite(cell_size) or cell_size <= 0.0:
+		return _pending("ordinary_geometry_cell_size_invalid", {"sourceId":source_id})
 	var part_id := _source_part_id(source_id, cell)
-	var source_revision := _revision(source, source_id, cell, block_type,
-		expected_transform, recipe.meshLocalTransform,
-		String(mesh_identity.contentDigest), material_identity.digest,
-		String(recipe.contentDigest) + recipe_digest)
-	if source_revision.is_empty():
+	var inputs: Array[Dictionary] = []
+	var bindings: Array[Dictionary] = []
+	var member_rows: Array = []
+	var first_mesh: Mesh
+	var first_material: Material
+	var first_compatibility: Dictionary = {}
+	var first_mesh_digest := ""
+	var first_material_digest := ""
+	for member_value: Variant in recipe_members:
+		if not member_value is Dictionary:
+			return _pending("ordinary_geometry_recipe_member_invalid", {
+				"sourceId":source_id, "cell":cell})
+		var member: Dictionary = member_value
+		var mesh := member.get("mesh") as Mesh
+		var material := member.get("material") as Material
+		var segment_suffix := String(member.get("segmentId", ""))
+		if segment_suffix.is_empty() or not is_instance_valid(mesh) \
+				or not is_instance_valid(material) \
+				or not member.get("meshLocalTransform") is Transform3D:
+			return _pending("ordinary_geometry_recipe_mesh_or_material_unavailable", {
+				"sourceId":source_id, "cell":cell, "segmentId":segment_suffix})
+		if mesh.get_surface_count() != 1:
+			return _pending("ordinary_geometry_multisurface_material_not_migrated", {
+				"sourceId":source_id, "cell":cell, "segmentId":segment_suffix,
+				"surfaceCount":mesh.get_surface_count()})
+		var material_identity := _material_identity(material)
+		if material_identity.is_empty():
+			return _pending("ordinary_geometry_material_fingerprint_unavailable", {
+				"sourceId":source_id, "cell":cell,
+				"materialClass":material.get_class()})
+		if not _material_is_opaque(material):
+			return _pending("ordinary_geometry_nonopaque_material_not_migrated", {
+				"sourceId":source_id, "cell":cell,
+				"materialClass":material.get_class()})
+		var mesh_identity := MeshFingerprint.inspect(mesh)
+		if mesh_identity.get("status") != "ready":
+			return _pending("ordinary_geometry_mesh_fingerprint_unavailable", {
+				"sourceId":source_id, "cell":cell,
+				"reason":String(mesh_identity.get("reason", ""))})
+		var mesh_bounds: AABB = member.meshLocalBounds
+		var world_bounds: AABB = member.worldBounds
+		if not _valid_bounds(mesh_bounds) or not _valid_bounds(world_bounds):
+			return _pending("ordinary_geometry_mesh_bounds_invalid", {
+				"sourceId":source_id, "cell":cell, "segmentId":segment_suffix})
+		if world_bounds.position.x < cell_origin.x - support.x \
+				or world_bounds.end.x > cell_origin.x + support.x \
+				or world_bounds.position.z < cell_origin.z - support.z \
+				or world_bounds.end.z > cell_origin.z + support.z:
+			return _pending("ordinary_geometry_horizontal_support_exceeds_section_query", {
+				"sourceId":source_id, "cell":cell, "segmentId":segment_suffix,
+				"worldBounds":world_bounds, "cellOrigin":cell_origin,
+				"maxHorizontalSupport":support.x})
+		var source_revision := _revision(source, source_id, cell, block_type,
+			expected_transform, member.meshLocalTransform,
+			String(mesh_identity.contentDigest), material_identity.digest,
+			String(recipe.contentDigest) + recipe_digest + segment_suffix)
+		if source_revision.is_empty():
+			return _failed("ordinary_geometry_revision_hash_failed")
+		var mesh_key: String = "ordinary-mesh:" + String(mesh_identity.contentDigest)
+		var material_key: String = "ordinary-material:" + String(material_identity.digest)
+		var pipeline_revision := "ordinary-static-mesh/v1"
+		var mesh_pipeline_key := "%s|pipeline=%s|layer=opaque|sort=none" % [mesh_key, pipeline_revision]
+		var compatibility := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+			"materialKey":material_key, "renderTier":"structural",
+			"meshResourceKey":mesh_key, "meshContentDigest":String(mesh_identity.contentDigest),
+			"meshKey":mesh_pipeline_key, "pipelineRevision":pipeline_revision,
+			"renderLayer":"opaque", "translucentSortPolicy":"none",
+			"meshLocalBounds":mesh_bounds, "castShadows":true,
+			"visibilityRangeEnd":100000.0, "fadeMargin":0.0}
+		var batch_key := SnapshotBuilder.batch_compatibility_key(compatibility)
+		if batch_key.is_empty():
+			return _pending("ordinary_geometry_batch_compatibility_invalid", {
+				"sourceId":source_id, "cell":cell})
+		compatibility["batchKey"] = batch_key
+		compatibility["compatibilityKey"] = batch_key
+		compatibility.make_read_only()
+		var buffer: Array[float] = []
+		for value: float in Attributes.encode(member.meshLocalTransform, Color.WHITE, Color.WHITE):
+			buffer.append(value)
+		buffer.make_read_only()
+		var instance_input: Dictionary = {
+			"schema":SCHEMA,
+			"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+			"sourceId":part_id,
+			"sourcePartId":part_id,
+			"authoritySourceId":source_id,
+			"sourceRevision":source_revision,
+			"visualRecipeDigest":recipe_digest,
+			"visualRecipeInput":recipe_input,
+			"segmentId":part_id + ":" + segment_suffix,
+			"ownerCell":Grid.logical_owner_cell_for_world_position(body.global_position),
+			"sourceToWorld":expected_transform,
+			"batchKey":batch_key,
+			"meshKey":mesh_key,
+			"meshContentDigest":String(mesh_identity.contentDigest),
+			"materialKey":material_key,
+			"meshLocalBounds":mesh_bounds,
+			"renderLayer":"opaque",
+			"translucentSortPolicy":"none",
+			"renderTier":"structural",
+			"pipelineRevision":pipeline_revision,
+			"compatibilityKey":batch_key,
+			"castShadows":true,
+			"visibilityRangeEnd":100000.0,
+			"fadeMargin":0.0,
+			"buffer":buffer,
+			"instanceCount":1
+		}
+		inputs.append(instance_input)
+		bindings.append({"input":instance_input, "mesh":mesh,
+			"material":material, "compatibility":compatibility,
+			"meshDigest":String(mesh_identity.contentDigest),
+			"materialDigest":String(material_identity.digest)})
+		member_rows.append([segment_suffix, source_revision,
+			String(mesh_identity.contentDigest), material_identity.digest])
+		if inputs.size() == 1:
+			first_mesh = mesh
+			first_material = material
+			first_compatibility = compatibility
+			first_mesh_digest = String(mesh_identity.contentDigest)
+			first_material_digest = String(material_identity.digest)
+	var combined_context := HashingContext.new()
+	if combined_context.start(HashingContext.HASH_SHA256) != OK \
+			or combined_context.update(var_to_bytes([SCHEMA, part_id, member_rows])) != OK:
 		return _failed("ordinary_geometry_revision_hash_failed")
-	var mesh_key: String = "ordinary-mesh:" + String(mesh_identity.contentDigest)
-	var material_key: String = "ordinary-material:" + String(material_identity.digest)
-	var pipeline_revision := "ordinary-static-mesh/v1"
-	var mesh_pipeline_key := "%s|pipeline=%s|layer=opaque|sort=none" % [mesh_key, pipeline_revision]
-	var compatibility := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
-		"materialKey":material_key, "renderTier":"structural",
-		"meshResourceKey":mesh_key, "meshContentDigest":String(mesh_identity.contentDigest),
-		"meshKey":mesh_pipeline_key, "pipelineRevision":pipeline_revision,
-		"renderLayer":"opaque", "translucentSortPolicy":"none",
-		"meshLocalBounds":mesh_bounds, "castShadows":true,
-		"visibilityRangeEnd":100000.0, "fadeMargin":0.0}
-	var batch_key := SnapshotBuilder.batch_compatibility_key(compatibility)
-	if batch_key.is_empty():
-		return _pending("ordinary_geometry_batch_compatibility_invalid", {
-			"sourceId":source_id, "cell":cell})
-	compatibility["batchKey"] = batch_key
-	compatibility["compatibilityKey"] = batch_key
-	compatibility.make_read_only()
-	var segment_id := part_id + ":mesh"
-	var buffer: Array[float] = []
-	for value: float in Attributes.encode(recipe.meshLocalTransform, Color.WHITE, Color.WHITE):
-		buffer.append(value)
-	buffer.make_read_only()
-	var instance_input: Dictionary = {
-		"schema":SCHEMA,
-		"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
-		"sourceId":part_id,
-		"sourcePartId":part_id,
-		"authoritySourceId":source_id,
-		"sourceRevision":source_revision,
-		"visualRecipeDigest":recipe_digest,
-		"visualRecipeInput":recipe_input,
-		"segmentId":segment_id,
-		"ownerCell":Grid.logical_owner_cell_for_world_position(body.global_position),
-		"sourceToWorld":expected_transform,
-		"batchKey":batch_key,
-		"meshKey":mesh_key,
-		"meshContentDigest":String(mesh_identity.contentDigest),
-		"materialKey":material_key,
-		"meshLocalBounds":mesh_bounds,
-		"renderLayer":"opaque",
-		"translucentSortPolicy":"none",
-		"renderTier":"structural",
-		"pipelineRevision":pipeline_revision,
-		"compatibilityKey":batch_key,
-		"castShadows":true,
-		"visibilityRangeEnd":100000.0,
-		"fadeMargin":0.0,
-		"buffer":buffer,
-		"instanceCount":1
-	}
-	instance_input.make_read_only()
+	var combined_revision := combined_context.finish().hex_encode()
+	for index in inputs.size():
+		var input: Dictionary = inputs[index]
+		input["sourceRevision"] = combined_revision
+		input.make_read_only()
+		bindings[index]["input"] = input
+		bindings[index].make_read_only()
+	inputs.make_read_only()
+	bindings.make_read_only()
+	for row_value: Variant in member_rows:
+		if row_value is Array:
+			(row_value as Array).make_read_only()
+	member_rows.make_read_only()
 	var manifest_row: Dictionary = {"sourcePartId":part_id,
-		"sourceRevision":source_revision, "sourceId":source_id,
+		"sourceRevision":combined_revision, "sourceId":source_id,
 		"cell":cell, "blockType":block_type,
-		"visualRecipeDigest":recipe_digest,
-		"meshDigest":String(mesh_identity.contentDigest),
-		"materialDigest":material_identity.digest}
+		"visualRecipeDigest":recipe_digest, "members":member_rows}
 	manifest_row.make_read_only()
-	return {"status":"ready", "sourceInput":instance_input,
-		"manifest":manifest_row, "compatibility":compatibility,
-		"mesh":mesh,
-		"material":material,
-		"body":weakref(body), "geometry":null,
-		"sourcePartId":part_id, "sourceRevision":source_revision,
-		"meshDigest":String(mesh_identity.contentDigest),
-		"materialDigest":material_identity.digest}
+	return {"status":"ready", "sourceInput":inputs[0], "sourceInputs":inputs,
+		"memberBindings":bindings,
+		"members":recipe_members, "manifest":manifest_row,
+		"compatibility":first_compatibility, "mesh":first_mesh,
+		"material":first_material, "body":weakref(body), "geometry":null,
+		"sourcePartId":part_id, "sourceRevision":combined_revision,
+		"meshDigest":first_mesh_digest,
+		"materialDigest":first_material_digest}
 
 
 ## Complete only for the requested generated structure source. This does not

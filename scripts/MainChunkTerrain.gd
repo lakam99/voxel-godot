@@ -24,26 +24,35 @@ func add_block_mesh(parent: Node3D, size: Vector3, offset: Vector3, material_key
     parent.add_child(mesh_instance)
     return mesh_instance
 
-func add_ordinary_structure_recipe_visual(parent: Node3D,
-        member_recipe: Dictionary) -> MeshInstance3D:
+func add_ordinary_structure_recipe_visuals(parent: Node3D,
+        member_recipe: Dictionary) -> Array[MeshInstance3D]:
+    var installed: Array[MeshInstance3D] = []
     if member_recipe.get("status") != "ready" \
-            or not member_recipe.get("mesh") is Mesh \
-            or not member_recipe.get("material") is Material \
-            or not member_recipe.get("meshLocalTransform") is Transform3D:
-        return null
-    var mesh_instance := MeshInstance3D.new()
-    var material_key := String(member_recipe.get("blockType", ""))
-    mesh_instance.name = "BlockVisual_%s" % material_key
-    mesh_instance.mesh = member_recipe.mesh
-    mesh_instance.material_override = member_recipe.material
-    mesh_instance.transform = member_recipe.meshLocalTransform
-    mesh_instance.cast_shadow = block_shadow_policy(material_key)
-    mesh_instance.set_meta("visual_role", "block")
-    mesh_instance.set_meta("material_key", material_key)
-    mesh_instance.set_meta("ordinary_structure_recipe_content_digest",
-        String(member_recipe.get("contentDigest", "")))
-    parent.add_child(mesh_instance)
-    return mesh_instance
+            or not member_recipe.get("members", []) is Array:
+        return installed
+    for member_value: Variant in member_recipe.members:
+        if not member_value is Dictionary:
+            return []
+        var member: Dictionary = member_value
+        if not member.get("mesh") is Mesh or not member.get("material") is Material \
+                or not member.get("meshLocalTransform") is Transform3D:
+            return []
+        var mesh_instance := MeshInstance3D.new()
+        var material_key := String(member.get("materialKey", ""))
+        mesh_instance.name = String(member.get("visualName", "BlockVisual_%s" % material_key))
+        mesh_instance.mesh = member.mesh
+        mesh_instance.material_override = member.material
+        mesh_instance.transform = member.meshLocalTransform
+        mesh_instance.cast_shadow = block_shadow_policy(material_key)
+        mesh_instance.set_meta("visual_role", String(member.get("visualRole", "block")))
+        mesh_instance.set_meta("material_key", material_key)
+        mesh_instance.set_meta("ordinary_structure_recipe_segment_id",
+            String(member.get("segmentId", "")))
+        mesh_instance.set_meta("ordinary_structure_recipe_content_digest",
+            String(member_recipe.get("contentDigest", "")))
+        parent.add_child(mesh_instance)
+        installed.append(mesh_instance)
+    return installed
 
 func block_shadow_policy(material_key: String) -> int:
     if material_key in ["glass", "flame", "furnaceGlow", "wardLantern", "sanctuaryBeacon", "riftAnchor", "copperOreGlow", "ironOreGlow"]:
@@ -930,12 +939,11 @@ func create_block(cell: Vector3i, block_type: String, options: Dictionary = {}) 
 
     var ordinary_recipe_visual_installed := false
     if ordinary_recipe_visual.get("status") == "ready":
-        var ordinary_visual := add_ordinary_structure_recipe_visual(body,
+        var ordinary_visuals := add_ordinary_structure_recipe_visuals(body,
             ordinary_recipe_visual)
-        if is_instance_valid(ordinary_visual):
-            body.set_meta("ordinary_structure_recipe_content_digest",
-                String(ordinary_visual.get_meta(
-                    "ordinary_structure_recipe_content_digest", "")))
+        if ordinary_visuals.size() == ordinary_recipe_visual.members.size():
+            body.set_meta("ordinary_structure_recipe_content_digest", String(
+                ordinary_recipe_visual.get("contentDigest", "")))
             ordinary_recipe_visual_installed = true
     if ordinary_recipe_visual_installed:
         pass

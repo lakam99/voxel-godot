@@ -27,10 +27,16 @@ class FixtureMain extends Node3D:
 	var block_root: Node3D
 	var meshes: Dictionary = {}
 	var materials: Dictionary = {"stoneBlock":StandardMaterial3D.new(),
-		"woodBlock":StandardMaterial3D.new(), "cobblestonePath":StandardMaterial3D.new()}
+		"woodBlock":StandardMaterial3D.new(), "cobblestonePath":StandardMaterial3D.new(),
+		"roofWood":StandardMaterial3D.new(), "roofStone":StandardMaterial3D.new(),
+		"trimWood":StandardMaterial3D.new(), "trimStone":StandardMaterial3D.new()}
 
 	func _init() -> void:
 		block_root = self
+		materials["roofWood"].albedo_color = Color(0.38, 0.19, 0.08)
+		materials["roofStone"].albedo_color = Color(0.25, 0.27, 0.30)
+		materials["trimWood"].albedo_color = Color(0.22, 0.10, 0.04)
+		materials["trimStone"].albedo_color = Color(0.13, 0.15, 0.17)
 
 	func block_visual_mesh(_key: String) -> Mesh:
 		if not meshes.has("base"):
@@ -95,15 +101,55 @@ func run() -> void:
 		"key":"0,0", "x":-4, "z":-4, "width":24, "depth":24}
 	var system := FixtureStructure.new()
 	system.main = world
+	var corner_recipe: Dictionary = VisualRecipe.resolve_member(world, "woodBlock",
+		Vector3i(0, 0, 0), StructureScript._sealed_ordinary_visual_value({
+			"accentRole":"cornerTimber", "cornerX":-1, "cornerZ":1,
+			"cornerTrimMaterial":"trimWood"}))
+	var corner_members: Array = corner_recipe.get("members", [])
+	var corner_ids: Array[String] = []
+	for member_value: Variant in corner_members:
+		if member_value is Dictionary:
+			corner_ids.append(String(member_value.get("segmentId", "")))
+	check("opaque_corner_timber_accent_matches_live_visual_members",
+		corner_recipe.get("status") == "ready" and corner_ids == [
+			"base", "corner_timber_x", "corner_timber_z"]
+		and corner_members.size() == 3
+		and corner_members[1].meshLocalTransform.origin == Vector3(
+			-world.CELL * 0.50, 0.0, world.CELL * 0.43)
+		and corner_members[2].meshLocalTransform.origin == Vector3(
+			-world.CELL * 0.43, 0.0, world.CELL * 0.50), corner_recipe)
+	var fence_recipe: Dictionary = VisualRecipe.resolve_member(world, "woodBlock",
+		Vector3i(0, 0, 0), StructureScript._sealed_ordinary_visual_value({
+			"accentRole":"fencePost", "fenceAxis":"z",
+			"fenceTrimMaterial":"trimWood"}))
+	var fence_members: Array = fence_recipe.get("members", [])
+	var fence_ids: Array[String] = []
+	for member_value: Variant in fence_members:
+		if member_value is Dictionary:
+			fence_ids.append(String(member_value.get("segmentId", "")))
+	check("opaque_fence_accent_captures_post_and_both_axis_correct_rails",
+		fence_recipe.get("status") == "ready" and fence_ids == [
+			"base", "fence_post", "fence_rail_0", "fence_rail_1"]
+		and fence_members.size() == 4
+		and fence_members[2].meshLocalTransform.basis.get_scale().is_equal_approx(Vector3(
+			world.CELL * 0.14, world.CELL * 0.12, world.CELL * 1.04)
+			)
+		and is_equal_approx(fence_members[2].meshLocalTransform.origin.y,
+			world.CELL * 0.18)
+		and is_equal_approx(fence_members[3].meshLocalTransform.origin.y,
+			-world.CELL * 0.18),
+		fence_recipe)
 	var source_id := "town:0,0"
 	var cell := Vector3i(2, 0, 3)
-	var body := _make_body(world, source_id, cell, "stoneBlock")
+	var roof_options := {"roofRole":"ridge", "roofAxis":"x", "roofEdgeX":-1,
+		"roofEdgeZ":1, "roofAccent":"chimney"}
+	var body := _make_body(world, source_id, cell, "stoneBlock", roof_options)
 	body.position = Vector3(cell) * world.CELL
 	world.add_child(body)
 	world.blocks[cell] = body
 	system.ordinary_visual_sources[source_id] = {
 		"completed":true, "expected":{cell:"stoneBlock"},
-		"visualRecipeInputs":{cell:_visual_recipe_input("stoneBlock")},
+		"visualRecipeInputs":{cell:_visual_recipe_input("stoneBlock", roof_options)},
 		"omitted":{}, "failed":{}, "revision":2}
 	var provider := ProviderScript.new()
 	var configured: Dictionary = provider.configure("seed:ordinary-provider", system, world)
@@ -117,11 +163,12 @@ func run() -> void:
 	check("section_census_is_complete_and_geometry_is_bound_to_source_revision",
 		first.get("status") == "complete" and section_row.get("status") == "complete"
 		and section_row.get("sourcePartIds", []).size() == 1
-		and prepared.get("inputs", []).size() == 1
+		and prepared.get("inputs", []).size() == 2
 		and String(prepared_input.get("visualRecipeDigest", "")).length() == 64
 		and prepared_input.get("visualRecipeInput", {}).is_read_only()
 		and prepared.get("declarations", []).size() == 1
-		and prepared.get("preparedSegments", []).size() == 1
+		and prepared.get("preparedSegments", []).size() == 2
+		and prepared.get("declarations", [])[0].get("segments", []).size() == 2
 		and prepared.get("resourceBindings", {}).size() == 1,
 		{"status":first.get("status", ""), "reason":first.get("reason", ""),
 			"memberIds":section_row.get("sourcePartIds", []),
@@ -138,8 +185,8 @@ func run() -> void:
 	var member_id := String(section_row.get("sourcePartIds", [""])[0]) \
 		if not section_row.get("sourcePartIds", []).is_empty() else ""
 	var expected_part_id := "ordinary:%s:cell:%d,%d,%d" % [source_id, cell.x, cell.y, cell.z]
-	check("stable_member_id_and_readonly_20_float_input",
-		member_id == expected_part_id and prepared.get("inputs", []).size() == 1
+	check("stable_member_id_and_section_owned_readonly_roof_segment_inputs",
+		member_id == expected_part_id and prepared.get("inputs", []).size() == 2
 		and prepared.inputs[0].is_read_only() and prepared.inputs[0].buffer.is_read_only()
 		and prepared.inputs[0].buffer.size() == 20,
 		{"memberId":member_id, "expected":expected_part_id})
@@ -161,7 +208,7 @@ func run() -> void:
 		and contribution.get("providerId") == ProviderScript.PROVIDER_ID
 		and contribution.get("authoritySourceRevisions", {}).get(member_id, "") \
 			== String(roster_result.sourceRevisions.get(member_id, ""))
-		and contribution.get("inputs", []).size() == 1
+		and contribution.get("inputs", []).size() == 2
 		and contribution.get("inputs", [])[0].get("sourcePartId", "") == member_id
 		and contribution.get("compatibilityByKey", {}).size() == 1
 		and contribution.get("resourceBindings", {}).size() == 1,
@@ -177,7 +224,7 @@ func run() -> void:
 		rejected_ack.get("status") == "failed"
 		and (body.get_child(0) as MeshInstance3D).visible,
 		rejected_ack)
-	var replaced_body := _make_body(world, source_id, cell, "stoneBlock")
+	var replaced_body := _make_body(world, source_id, cell, "stoneBlock", roof_options)
 	replaced_body.position = body.position
 	world.add_child(replaced_body)
 	world.blocks[cell] = replaced_body
@@ -210,12 +257,78 @@ func run() -> void:
 			"reason":rebuilt_contribution.get("reason", "")})
 	var acknowledged: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO,
 		first_coverage, _installed_receipt(Vector3i.ZERO))
+	var visible_roof_segments: Array[String] = []
+	for child: Node in body.get_children():
+		if child is MeshInstance3D and child.visible:
+			visible_roof_segments.append(String(child.get_meta(
+				"ordinary_structure_recipe_segment_id", "")))
+	visible_roof_segments.sort()
+	var expected_remaining_roof_segments: Array[String] = [
+		"roof_base", "roof_eave_x", "roof_eave_z", "roof_ridge_bar"]
 	check("membership_baseline_advances_only_on_explicit_install_ack",
 		acknowledged.get("status") == "acknowledged"
 		and int(acknowledged.get("memberCount", 0)) == 1
-		and not (body.get_child(0) as MeshInstance3D).visible
+		and visible_roof_segments == expected_remaining_roof_segments
 		and body.is_inside_tree(),
-		acknowledged)
+		{"status":String(acknowledged.get("status", "")),
+			"reason":String(acknowledged.get("reason", "")),
+			"visibleSegments":visible_roof_segments})
+	var geometry_cache_before_lower: Dictionary = provider.membership_census_stats()
+	var lower_roof_section := _capture_until_settled(provider,
+		"seed:ordinary-provider", Vector3i(0, -1, 0))
+	var geometry_cache_after_lower: Dictionary = provider.membership_census_stats()
+	var lower_roof_row: Dictionary = lower_roof_section.get("sections", {}).get(
+		Vector3i(0, -1, 0), {})
+	var lower_roof_ack := provider.acknowledge_section_install(Vector3i(0, -1, 0),
+		String(lower_roof_row.get("coverageRevision", "")),
+		_installed_receipt(Vector3i(0, -1, 0)))
+	var all_roof_members_retired := true
+	for child: Node in body.get_children():
+		if child is MeshInstance3D and child.visible:
+			all_roof_members_retired = false
+	check("cross_section_roof_visuals_retire_only_after_each_owned_section_receipt",
+		lower_roof_section.get("status") == "complete"
+		and lower_roof_row.get("sourcePartIds", []).has(member_id)
+		and lower_roof_section.get("preparedSections", {}).get(
+			Vector3i(0, -1, 0), {}).get("inputs", []).size() == 4
+		and lower_roof_ack.get("status") == "acknowledged"
+		and all_roof_members_retired,
+		{"sectionStatus":lower_roof_section.get("status", ""),
+			"reason":lower_roof_section.get("reason", ""),
+			"segmentCount":lower_roof_section.get("preparedSections", {}).get(
+				Vector3i(0, -1, 0), {}).get("inputs", []).size(),
+			"ackStatus":lower_roof_ack.get("status", ""),
+			"allMembersRetired":all_roof_members_retired})
+	check("adjacent_vertical_section_reuses_the_complete_source_capture",
+		int(geometry_cache_after_lower.get("geometryCaptureCacheHits", 0)) \
+			> int(geometry_cache_before_lower.get("geometryCaptureCacheHits", 0))
+		and geometry_cache_after_lower.get("geometryCaptureCacheEntries", 0) > 0,
+		geometry_cache_after_lower)
+	var cache_before_resource_change: Dictionary = provider.membership_census_stats()
+	var cached_recipe := _visual_recipe_input("stoneBlock", roof_options)
+	var cached_raw := {"sourceId":source_id, "sourceRevision":2,
+		"cell":cell, "blockType":"stoneBlock",
+		"recipeDigest":String(cached_recipe.get("digest", ""))}
+	var geometry_cache_hit := provider._capture_or_reuse_block({"system":system,
+		"main":world}, cached_raw, cell, "stoneBlock")
+	var cached_mesh: Mesh = world.block_visual_mesh("stoneBlock")
+	cached_mesh.emit_changed()
+	var cache_after_resource_change: Dictionary = provider.membership_census_stats()
+	var geometry_cache_rebuild := provider._capture_or_reuse_block({"system":system,
+		"main":world}, cached_raw, cell, "stoneBlock")
+	var cache_after_rebuild: Dictionary = provider.membership_census_stats()
+	check("resource_changed_invalidates_capture_cache_before_reuse",
+		geometry_cache_hit.get("status") == "ready" \
+		and int(cache_after_resource_change.get("geometryCaptureCacheEntries", 0)) \
+			< int(cache_before_resource_change.get("geometryCaptureCacheEntries", 0)) \
+		and geometry_cache_rebuild.get("status") == "ready" \
+		and int(cache_after_rebuild.get("geometryCaptureCacheMisses", 0)) \
+			> int(cache_after_resource_change.get("geometryCaptureCacheMisses", 0)),
+		{"hitStatus":geometry_cache_hit.get("status", ""),
+			"rebuildStatus":geometry_cache_rebuild.get("status", ""),
+			"before":cache_before_resource_change,
+			"afterChange":cache_after_resource_change,
+			"afterRebuild":cache_after_rebuild})
 	var boundary_cell := Vector3i(16, 0, 3)
 	var boundary_body := _make_body(world, source_id, boundary_cell, "stoneBlock")
 	boundary_body.position = Vector3(boundary_cell) * world.CELL
@@ -264,17 +377,19 @@ func run() -> void:
 		_installed_receipt(Vector3i(1, 0, 0)))
 	var hidden_boundary_sections := _capture_sections_until_settled(provider,
 		"seed:ordinary-provider", [Vector3i.ZERO, Vector3i(1, 0, 0)])
+	var hidden_sections: Dictionary = hidden_boundary_sections.get("sections", {})
 	check("retired_boundary_visual_replays_from_actual_mesh_support",
 		boundary_ack.get("status") == "acknowledged"
 		and not boundary_mesh.visible
 		and hidden_boundary_sections.get("status") == "complete"
-		and not hidden_boundary_sections.sections.get(Vector3i.ZERO, {}).get(
+		and not hidden_sections.get(Vector3i.ZERO, {}).get(
 			"sourcePartIds", []).has(boundary_part_id)
-		and hidden_boundary_sections.sections.get(Vector3i(1, 0, 0), {}).get(
+		and hidden_sections.get(Vector3i(1, 0, 0), {}).get(
 			"sourcePartIds", []).has(boundary_part_id),
 		{"status":hidden_boundary_sections.get("status", ""),
-			"westMembers":hidden_boundary_sections.sections.get(Vector3i.ZERO, {}).get("sourcePartIds", []),
-			"eastMembers":hidden_boundary_sections.sections.get(Vector3i(1, 0, 0), {}).get("sourcePartIds", [])})
+			"reason":hidden_boundary_sections.get("reason", ""),
+			"westMembers":hidden_sections.get(Vector3i.ZERO, {}).get("sourcePartIds", []),
+			"eastMembers":hidden_sections.get(Vector3i(1, 0, 0), {}).get("sourcePartIds", [])})
 	var boundary_removed_key := system._ordinary_visual_block_key(source_id,
 		boundary_cell, "stoneBlock")
 	system.removed_generated_structure_blocks[boundary_removed_key] = true
@@ -308,7 +423,8 @@ func run() -> void:
 	provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(boundary_empty_row.get("coverageRevision", "")),
 		_installed_receipt(Vector3i(1, 0, 0)))
-	var out_of_bounds_options := {"world_x":float(cell.x) * world.CELL + world.CELL * 1.1}
+	var out_of_bounds_options := roof_options.duplicate()
+	out_of_bounds_options["world_x"] = float(cell.x) * world.CELL + world.CELL * 1.1
 	var out_of_bounds_position := Vector3(out_of_bounds_options.world_x,
 		float(cell.y) * world.CELL, float(cell.z) * world.CELL)
 	body.position = out_of_bounds_position
@@ -323,7 +439,7 @@ func run() -> void:
 		excessive_support)
 	body.position = Vector3(cell) * world.CELL
 	system.ordinary_visual_sources[source_id].visualRecipeInputs[cell] = \
-		_visual_recipe_input("stoneBlock")
+		_visual_recipe_input("stoneBlock", roof_options)
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var restored := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)
@@ -442,14 +558,21 @@ func _make_body(world: FixtureMain, source_id: String, cell: Vector3i,
 	body.set_meta("generated_visual_source_id", source_id)
 	var sealed_options: Dictionary = StructureScript._sealed_ordinary_visual_value(options)
 	var recipe: Dictionary = VisualRecipe.resolve_member(world, block_type, cell, sealed_options)
-	var visual := MeshInstance3D.new()
-	visual.mesh = recipe.get("mesh")
-	visual.material_override = recipe.get("material")
-	visual.transform = recipe.get("meshLocalTransform", Transform3D.IDENTITY)
 	var content_digest := String(recipe.get("contentDigest", ""))
-	visual.set_meta("ordinary_structure_recipe_content_digest", content_digest)
 	body.set_meta("ordinary_structure_recipe_content_digest", content_digest)
-	body.add_child(visual)
+	for member_value: Variant in recipe.get("members", []):
+		if not member_value is Dictionary:
+			continue
+		var member: Dictionary = member_value
+		var visual := MeshInstance3D.new()
+		visual.name = String(member.get("visualName", ""))
+		visual.mesh = member.get("mesh")
+		visual.material_override = member.get("material")
+		visual.transform = member.get("meshLocalTransform", Transform3D.IDENTITY)
+		visual.set_meta("ordinary_structure_recipe_segment_id",
+			String(member.get("segmentId", "")))
+		visual.set_meta("ordinary_structure_recipe_content_digest", content_digest)
+		body.add_child(visual)
 	return body
 
 
@@ -458,7 +581,9 @@ func check(name: String, passed: bool, details: Dictionary) -> void:
 		"status":String(details.get("status", "")),
 		"reason":String(details.get("reason", "")),
 		"memberCount":int(details.get("memberCount", -1)),
-		"providerId":String(details.get("providerId", ""))}})
+		"providerId":String(details.get("providerId", "")),
+		"allRoofMembersRetired":bool(details.get("allRoofMembersRetired", false)),
+		"visibleSegments":details.get("visibleSegments", [])}})
 
 
 func _sealed_value_tree(value: Variant) -> bool:

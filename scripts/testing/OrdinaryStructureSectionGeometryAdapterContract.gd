@@ -199,33 +199,30 @@ func run() -> void:
 	var multi_cell := Vector3i(-3, 6, 16)
 	var extra_mesh_body := _make_body(source_id, multi_cell, "woodBlock")
 	extra_mesh_body.position = Vector3(multi_cell)
-	var second_mesh := MeshInstance3D.new()
-	second_mesh.mesh = BoxMesh.new()
-	second_mesh.material_override = StandardMaterial3D.new()
-	extra_mesh_body.add_child(second_mesh)
 	world.add_child(extra_mesh_body)
 	world.blocks[multi_cell] = extra_mesh_body
 	structures.ordinary_visual_sources[source_id].expected[multi_cell] = "woodBlock"
 	structures.ordinary_visual_sources[source_id].visualRecipeInputs[multi_cell] = \
-		_visual_recipe_input("woodBlock", {"roofRole":"roof_surface"})
+		_visual_recipe_input("woodBlock", {"roofRole":"ridge", "roofAxis":"x",
+			"roofEdgeX":-1, "roofEdgeZ":1, "roofAccent":"chimney"})
 	structures.ordinary_visual_sources[source_id].revision += 1
 	var multiple: Dictionary = Adapter.capture_block(structures, world, source_id, multi_cell)
-	check("multi_mesh_accents_remain_pending_until_complete_adapter_exists",
-		multiple.get("status") == "pending"
-		and multiple.get("reason") == "ordinary_block_visual_option_not_supported", multiple)
-	extra_mesh_body.remove_child(second_mesh)
-	second_mesh.free()
+	check("roof_recipe_captures_base_ridge_both_eaves_and_chimney_as_segments",
+		multiple.get("status") == "ready"
+		and multiple.get("sourceInputs", []).size() == 6
+		and multiple.get("memberBindings", []).size() == 6
+		and multiple.get("sourceInput", {}).get("segmentId", "").ends_with(":roof_base"), multiple)
 	structures.generated_visual_block_removed(body)
 	var removed: Dictionary = Adapter.capture_block(structures, world, source_id, cell)
 	var removed_source: Dictionary = Adapter.capture_source(structures, world, source_id)
 	check("durable_tombstone_is_explicit_source_removal_and_other_unsupported_member_stays_pending",
 		removed.get("status") == "empty"
 		and removed_source.get("status") == "pending"
-		and removed_source.get("reason") == "ordinary_block_visual_option_not_supported",
+		and removed_source.get("reason") == "ordinary_geometry_block_type_not_migrated",
 		removed_source)
 	var changed_mesh: Dictionary = Adapter.capture_block(structures, world, source_id, multi_cell)
-	check("unsupported_recipe_does_not_mutate_static_body_collision",
-		changed_mesh.get("status") == "pending"
+	check("multipart_recipe_does_not_mutate_static_body_collision",
+		changed_mesh.get("status") == "ready"
 		and collider.get_parent() == body and body.get_parent() == world,
 		{"status":changed_mesh.get("status", ""), "colliderPresent":collider.get_parent() == body})
 	var passed := true

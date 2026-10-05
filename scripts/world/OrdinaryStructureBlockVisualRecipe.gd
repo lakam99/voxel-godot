@@ -9,10 +9,7 @@ const SUPPORTED_BLOCK_TYPES: Array[String] = [
 	"cobblestonePath", "stoneBlock", "woodBlock"]
 const RECIPE_SCHEMA := "ordinary-structure-base-block-visual/v1"
 const UNSUPPORTED_OPTION_KEYS: Array[String] = [
-	"roofRole", "roofAxis", "roofSide", "roofMaterial", "roofTrimMaterial",
-	"roofEdgeX", "roofEdgeZ", "roofAccent", "accentRole", "windowAxis",
-	"windowSide", "cornerX", "cornerZ", "fenceAxis", "fenceTrimMaterial",
-	"windowTrimMaterial", "cornerTrimMaterial", "torchVisualScale",
+	"windowAxis", "windowSide", "windowTrimMaterial", "torchVisualScale",
 	"torchWallMount", "torchWallNormalX", "torchWallNormalZ",
 	"torchWallSurfaceX", "torchWallSurfaceZ", "torchWallNormalWorldX",
 	"torchWallNormalWorldZ", "torchWallAnchorCellX", "torchWallAnchorCellZ"
@@ -76,9 +73,6 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 	var recipe_digest := _recipe_digest(block_type, sealed_options)
 	if recipe_digest.is_empty():
 		return _failed("ordinary_block_visual_recipe_digest_failed")
-	var resources := resolve_shared_resources(main, block_type)
-	if resources.get("status") != "ready":
-		return resources
 	var shape := resolve_base_shape(main, block_type)
 	if shape.get("status") != "ready":
 		return shape
@@ -95,15 +89,43 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 		return _pending("ordinary_block_visual_source_transform_invalid", {"cell":cell})
 	var source_to_world := block_root.global_transform * Transform3D(
 		Basis(Vector3.UP, facing), position)
-	var mesh_local_transform := Transform3D(Basis.from_scale(shape.size), shape.offset)
-	var mesh: Mesh = resources.mesh
-	var material: Material = resources.material
-	var mesh_bounds := mesh.get_aabb()
-	if not _finite_aabb(mesh_bounds):
-		return _pending("ordinary_block_visual_mesh_bounds_invalid", {"blockType":block_type})
-	var support_bounds: AABB = source_to_world * (mesh_local_transform * mesh_bounds)
+	var specs := _member_specs(block_type, options, shape)
+	if specs.get("status") != "ready":
+		return specs
+	var members: Array[Dictionary] = []
+	var member_payloads: Array = []
+	for spec_value: Variant in specs.get("members", []):
+		if not spec_value is Dictionary:
+			return _failed("ordinary_block_visual_member_spec_invalid")
+		var spec: Dictionary = spec_value
+		var resources := resolve_shared_resources(main, String(spec.materialKey))
+		if resources.get("status") != "ready":
+			return resources
+		var mesh: Mesh = resources.mesh
+		var mesh_local_transform: Transform3D = spec.localTransform
+		var mesh_bounds := mesh.get_aabb()
+		if not _finite_aabb(mesh_bounds):
+			return _pending("ordinary_block_visual_mesh_bounds_invalid", {
+				"blockType":block_type, "segmentId":String(spec.segmentId)})
+		var member := {"segmentId":String(spec.segmentId),
+			"visualName":String(spec.visualName), "visualRole":String(spec.visualRole),
+			"materialKey":String(spec.materialKey), "mesh":mesh,
+			"material":resources.material,
+			"meshLocalTransform":mesh_local_transform,
+			"meshLocalBounds":mesh_bounds,
+			"worldBounds":source_to_world * (mesh_local_transform * mesh_bounds),
+			"castShadows":true}
+		member.make_read_only()
+		members.append(member)
+		member_payloads.append([String(spec.segmentId), String(spec.materialKey),
+			mesh.get_class(), mesh.resource_path, mesh_local_transform, mesh_bounds,
+			String(spec.visualRole), true])
+	if members.is_empty():
+		return _failed("ordinary_block_visual_member_list_empty")
+	members.make_read_only()
+	var first: Dictionary = members[0]
 	var payload := [RECIPE_SCHEMA, block_type, cell, sealed_options, recipe_digest,
-		source_to_world, mesh_local_transform, mesh_bounds]
+		source_to_world, member_payloads]
 	var context := HashingContext.new()
 	if context.start(HashingContext.HASH_SHA256) != OK \
 			or context.update(var_to_bytes(payload)) != OK:
@@ -111,11 +133,107 @@ static func resolve_member(main: Object, block_type: String, cell: Vector3i,
 	return {"status":"ready", "schema":RECIPE_SCHEMA, "blockType":block_type,
 		"cell":cell, "recipeDigest":recipe_digest,
 		"contentDigest":context.finish().hex_encode(),
-		"sourceToWorld":source_to_world,
-		"meshLocalTransform":mesh_local_transform,
-		"meshLocalBounds":mesh_bounds, "worldBounds":support_bounds,
-		"mesh":mesh, "material":material,
+		"sourceToWorld":source_to_world, "members":members,
+		"meshLocalTransform":first.meshLocalTransform,
+		"meshLocalBounds":first.meshLocalBounds,
+		"worldBounds":first.worldBounds,
+		"mesh":first.mesh, "material":first.material,
 		"size":shape.size, "offset":shape.offset}
+
+
+static func _member_specs(block_type: String, options: Dictionary,
+		shape: Dictionary) -> Dictionary:
+	var cell_size := float(shape.cellSize)
+	var specs: Array[Dictionary] = []
+	if options.has("roofRole") and block_type in ["woodBlock", "stoneBlock"]:
+		var role := String(options.get("roofRole", "slope"))
+		var axis := String(options.get("roofAxis", "x"))
+		var roof_material := String(options.get("roofMaterial",
+			"roofStone" if block_type == "stoneBlock" else "roofWood"))
+		var trim_material := String(options.get("roofTrimMaterial",
+			"trimStone" if block_type == "stoneBlock" else "trimWood"))
+		if role not in ["slope", "ridge", "eave"] or axis not in ["x", "z"]:
+			return _pending("ordinary_block_roof_role_or_axis_invalid", {
+				"role":role, "axis":axis})
+		_append_spec(specs, "roof_base", "RoofVisual_%s" % role, "roof",
+			roof_material, Vector3(cell_size * 1.02, cell_size * 0.22,
+				cell_size * 1.02), Vector3(0.0, -cell_size * 0.30, 0.0))
+		if role == "ridge":
+			var ridge_size := Vector3(cell_size * 1.16, cell_size * 0.18, cell_size * 0.30) \
+				if axis == "x" else Vector3(cell_size * 0.30, cell_size * 0.18,
+					cell_size * 1.16)
+			_append_spec(specs, "roof_ridge_bar", "RoofRidgeCapVisual", "roof",
+				roof_material, ridge_size, Vector3(0.0, -cell_size * 0.10, 0.0))
+		var edge_x := int(options.get("roofEdgeX", 0))
+		var edge_z := int(options.get("roofEdgeZ", 0))
+		if abs(edge_x) > 1 or abs(edge_z) > 1:
+			return _pending("ordinary_block_roof_edge_value_invalid", {
+				"edgeX":edge_x, "edgeZ":edge_z})
+		if edge_x != 0:
+			_append_spec(specs, "roof_eave_x", "RoofEaveTrimX", "roofTrim",
+				trim_material, Vector3(cell_size * 0.08, cell_size * 0.18, cell_size * 1.18),
+				Vector3(float(edge_x) * cell_size * 0.57, -cell_size * 0.22, 0.0))
+		if edge_z != 0:
+			_append_spec(specs, "roof_eave_z", "RoofEaveTrimZ", "roofTrim",
+				trim_material, Vector3(cell_size * 1.18, cell_size * 0.18, cell_size * 0.08),
+				Vector3(0.0, -cell_size * 0.22, float(edge_z) * cell_size * 0.57))
+		if String(options.get("roofAccent", "")) == "chimney":
+			_append_spec(specs, "chimney_shaft", "ChimneyVisual", "chimney",
+				trim_material, Vector3(cell_size * 0.34, cell_size * 0.90, cell_size * 0.34),
+				Vector3(cell_size * 0.18, cell_size * 0.45, cell_size * 0.12))
+			_append_spec(specs, "chimney_cap", "ChimneyCapVisual", "chimney",
+				trim_material, Vector3(cell_size * 0.46, cell_size * 0.14, cell_size * 0.46),
+				Vector3(cell_size * 0.18, cell_size * 0.96, cell_size * 0.12))
+	else:
+		_append_spec(specs, "base", "BlockVisual_%s" % block_type, "block",
+			block_type, shape.size, shape.offset)
+	var accent := String(options.get("accentRole", ""))
+	if not accent.is_empty():
+		if accent == "cornerTimber" and block_type == "woodBlock":
+			var corner_x := int(options.get("cornerX", 1))
+			var corner_z := int(options.get("cornerZ", 1))
+			if abs(corner_x) != 1 or abs(corner_z) != 1:
+				return _pending("ordinary_block_corner_sign_invalid", {
+					"cornerX":corner_x, "cornerZ":corner_z})
+			var trim_key := String(options.get("cornerTrimMaterial", "trimWood"))
+			_append_spec(specs, "corner_timber_x", "CornerTimberX", "cornerTimber",
+				trim_key, Vector3(cell_size * 0.10, cell_size * 1.04,
+					cell_size * 0.16), Vector3(float(corner_x) * cell_size * 0.50,
+					0.0, float(corner_z) * cell_size * 0.43))
+			_append_spec(specs, "corner_timber_z", "CornerTimberZ", "cornerTimber",
+				trim_key, Vector3(cell_size * 0.16, cell_size * 1.04,
+					cell_size * 0.10), Vector3(float(corner_x) * cell_size * 0.43,
+					0.0, float(corner_z) * cell_size * 0.50))
+		elif accent == "fencePost" and block_type == "woodBlock":
+			var axis := String(options.get("fenceAxis", "x"))
+			if axis not in ["x", "z"]:
+				return _pending("ordinary_block_fence_axis_invalid", {"axis":axis})
+			var fence_trim := String(options.get("fenceTrimMaterial", "trimWood"))
+			_append_spec(specs, "fence_post", "FencePostVisual", "fencePost",
+				fence_trim, Vector3(cell_size * 0.18, cell_size * 1.08,
+					cell_size * 0.18), Vector3.ZERO)
+			for rail_index in range(2):
+				var rail_axis := "x" if axis == "x" else "z"
+				var rail_size := Vector3(cell_size * 1.04, cell_size * 0.12,
+					cell_size * 0.14) if rail_axis == "x" else Vector3(
+					cell_size * 0.14, cell_size * 0.12, cell_size * 1.04)
+				_append_spec(specs, "fence_rail_%s" % rail_index,
+					"FenceRailVisual", "fenceRail", fence_trim, rail_size,
+					Vector3(0.0, (0.18 if rail_index == 0 else -0.18) * cell_size, 0.0))
+		else:
+			return _pending("ordinary_block_accent_not_supported", {
+				"blockType":block_type, "accentRole":accent})
+	return {"status":"ready", "members":specs}
+
+
+static func _append_spec(specs: Array[Dictionary], segment_id: String,
+		visual_name: String, visual_role: String, material_key: String,
+		size: Vector3, offset: Vector3) -> void:
+	var spec := {"segmentId":segment_id, "visualName":visual_name,
+		"visualRole":visual_role, "materialKey":material_key,
+		"localTransform":Transform3D(Basis.from_scale(size), offset)}
+	spec.make_read_only()
+	specs.append(spec)
 
 
 static func _recipe_digest(block_type: String, options: Dictionary) -> String:
