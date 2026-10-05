@@ -7,6 +7,31 @@ class_name OrdinaryStructureBlockVisualRecipe
 
 const SUPPORTED_BLOCK_TYPES: Array[String] = [
 	"cobblestonePath", "stoneBlock", "woodBlock"]
+## Explicit completeness classification for block families emitted by
+## StructureSystem. Static families may remain unsupported by the section
+## adapter; those still pend instead of being treated as empty coverage.
+const GENERATED_BLOCK_TYPE_FAMILIES := {
+	"cobblestonePath":{"family":"section_static", "owner":"OrdinaryStructureBlockVisualRecipe"},
+	"stoneBlock":{"family":"section_static", "owner":"OrdinaryStructureBlockVisualRecipe"},
+	"woodBlock":{"family":"section_static", "owner":"OrdinaryStructureBlockVisualRecipe"},
+	"glass":{"family":"section_static", "owner":"MainChunkTerrain.add_block_mesh (translucent layer pending)"},
+	"chest":{"family":"separate_dynamic",
+		"owner":"MainChunkTerrain.add_chest_visual and UtilityBlockSystem.open_block (state/interaction presentation)"},
+	"furnace":{"family":"separate_dynamic",
+		"owner":"MainChunkTerrain.add_furnace_visual and UtilityBlockSystem.open_block (state/interaction presentation)"},
+	"workbench":{"family":"section_static", "owner":"MainChunkTerrain.add_workbench_visual"},
+	"bed":{"family":"section_static", "owner":"MainChunkTerrain.add_bed_visual"},
+	"traderStall":{"family":"section_static", "owner":"MainChunkTerrain.add_trader_stall_visual"},
+	"campfire":{"family":"separate_dynamic",
+		"owner":"MainChunkTerrain.add_campfire_visual and LocalLightRig (live flame/light presentation)"},
+	"torch":{"family":"separate_dynamic",
+		"owner":"MainChunkTerrain.add_torch_visual and LocalLightRig (live flame/light presentation)"},
+	"spikeTrap":{"family":"section_static", "owner":"MainChunkTerrain.add_spike_trap_visual"},
+	"copperVein":{"family":"section_static", "owner":"MainChunkTerrain.add_ore_block_visual"},
+	"ironVein":{"family":"section_static", "owner":"MainChunkTerrain.add_ore_block_visual"},
+	"door":{"family":"separate_dynamic",
+		"owner":"DoorPortalService (pose/portal state); MainChunkTerrain.add_door_visual (live leaf/frame)"}
+}
 const RECIPE_SCHEMA := "ordinary-structure-base-block-visual/v1"
 const UNSUPPORTED_OPTION_KEYS: Array[String] = [
 	"windowAxis", "windowSide", "windowTrimMaterial", "torchVisualScale",
@@ -14,6 +39,30 @@ const UNSUPPORTED_OPTION_KEYS: Array[String] = [
 	"torchWallSurfaceX", "torchWallSurfaceZ", "torchWallNormalWorldX",
 	"torchWallNormalWorldZ", "torchWallAnchorCellX", "torchWallAnchorCellZ"
 ]
+
+
+static func classify_generated_block_type(block_type: String) -> Dictionary:
+	var value: Variant = GENERATED_BLOCK_TYPE_FAMILIES.get(block_type, null)
+	var result: Dictionary
+	if value is Dictionary:
+		result = {"status":"classified", "blockType":block_type,
+			"family":String(value.get("family", "")),
+			"owner":String(value.get("owner", ""))}
+	else:
+		result = {"status":"unknown", "blockType":block_type,
+			"family":"unknown", "owner":"",
+			"reason":"ordinary_generated_block_family_unclassified"}
+	result.make_read_only()
+	return result
+
+
+static func generated_block_type_inventory() -> Array[String]:
+	var result: Array[String] = []
+	for block_type_value: Variant in GENERATED_BLOCK_TYPE_FAMILIES:
+		result.append(String(block_type_value))
+	result.sort()
+	result.make_read_only()
+	return result
 
 
 static func resolve_shared_resources(main: Object, material_key: String) -> Dictionary:

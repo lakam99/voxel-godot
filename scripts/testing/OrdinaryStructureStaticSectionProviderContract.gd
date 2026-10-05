@@ -179,6 +179,35 @@ func run() -> void:
 		and is_equal_approx(fence_members[3].meshLocalTransform.origin.y,
 			-world.CELL * 0.18),
 		fence_recipe)
+	var expected_family_by_type := {
+		"bed":"section_static", "campfire":"separate_dynamic",
+		"chest":"separate_dynamic", "cobblestonePath":"section_static",
+		"copperVein":"section_static", "door":"separate_dynamic",
+		"furnace":"separate_dynamic", "glass":"section_static",
+		"ironVein":"section_static", "spikeTrap":"section_static",
+		"stoneBlock":"section_static", "torch":"separate_dynamic",
+		"traderStall":"section_static", "woodBlock":"section_static",
+		"workbench":"section_static"}
+	var inventory := VisualRecipe.generated_block_type_inventory()
+	var expected_types: Array[String] = []
+	for expected_type_value: Variant in expected_family_by_type:
+		expected_types.append(String(expected_type_value))
+	expected_types.sort()
+	var inventory_matches := inventory == expected_types
+	for block_type: String in expected_family_by_type:
+		var family := VisualRecipe.classify_generated_block_type(block_type)
+		inventory_matches = inventory_matches and block_type in inventory \
+			and family.get("status") == "classified" \
+			and family.get("family") == expected_family_by_type[block_type] \
+			and not String(family.get("owner", "")).is_empty()
+	var unknown_family := VisualRecipe.classify_generated_block_type("futureUnknownBlock")
+	check("every_current_generated_block_type_has_explicit_family_and_owner",
+		inventory_matches and unknown_family.get("status") == "unknown" \
+		and unknown_family.get("family") == "unknown"
+		and String(unknown_family.get("reason", "")) \
+		== "ordinary_generated_block_family_unclassified",
+		{"inventory":inventory, "expected":expected_family_by_type,
+			"unknown":unknown_family})
 	var source_id := "town:0,0"
 	var cell := Vector3i(2, 0, 3)
 	var roof_options := {"roofRole":"ridge", "roofAxis":"x", "roofEdgeX":-1,
@@ -506,22 +535,51 @@ func run() -> void:
 	var unsupported: Dictionary = _capture_until_pending(provider, "seed:ordinary-provider", Vector3i.ZERO)
 	check("unsupported_interactive_member_prevents_false_complete_section",
 		unsupported.get("status") == "pending"
-		and String(unsupported.get("reason", "")) == "ordinary_geometry_block_type_not_migrated",
+		and String(unsupported.get("reason", "")) \
+		== "ordinary_geometry_dynamic_family_requires_separate_owner",
 		unsupported)
+	var unknown_cell := Vector3i(4, 0, 4)
+	var unknown_body := _make_body(world, source_id, unknown_cell, "futureUnknownBlock")
+	unknown_body.position = Vector3(unknown_cell) * world.CELL
+	world.add_child(unknown_body)
+	world.blocks[unknown_cell] = unknown_body
+	system.ordinary_visual_sources[source_id].expected[unknown_cell] = "futureUnknownBlock"
+	system.ordinary_visual_sources[source_id].visualRecipeInputs[unknown_cell] = \
+		_visual_recipe_input("futureUnknownBlock")
+	system.ordinary_visual_sources[source_id].revision += 1
+	system.ordinary_visual_revision += 1
+	var unknown_capture := Adapter.capture_block(system, world, source_id, unknown_cell)
+	check("unknown_generated_family_stays_pending_instead_of_empty_coverage",
+		unknown_capture.get("status") == "pending"
+		and String(unknown_capture.get("reason", "")) \
+		== "ordinary_geometry_block_family_unknown",
+		unknown_capture)
 
 	var removed_key := system._ordinary_visual_block_key(source_id, cell, "stoneBlock")
 	system.removed_generated_structure_blocks[removed_key] = true
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var after_remove := _capture_until_pending(provider, "seed:ordinary-provider", Vector3i.ZERO)
-	check("durable_removal_emits_retryable_section_tombstone",
+	check("durable_removal_keeps_dynamic_chest_pending_for_separate_owner",
 		after_remove.get("status") == "pending"
-		and String(after_remove.get("reason", "")) == "ordinary_geometry_block_type_not_migrated",
+		and String(after_remove.get("reason", "")) == "ordinary_geometry_dynamic_family_requires_separate_owner",
 		after_remove)
 	# The unsupported chest remains a current census member; remove it as well to
 	# expose an explicit empty replacement and the prior installed stone tombstone.
 	var chest_key := system._ordinary_visual_block_key(source_id, unsupported_cell, "chest")
 	system.removed_generated_structure_blocks[chest_key] = true
+	system.ordinary_visual_sources[source_id].revision += 1
+	system.ordinary_visual_revision += 1
+	var unknown_only_section := _capture_until_pending(provider,
+		"seed:ordinary-provider", Vector3i.ZERO)
+	check("unknown_family_alone_cannot_become_empty_section_coverage",
+		unknown_only_section.get("status") == "pending"
+		and String(unknown_only_section.get("reason", "")) \
+		== "ordinary_geometry_block_family_unknown",
+		unknown_only_section)
+	var unknown_key := system._ordinary_visual_block_key(source_id, unknown_cell,
+		"futureUnknownBlock")
+	system.removed_generated_structure_blocks[unknown_key] = true
 	system.ordinary_visual_sources[source_id].revision += 1
 	system.ordinary_visual_revision += 1
 	var empty_after_remove := _capture_until_settled(provider, "seed:ordinary-provider", Vector3i.ZERO)

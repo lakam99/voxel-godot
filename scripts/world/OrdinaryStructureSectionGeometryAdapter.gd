@@ -42,6 +42,7 @@ static func capture_block(structure_system: Object, main: Object,
 	if not expected_value is Dictionary or not expected_value.has(cell):
 		return _failed("ordinary_geometry_cell_not_in_source_manifest")
 	var block_type := String(expected_value[cell])
+	var family := VisualRecipe.classify_generated_block_type(block_type)
 	var recipe_inputs_value: Variant = source.get("visualRecipeInputs", {})
 	if not recipe_inputs_value is Dictionary:
 		return _pending("ordinary_geometry_visual_recipe_manifest_missing")
@@ -60,6 +61,13 @@ static func capture_block(structure_system: Object, main: Object,
 	if removed_value.has(durable_id):
 		return {"status":"empty", "reason":"ordinary_geometry_durably_removed",
 			"sourcePartId":_source_part_id(source_id, cell)}
+	if family.get("family") == "unknown":
+		return _pending("ordinary_geometry_block_family_unknown", {
+			"sourceId":source_id, "cell":cell, "blockType":block_type})
+	if family.get("family") == "separate_dynamic":
+		return _pending("ordinary_geometry_dynamic_family_requires_separate_owner", {
+			"sourceId":source_id, "cell":cell, "blockType":block_type,
+			"owner":String(family.get("owner", ""))})
 	if block_type not in ALLOWED_BLOCK_TYPES:
 		return _pending("ordinary_geometry_block_type_not_migrated", {
 			"sourceId":source_id, "cell":cell, "blockType":block_type})
