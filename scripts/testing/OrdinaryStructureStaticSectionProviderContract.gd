@@ -7,6 +7,7 @@ const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const StructureScript := preload("res://scripts/StructureSystem.gd")
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 const SourceCaptureScript := preload("res://scripts/world/OrdinaryStructureVisualSourceCapture.gd")
+const CoordinatorScript := preload("res://scripts/world/WorldStaticSectionCoordinator.gd")
 const EXPECTED_CAPTURE_PHASES := ["town_regions", "standalone_regions", "sources",
 	"cells", "sort_cells", "hash", "validate"]
 
@@ -602,12 +603,13 @@ func run() -> void:
 		and final_stage_stats.is_read_only(),
 		{"status":completed_throughput_capture.get("status", ""),
 			"geometryStats":final_geometry_stats})
+	await _run_coordinator_throughput_integration()
 
 	var passed := true
 	for row: Dictionary in checks:
 		if not bool(row.passed): passed = false
 	var report := {"schema":"ordinary-structure-static-section-provider-contract/v1",
-		"evidenceLevel":"synthetic_authority_census_and_prepared_geometry_contract",
+		"evidenceLevel":"synthetic_real_coordinator_and_ordinary_provider_geometry_contract",
 		"complete":true, "passed":passed, "checkCount":checks.size(), "checks":checks,
 		"doesNotProve":"native upload or receipt, production registration, save/reload, headed visual parity, or performance"}
 	var report_path := OS.get_environment("VOXEL_ORDINARY_STATIC_SECTION_PROVIDER_REPORT")
@@ -642,6 +644,138 @@ func _capture_sections_until_settled(provider: Object, world_id: String,
 func _capture_until_pending(provider: Object, world_id: String,
 		section: Vector3i) -> Dictionary:
 	return _capture_until_settled(provider, world_id, section)
+
+
+## Exercises the real visible-demand scheduler with the production ordinary
+## provider. Each loop iteration advances the coordinator exactly once, then
+## waits for the next engine frame before retrying its continuation.
+func _run_coordinator_throughput_integration() -> void:
+	var integration_world := FixtureMain.new()
+	root.add_child(integration_world)
+	for z in range(-2, 2):
+		for x in range(-2, 2):
+			integration_world.town_region_cache[Vector2i(x, z)] = {}
+	integration_world.town_region_cache[Vector2i.ZERO] = {
+		"key":"0,0", "x":-4, "z":-4, "width":24, "depth":24}
+	var integration_system := FixtureStructure.new()
+	integration_system.main = integration_world
+	var integration_source_id := "town:0,0"
+	var expected: Dictionary = {}
+	var recipe_inputs: Dictionary = {}
+	for index in range(33):
+		var cell := Vector3i(4 + index % 8, 0, 4 + int(index / 8))
+		var body := _make_body(integration_world, integration_source_id, cell, "stoneBlock")
+		body.position = Vector3(cell) * integration_world.CELL
+		integration_world.add_child(body)
+		integration_world.blocks[cell] = body
+		expected[cell] = "stoneBlock"
+		recipe_inputs[cell] = _visual_recipe_input("stoneBlock")
+	integration_system.ordinary_visual_sources[integration_source_id] = {
+		"completed":true, "expected":expected, "visualRecipeInputs":recipe_inputs,
+		"omitted":{}, "failed":{}, "revision":1}
+
+	var integration_provider := ProviderScript.new()
+	var provider_bound: Dictionary = integration_provider.configure(
+		"seed:ordinary-coordinator-integration", integration_system, integration_world)
+	var coordinator = CoordinatorScript.new()
+	var coordinator_bound: Dictionary = coordinator.configure(
+		"seed:ordinary-coordinator-integration")
+	var roster_bound: Dictionary = coordinator.configure_source_roster(
+		[ProviderScript.PROVIDER_ID])
+	var provider_registered: Dictionary = coordinator.register_source_provider(
+		ProviderScript.PROVIDER_ID, integration_provider, "capture_static_section_sources")
+	var target_section := Vector3i.ZERO
+	var competing_initial_section := Vector3i(1, 0, 0)
+	var target_requested: Dictionary = coordinator.request_visible_section_demand(
+		target_section, 1, 10.0)
+	var first_attempt: Dictionary = coordinator.advance_visible_section_candidate_demands(1)
+	var first_attempt_section := Vector3i(-999, -999, -999)
+	if first_attempt.get("results", []).size() == 1:
+		first_attempt_section = first_attempt.results[0].sectionKey
+	var competing_requested: Dictionary = coordinator.request_visible_section_demand(
+		competing_initial_section, 1, 0.0)
+	var target_progress_history: Array[Dictionary] = []
+	var advanced_sections: Array[String] = [str(first_attempt_section)]
+	var first_stats: Dictionary = integration_provider.membership_census_stats()
+	var first_progress: Dictionary = first_stats.get("lastGeometryProgress", {})
+	var prior_advance_count := int(first_stats.get("geometryAdvanceCount", 0))
+	if String(first_progress.get("sectionKey", "")) == "0,0,0":
+		target_progress_history.append({
+			"advanceCount":prior_advance_count,
+			"cursorBefore":int(first_progress.get("cursorBefore", -1)),
+			"cursorAfter":int(first_progress.get("cursorAfter", -1)),
+			"candidateCount":int(first_progress.get("candidateCount", -1)),
+			"status":String(first_progress.get("status", "")),
+			"reason":String(first_progress.get("reason", ""))})
+	var competing_initial_was_serviced := false
+	for _frame_attempt in range(16):
+		await process_frame
+		var turn: Dictionary = coordinator.advance_visible_section_candidate_demands(1)
+		if turn.get("results", []).size() == 1:
+			var advanced_section: Vector3i = turn.results[0].sectionKey
+			advanced_sections.append(str(advanced_section))
+			if advanced_section == competing_initial_section:
+				competing_initial_was_serviced = true
+		var stats: Dictionary = integration_provider.membership_census_stats()
+		var progress: Dictionary = stats.get("lastGeometryProgress", {})
+		var advance_count := int(stats.get("geometryAdvanceCount", 0))
+		if advance_count > prior_advance_count \
+				and String(progress.get("sectionKey", "")) == "0,0,0":
+			target_progress_history.append({
+				"advanceCount":advance_count,
+				"cursorBefore":int(progress.get("cursorBefore", -1)),
+				"cursorAfter":int(progress.get("cursorAfter", -1)),
+				"candidateCount":int(progress.get("candidateCount", -1)),
+				"status":String(progress.get("status", "")),
+				"reason":String(progress.get("reason", ""))})
+		prior_advance_count = advance_count
+		var demand_state: Dictionary = coordinator._visible_section_demands.get(
+			target_section, {})
+		if String(demand_state.get("stage", "")) == "candidate_queued":
+			break
+
+	var final_stats: Dictionary = integration_provider.membership_census_stats()
+	var target_state: Dictionary = coordinator._visible_section_demands.get(
+		target_section, {})
+	var cursor_monotonic := not target_progress_history.is_empty()
+	for index in range(1, target_progress_history.size()):
+		if int(target_progress_history[index].cursorAfter) \
+				< int(target_progress_history[index - 1].cursorAfter):
+			cursor_monotonic = false
+	var first_target_cursor := int(target_progress_history[0].cursorAfter) \
+		if not target_progress_history.is_empty() else -1
+	var last_target_progress: Dictionary = target_progress_history[-1] \
+		if not target_progress_history.is_empty() else {}
+	var setup_ready: bool = provider_bound.get("status") == "ready" \
+		and coordinator_bound.get("status") == "ready" \
+		and roster_bound.get("status") == "ready" \
+		and provider_registered.get("status") == "ready" \
+		and target_requested.get("status") == "queued" \
+		and competing_requested.get("status") == "queued"
+	check("coordinator_one_attempt_per_frame_drains_real_33_member_ordinary_job",
+		setup_ready and first_attempt.get("attemptCount") == 1 \
+		and first_attempt_section == target_section \
+		and competing_initial_was_serviced \
+		and target_state.get("stage") == "candidate_queued" \
+		and not target_progress_history.is_empty() \
+		and first_target_cursor > 0 and first_target_cursor < 33 \
+		and last_target_progress.get("cursorAfter") == 33 \
+		and last_target_progress.get("candidateCount") == 33 \
+		and last_target_progress.get("status") == "complete" \
+		and cursor_monotonic \
+		and final_stats.get("geometryJobRestartCount") == 0 \
+		and final_stats.get("geometryJobInvalidationCount") == 0 \
+		and final_stats.get("geometryJobCompleteCount") >= 1,
+		{"status":String(target_state.get("stage", "")),
+			"reason":String(target_state.get("lastReason", "")),
+			"memberCount":33, "providerId":ProviderScript.PROVIDER_ID,
+			"targetCandidateCount":int(last_target_progress.get("candidateCount", -1)),
+			"targetProgressHistory":target_progress_history,
+			"advancedSections":advanced_sections,
+			"geometryJobRestartCount":int(final_stats.get("geometryJobRestartCount", -1)),
+			"geometryJobInvalidationCount":int(final_stats.get("geometryJobInvalidationCount", -1)),
+			"geometryJobCompleteCount":int(final_stats.get("geometryJobCompleteCount", -1))})
+	integration_world.queue_free()
 
 
 func _installed_receipt(section: Vector3i) -> Dictionary:
@@ -679,13 +813,17 @@ func _make_body(world: FixtureMain, source_id: String, cell: Vector3i,
 
 
 func check(name: String, passed: bool, details: Dictionary) -> void:
-	checks.append({"name":name, "passed":passed, "details":{
-		"status":String(details.get("status", "")),
+	var evidence := {"status":String(details.get("status", "")),
 		"reason":String(details.get("reason", "")),
 		"memberCount":int(details.get("memberCount", -1)),
 		"providerId":String(details.get("providerId", "")),
 		"allRoofMembersRetired":bool(details.get("allRoofMembersRetired", false)),
-		"visibleSegments":details.get("visibleSegments", [])}})
+		"visibleSegments":details.get("visibleSegments", [])}
+	for key in ["targetCandidateCount", "targetProgressHistory", "advancedSections",
+			"geometryJobRestartCount", "geometryJobInvalidationCount",
+			"geometryJobCompleteCount"]:
+		if details.has(key): evidence[key] = details[key]
+	checks.append({"name":name, "passed":passed, "details":evidence})
 
 
 func _sealed_value_tree(value: Variant) -> bool:

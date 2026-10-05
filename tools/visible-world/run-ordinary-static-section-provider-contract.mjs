@@ -10,6 +10,13 @@ cli(async () => {
     'scripts/world/OrdinaryStructureStaticSectionProvider.gd',
     'scripts/world/OrdinaryStructureSectionGeometryAdapter.gd',
     'scripts/world/OrdinaryStructureVisualSourceCapture.gd',
+    'scripts/StructureSystem.gd',
+    'scripts/world/OrdinaryStructureBlockVisualRecipe.gd',
+    'scripts/world/WorldStaticSectionCoordinator.gd',
+    'scripts/world/WorldStaticSectionCandidateAssembler.gd',
+    'scripts/world/PreparedStaticContributorLedger.gd',
+    'scripts/world/NativeStaticSectionInstallSession.gd',
+    'scripts/world/ChunkRenderPacketOwner.gd',
     'scripts/world/StandaloneStructureCandidate.gd',
     'scripts/world/StaticSectionSourceRoster.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
@@ -24,7 +31,7 @@ cli(async () => {
     'tools/run-godot-scene-watchdog.mjs'
   ], {
     schema: 'ordinary-static-section-provider-launch/v1',
-    evidenceLevel: 'synthetic_authority_census_and_prepared_geometry_contract',
+    evidenceLevel: 'synthetic_real_coordinator_and_ordinary_provider_geometry_contract',
     headed: false,
     timeoutSeconds: 90,
     doesNotProve: 'native upload or receipt, production registration, save/reload, headed visual parity, or performance.'
@@ -33,7 +40,7 @@ cli(async () => {
     args: ['--headless', '--script', 'res://scripts/testing/OrdinaryStructureStaticSectionProviderContract.gd'],
     env: { VOXEL_ORDINARY_STATIC_SECTION_PROVIDER_REPORT: path.join(c.run, 'report.json') },
     timeout: 90,
-    logPolicy: { emptyStderr: false }
+    logPolicy: { emptyStderr: false, expectedError: 'ERROR: Failed to read the root certificate store.', pattern: /SCRIPT ERROR:|Parse Error:|Compile Error:|ERROR:(?! Failed to read the root certificate store\\.)|WARNING:|leaked|resources still in use/i }
   });
   const report = read(path.join(c.run, 'report.json'));
   assertReport(report, {
