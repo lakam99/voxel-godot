@@ -38,6 +38,36 @@ var voxel_terrain_runtime: Node3D
 var voxel_terrain_section_provider_registered := false
 var voxel_terrain_section_demand_signal_connected := false
 
+## Replay only when Main's retained render demand enters a stream-owner cell.
+## Candidate installation creates the owner lazily, so this notification must
+## not require an owner node to exist first.
+func sync_static_section_render_owner_demands(retained_owner_cells: Dictionary) -> int:
+    var entered := 0
+    var next_owner_cells := retained_owner_cells.duplicate()
+    for owner_value: Variant in static_section_owner_demand_cells:
+        var owner_cell := Vector2i(owner_value)
+        if retained_owner_cells.has(owner_cell) \
+                or static_section_render_owners.has(owner_cell):
+            continue
+        # A pending install may have requested lazy owner creation without
+        # registering a node yet. Retire that demand with the ownerless identity
+        # so the coordinator cancels its queued/staged work before it can create
+        # an owner after this cell has left render demand. Registered owners are
+        # retired by prune_static_section_render_owners with their exact ID.
+        var retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, null)
+        if retirement.get("status") != "ready":
+            # Retain this demand edge until cancellation and any queued frame
+            # callback are acknowledged. The next streaming turn retries it.
+            next_owner_cells[owner_cell] = true
+    for owner_value: Variant in retained_owner_cells:
+        var owner_cell := Vector2i(owner_value)
+        if static_section_owner_demand_cells.has(owner_cell):
+            continue
+        _notify_static_section_owner_loaded(owner_cell)
+        entered += 1
+    static_section_owner_demand_cells = next_owner_cells
+    return entered
+
 ## Static render-section owners live beside gameplay chunks and are retired by
 ## render demand. A section can cross several gameplay chunks; its immutable
 ## candidate remains installed under one canonical render owner without
@@ -52,10 +82,28 @@ func get_static_section_render_owner(owner_cell: Vector2i,
     if is_instance_valid(owner) and owner.is_inside_tree() and not owner.is_queued_for_deletion():
         var backend := owner.get_node_or_null(ChunkRenderPacketOwnerScript.BACKEND_NODE) as Node3D
         if backend == null:
+            # A missing backend invalidates the old receipt identity. The owner
+            # stays alive while it is repaired, and replay runs only after the
+            # replacement backend is attached.
+            var retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, owner)
+            if retirement.get("status") != "ready":
+                return {"status":"pending" if retirement.get("status") == "pending" else "failed",
+                    "reason":String(retirement.get("reason", retirement.get("status", "owner_retirement_pending"))),
+                    "ownerCell":owner_cell, "retirement":retirement}
             var attached: Dictionary = ChunkRenderPacketOwnerScript.attach_to_chunk(owner)
             if attached.get("status") != "ready": return attached
             backend = attached.backend as Node3D
+            _notify_static_section_owner_loaded(owner_cell)
         return {"status":"ready","owner":owner,"backend":backend,"ownerCell":owner_cell}
+    var stale_registered_owner := static_section_render_owners.has(owner_cell)
+    if stale_registered_owner:
+        var retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, owner)
+        if retirement.get("status") != "ready":
+            return {"status":"pending" if retirement.get("status") == "pending" else "failed",
+                "reason":String(retirement.get("reason", retirement.get("status", "owner_retirement_pending"))),
+                "ownerCell":owner_cell, "retirement":retirement}
+        if is_instance_valid(owner) and not owner.is_queued_for_deletion():
+            owner.queue_free()
     static_section_render_owners.erase(owner_cell)
     if not create_if_missing:
         return {"status":"pending","reason":"static_section_owner_not_loaded",
@@ -72,18 +120,12 @@ func get_static_section_render_owner(owner_cell: Vector2i,
         owner.queue_free()
         return attached
     static_section_render_owners[owner_cell] = owner
+    # A stale registered owner was explicitly unloaded above; once its
+    # replacement identity is registered, replay candidates for this cell.
+    if stale_registered_owner:
+        _notify_static_section_owner_loaded(owner_cell)
     return {"status":"ready","owner":owner,"backend":attached.backend,
         "ownerCell":owner_cell}
-
-
-func retire_static_section_render_owner(owner_cell: Vector2i) -> bool:
-    var owner: Node3D = static_section_render_owners.get(owner_cell) as Node3D
-    if not is_instance_valid(owner):
-        static_section_render_owners.erase(owner_cell)
-        return true
-    static_section_render_owners.erase(owner_cell)
-    owner.queue_free()
-    return true
 
 
 func prune_static_section_render_owners(retained_gameplay_chunks: Dictionary) -> int:
@@ -426,6 +468,60 @@ func update_chunks(force: bool = false) -> void:
         return
     update_voxel_authority_chunks(force)
 
+func advance_loading_visible_section_publication() -> Dictionary:
+    var coordinator = get("world_static_section_coordinator")
+    if coordinator == null or not is_instance_valid(coordinator):
+        return {"status":"pending", "reason":"world_static_section_coordinator_unavailable",
+            "pendingDemandCount":0, "pendingCandidateJobCount":0}
+    if coordinator.has_method("refresh_visible_section_demand_priorities"):
+        var priority_origin := player.global_position if player != null \
+            and is_instance_valid(player) else Vector3.ZERO
+        if player != null and is_instance_valid(player) and player.camera != null:
+            priority_origin = player.camera.global_position
+        coordinator.call("refresh_visible_section_demand_priorities", priority_origin, 16)
+    var admission: Dictionary = coordinator.call(
+        "advance_visible_section_candidate_demands", 1) \
+        if coordinator.has_method("advance_visible_section_candidate_demands") \
+        else {"status":"pending", "reason":"visible_section_admission_api_unavailable"}
+    var installation: Dictionary = coordinator.call(
+        "advance_queued_complete_section_candidates", 1, 1) \
+        if coordinator.has_method("advance_queued_complete_section_candidates") \
+        else {"status":"pending", "reason":"visible_section_install_api_unavailable"}
+    var demands_value = coordinator.get("_visible_section_demands")
+    var demands: Dictionary = demands_value if demands_value is Dictionary else {}
+    var jobs_value = coordinator.get("_production_candidate_jobs")
+    var jobs: Dictionary = jobs_value if jobs_value is Dictionary else {}
+    var pending_ack_count := int(installation.get("pendingAcknowledgementCount", 0))
+    var coordinator_state: Dictionary = coordinator.call("status") \
+        if coordinator.has_method("status") else {}
+    var admission_rows_value: Variant = admission.get("results", [])
+    var last_admission: Dictionary = {}
+    if admission_rows_value is Array and not (admission_rows_value as Array).is_empty():
+        var admission_row: Variant = (admission_rows_value as Array)[0]
+        if admission_row is Dictionary:
+            var detail_value: Variant = admission_row.get("admission", {})
+            if detail_value is Dictionary:
+                var detail: Dictionary = detail_value
+                last_admission = {"sectionKey":admission_row.get("sectionKey"),
+                    "status":String(detail.get("status", "")),
+                    "reason":String(detail.get("reason", "")),
+                    "providerId":String(detail.get("providerId", "")),
+                    "providerReason":String(detail.get("providerReason", "")),
+                    "providerDetails":detail.get("providerDetails", {})}
+    return {"status":"advanced" if int(admission.get("attemptCount", 0)) > 0 \
+            or int(installation.get("sectionCount", 0)) > 0 \
+            or int(installation.get("acknowledgementCount", 0)) > 0 else "pending",
+        "admissionStatus":String(admission.get("status", "pending")),
+        "admissionAttempts":int(admission.get("attemptCount", 0)),
+        "lastAdmission":last_admission,
+        "pendingDemandCount":demands.size(),
+        "installStatus":String(installation.get("status", "pending")),
+        "installAdvances":int(installation.get("sectionCount", 0)),
+        "pendingCandidateJobCount":jobs.size(),
+        "pendingSourceAcknowledgementCount":pending_ack_count,
+        "sourceAcknowledgementResults":installation.get("acknowledgements", []),
+        "coordinatorStatus":coordinator_state.get("status", "unknown")}
+
 func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
     var monitor = runtime_perf_monitor
     var center := world_to_chunk(player.position.x, player.position.z)
@@ -683,6 +779,10 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 create_chunk(chunk_key.x, chunk_key.y)
             else:
                 queue_chunk_load(chunk_key)
+    # Stream-owner demand is independent of gameplay chunk construction. On a
+    # re-entry edge this queues retained section candidates before any install
+    # job lazily creates the new render owner.
+    sync_static_section_render_owner_demands(needed)
     prune_static_section_render_owners(needed)
     for chunk_key: Vector2i in needed:
         if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
@@ -790,6 +890,8 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 float(Time.get_ticks_usec() - section_start_usec) / 1000.0)
             monitor.observe_gauge("whole_section_candidate_pending_install_count",
                 world_static_section_coordinator.get("_production_candidate_jobs").size())
+            monitor.observe_gauge("whole_section_pending_source_acknowledgement_count",
+                int(section_step.get("pendingAcknowledgementCount", 0)))
             if section_step.get("status") == "failed":
                 monitor.increment_counter("whole_section_candidate_install_failure")
     if monitor != null:

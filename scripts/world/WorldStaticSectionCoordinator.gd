@@ -29,6 +29,12 @@ const CandidateAssembler = preload("res://scripts/world/WorldStaticSectionCandid
 const MAX_VISIBLE_SECTION_DEMAND_SCAN_PER_ADVANCE := 32
 const VISIBLE_SECTION_DEMAND_RETRY_FRAMES := 30
 const MAX_SOURCE_INVALIDATION_SECTIONS := 64
+const MAX_PENDING_SOURCE_ACKNOWLEDGEMENTS_PER_ADVANCE := 1
+const MAX_PENDING_SOURCE_RELEASES_PER_ADVANCE := 1
+const MAX_PENDING_SOURCE_RELEASE_SCAN_PER_ADVANCE := 32
+const SOURCE_ACK_RETRY_BASE_FRAMES := 2
+const SOURCE_ACK_RETRY_MAX_FRAMES := 120
+const MAX_TRANSLUCENT_POV_RESORT_SCAN_PER_REFRESH := 16
 
 var _ledger = LedgerScript.new()
 var _source_roster = SourceRoster.new()
@@ -45,6 +51,15 @@ var _census_digest_by_boundary: Dictionary = {}
 var _production_candidates_by_section: Dictionary = {}
 var _production_candidate_jobs: Dictionary = {}
 var _production_candidate_receipts: Dictionary = {}
+var _pending_source_acknowledgements: Dictionary = {}
+var _pending_source_releases: Dictionary = {}
+var _pending_source_release_order: Array[Dictionary] = []
+var _pending_source_release_queue_index: Dictionary = {}
+var _pending_source_release_free_slots: Array[int] = []
+var _pending_source_release_cursor := 0
+var _pending_frame_presentations: Dictionary = {}
+var _frame_presentation_callback_counts := {"registered":0, "accepted":0,
+	"cancelledNoOp":0, "staleNoOp":0}
 var _production_candidate_generation := 0
 var _visible_sections_by_source_id: Dictionary = {}
 var _dirty_source_sections: Dictionary = {}
@@ -59,6 +74,11 @@ var _visible_section_recompile_quota := 2
 var _visible_section_demand_wake_rounds := 0
 var _translucent_camera_position := Vector3.ZERO
 var _has_translucent_camera_snapshot := false
+var _translucent_visible_sections: Array[Vector3i] = []
+var _translucent_visible_section_set: Dictionary = {}
+var _translucent_visible_scan_cursor := 0
+var _replay_pov_waiting_revision_by_section: Dictionary = {}
+var _replay_reassembly_required_by_section: Dictionary = {}
 
 
 func configure(world_id: String) -> Dictionary:
@@ -71,6 +91,128 @@ func configure(world_id: String) -> Dictionary:
 		return _failed("world_static_section_coordinator_already_bound")
 	_world_id = world_id
 	return {"status":"ready", "worldId":_world_id}
+
+
+## RenderingServer callbacks target this world-lifetime coordinator, never the
+## short-lived install session. The map strongly retains each session until its
+## global frame-boundary callback is accepted or safely discarded as a tombstone.
+func register_pending_frame_presentation(session: RefCounted, token: String) -> Dictionary:
+	if not is_instance_valid(session) or token.is_empty() \
+			or String(session.get("state")) != "awaiting_frame" \
+			or String(session.get("_presentation_token")) != token:
+		return _failed("invalid_section_frame_callback_registration")
+	if _pending_frame_presentations.has(token):
+		var existing: Dictionary = _pending_frame_presentations[token]
+		if existing.get("session") == session:
+			return {"status":"queued", "token":token, "alreadyRegistered":true}
+		return _failed("duplicate_section_frame_callback_token")
+	_pending_frame_presentations[token] = {"session":session, "cancelled":false,
+		"callbackReceived":false}
+	_frame_presentation_callback_counts["registered"] += 1
+	RenderingServer.request_frame_drawn_callback(
+		Callable(self, "_on_section_frame_drawn").bind(token))
+	return {"status":"queued", "token":token}
+
+
+func cancel_pending_frame_presentation(session: RefCounted, token: String) -> Dictionary:
+	if token.is_empty() or not _pending_frame_presentations.has(token):
+		return {"status":"already_drained", "token":token}
+	var record: Dictionary = _pending_frame_presentations[token]
+	if record.get("session") != session:
+		return _failed("section_frame_callback_owner_mismatch")
+	if bool(record.get("callbackReceived", false)):
+		_pending_frame_presentations.erase(token)
+		return {"status":"already_drained", "token":token}
+	record["cancelled"] = true
+	return {"status":"tombstoned", "token":token}
+
+
+func complete_pending_frame_presentation(session: RefCounted, token: String) -> Dictionary:
+	if token.is_empty() or not _pending_frame_presentations.has(token):
+		return {"status":"already_drained", "token":token}
+	var record: Dictionary = _pending_frame_presentations[token]
+	if record.get("session") != session or bool(record.get("cancelled", false)) \
+			or not bool(record.get("callbackReceived", false)):
+		return _failed("section_frame_presentation_completion_mismatch")
+	_pending_frame_presentations.erase(token)
+	return {"status":"completed", "token":token}
+
+
+func frame_presentation_callback_diagnostics() -> Dictionary:
+	var pending_callback_count := 0
+	for record_value: Variant in _pending_frame_presentations.values():
+		if record_value is Dictionary and not bool(record_value.get("callbackReceived", false)):
+			pending_callback_count += 1
+	return {"pendingCallbackCount":pending_callback_count,
+		"awaitingPresentationCount":_pending_frame_presentations.size(),
+		"registeredCallbackCount":int(_frame_presentation_callback_counts.get("registered", 0)),
+		"acceptedCallbackCount":int(_frame_presentation_callback_counts.get("accepted", 0)),
+		"cancelledCallbackCount":int(_frame_presentation_callback_counts.get("cancelledNoOp", 0)),
+		"staleCallbackCount":int(_frame_presentation_callback_counts.get("staleNoOp", 0))}
+
+
+func drain_pending_frame_presentations() -> Dictionary:
+	var rolled_back := 0
+	var rollback_failures: Array[String] = []
+	for token_value: Variant in _pending_frame_presentations.keys():
+		var token := String(token_value)
+		var record: Dictionary = _pending_frame_presentations[token]
+		var session: Variant = record.get("session")
+		if not bool(record.get("cancelled", false)) and session is RefCounted \
+				and is_instance_valid(session) and String(session.get("state")) == "awaiting_frame":
+			var rollback: Dictionary = session.rollback_presentation(token)
+			if rollback.get("status") != "cancelled":
+				rollback_failures.append(token + ":" + String(rollback.get("reason", "rollback_failed")))
+				continue
+			rolled_back += 1
+		if bool(record.get("callbackReceived", false)):
+			# The callback has already been consumed, so there is no future server
+			# event to wait for. A still-awaiting session was rolled back above;
+			# installed/cancelled sessions can now release this token record.
+			_pending_frame_presentations.erase(token)
+			continue
+		# Keep the coordinator callback target alive and the canceled session in
+		# the token map until RenderingServer delivers the already-queued callback.
+		record["cancelled"] = true
+	if not rollback_failures.is_empty():
+		return {"status":"rollback_failed", "drained":false,
+			"ownerMustBeRetained":true, "rolledBackCount":rolled_back,
+			"pendingCallbackCount":_pending_frame_presentations.size(),
+			"rollbackFailures":rollback_failures}
+	# The caller retains this coordinator while awaiting. Its token records also
+	# strongly retain sessions until RenderingServer delivers every queued global
+	# frame callback. Do not destroy backend owners while a callback can still
+	# target this dispatcher.
+	var main_loop := Engine.get_main_loop() as SceneTree
+	if main_loop == null and not _pending_frame_presentations.is_empty():
+		return {"status":"callback_dispatcher_unavailable", "drained":false,
+			"ownerMustBeRetained":true, "rolledBackCount":rolled_back,
+			"pendingCallbackCount":_pending_frame_presentations.size(),
+			"rollbackFailures":[]}
+	while not _pending_frame_presentations.is_empty():
+		await main_loop.process_frame
+	return {"status":"drained", "drained":true,
+		"rolledBackCount":rolled_back, "pendingCallbackCount":0,
+		"rollbackFailures":[]}
+
+
+func _on_section_frame_drawn(token: String) -> void:
+	if not _pending_frame_presentations.has(token):
+		_frame_presentation_callback_counts["staleNoOp"] += 1
+		return
+	var record: Dictionary = _pending_frame_presentations[token]
+	var session: Variant = record.get("session")
+	if bool(record.get("cancelled", false)):
+		_frame_presentation_callback_counts["cancelledNoOp"] += 1
+		_pending_frame_presentations.erase(token)
+	elif session is RefCounted and is_instance_valid(session) \
+			and session.has_method("accept_frame_drawn_callback") \
+			and bool(session.call("accept_frame_drawn_callback", token)):
+		_frame_presentation_callback_counts["accepted"] += 1
+		record["callbackReceived"] = true
+	else:
+		_frame_presentation_callback_counts["staleNoOp"] += 1
+		_pending_frame_presentations.erase(token)
 
 
 func configure_source_roster(required_provider_ids: Array[String]) -> Dictionary:
@@ -120,7 +262,14 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 	else:
 		state["priority"] = camera_distance_squared
 		if String(state.get("terrainRevision", "")) != revision:
-			_cancel_pending_production_candidate(section_key)
+			var revision_cancel := _cancel_pending_production_candidate(section_key)
+			if revision_cancel.get("status") == "rollback_failed":
+				state["stage"] = "rollback_failed"
+				state["lastInstallStatus"] = "rollback_failed"
+				state["lastInstallReason"] = String(revision_cancel.get("reason", ""))
+				_visible_section_demands[section_key] = state
+				return revision_cancel
+			_pending_source_acknowledgements.erase(section_key)
 			state["terrainRevision"] = revision
 			if _production_candidates_by_section.has(section_key):
 				# A replacement for installed world content is latency-sensitive:
@@ -139,7 +288,11 @@ func request_visible_section_demand(section_key: Vector3i, terrain_revision: int
 			state.erase("installedReceipt")
 			if not bool(state.get("queued", false)):
 				_enqueue_visible_section_demand(section_key, state)
-		_visible_section_demands[section_key] = state
+	_visible_section_demands[section_key] = state
+	if _replay_reassembly_required_by_section.has(section_key):
+		_promote_replay_reassembly_to_visible_demand(section_key)
+		state = _visible_section_demands.get(section_key, state)
+	_track_translucent_visible_section(section_key)
 	return {"status":"queued" if state.get("stage") == "waiting" else "tracked",
 		"sectionKey":section_key, "stage":String(state.get("stage", "waiting")),
 		"terrainRevision":revision}
@@ -154,17 +307,22 @@ func invalidate_visible_section_source(section_key: Vector3i, provider_id: Strin
 			or source_revision.strip_edges().is_empty():
 		return _failed("invalid_visible_section_source_invalidation")
 	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	_pending_source_acknowledgements.erase(section_key)
 	var dirty_sources: Dictionary = _dirty_source_sections.get(section_key, {})
 	dirty_sources[source_id] = {"providerId":provider_id,
 		"sourceRevision":source_revision, "requestedFrame":Engine.get_process_frames()}
 	_dirty_source_sections[section_key] = dirty_sources
-	_cancel_stale_replay_for_section(section_key)
+	var replay_cancel := _cancel_stale_replay_for_section(section_key)
+	if replay_cancel.get("status") == "rollback_failed":
+		return replay_cancel
 	if state.is_empty():
 		return {"status":"deferred", "reason":"section_not_currently_demanded",
 			"retryable":true, "dirtyRetained":true,
 			"sectionKey":section_key, "providerId":provider_id, "sourceId":source_id}
 	var previous_generation := int(state.get("installedGeneration", 0))
-	_cancel_pending_production_candidate(section_key)
+	var invalidation_cancel := _cancel_pending_production_candidate(section_key)
+	if invalidation_cancel.get("status") == "rollback_failed":
+		return invalidation_cancel
 	state["stage"] = "waiting"
 	state["attempts"] = 0
 	state["lastReason"] = "authoritative_source_revision_changed"
@@ -289,8 +447,11 @@ static func _section_candidate_source_revisions(candidate: Dictionary) -> Dictio
 func withdraw_visible_section_demand(section_key: Vector3i) -> Dictionary:
 	if not _visible_section_demands.has(section_key):
 		return {"status":"idle", "sectionKey":section_key}
+	var cancel_result := _cancel_pending_production_candidate(section_key)
+	if cancel_result.get("status") == "rollback_failed":
+		return cancel_result
 	_visible_section_demands.erase(section_key)
-	_cancel_pending_production_candidate(section_key)
+	_untrack_translucent_visible_section(section_key)
 	return {"status":"withdrawn", "sectionKey":section_key,
 		"installedRepresentationRetained":_production_candidates_by_section.has(section_key)}
 
@@ -335,6 +496,8 @@ func refresh_visible_section_demand_priorities(camera_position: Vector3,
 		return _failed("invalid_visible_section_priority_refresh")
 	_translucent_camera_position = camera_position
 	_has_translucent_camera_snapshot = true
+	var pov_resorts_queued := _queue_translucent_pov_resorts(
+		MAX_TRANSLUCENT_POV_RESORT_SCAN_PER_REFRESH)
 	var updated := 0
 	var refresh_count := mini(max_updates, _visible_section_demand_count)
 	for _index in range(refresh_count):
@@ -355,8 +518,84 @@ func refresh_visible_section_demand_priorities(camera_position: Vector3,
 			_enqueue_visible_section_demand(section_key, state)
 		else:
 			_visible_section_demands[section_key] = state
-	return {"status":"advanced" if updated > 0 else "idle", "updatedCount":updated,
+	return {"status":"advanced" if updated > 0 or pov_resorts_queued > 0 else "idle",
+		"updatedCount":updated, "povResortsQueued":pov_resorts_queued,
 		"pendingDemandCount":_visible_section_demands.size()}
+
+
+func _track_translucent_visible_section(section_key: Vector3i) -> void:
+	if _translucent_visible_section_set.has(section_key):
+		return
+	_translucent_visible_section_set[section_key] = true
+	_translucent_visible_sections.append(section_key)
+
+
+func _untrack_translucent_visible_section(section_key: Vector3i) -> void:
+	if not _translucent_visible_section_set.erase(section_key):
+		return
+	var index := _translucent_visible_sections.find(section_key)
+	if index < 0:
+		return
+	_translucent_visible_sections.remove_at(index)
+	if _translucent_visible_sections.is_empty():
+		_translucent_visible_scan_cursor = 0
+	else:
+		if index < _translucent_visible_scan_cursor:
+			_translucent_visible_scan_cursor -= 1
+		_translucent_visible_scan_cursor = posmod(_translucent_visible_scan_cursor,
+			_translucent_visible_sections.size())
+
+
+## Camera-relative transparency changes become normal replacement demand. The
+## old accepted candidate/root stays installed while providers recompile the
+## same section against the new POV and the native session accepts its receipt.
+## Scan at most a fixed number of visible resident sections per camera refresh.
+func _queue_translucent_pov_resorts(max_scans: int) -> int:
+	if not _has_translucent_camera_snapshot or max_scans < 1 \
+			or _translucent_visible_sections.is_empty():
+		return 0
+	var queued := 0
+	var scan_count := mini(max_scans, _translucent_visible_sections.size())
+	for _index in range(scan_count):
+		if _translucent_visible_sections.is_empty():
+			break
+		_translucent_visible_scan_cursor = posmod(_translucent_visible_scan_cursor,
+			_translucent_visible_sections.size())
+		var section_key := _translucent_visible_sections[_translucent_visible_scan_cursor]
+		_translucent_visible_scan_cursor = posmod(_translucent_visible_scan_cursor + 1,
+			_translucent_visible_sections.size())
+		var state: Dictionary = _visible_section_demands.get(section_key, {})
+		if state.is_empty() or String(state.get("stage", "")) != "installed":
+			continue
+		var candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
+		var receipt: Dictionary = _production_candidate_receipts.get(section_key, {})
+		var installed_pov := _candidate_translucent_pov_revision(candidate)
+		if installed_pov <= 0 or receipt.is_empty() \
+				or not _receipt_backend_matches_candidate(candidate, receipt) \
+				or not _section_receipt_source_revision_matches_candidate(candidate, receipt):
+			continue
+		var current_pov := current_translucent_pov_snapshot(section_key)
+		if current_pov.get("status") != "ready" \
+				or int(current_pov.get("revision", -1)) == installed_pov:
+			continue
+		var terrain_revision := int(state.get("terrainRevision", 0))
+		if terrain_revision <= 0:
+			continue
+		state.erase("candidateGeneration")
+		state.erase("pendingCandidateStage")
+		state.erase("blockedReason")
+		state["stage"] = "waiting"
+		state["urgentRecompile"] = true
+		state["priority"] = 0.0
+		state["attempts"] = 0
+		state["nextAttemptFrame"] = Engine.get_process_frames()
+		state["lastWakeReason"] = "translucent_camera_pov_changed"
+		state["lastWakeToken"] = "%d" % int(current_pov.get("revision", -1))
+		if not bool(state.get("queued", false)):
+			_enqueue_visible_section_demand(section_key, state)
+		_visible_section_demands[section_key] = state
+		queued += 1
+	return queued
 
 
 ## Supplies the active camera snapshot and Minecraft-style section-relative
@@ -617,14 +856,23 @@ func _pop_visible_section_demand() -> Dictionary:
 		"queueToken":int(queued.get("queueToken", -1))}
 
 
-func _cancel_pending_production_candidate(section_key: Vector3i) -> void:
+func _cancel_pending_production_candidate(section_key: Vector3i) -> Dictionary:
 	var job: Dictionary = _production_candidate_jobs.get(section_key, {})
 	if job.is_empty():
-		return
+		return {"status":"cancelled", "sectionKey":section_key}
 	var session = job.get("session")
 	if session is RefCounted and session.has_method("cancel"):
-		session.cancel()
+		var cancelled: Dictionary = session.cancel()
+		if cancelled.get("status") != "cancelled":
+			job["stage"] = "rollback_failed"
+			job["rollbackFailure"] = cancelled.duplicate(true)
+			_production_candidate_jobs[section_key] = job
+			return {"status":"rollback_failed", "reason":"section_candidate_cancel_rollback_failed",
+				"sectionKey":section_key,
+				"generation":int(job.get("candidate", {}).get("generation", 0)),
+				"rollback":cancelled, "retryable":true}
 	_production_candidate_jobs.erase(section_key)
+	return {"status":"cancelled", "sectionKey":section_key}
 
 
 func _wake_visible_section_demands() -> void:
@@ -718,6 +966,9 @@ func submit_complete_section_candidate(candidate: Dictionary) -> Dictionary:
 		return {"status":"pending", "reason":"complete_section_candidate_census_stale",
 			"retryable":true, "sectionKey":section_value}
 	var section_key: Vector3i = section_value
+	if _pending_source_releases.has(section_key):
+		return {"status":"pending", "reason":"section_source_release_pending",
+			"retryable":true, "sectionKey":section_key}
 	var latest_candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
 	if not latest_candidate.is_empty() \
 			and int(latest_candidate.get("generation", 0)) >= int(generation_value):
@@ -729,7 +980,16 @@ func submit_complete_section_candidate(candidate: Dictionary) -> Dictionary:
 			return _failed("stale_complete_section_candidate_generation")
 		var session = existing.get("session")
 		if session is RefCounted and session.has_method("cancel"):
-			session.cancel()
+			var cancelled: Dictionary = session.cancel()
+			if cancelled.get("status") != "cancelled":
+				existing["stage"] = "rollback_failed"
+				existing["rollbackFailure"] = cancelled.duplicate(true)
+				_production_candidate_jobs[section_key] = existing
+				return {"status":"rollback_failed",
+					"reason":"replaced_candidate_rollback_failed",
+					"sectionKey":section_key,
+					"generation":int(existing_candidate.get("generation", 0)),
+					"rollback":cancelled, "retryable":true}
 	_production_candidate_jobs[section_key] = {"candidate":candidate,
 		"session":null, "stage":"queued"}
 	return {"status":"queued", "sectionKey":section_key,
@@ -743,6 +1003,9 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		max_upload_units := 1) -> Dictionary:
 	if max_upload_units < 1 or max_upload_units > 64:
 		return _failed("invalid_complete_section_upload_budget")
+	if _pending_source_releases.has(section_key):
+		return {"status":"pending", "reason":"section_source_release_pending",
+			"retryable":true, "sectionKey":section_key}
 	var job: Dictionary = _production_candidate_jobs.get(section_key, {})
 	if job.is_empty():
 		return {"status":"idle", "sectionKey":section_key}
@@ -752,10 +1015,21 @@ func advance_complete_section_candidate(section_key: Vector3i,
 			or String(census.get("censusDigest", "")) != String(candidate.get("censusDigest", "")):
 		var stale_session = job.get("session")
 		if stale_session is RefCounted and stale_session.has_method("cancel"):
-			stale_session.cancel()
+			var stale_cancel: Dictionary = stale_session.cancel()
+			if stale_cancel.get("status") != "cancelled":
+				job["stage"] = "rollback_failed"
+				job["rollbackFailure"] = stale_cancel.duplicate(true)
+				_production_candidate_jobs[section_key] = job
+				return {"status":"rollback_failed", "stage":"rollback",
+					"reason":"stale_candidate_rollback_failed",
+					"sectionKey":section_key,
+					"generation":int(candidate.get("generation", 0)),
+					"rollback":stale_cancel, "retryable":true}
 		_production_candidate_jobs.erase(section_key)
 		var stale_result := {"status":"pending", "stage":"source_census",
 			"reason":String(census.get("reason", "complete_section_candidate_census_changed")),
+			"providerId":String(census.get("providerId", "")),
+			"providerReason":String(census.get("providerReason", "")),
 			"retryable":true, "sectionKey":section_key,
 			"requiresReassembly":true}
 		_reconcile_visible_section_candidate_outcome(section_key,
@@ -764,7 +1038,7 @@ func advance_complete_section_candidate(section_key: Vector3i,
 	var session = job.get("session")
 	if session == null:
 		var started: Dictionary = PacketOwner.begin_static_section_install(candidate,
-			candidate.get("materialBindings", {}), candidate.get("meshBindings", {}))
+			candidate.get("materialBindings", {}), candidate.get("meshBindings", {}), self)
 		if started.get("status") == "pending":
 			var owner_pending := {"status":"pending_owner", "reason":String(started.get("reason", "")),
 				"sectionKey":section_key, "retryable":true}
@@ -785,9 +1059,36 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		_production_candidate_jobs[section_key] = job
 		session = started.session
 	var pov_snapshot := current_translucent_pov_snapshot(section_key)
+	var candidate_pov_revision := _candidate_translucent_pov_revision(candidate)
+	var awaiting_frame_session: Variant = job.get("session")
+	var candidate_awaiting_frame := awaiting_frame_session is RefCounted \
+		and String(awaiting_frame_session.get("state")) == "awaiting_frame"
+	if candidate_pov_revision > 0 and pov_snapshot.get("status") != "ready" \
+			and not candidate_awaiting_frame:
+		var pending_pov := {"status":"pending", "stage":"translucent_pov",
+			"reason":String(pov_snapshot.get("reason",
+				"translucent_camera_snapshot_unavailable")),
+			"sectionKey":section_key,
+			"generation":int(candidate.get("generation", 0)), "retryable":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), pending_pov)
+		return pending_pov
 	var current_pov_revision := int(pov_snapshot.get("revision", -1)) \
 		if pov_snapshot.get("status") == "ready" else -1
 	var step: Dictionary = session.advance(max_upload_units, current_pov_revision)
+	if step.get("status") == "pending_presentation":
+		job["stage"] = "awaiting_frame"
+		job["presentationToken"] = String(step.get("presentationToken", ""))
+		_production_candidate_jobs[section_key] = job
+		if not bool(step.get("frameDrawn", false)):
+			var frame_pending := {"status":"pending", "stage":"awaiting_frame",
+				"reason":"section_candidate_waiting_for_frame_drawn_callback",
+				"sectionKey":section_key,
+				"generation":int(candidate.get("generation", 0)), "retryable":true}
+			_reconcile_visible_section_candidate_outcome(section_key,
+				int(candidate.get("generation", 0)), frame_pending)
+			return frame_pending
+		step = session.finalize_presentation(String(step.get("presentationToken", "")))
 	if step.get("status") == "pending":
 		job["stage"] = String(step.get("stage", "installing"))
 		_production_candidate_jobs[section_key] = job
@@ -797,7 +1098,27 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		_reconcile_visible_section_candidate_outcome(section_key,
 			int(candidate.get("generation", 0)), install_pending)
 		return install_pending
+	if step.get("status") == "rollback_failed":
+		job["stage"] = "rollback_failed"
+		job["rollbackFailure"] = step.duplicate(true)
+		_production_candidate_jobs[section_key] = job
+		var rollback_pending := {"status":"rollback_failed", "stage":"rollback",
+			"reason":String(step.get("reason", "section_presentation_rollback_failed")),
+			"sectionKey":section_key,
+			"generation":int(candidate.get("generation", 0)),
+			"rollback":step.get("rollback", {}), "retryable":true}
+		_reconcile_visible_section_candidate_outcome(section_key,
+			int(candidate.get("generation", 0)), rollback_pending)
+		return rollback_pending
 	if step.get("status") == "failed" and String(step.get("reason", "")) == "section_install_owner_replaced":
+		if step.get("rollback", {}).get("status") != "cancelled":
+			job["stage"] = "rollback_failed"
+			job["rollbackFailure"] = step.duplicate(true)
+			_production_candidate_jobs[section_key] = job
+			return {"status":"rollback_failed", "stage":"rollback",
+				"reason":"owner_replaced_without_rollback_acknowledgement",
+				"sectionKey":section_key, "generation":int(candidate.get("generation", 0)),
+				"rollback":step.get("rollback", {}), "retryable":true}
 		job["session"] = null
 		job["stage"] = "owner_replaced"
 		_production_candidate_jobs[section_key] = job
@@ -841,7 +1162,16 @@ func advance_complete_section_candidate(section_key: Vector3i,
 	if not _receipt_is_live(candidate, receipt):
 		var stale_owner_session = job.get("session")
 		if stale_owner_session is RefCounted and stale_owner_session.has_method("cancel"):
-			stale_owner_session.cancel()
+			var stale_owner_cancel: Dictionary = stale_owner_session.cancel()
+			if stale_owner_cancel.get("status") != "cancelled":
+				job["stage"] = "rollback_failed"
+				job["rollbackFailure"] = stale_owner_cancel.duplicate(true)
+				_production_candidate_jobs[section_key] = job
+				return {"status":"rollback_failed", "stage":"rollback",
+					"reason":"installed_candidate_owner_change_cancel_failed",
+					"sectionKey":section_key,
+					"generation":int(candidate.get("generation", 0)),
+					"rollback":stale_owner_cancel, "retryable":true}
 		job["session"] = null
 		job["stage"] = "owner_replaced"
 		_production_candidate_jobs[section_key] = job
@@ -854,14 +1184,33 @@ func advance_complete_section_candidate(section_key: Vector3i,
 		return owner_changed
 	var previous_candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
 	_replace_section_source_index(section_key, previous_candidate, candidate)
+	# A newer generation owns the slot now. Any acknowledgement retry queued for
+	# the replaced receipt is stale and must never retire source visuals.
+	_pending_source_acknowledgements.erase(section_key)
 	_production_candidates_by_section[section_key] = candidate
 	_production_candidate_receipts[section_key] = receipt
+	# Keep the unload/replay index on the same immutable snapshot as the live
+	# production slot; do not leave a previously committed envelope available.
+	var installed_envelope: Variant = candidate.get("candidate", null)
+	if installed_envelope is Dictionary:
+		_committed_candidates[section_key] = installed_envelope
+		_installed_receipts[section_key] = receipt
 	_dirty_source_sections.erase(section_key)
 	_production_candidate_jobs.erase(section_key)
+	# A replacement assembled from the current provider census owns the section
+	# only after its live receipt passed above. Until then, replay/reassembly keeps
+	# the old installed representation visible and retryable.
+	_replay_reassembly_required_by_section.erase(section_key)
+	_replay_pov_waiting_revision_by_section.erase(section_key)
+	_replay_set.erase(section_key)
+	_replay_queue.erase(section_key)
 	var acknowledgement_receipt: Dictionary = receipt.duplicate(true)
 	acknowledgement_receipt.make_read_only()
 	var provider_acknowledgements: Dictionary = _source_roster.acknowledge_section_install(
 		section_key, candidate.get("providerCoverage", []), acknowledgement_receipt)
+	_retain_pending_source_acknowledgement(section_key, candidate,
+		candidate.get("providerCoverage", []), acknowledgement_receipt,
+		provider_acknowledgements)
 	var installed_result := {"status":"installed", "sectionKey":section_key,
 		"generation":int(candidate.get("generation", 0)), "receipt":receipt,
 		"sourceAcknowledgements":provider_acknowledgements}
@@ -918,6 +1267,9 @@ func _reconcile_visible_section_candidate_outcome(section_key: Vector3i,
 		state["stage"] = "candidate_pending"
 		state.erase("blockedReason")
 		state["pendingCandidateStage"] = String(outcome.get("stage", status))
+	elif status == "rollback_failed":
+		state["stage"] = "rollback_failed"
+		state["blockedReason"] = String(outcome.get("reason", status))
 	elif status in ["failed", "cancelled"]:
 		state["stage"] = "blocked"
 		state["blockedReason"] = String(outcome.get("reason", status))
@@ -931,6 +1283,10 @@ func advance_queued_complete_section_candidates(max_sections := 1,
 		max_upload_units := 1) -> Dictionary:
 	if max_sections < 1 or max_sections > 8:
 		return _failed("invalid_complete_section_scheduler_budget")
+	var release_results := _advance_pending_source_releases(
+		MAX_PENDING_SOURCE_RELEASES_PER_ADVANCE)
+	var acknowledgement_results := _advance_pending_source_acknowledgements(
+		MAX_PENDING_SOURCE_ACKNOWLEDGEMENTS_PER_ADVANCE)
 	var section_keys: Array[Vector3i] = []
 	for section_value: Variant in _production_candidate_jobs:
 		if section_value is Vector3i:
@@ -943,8 +1299,253 @@ func advance_queued_complete_section_candidates(max_sections := 1,
 	for index in range(mini(max_sections, section_keys.size())):
 		results.append(advance_complete_section_candidate(section_keys[index], max_upload_units))
 	results.make_read_only()
-	return {"status":"advanced" if not results.is_empty() else "idle",
-		"sectionCount":results.size(), "results":results}
+	return {"status":"advanced" if not results.is_empty() \
+		or not acknowledgement_results.is_empty() or not release_results.is_empty() else "idle",
+		"sectionCount":results.size(), "results":results,
+		"releaseCount":release_results.size(), "releases":release_results,
+		"pendingReleaseCount":_pending_source_releases.size(),
+		"acknowledgementCount":acknowledgement_results.size(),
+		"acknowledgements":acknowledgement_results,
+		"pendingAcknowledgementCount":_pending_source_acknowledgements.size()}
+
+
+func _advance_pending_source_acknowledgements(max_attempts: int) -> Array[Dictionary]:
+	var section_keys: Array[Vector3i] = []
+	for section_value: Variant in _pending_source_acknowledgements:
+		if section_value is Vector3i:
+			section_keys.append(Vector3i(section_value))
+	section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	var results: Array[Dictionary] = []
+	var current_frame := Engine.get_process_frames()
+	for section_key: Vector3i in section_keys:
+		if results.size() >= max_attempts:
+			break
+		# A replacement may be visible for its first acknowledged frame while the
+		# previous provider receipt is retained only for rollback. Defer retries of
+		# that prior receipt until the replacement either finalizes or rolls back.
+		if _production_candidate_jobs.has(section_key):
+			continue
+		if _pending_source_releases.has(section_key):
+			continue
+		var pending: Dictionary = _pending_source_acknowledgements.get(section_key, {})
+		if pending.is_empty() or int(pending.get("nextAttemptFrame", 0)) > current_frame:
+			continue
+		var receipt: Dictionary = pending.get("receipt", {})
+		var candidate: Dictionary = pending.get("candidate", {})
+		if not installed_section_receipt_is_current(section_key, receipt) \
+				or int(candidate.get("generation", 0)) \
+				!= int(receipt.get("generation", -1)):
+			_pending_source_acknowledgements.erase(section_key)
+			results.append({"sectionKey":section_key, "status":"stale_dropped",
+				"generation":int(receipt.get("generation", 0))})
+			continue
+		var retried: Dictionary = _source_roster.acknowledge_section_install(
+			section_key, pending.get("providerCoverage", []), receipt)
+		var attempts := int(pending.get("attempts", 0)) + 1
+		if retried.get("status") == "acknowledged":
+			_pending_source_acknowledgements.erase(section_key)
+			results.append({"sectionKey":section_key, "status":"acknowledged",
+				"generation":int(receipt.get("generation", 0)),
+				"attempt":attempts, "providerAcknowledgements":retried})
+			continue
+		if retried.get("status") != "pending":
+			_pending_source_acknowledgements.erase(section_key)
+			results.append({"sectionKey":section_key, "status":"failed",
+				"generation":int(receipt.get("generation", 0)),
+				"attempt":attempts, "providerAcknowledgements":retried})
+			continue
+		var retry_exponent := mini(attempts - 1, 6)
+		var retry_delay := mini(SOURCE_ACK_RETRY_MAX_FRAMES,
+			SOURCE_ACK_RETRY_BASE_FRAMES << retry_exponent)
+		pending["attempts"] = attempts
+		pending["nextAttemptFrame"] = current_frame + retry_delay
+		pending["lastResult"] = retried
+		_pending_source_acknowledgements[section_key] = pending
+		results.append({"sectionKey":section_key, "status":"pending",
+			"generation":int(receipt.get("generation", 0)),
+			"attempt":attempts, "nextAttemptFrame":int(pending.nextAttemptFrame),
+			"providerAcknowledgements":retried})
+	results.make_read_only()
+	return results
+
+
+func _retain_pending_source_acknowledgement(section_key: Vector3i,
+		candidate: Dictionary, provider_coverage: Array, receipt: Dictionary,
+		provider_result: Dictionary) -> void:
+	if provider_result.get("status") != "pending":
+		_pending_source_acknowledgements.erase(section_key)
+		return
+	_pending_source_acknowledgements[section_key] = {
+		"candidate":candidate,
+		"providerCoverage":provider_coverage,
+		"receipt":receipt,
+		"attempts":0,
+		"nextAttemptFrame":Engine.get_process_frames() + SOURCE_ACK_RETRY_BASE_FRAMES,
+		"lastResult":provider_result}
+
+
+func _queue_source_install_release(section_key: Vector3i,
+		candidate: Dictionary, receipt: Dictionary, release_result: Dictionary,
+		owner_cell: Vector2i, chunk_instance_id: int) -> Dictionary:
+	if release_result.get("status") == "acknowledged":
+		_complete_source_install_release(section_key, receipt, candidate, false)
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"generation":int(receipt.get("generation", 0)),
+			"providerReleases":release_result}
+	var pending: Dictionary = _pending_source_releases.get(section_key, {})
+	if not pending.is_empty():
+		if not _release_receipt_identity_matches(pending.get("receipt", {}), receipt):
+			return {"status":"pending", "reason":"different_section_release_already_pending",
+				"retryable":true, "sectionKey":section_key}
+		pending["lastResult"] = release_result
+		_pending_source_releases[section_key] = pending
+		return {"status":"pending", "sectionKey":section_key,
+			"generation":int(receipt.get("generation", 0)),
+			"providerReleases":release_result}
+	# One exact release record is retained per still-installed section receipt.
+	# This map is bounded by the coordinator's retained section slots; attempts
+	# are separately budgeted to one provider release per normal update.
+	var next_attempt_frame := Engine.get_process_frames() + SOURCE_ACK_RETRY_BASE_FRAMES
+	_pending_source_releases[section_key] = {
+		"candidate":candidate, "providerCoverage":candidate.get("providerCoverage", []),
+		"receipt":receipt, "ownerCell":owner_cell,
+		"chunkInstanceId":chunk_instance_id, "reloadPending":false,
+		"attempts":0, "nextAttemptFrame":next_attempt_frame,
+		"lastResult":release_result}
+	if not _pending_source_release_queue_index.has(section_key):
+		var queue_index := -1
+		if not _pending_source_release_free_slots.is_empty():
+			queue_index = _pending_source_release_free_slots.pop_back()
+		else:
+			queue_index = _pending_source_release_order.size()
+			_pending_source_release_order.append({})
+		_pending_source_release_order[queue_index] = {"sectionKey":section_key}
+		_pending_source_release_queue_index[section_key] = queue_index
+	return {"status":"pending", "sectionKey":section_key,
+		"generation":int(receipt.get("generation", 0)),
+		"providerReleases":release_result,
+		"nextAttemptFrame":next_attempt_frame}
+
+
+func _advance_pending_source_releases(max_attempts: int) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	var current_frame := Engine.get_process_frames()
+	var scanned := 0
+	while scanned < MAX_PENDING_SOURCE_RELEASE_SCAN_PER_ADVANCE \
+			and results.size() < max_attempts \
+			and not _pending_source_release_order.is_empty():
+		if _pending_source_release_cursor >= _pending_source_release_order.size():
+			_pending_source_release_cursor = 0
+		var queue_row: Dictionary = _pending_source_release_order[
+			_pending_source_release_cursor]
+		_pending_source_release_cursor += 1
+		scanned += 1
+		var section_value: Variant = queue_row.get("sectionKey", null)
+		if not section_value is Vector3i:
+			continue
+		var section_key := Vector3i(section_value)
+		if not _pending_source_releases.has(section_key):
+			continue
+		if results.size() >= max_attempts:
+			break
+		var pending: Dictionary = _pending_source_releases.get(section_key, {})
+		if pending.is_empty() or int(pending.get("nextAttemptFrame", 0)) > current_frame:
+			continue
+		var receipt: Dictionary = pending.get("receipt", {})
+		var candidate: Dictionary = pending.get("candidate", {})
+		if not _release_receipt_identity_matches(
+			_production_candidate_receipts.get(section_key, {}), receipt):
+			# Never release an unrelated/newer receipt. Keep the old token visible in
+			# diagnostics and block replacement until its owning provider can settle.
+			pending["lastResult"] = {"status":"failed",
+				"reason":"pending_release_receipt_identity_changed"}
+			pending["nextAttemptFrame"] = current_frame + SOURCE_ACK_RETRY_MAX_FRAMES
+			_pending_source_releases[section_key] = pending
+			results.append({"sectionKey":section_key, "status":"blocked",
+				"reason":"pending_release_receipt_identity_changed",
+				"generation":int(receipt.get("generation", 0))})
+			continue
+		var released: Dictionary = _source_roster.release_section_install(section_key,
+			pending.get("providerCoverage", []), receipt)
+		var attempts := int(pending.get("attempts", 0)) + 1
+		if released.get("status") == "acknowledged":
+			var reload_pending := bool(pending.get("reloadPending", false))
+			_pending_source_releases.erase(section_key)
+			_remove_source_release_queue_entry(section_key)
+			_complete_source_install_release(section_key, receipt, candidate, reload_pending)
+			results.append({"sectionKey":section_key, "status":"released",
+				"generation":int(receipt.get("generation", 0)),
+				"attempt":attempts, "reloadPending":reload_pending,
+				"providerReleases":released})
+			continue
+		var retry_exponent := mini(attempts - 1, 6)
+		var retry_delay := mini(SOURCE_ACK_RETRY_MAX_FRAMES,
+			SOURCE_ACK_RETRY_BASE_FRAMES << retry_exponent)
+		pending["attempts"] = attempts
+		pending["nextAttemptFrame"] = current_frame + retry_delay
+		pending["lastResult"] = released
+		_pending_source_releases[section_key] = pending
+		results.append({"sectionKey":section_key, "status":"pending",
+			"generation":int(receipt.get("generation", 0)),
+			"attempt":attempts, "nextAttemptFrame":int(pending.nextAttemptFrame),
+			"providerReleases":released})
+	if _pending_source_releases.is_empty():
+		_pending_source_release_order.clear()
+		_pending_source_release_queue_index.clear()
+		_pending_source_release_free_slots.clear()
+		_pending_source_release_cursor = 0
+	results.make_read_only()
+	return results
+
+
+func _remove_source_release_queue_entry(section_key: Vector3i) -> void:
+	var index_value: Variant = _pending_source_release_queue_index.get(section_key, null)
+	if not index_value is int:
+		return
+	var queue_index := int(index_value)
+	if queue_index < 0 or queue_index >= _pending_source_release_order.size():
+		_pending_source_release_queue_index.erase(section_key)
+		return
+	var queue_row: Dictionary = _pending_source_release_order[queue_index]
+	if queue_row.get("sectionKey") == section_key:
+		_pending_source_release_order[queue_index] = {}
+		_pending_source_release_free_slots.append(queue_index)
+	_pending_source_release_queue_index.erase(section_key)
+
+
+func _complete_source_install_release(section_key: Vector3i, receipt: Dictionary,
+		candidate: Dictionary, queue_replay: bool) -> void:
+	if not _release_receipt_identity_matches(
+		_production_candidate_receipts.get(section_key, {}), receipt):
+		return
+	_installed_receipts.erase(section_key)
+	_production_candidate_receipts.erase(section_key)
+	_pending_source_acknowledgements.erase(section_key)
+	_untrack_translucent_visible_section(section_key)
+	if queue_replay and not _dirty_source_sections.has(section_key) \
+			and not _replay_reassembly_required_by_section.has(section_key) \
+			and not _production_candidate_jobs.has(section_key):
+		var current_candidate: Dictionary = _production_candidates_by_section.get(
+			section_key, candidate)
+		if not current_candidate.is_empty():
+			_production_candidate_jobs[section_key] = {
+				"candidate":current_candidate, "session":null,
+				"stage":"unload_replay"}
+
+
+static func _release_receipt_identity_matches(a_value: Variant, b_value: Variant) -> bool:
+	if not a_value is Dictionary or not b_value is Dictionary:
+		return false
+	var a: Dictionary = a_value
+	var b: Dictionary = b_value
+	for key: String in ["worldId", "sectionKey", "generation", "contentManifestDigest",
+			"ownerCell", "backendInstanceId", "chunkInstanceId"]:
+		if a.get(key) != b.get(key):
+			return false
+	return true
 
 
 ## Production admission path: recapture the complete authority roster on every
@@ -1013,7 +1614,12 @@ func reset_for_world(world_id: String) -> Dictionary:
 		return _failed("invalid_world_identity")
 	if not _active_boundary.is_empty() or not _boundary_queue.is_empty() \
 			or not _active_replay.is_empty() or not _replay_queue.is_empty() \
+			or not _pending_frame_presentations.is_empty() \
 			or not _production_candidate_jobs.is_empty() \
+			or not _installed_receipts.is_empty() \
+			or not _production_candidate_receipts.is_empty() \
+			or not _pending_source_acknowledgements.is_empty() \
+			or not _pending_source_releases.is_empty() \
 			or not _visible_section_demands.is_empty():
 		return _failed("world_reset_has_pending_section_work")
 	_world_id = world_id
@@ -1021,11 +1627,24 @@ func reset_for_world(world_id: String) -> Dictionary:
 	_source_roster = SourceRoster.new()
 	_generation = 0
 	_production_candidate_generation = 0
+	_translucent_camera_position = Vector3.ZERO
+	_has_translucent_camera_snapshot = false
 	_committed_candidates.clear()
 	_installed_receipts.clear()
 	_production_candidates_by_section.clear()
 	_production_candidate_jobs.clear()
 	_production_candidate_receipts.clear()
+	_pending_source_acknowledgements.clear()
+	_pending_source_releases.clear()
+	_pending_source_release_order.clear()
+	_pending_source_release_queue_index.clear()
+	_pending_source_release_free_slots.clear()
+	_pending_source_release_cursor = 0
+	_translucent_visible_sections.clear()
+	_translucent_visible_section_set.clear()
+	_translucent_visible_scan_cursor = 0
+	_replay_pov_waiting_revision_by_section.clear()
+	_replay_reassembly_required_by_section.clear()
 	_visible_sections_by_source_id.clear()
 	_dirty_source_sections.clear()
 	_visible_section_demands.clear()
@@ -1085,11 +1704,10 @@ func submit_prepared_segment(boundary_id: String, segment: Dictionary) -> Dictio
 ## there is no externally cancellable half-promoted state.
 func cancel_boundary(boundary_id: String) -> Dictionary:
 	if String(_active_boundary.get("boundaryId", "")) == boundary_id:
-		var session = _active_boundary.get("installSession")
-		if session is RefCounted and session.has_method("cancel"):
-			session.cancel()
+		var cancelled := _cancel_active_boundary("explicit_cancel")
+		if cancelled.get("status") != "cancelled":
+			return cancelled
 		_ledger.abort_boundary(boundary_id)
-		_active_boundary.clear()
 		_census_digest_by_boundary.erase(boundary_id)
 		return {"status":"cancelled", "boundaryId":boundary_id}
 	for index in range(_boundary_queue.size()):
@@ -1175,7 +1793,7 @@ func advance_boundary(current_source_revisions: Dictionary,
 		var session = _active_boundary.get("installSession")
 		if session == null:
 			var started: Dictionary = PacketOwner.begin_static_section_install(
-				replacement, material_bindings, mesh_bindings)
+				replacement, material_bindings, mesh_bindings, self)
 			if started.get("status") == "pending":
 				return {"status":"pending_owner", "reason":started.get("reason", ""),
 					"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
@@ -1185,7 +1803,38 @@ func advance_boundary(current_source_revisions: Dictionary,
 				return _abort_active(String(started.get("reason", "section_install_begin_failed")))
 			_active_boundary.installSession = started.session
 			session = started.session
-		var step: Dictionary = session.advance(max_upload_units)
+		var pov_state := _current_translucent_pov_revision_for_candidate(
+			replacement, section_key)
+		if pov_state.get("status") != "ready":
+			if String(session.get("state")) == "awaiting_frame":
+				var unavailable_pov_step: Dictionary = session.advance(max_upload_units, -1)
+				if unavailable_pov_step.get("status") == "rollback_failed":
+					_active_boundary["stage"] = "rollback_failed"
+					_active_boundary["rollbackFailure"] = unavailable_pov_step.duplicate(true)
+					return {"status":"rollback_failed", "stage":"rollback",
+						"boundaryId":boundary_id, "sectionKey":section_key,
+						"reason":String(unavailable_pov_step.get("reason", "")),
+						"rollback":unavailable_pov_step.get("rollback", {}),
+						"retryable":true}
+				if unavailable_pov_step.get("status") == "failed" \
+						and String(unavailable_pov_step.get("reason", "")) \
+							== "section_translucent_pov_revision_stale":
+					var pov_abort := _abort_active("section_translucent_pov_revision_stale")
+					pov_abort["requiresResubmit"] = true
+					pov_abort["sectionKey"] = section_key
+					return pov_abort
+			return {"status":"pending", "stage":"translucent_pov",
+				"reason":String(pov_state.get("reason", "translucent_camera_snapshot_unavailable")),
+				"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
+		var step: Dictionary = session.advance(max_upload_units,
+			int(pov_state.get("revision", -1)))
+		if step.get("status") == "pending_presentation":
+			if not bool(step.get("frameDrawn", false)):
+				return {"status":"pending", "stage":"awaiting_frame",
+					"reason":"section_candidate_waiting_for_frame_drawn_callback",
+					"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
+			step = session.finalize_presentation(
+				String(step.get("presentationToken", "")))
 		if step.get("status") == "pending":
 			return {"status":"pending", "stage":String(step.get("stage", "section_install")),
 				"reason":String(step.get("reason", "")), "boundaryId":boundary_id,
@@ -1193,9 +1842,21 @@ func advance_boundary(current_source_revisions: Dictionary,
 		if step.get("status") != "installed":
 			var reason := String(step.get("reason", "section_install_failed"))
 			if reason == "section_install_owner_replaced":
+				if step.get("rollback", {}).get("status") != "cancelled":
+					_active_boundary["stage"] = "rollback_failed"
+					_active_boundary["rollbackFailure"] = step.duplicate(true)
+					return {"status":"rollback_failed", "stage":"rollback",
+						"reason":"owner_replaced_without_rollback_acknowledgement",
+						"boundaryId":boundary_id, "sectionKey":section_key,
+						"rollback":step.get("rollback", {}), "retryable":true}
 				_active_boundary.installSession = null
 				return {"status":"pending_owner", "reason":reason,
 					"boundaryId":boundary_id, "sectionKey":section_key, "retryable":true}
+			if reason == "section_translucent_pov_revision_stale":
+				var stale_pov := _abort_active(reason)
+				stale_pov["requiresResubmit"] = true
+				stale_pov["sectionKey"] = section_key
+				return stale_pov
 			return _abort_active(reason)
 		var receipt: Dictionary = step.get("receipt", {})
 		if not _receipt_is_live(replacement, receipt):
@@ -1219,7 +1880,8 @@ func notify_stream_chunk_unloaded(owner_cell: Vector2i, chunk_instance_id := 0) 
 	var queued := 0
 	for section_value: Variant in _committed_candidates:
 		var section_key: Vector3i = section_value
-		if SectionGrid.chunk_key_for_section(section_key) != owner_cell:
+		if _production_candidates_by_section.has(section_key) \
+				or SectionGrid.chunk_key_for_section(section_key) != owner_cell:
 			continue
 		var receipt: Dictionary = _installed_receipts.get(section_key, {})
 		if chunk_instance_id > 0 and int(receipt.get("chunkInstanceId", 0)) not in [0, chunk_instance_id]:
@@ -1241,18 +1903,76 @@ func notify_stream_chunk_unloaded(owner_cell: Vector2i, chunk_instance_id := 0) 
 		var job: Dictionary = _production_candidate_jobs.get(section_key, {})
 		var session = job.get("session")
 		if session is RefCounted and session.has_method("cancel"):
-			session.cancel()
+			var cancelled: Dictionary = session.cancel()
+			if cancelled.get("status") != "cancelled":
+				job["stage"] = "rollback_failed"
+				job["rollbackFailure"] = cancelled.duplicate(true)
+				_production_candidate_jobs[section_key] = job
+				queued += 1
+				continue
 		_production_candidate_jobs.erase(section_key)
-		_production_candidate_receipts.erase(section_key)
+		if _pending_source_releases.has(section_key):
+			var pending_release: Dictionary = _pending_source_releases[section_key]
+			pending_release["reloadPending"] = false
+			_pending_source_releases[section_key] = pending_release
+			queued += 1
+			continue
+		if production_receipt.is_empty():
+			_pending_source_acknowledgements.erase(section_key)
+			_untrack_translucent_visible_section(section_key)
+		else:
+			var candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
+			var provider_coverage: Array = candidate.get("providerCoverage", [])
+			var receipt_for_release := production_receipt.duplicate(true)
+			receipt_for_release.make_read_only()
+			var release_result: Dictionary = _source_roster.release_section_install(
+				section_key, provider_coverage, receipt_for_release) \
+				if not provider_coverage.is_empty() else {"status":"acknowledged"}
+			_queue_source_install_release(section_key, candidate,
+				receipt_for_release, release_result, owner_cell, chunk_instance_id)
 		queued += 1
 	return queued
+
+
+## Main may remove a native renderer owner only after stream invalidation has
+## acknowledged every pending rollback and the stable dispatcher no longer
+## retains a callback token for that exact owner identity.
+func request_stream_chunk_owner_retirement(owner_cell: Vector2i,
+		chunk_instance_id := 0) -> Dictionary:
+	var queued := notify_stream_chunk_unloaded(owner_cell, chunk_instance_id)
+	for section_value: Variant in _production_candidate_jobs:
+		if not section_value is Vector3i \
+				or SectionGrid.chunk_key_for_section(Vector3i(section_value)) != owner_cell:
+			continue
+		if String(_production_candidate_jobs[section_value].get("stage", "")) == "rollback_failed":
+			return {"status":"rollback_failed", "ownerMustBeRetained":true,
+				"ownerCell":owner_cell, "chunkInstanceId":chunk_instance_id,
+				"sectionKey":section_value,
+				"rollbackFailure":_production_candidate_jobs[section_value].get("rollbackFailure", {}),
+				"queuedWorkCount":queued}
+	for token_value: Variant in _pending_frame_presentations:
+		var record: Dictionary = _pending_frame_presentations[token_value]
+		var session: Variant = record.get("session", null)
+		if not session is RefCounted or not is_instance_valid(session) \
+				or session.get("_owner_cell") != owner_cell:
+			continue
+		if chunk_instance_id > 0 and int(session.get("_chunk_id")) != chunk_instance_id:
+			continue
+		return {"status":"pending", "reason":"section_frame_callback_drain_pending",
+			"ownerCell":owner_cell, "chunkInstanceId":chunk_instance_id,
+			"presentationToken":String(token_value), "queuedWorkCount":queued,
+			"retryable":true}
+	return {"status":"ready", "ownerCell":owner_cell,
+		"chunkInstanceId":chunk_instance_id, "queuedWorkCount":queued}
 
 
 func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 	var queued := 0
 	for section_value: Variant in _committed_candidates:
 		var section_key: Vector3i = section_value
-		if SectionGrid.chunk_key_for_section(section_key) == owner_cell \
+		if not _production_candidates_by_section.has(section_key) \
+				and SectionGrid.chunk_key_for_section(section_key) == owner_cell \
+				and not _replay_reassembly_required_by_section.has(section_key) \
 				and not _dirty_source_sections.has(section_key):
 			_queue_replay(section_key)
 			queued += 1
@@ -1260,7 +1980,14 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 		if not section_value is Vector3i:
 			continue
 		var section_key: Vector3i = section_value
-		if SectionGrid.chunk_key_for_section(section_key) != owner_cell \
+		if SectionGrid.chunk_key_for_section(section_key) != owner_cell:
+			continue
+		var pending_release: Dictionary = _pending_source_releases.get(section_key, {})
+		if not pending_release.is_empty():
+			pending_release["reloadPending"] = true
+			_pending_source_releases[section_key] = pending_release
+			continue
+		if _replay_reassembly_required_by_section.has(section_key) \
 				or _dirty_source_sections.has(section_key) \
 				or _production_candidate_receipts.has(section_key) \
 				or _production_candidate_jobs.has(section_key):
@@ -1273,6 +2000,13 @@ func notify_stream_chunk_loaded(owner_cell: Vector2i) -> int:
 
 
 func request_section_replay(section_key: Vector3i) -> bool:
+	if _pending_source_releases.has(section_key):
+		var pending_release: Dictionary = _pending_source_releases[section_key]
+		pending_release["reloadPending"] = true
+		_pending_source_releases[section_key] = pending_release
+		return false
+	if _replay_reassembly_required_by_section.has(section_key):
+		return _promote_replay_reassembly_to_visible_demand(section_key)
 	if _dirty_source_sections.has(section_key):
 		return false
 	if _production_candidates_by_section.has(section_key):
@@ -1293,10 +2027,9 @@ func cancel_section_replay(section_key: Vector3i) -> Dictionary:
 	if not _committed_candidates.has(section_key):
 		return _failed("section_replay_candidate_missing")
 	if not _active_replay.is_empty() and _active_replay.get("sectionKey") == section_key:
-		var session = _active_replay.get("installSession")
-		if session is RefCounted and session.has_method("cancel"):
-			session.cancel()
-		_active_replay.clear()
+		var cancelled := _cancel_active_replay("explicit_cancel")
+		if cancelled.get("status") != "cancelled":
+			return cancelled
 	if _replay_set.has(section_key):
 		_replay_set.erase(section_key)
 		_replay_queue.erase(section_key)
@@ -1313,17 +2046,44 @@ func advance_replay(current_source_revisions: Dictionary,
 	if not _active_boundary.is_empty():
 		return {"status":"busy", "reason":"boundary_install_in_progress"}
 	if not _active_replay.is_empty():
+		var active_section: Vector3i = _active_replay.get("sectionKey", Vector3i.ZERO)
+		if _replay_reassembly_required_by_section.has(active_section):
+			var cancelled := _cancel_active_replay("authoritative_reassembly")
+			if cancelled.get("status") != "cancelled":
+				return cancelled
+			var queued_reassembly := _promote_replay_reassembly_to_visible_demand(
+				active_section)
+			return {"status":"pending", "stage":"authoritative_reassembly",
+				"sectionKey":active_section,
+				"reason":"stale_replay_candidate_requires_provider_recapture",
+				"reassemblyDemandQueued":queued_reassembly, "retryable":true}
 		return _advance_replay_session(current_source_revisions,
 			expected_contributors_by_section, material_bindings, mesh_bindings,
 			max_upload_units)
 	while not _replay_queue.is_empty():
 		var section_key: Vector3i = _replay_queue.pop_front()
 		_replay_set.erase(section_key)
+		if _replay_reassembly_required_by_section.has(section_key):
+			_promote_replay_reassembly_to_visible_demand(section_key)
+			return {"status":"pending", "stage":"authoritative_reassembly",
+				"sectionKey":section_key,
+				"reason":"stale_replay_candidate_requires_provider_recapture",
+				"retryable":true}
 		if _dirty_source_sections.has(section_key):
 			continue
 		if not _committed_candidates.has(section_key):
 			continue
 		var candidate: Dictionary = _committed_candidates[section_key]
+		if _replay_pov_waiting_revision_by_section.has(section_key):
+			var blocked_revision := int(_replay_pov_waiting_revision_by_section[section_key])
+			var current_pov := current_translucent_pov_snapshot(section_key)
+			if current_pov.get("status") != "ready" \
+					or int(current_pov.get("revision", -1)) == blocked_revision:
+				_queue_replay(section_key)
+				return {"status":"pending", "stage":"translucent_pov",
+					"reason":"section_replay_waiting_for_translucent_pov_change",
+					"sectionKey":section_key, "retryable":true}
+			_replay_pov_waiting_revision_by_section.erase(section_key)
 		var check := _validate_candidate_census([candidate],
 			expected_contributors_by_section, current_source_revisions)
 		if check.get("status") != "ready":
@@ -1342,15 +2102,76 @@ func advance_replay(current_source_revisions: Dictionary,
 
 func has_pending_work() -> bool:
 	return not _active_boundary.is_empty() or not _boundary_queue.is_empty() \
-		or not _active_replay.is_empty() or not _replay_queue.is_empty()
+		or not _active_replay.is_empty() or not _replay_queue.is_empty() \
+		or not _pending_source_acknowledgements.is_empty() \
+		or not _pending_source_releases.is_empty() \
+		or not _production_candidate_jobs.is_empty() \
+		or _pending_visible_section_demand_count() > 0
+
+
+func _pending_visible_section_demand_count() -> int:
+	var pending := 0
+	for state_value: Variant in _visible_section_demands.values():
+		if not state_value is Dictionary:
+			continue
+		var stage := String(state_value.get("stage", ""))
+		if stage in ["waiting", "candidate_queued", "candidate_pending"]:
+			pending += 1
+	return pending
+
+
+func _active_replay_reassembly_demand_count() -> int:
+	var active := 0
+	for section_key_value: Variant in _replay_reassembly_required_by_section.keys():
+		if not section_key_value is Vector3i:
+			continue
+		var demand: Dictionary = _visible_section_demands.get(section_key_value, {})
+		if String(demand.get("stage", "")) in ["waiting", "candidate_queued",
+				"candidate_pending"]:
+			active += 1
+	return active
 
 
 func status() -> Dictionary:
+	var next_ack_frame := -1
+	for pending_value: Variant in _pending_source_acknowledgements.values():
+		if not pending_value is Dictionary:
+			continue
+		var retry_frame := int(pending_value.get("nextAttemptFrame", 0))
+		if next_ack_frame < 0 or retry_frame < next_ack_frame:
+			next_ack_frame = retry_frame
+	var next_release_frame := -1
+	for pending_value: Variant in _pending_source_releases.values():
+		if not pending_value is Dictionary:
+			continue
+		var retry_frame := int(pending_value.get("nextAttemptFrame", 0))
+		if next_release_frame < 0 or retry_frame < next_release_frame:
+			next_release_frame = retry_frame
+	var demand_stages := {"waiting":0, "candidate_queued":0,
+		"candidate_pending":0, "installed":0, "blocked":0}
+	for state_value: Variant in _visible_section_demands.values():
+		if not state_value is Dictionary:
+			continue
+		var stage := String(state_value.get("stage", ""))
+		if demand_stages.has(stage):
+			demand_stages[stage] = int(demand_stages[stage]) + 1
 	return {"status":"busy" if has_pending_work() else "idle", "worldId":_world_id,
 		"queuedBoundaries":_boundary_queue.size(),
 		"activeBoundaryId":String(_active_boundary.get("boundaryId", "")),
 		"queuedReplaySections":_replay_queue.size(),
 		"activeReplaySection":_active_replay.get("sectionKey"),
+		"replayAwaitingAuthoritativeReassemblyCount":_replay_reassembly_required_by_section.size(),
+		"activeReplayReassemblyDemandCount":_active_replay_reassembly_demand_count(),
+		"productionCandidateJobCount":_production_candidate_jobs.size(),
+		"visibleSectionDemandCount":_visible_section_demands.size(),
+		"pendingVisibleSectionDemandCount":_pending_visible_section_demand_count(),
+		"queuedVisibleSectionDemandCount":_pending_visible_section_demand_count(),
+		"physicalVisibleDemandQueueRows":_visible_section_demand_count,
+		"visibleSectionDemandStages":demand_stages,
+		"pendingSourceAcknowledgementCount":_pending_source_acknowledgements.size(),
+		"nextSourceAcknowledgementFrame":next_ack_frame,
+		"pendingSourceReleaseCount":_pending_source_releases.size(),
+		"nextSourceReleaseFrame":next_release_frame,
 		"committedSourcePartIds":_ledger.committed_source_part_ids(),
 		"committedSectionCount":_committed_candidates.size()}
 
@@ -1384,22 +2205,32 @@ func _advance_replay_session(current_source_revisions: Dictionary,
 	var candidate: Dictionary = _active_replay.candidate
 	var section_key: Vector3i = _active_replay.sectionKey
 	if _dirty_source_sections.has(section_key):
-		var stale_replay_session = _active_replay.get("installSession")
-		if stale_replay_session is RefCounted and stale_replay_session.has_method("cancel"):
-			stale_replay_session.cancel()
-		_active_replay.clear()
+		var dirty_cancel := _cancel_active_replay("dirty_source")
+		if dirty_cancel.get("status") != "cancelled":
+			return dirty_cancel
 		return {"status":"deferred_dirty", "reason":"section_has_dirty_source",
 			"sectionKey":section_key, "retryable":true}
 	var current_check := _validate_candidate_census([candidate],
 		expected_contributors_by_section, current_source_revisions)
 	if current_check.get("status") != "ready":
-		_active_replay.clear()
+		var census_cancel := _cancel_active_replay("source_census_changed")
+		if census_cancel.get("status") != "cancelled":
+			return census_cancel
 		return {"status":"failed", "reason":current_check.get("reason", "stale_section_replay_source"),
 			"sectionKey":section_key}
+	if _replay_reassembly_required_by_section.has(section_key):
+		var reassembly_cancel := _cancel_active_replay("authoritative_reassembly")
+		if reassembly_cancel.get("status") != "cancelled":
+			return reassembly_cancel
+		_promote_replay_reassembly_to_visible_demand(section_key)
+		return {"status":"pending", "stage":"authoritative_reassembly",
+			"sectionKey":section_key,
+			"reason":"stale_replay_candidate_requires_provider_recapture",
+			"retryable":true}
 	var session = _active_replay.get("installSession")
 	if session == null:
 		var started: Dictionary = PacketOwner.begin_static_section_install(
-			candidate, material_bindings, mesh_bindings)
+			candidate, material_bindings, mesh_bindings, self)
 		if started.get("status") == "pending":
 			return {"status":"pending_owner", "sectionKey":section_key,
 				"reason":started.get("reason", ""), "retryable":true}
@@ -1412,22 +2243,77 @@ func _advance_replay_session(current_source_revisions: Dictionary,
 			return _failed(String(started.get("reason", "section_replay_begin_failed")))
 		_active_replay.installSession = started.session
 		session = started.session
-	var step: Dictionary = session.advance(max_upload_units)
+	var pov_state := _current_translucent_pov_revision_for_candidate(
+		candidate, section_key)
+	if pov_state.get("status") != "ready":
+		if String(session.get("state")) == "awaiting_frame":
+			var unavailable_pov_step: Dictionary = session.advance(max_upload_units, -1)
+			if unavailable_pov_step.get("status") == "rollback_failed":
+				_active_replay["stage"] = "rollback_failed"
+				_active_replay["rollbackFailure"] = unavailable_pov_step.duplicate(true)
+				return {"status":"rollback_failed", "stage":"rollback",
+					"sectionKey":section_key,
+					"reason":String(unavailable_pov_step.get("reason", "")),
+					"rollback":unavailable_pov_step.get("rollback", {}),
+					"retryable":true}
+			if unavailable_pov_step.get("status") == "failed" \
+					and String(unavailable_pov_step.get("reason", "")) \
+						== "section_translucent_pov_revision_stale":
+				var unavailable_pov_cancel := _cancel_active_replay("translucent_pov_unavailable")
+				if unavailable_pov_cancel.get("status") != "cancelled":
+					return unavailable_pov_cancel
+				return _defer_stale_replay_to_authoritative_reassembly(section_key, -1)
+		return {"status":"pending", "stage":"translucent_pov",
+			"reason":String(pov_state.get("reason", "translucent_camera_snapshot_unavailable")),
+			"sectionKey":section_key, "retryable":true}
+	var step: Dictionary = session.advance(max_upload_units,
+		int(pov_state.get("revision", -1)))
+	if step.get("status") == "pending_presentation":
+		if not bool(step.get("frameDrawn", false)):
+			return {"status":"pending", "sectionKey":section_key,
+				"stage":"awaiting_frame",
+				"reason":"section_candidate_waiting_for_frame_drawn_callback",
+				"retryable":true}
+		step = session.finalize_presentation(
+			String(step.get("presentationToken", "")))
 	if step.get("status") == "pending":
 		return {"status":"pending", "sectionKey":section_key,
 			"stage":step.get("stage", "section_replay"),
 			"reason":step.get("reason", ""), "retryable":true}
+	if step.get("status") == "rollback_failed":
+		_active_replay["stage"] = "rollback_failed"
+		_active_replay["rollbackFailure"] = step.duplicate(true)
+		return {"status":"rollback_failed", "stage":"rollback",
+			"sectionKey":section_key, "reason":String(step.get("reason", "")),
+			"rollback":step.get("rollback", {}), "retryable":true}
 	if step.get("status") != "installed":
 		var reason := String(step.get("reason", "section_replay_failed"))
 		if reason == "section_install_owner_replaced":
+			if step.get("rollback", {}).get("status") != "cancelled":
+				_active_replay["stage"] = "rollback_failed"
+				_active_replay["rollbackFailure"] = step.duplicate(true)
+				return {"status":"rollback_failed", "stage":"rollback",
+					"sectionKey":section_key,
+					"reason":"owner_replaced_without_rollback_acknowledgement",
+					"rollback":step.get("rollback", {}), "retryable":true}
 			_active_replay.installSession = null
 			return {"status":"pending_owner", "sectionKey":section_key,
 				"reason":reason, "retryable":true}
-		_active_replay.clear()
+		if reason == "section_translucent_pov_revision_stale":
+			var pov_cancel := _cancel_active_replay("stale_translucent_pov")
+			if pov_cancel.get("status") != "cancelled":
+				return pov_cancel
+			var stale_pov_snapshot := current_translucent_pov_snapshot(section_key)
+			return _defer_stale_replay_to_authoritative_reassembly(section_key,
+				int(stale_pov_snapshot.get("revision", -1)) \
+				if stale_pov_snapshot.get("status") == "ready" else -1)
+		var failure_cancel := _cancel_active_replay("replay_failed")
+		if failure_cancel.get("status") != "cancelled":
+			return failure_cancel
 		return _failed(reason)
 	var receipt: Dictionary = step.get("receipt", {})
 	if not _receipt_is_live(candidate, receipt):
-		_active_replay.installSession = null
+		_active_replay["stage"] = "owner_replaced"
 		return {"status":"pending_owner", "sectionKey":section_key,
 			"reason":"section_replay_receipt_owner_changed", "retryable":true}
 	_installed_receipts[section_key] = receipt
@@ -1533,11 +2419,26 @@ func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
 			or int(receipt.get("generation", 0)) != int(candidate.get("generation", 0)) \
 			or String(receipt.get("contentManifestDigest", "")) != String(candidate.get("contentManifestDigest", "")):
 		return false
-	var section_key: Vector3i = candidate.sectionKey
+	return _section_receipt_source_revision_is_current(candidate, receipt) \
+		and _receipt_backend_matches_candidate(candidate, receipt)
+
+
+func _receipt_backend_matches_candidate(candidate: Dictionary, receipt: Dictionary) -> bool:
+	if receipt.is_empty() or not receipt.is_read_only() \
+			or receipt.get("status") != "installed" \
+			or String(receipt.get("worldId", "")) != String(candidate.get("worldId", "")) \
+			or receipt.get("sectionKey") != candidate.get("sectionKey") \
+			or int(receipt.get("generation", 0)) != int(candidate.get("generation", 0)) \
+			or String(receipt.get("contentManifestDigest", "")) != String(candidate.get("contentManifestDigest", "")):
+		return false
+	var section_value: Variant = candidate.get("sectionKey", null)
+	if not section_value is Vector3i:
+		return false
+	var section_key := Vector3i(section_value)
 	var owner_cell := SectionGrid.chunk_key_for_section(section_key)
 	if receipt.get("ownerCell") != owner_cell:
 		return false
-	var current: Dictionary = PacketOwner.resolve_existing_static_section_backend(owner_cell)
+	var current: Dictionary = _resolve_existing_static_section_backend(owner_cell)
 	if current.get("status") != "ready":
 		return false
 	var backend: Node = current.backend as Node
@@ -1549,7 +2450,7 @@ func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
 		return false
 	var source_id := InstallSession.slot_id(_world_id, section_key)
 	var generation := int(candidate.generation)
-	var source_revision := "%s:%d" % [_world_id, generation]
+	var source_revision := String(receipt.get("sourceRevision", ""))
 	var digest := String(candidate.contentManifestDigest)
 	if not backend.has_method("receipt_installed") \
 			or not bool(backend.call("receipt_installed", source_id, generation, source_revision, digest)):
@@ -1562,15 +2463,176 @@ func _receipt_is_live(candidate: Dictionary, receipt: Dictionary) -> bool:
 		and String(installed.get("packetDigest", "")) == digest
 
 
+func _resolve_existing_static_section_backend(owner_cell: Vector2i) -> Dictionary:
+	return PacketOwner.resolve_existing_static_section_backend(owner_cell)
+
+
 func installed_section_receipt_is_current(section_key: Vector3i,
 		receipt: Dictionary) -> bool:
 	var candidate: Dictionary = _production_candidates_by_section.get(section_key, {})
 	var current_receipt: Dictionary = _production_candidate_receipts.get(section_key, {})
-	return not candidate.is_empty() and not current_receipt.is_empty() \
-		and int(current_receipt.get("generation", 0)) == int(receipt.get("generation", -1)) \
-		and String(current_receipt.get("contentManifestDigest", "")) \
-			== String(receipt.get("contentManifestDigest", "")) \
+	if candidate.is_empty() or current_receipt.is_empty() or receipt.is_empty():
+		return false
+	for identity_key: String in ["worldId", "sectionKey", "generation",
+			"censusDigest", "contentManifestDigest", "sourceRevision",
+			"translucentPovRevision", "backendInstanceId", "chunkInstanceId", "ownerCell"]:
+		if current_receipt.get(identity_key) != receipt.get(identity_key):
+			return false
+	return int(current_receipt.get("generation", 0)) == int(candidate.get("generation", -1)) \
 		and _receipt_is_live(candidate, current_receipt)
+
+
+## Exact startup diagnostic join. The caller supplies section keys from one
+## compiled tree source; this method never scans unrelated sections or jobs.
+func startup_source_install_diagnostics(source_id: String,
+		section_keys: Array[Vector3i], expected_source_revision := "") -> Dictionary:
+	var sections: Array[Dictionary] = []
+	for section_key: Vector3i in section_keys:
+		var job: Dictionary = _production_candidate_jobs.get(section_key, {})
+		var installed: Dictionary = _production_candidates_by_section.get(section_key, {})
+		var queued_candidate: Dictionary = job.get("candidate", {})
+		var candidate: Dictionary = queued_candidate if not queued_candidate.is_empty() else installed
+		var queued_source_revisions := _section_candidate_source_revisions(queued_candidate)
+		var installed_source_revisions := _section_candidate_source_revisions(installed)
+		var queued_source_present := queued_source_revisions.has(source_id)
+		var installed_source_present := installed_source_revisions.has(source_id)
+		var queued_source_revision := String(queued_source_revisions.get(source_id, ""))
+		var installed_source_revision := String(installed_source_revisions.get(source_id, ""))
+		var candidate_source_revision := queued_source_revision if not queued_candidate.is_empty() \
+			else installed_source_revision
+		var source_present := queued_source_present or installed_source_present
+		var receipt: Dictionary = _production_candidate_receipts.get(section_key, {})
+		var receipt_installed_current := installed_source_present and not receipt.is_empty() \
+			and installed_section_receipt_is_current(section_key, receipt)
+		var receipt_source_revision := String(receipt.get("sourceRevision", ""))
+		var receipt_revision_matches_candidate := receipt_installed_current \
+			and receipt_source_revision == installed_source_revision
+		var queued_matches_installed := queued_candidate.is_empty() \
+			or queued_source_revision == installed_source_revision
+		var revision_matches := receipt_revision_matches_candidate and queued_matches_installed
+		if not expected_source_revision.is_empty():
+			revision_matches = candidate_source_revision == expected_source_revision
+		var receipt_current := receipt_revision_matches_candidate \
+			and (expected_source_revision.is_empty() \
+				or installed_source_revision == expected_source_revision) \
+			and queued_matches_installed
+		var revision_mismatch_reason := ""
+		if not expected_source_revision.is_empty() and not revision_matches:
+			revision_mismatch_reason = "candidate_source_revision_mismatch"
+		elif not queued_matches_installed:
+			revision_mismatch_reason = "queued_candidate_source_revision_mismatch"
+		elif not receipt_revision_matches_candidate:
+			revision_mismatch_reason = "receipt_source_revision_mismatch"
+		var pending_ack: Dictionary = _pending_source_acknowledgements.get(section_key, {})
+		var pending_candidate: Dictionary = pending_ack.get("candidate", {})
+		var pending_source := _section_candidate_source_revisions(pending_candidate).has(source_id)
+		var pending_release: Dictionary = _pending_source_releases.get(section_key, {})
+		var admitted := queued_source_present or installed_source_present
+		sections.append({"sectionKey":section_key,
+			"candidateJobStage":String(job.get("stage", "")),
+			"sourcePresentInCandidate":source_present,
+			"queuedSourceRevision":queued_source_revision,
+			"installedSourceRevision":installed_source_revision,
+			"admitted":admitted,
+			"expectedSourceRevision":expected_source_revision,
+			"candidateSourceRevision":candidate_source_revision,
+			"queuedRevisionMatchesInstalled":queued_matches_installed,
+			"receiptSourceRevision":receipt_source_revision,
+			"receiptRevisionMatchesInstalledCandidate":receipt_revision_matches_candidate,
+			"sourceRevisionMatch":revision_matches,
+			"sourceRevisionComparison":"expected_source_revision" \
+				if not expected_source_revision.is_empty() else "receipt_to_installed_candidate",
+			"sourceRevisionMismatchReason":revision_mismatch_reason,
+			"candidateGeneration":int(candidate.get("generation", 0)),
+			"receiptInstalledCurrent":receipt_installed_current,
+			"receiptCurrent":receipt_current,
+			"receiptGeneration":int(receipt.get("generation", 0)),
+			"sourceAckPending":pending_source,
+			"sourceAckResult":String(pending_ack.get("lastResult", {}).get("status", "")),
+			"sourceReleasePending":not pending_release.is_empty(),
+			"sourceReleaseResult":String(pending_release.get("lastResult", {}).get("status", "")),
+			"sourceReleaseNextAttemptFrame":int(pending_release.get("nextAttemptFrame", -1))})
+	return {"sourceId":source_id, "sections":sections,
+		"querySectionCount":section_keys.size(), "exactSectionQuery":true,
+		"status":"unresolved_no_compiled_sections" if section_keys.is_empty() else "queried"}
+
+
+func _candidate_translucent_pov_revision(candidate: Dictionary) -> int:
+	var envelope: Variant = candidate.get("candidate", candidate)
+	if not envelope is Dictionary:
+		return -1
+	var snapshot: Variant = envelope.get("snapshot", null)
+	if not snapshot is Dictionary:
+		return -1
+	var batches: Variant = snapshot.get("batches", null)
+	if not batches is Dictionary:
+		return -2
+	var expected_revision := -1
+	for batch_value: Variant in batches.values():
+		if not batch_value is Dictionary \
+				or String(batch_value.get("renderLayer", "")) != "translucent":
+			continue
+		var descriptor: Variant = batch_value.get("translucentSortDescriptor", null)
+		if not descriptor is Dictionary:
+			return -2
+		var revision := int(descriptor.get("povRevision", -1))
+		if revision <= 0 or (expected_revision > 0 and expected_revision != revision):
+			return -2
+		expected_revision = revision
+	return expected_revision
+
+
+func _current_translucent_pov_revision_for_candidate(candidate: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	var expected_revision := _candidate_translucent_pov_revision(candidate)
+	if expected_revision == -2:
+		return {"status":"failed", "reason":"candidate_translucent_pov_descriptor_invalid"}
+	if expected_revision == -1:
+		return {"status":"ready", "revision":-1}
+	var snapshot := current_translucent_pov_snapshot(section_key)
+	if snapshot.get("status") != "ready":
+		return snapshot
+	return {"status":"ready", "revision":int(snapshot.get("revision", -1)),
+		"candidateRevision":expected_revision}
+
+
+func _section_receipt_source_revision_is_current(candidate: Dictionary,
+		receipt: Dictionary) -> bool:
+	var section_value: Variant = candidate.get("sectionKey", null)
+	var generation_value: Variant = candidate.get("generation", null)
+	if not section_value is Vector3i or not generation_value is int:
+		return false
+	var expected_pov_revision := _candidate_translucent_pov_revision(candidate)
+	if expected_pov_revision == -2:
+		return false
+	if not _section_receipt_source_revision_matches_candidate(candidate, receipt):
+		return false
+	if expected_pov_revision <= 0:
+		return true
+	var pov_snapshot := current_translucent_pov_snapshot(Vector3i(section_value))
+	return pov_snapshot.get("status") == "ready" \
+		and int(pov_snapshot.get("revision", -1)) == expected_pov_revision
+
+
+func _section_receipt_source_revision_matches_candidate(candidate: Dictionary,
+		receipt: Dictionary) -> bool:
+	var section_value: Variant = candidate.get("sectionKey", null)
+	var generation_value: Variant = candidate.get("generation", null)
+	if not section_value is Vector3i or not generation_value is int:
+		return false
+	var expected_pov_revision := _candidate_translucent_pov_revision(candidate)
+	if expected_pov_revision == -2:
+		return false
+	var receipt_pov_value: Variant = receipt.get("translucentPovRevision", null)
+	var expected_source_revision := "%s:%d" % [String(candidate.get("worldId", "")),
+		int(generation_value)]
+	if expected_pov_revision > 0:
+		if not receipt_pov_value is int or int(receipt_pov_value) != expected_pov_revision:
+			return false
+		expected_source_revision += ":pov:%d" % expected_pov_revision
+	elif receipt_pov_value != null:
+		return false
+	return String(receipt.get("sourceRevision", "")) == expected_source_revision
 
 
 func _promote_active_boundary(current_source_revisions: Dictionary,
@@ -1610,6 +2672,7 @@ func _promote_active_boundary(current_source_revisions: Dictionary,
 		var section_key: Vector3i = replacement.sectionKey
 		_committed_candidates[section_key] = replacement
 		_installed_receipts[section_key] = _active_boundary.receipts[section_key]
+		_replay_pov_waiting_revision_by_section.erase(section_key)
 		_replay_set.erase(section_key)
 		_replay_queue.erase(section_key)
 	_active_boundary.clear()
@@ -1621,12 +2684,11 @@ func _promote_active_boundary(current_source_revisions: Dictionary,
 
 func _unsupported_active(reason: String) -> Dictionary:
 	var boundary_id := String(_active_boundary.get("boundaryId", ""))
-	var session = _active_boundary.get("installSession")
-	if session is RefCounted and session.has_method("cancel"):
-		session.cancel()
+	var cancelled := _cancel_active_boundary("unsupported:" + reason)
+	if cancelled.get("status") != "cancelled":
+		return cancelled
 	if not boundary_id.is_empty():
 		_ledger.abort_boundary(boundary_id)
-	_active_boundary.clear()
 	return {"status":"unsupported", "reason":reason,
 		"boundaryId":boundary_id, "retryable":false, "requiresResubmit":true}
 
@@ -1635,13 +2697,30 @@ func _abort_active(reason: String) -> Dictionary:
 	if _active_boundary.is_empty():
 		return _failed(reason)
 	var boundary_id := String(_active_boundary.get("boundaryId", ""))
-	var session = _active_boundary.get("installSession")
-	if session is RefCounted and session.has_method("cancel"):
-		session.cancel()
+	var cancelled := _cancel_active_boundary("abort:" + reason)
+	if cancelled.get("status") != "cancelled":
+		return cancelled
 	if not boundary_id.is_empty():
 		_ledger.abort_boundary(boundary_id)
-	_active_boundary.clear()
 	return {"status":"failed", "reason":reason, "boundaryId":boundary_id}
+
+
+func _cancel_active_boundary(context: String) -> Dictionary:
+	if _active_boundary.is_empty():
+		return {"status":"cancelled"}
+	var boundary_id := String(_active_boundary.get("boundaryId", ""))
+	var session = _active_boundary.get("installSession")
+	if session is RefCounted and session.has_method("cancel"):
+		var cancelled: Dictionary = session.cancel()
+		if cancelled.get("status") != "cancelled":
+			_active_boundary["stage"] = "rollback_failed"
+			_active_boundary["rollbackFailure"] = cancelled.duplicate(true)
+			return {"status":"rollback_failed", "stage":"rollback",
+				"reason":"active_section_boundary_rollback_failed",
+				"context":context, "boundaryId":boundary_id,
+				"rollback":cancelled, "retryable":true}
+	_active_boundary.clear()
+	return {"status":"cancelled", "boundaryId":boundary_id}
 
 
 func _queue_replay(section_key: Vector3i) -> void:
@@ -1652,15 +2731,70 @@ func _queue_replay(section_key: Vector3i) -> void:
 	_replay_queue.append(section_key)
 
 
-func _cancel_stale_replay_for_section(section_key: Vector3i) -> void:
+func _promote_replay_reassembly_to_visible_demand(section_key: Vector3i) -> bool:
+	var state: Dictionary = _visible_section_demands.get(section_key, {})
+	if state.is_empty():
+		return false
+	state.erase("candidateGeneration")
+	state.erase("pendingCandidateStage")
+	state.erase("blockedReason")
+	state.erase("continuationHint")
+	state["stage"] = "waiting"
+	state["urgentRecompile"] = true
+	state["priority"] = 0.0
+	state["attempts"] = 0
+	state["nextAttemptFrame"] = Engine.get_process_frames()
+	state["lastWakeReason"] = "stale_replay_requires_authoritative_reassembly"
+	if not bool(state.get("queued", false)):
+		_enqueue_visible_section_demand(section_key, state)
+	_visible_section_demands[section_key] = state
+	return true
+
+
+func _defer_stale_replay_to_authoritative_reassembly(section_key: Vector3i,
+		current_pov_revision: int) -> Dictionary:
+	_replay_pov_waiting_revision_by_section.erase(section_key)
+	_replay_reassembly_required_by_section[section_key] = {
+		"requiredAfterPovRevision":current_pov_revision,
+		"requestedFrame":Engine.get_process_frames()}
+	_replay_set.erase(section_key)
+	_replay_queue.erase(section_key)
+	var demand_queued := _promote_replay_reassembly_to_visible_demand(section_key)
+	return {"status":"pending", "stage":"authoritative_reassembly",
+		"reason":"stale_replay_candidate_requires_provider_recapture",
+		"sectionKey":section_key, "currentPovRevision":current_pov_revision,
+		"requiresAuthoritativeReassembly":true,
+		"reassemblyDemandQueued":demand_queued, "retryable":true}
+
+
+func _cancel_stale_replay_for_section(section_key: Vector3i) -> Dictionary:
 	if not _active_replay.is_empty() and _active_replay.get("sectionKey") == section_key:
-		var session = _active_replay.get("installSession")
-		if session is RefCounted and session.has_method("cancel"):
-			session.cancel()
-		_active_replay.clear()
+		var cancelled := _cancel_active_replay("authoritative_source_invalidation")
+		if cancelled.get("status") != "cancelled":
+			return cancelled
+	_replay_pov_waiting_revision_by_section.erase(section_key)
 	if _replay_set.has(section_key):
 		_replay_set.erase(section_key)
 		_replay_queue.erase(section_key)
+	return {"status":"cancelled", "sectionKey":section_key}
+
+
+func _cancel_active_replay(context: String) -> Dictionary:
+	if _active_replay.is_empty():
+		return {"status":"cancelled"}
+	var section_value: Variant = _active_replay.get("sectionKey", null)
+	var session = _active_replay.get("installSession")
+	if session is RefCounted and session.has_method("cancel"):
+		var cancelled: Dictionary = session.cancel()
+		if cancelled.get("status") != "cancelled":
+			_active_replay["stage"] = "rollback_failed"
+			_active_replay["rollbackFailure"] = cancelled.duplicate(true)
+			return {"status":"rollback_failed", "stage":"rollback",
+				"reason":"active_section_replay_rollback_failed",
+				"context":context, "sectionKey":section_value,
+				"rollback":cancelled, "retryable":true}
+	_active_replay.clear()
+	return {"status":"cancelled", "sectionKey":section_value}
 
 
 func _valid_revision_map(value: Dictionary) -> bool:

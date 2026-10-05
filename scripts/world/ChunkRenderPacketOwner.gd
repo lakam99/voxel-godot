@@ -74,7 +74,8 @@ static func resolve_existing_static_section_backend(owner_cell: Vector2i) -> Dic
 
 
 static func begin_static_section_install(candidate: Dictionary,
-		material_bindings: Dictionary, mesh_bindings: Dictionary) -> Dictionary:
+		material_bindings: Dictionary, mesh_bindings: Dictionary,
+		frame_callback_coordinator: Object = null) -> Dictionary:
 	if not candidate.is_read_only() or not candidate.get("sectionKey") is Vector3i:
 		return {"status":"failed", "reason":"invalid_section_candidate_header"}
 	var owner_cell: Vector2i = SectionGrid.chunk_key_for_section(candidate.sectionKey)
@@ -83,7 +84,7 @@ static func begin_static_section_install(candidate: Dictionary,
 		return owner
 	var session = SectionInstallSession.new()
 	var begun: Dictionary = session.begin(owner.backend, owner.chunk, candidate,
-		material_bindings, mesh_bindings)
+		material_bindings, mesh_bindings, frame_callback_coordinator)
 	if begun.get("status") != "begun":
 		return begun
 	return {"status":"ready", "session":session,

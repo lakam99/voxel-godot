@@ -1,4 +1,4 @@
-﻿extends "res://scripts/MainInterface.gd"
+extends "res://scripts/MainInterface.gd"
 
 signal startup_loading_step(message)
 signal startup_loading_progress(message, completed, total)
@@ -32,6 +32,8 @@ const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
 const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
+const MAX_STARTUP_PENDING_TREE_VISUAL_ROWS := 4096
+const MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS := 512
 const STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS := 1.6
 const STARTUP_PROP_REQUIRED_FULL_BUDGET_MS := 4.8
 # The pinned startup queue's largest observed slice was 2.756ms. Reserve that
@@ -122,13 +124,66 @@ var temp_noise: FastNoiseLite
 var chunk_root: Node3D
 var static_section_render_root: Node3D
 var static_section_render_owners: Dictionary = {}
+var static_section_owner_demand_cells: Dictionary = {}
 
-func clear_static_section_render_owners() -> void:
+func _notify_static_section_owner_unloaded(owner_cell: Vector2i, owner: Node3D) -> Dictionary:
+    if world_static_section_coordinator == null:
+        return {"status":"ready", "ownerCell":owner_cell}
+    if not is_instance_valid(world_static_section_coordinator):
+        return {"status":"failed", "reason":"section_owner_coordinator_invalid",
+            "ownerCell":owner_cell, "ownerMustBeRetained":true}
+    var owner_instance_id := owner.get_instance_id() if is_instance_valid(owner) else 0
+    if world_static_section_coordinator.has_method("request_stream_chunk_owner_retirement"):
+        return world_static_section_coordinator.call("request_stream_chunk_owner_retirement",
+            owner_cell, owner_instance_id)
+    return {"status":"failed", "reason":"section_owner_retirement_ack_unavailable",
+        "ownerCell":owner_cell, "ownerMustBeRetained":true}
+
+func _notify_static_section_owner_loaded(owner_cell: Vector2i) -> void:
+    if world_static_section_coordinator == null \
+            or not is_instance_valid(world_static_section_coordinator) \
+            or not world_static_section_coordinator.has_method("notify_stream_chunk_loaded"):
+        return
+    world_static_section_coordinator.call("notify_stream_chunk_loaded", owner_cell)
+
+func retire_static_section_render_owner(owner_cell: Vector2i) -> bool:
+    var owner: Node3D = static_section_render_owners.get(owner_cell) as Node3D
+    if not is_instance_valid(owner):
+        var stale_retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, null)
+        if stale_retirement.get("status") != "ready":
+            return false
+        static_section_render_owners.erase(owner_cell)
+        return true
+    # Invalidate the exact renderer receipt before its backend subtree is
+    # retired. Immutable section candidates remain in the coordinator for replay.
+    var retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, owner)
+    if retirement.get("status") != "ready":
+        owner.set_meta("static_section_owner_retirement", retirement.duplicate(true))
+        return false
+    if owner.has_meta("static_section_owner_retirement"):
+        owner.remove_meta("static_section_owner_retirement")
+    static_section_render_owners.erase(owner_cell)
+    owner.queue_free()
+    return true
+
+func clear_static_section_render_owners() -> bool:
+    var registered_cells: Array = static_section_render_owners.keys()
     for owner_value: Variant in static_section_render_owners.keys():
-        var owner: Node3D = static_section_render_owners[owner_value] as Node3D
-        if is_instance_valid(owner):
-            owner.queue_free()
+        if not retire_static_section_render_owner(Vector2i(owner_value)):
+            return false
+    # A lost owner registry entry must not leave a renderer receipt alive across
+    # world reset. Registered cells above were invalidated with their exact
+    # owner identity; demand-only cells have no node identity to report.
+    for owner_value: Variant in static_section_owner_demand_cells.keys():
+        var owner_cell := Vector2i(owner_value)
+        if registered_cells.has(owner_cell):
+            continue
+        var retirement: Dictionary = _notify_static_section_owner_unloaded(owner_cell, null)
+        if retirement.get("status") != "ready":
+            return false
     static_section_render_owners.clear()
+    static_section_owner_demand_cells.clear()
+    return true
 var block_root: Node3D
 var prop_root: Node3D
 var water: MeshInstance3D
@@ -508,6 +563,7 @@ func _run_deferred_startup_boot() -> void:
     static_section_render_root.name = "StaticSectionOwners"
     add_child(static_section_render_root)
     static_section_render_owners.clear()
+    static_section_owner_demand_cells.clear()
     prop_root = Node3D.new()
     prop_root.name = "Props"
     add_child(prop_root)
@@ -1019,11 +1075,16 @@ func begin_startup_loading_timeline() -> void:
 func startup_loading_yield(message: String, domain := "general", status := "pending", metrics := {}) -> void:
     # Main/native processing can be disabled during staged seed reset. Keep
     # old publication work draining without dispatching against a partial world.
+    var loading_section_publication: Dictionary = {}
     if not shutdown_requested:
         if structure_system != null:
             structure_system.advance_citadel_publication()
         if streaming_active:
             apply_streaming_region_demand()
+        if has_method("advance_loading_visible_section_publication"):
+            var publication_value: Variant = call("advance_loading_visible_section_publication")
+            if publication_value is Dictionary:
+                loading_section_publication = publication_value
     # Local-light rigs can be published while the regular gameplay process is
     # disabled. Apply the same visibility and shadow budgets during loading so
     # newly prepared structures cannot turn a loading frame into an unbounded
@@ -1041,6 +1102,8 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     if normalized_status == "":
         normalized_status = "pending"
     var normalized_metrics: Dictionary = metrics.duplicate(true) if metrics is Dictionary else {}
+    if not loading_section_publication.is_empty():
+        normalized_metrics["visibleSectionPublication"] = loading_section_publication
     startup_work_progress.observe(normalized_domain, normalized_status, normalized_metrics, now_usec)
     var timeline_row := {
         "message": message,
@@ -1832,6 +1895,8 @@ func wait_for_initial_region_readiness() -> Dictionary:
         return StartupReadinessResultScript.failed("initial_region_demand_missing")
     var started := Time.get_ticks_msec()
     var state: Dictionary = {}
+    var final_readiness_request_id := -1
+    var final_readiness_bounds := Rect2i()
     while float(Time.get_ticks_msec()-started)/1000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if not apply_streaming_region_demand():
@@ -1841,8 +1906,10 @@ func wait_for_initial_region_readiness() -> Dictionary:
             call("process_streaming_structure_work")
             advance_startup_prop_sources()
         advance_visible_world_prop_manifest()
+        final_readiness_request_id = int(streaming_requests.get("player", -1))
+        final_readiness_bounds = streaming_request_foreground_bounds.get("player", Rect2i())
         state = world_streaming.initial_physical_readiness(
-            streaming_request_foreground_bounds.player, int(streaming_requests.get("player", -1)))
+            final_readiness_bounds, final_readiness_request_id)
         if state.status == "ready" and streaming_source_handoff_complete():
             var structure_visual: Dictionary = submit_initial_structure_visual_readiness()
             state["structureVisual"] = structure_visual
@@ -1853,7 +1920,7 @@ func wait_for_initial_region_readiness() -> Dictionary:
                 await startup_loading_yield("Finishing nearby structure visuals", "initial_structure_visual", "pending", structure_visual)
                 continue
             var full_gameplay_state: Dictionary = world_streaming.region_readiness(
-                streaming_request_foreground_bounds.player, int(streaming_requests.get("player", -1)))
+                final_readiness_bounds, final_readiness_request_id)
             full_gameplay_state["structureVisual"] = structure_visual
             if full_gameplay_state.get("status") == "ready":
                 await startup_loading_yield("Nearby world ready", "initial_region", "ready", full_gameplay_state)
@@ -1885,7 +1952,317 @@ func wait_for_initial_region_readiness() -> Dictionary:
                 "pendingCount":owner.get("pendingCount",0),
                 "byKind":owner.get("byKind",{})}
         await startup_loading_yield("Preparing nearby world", "initial_region", "pending", progress)
+    state["pendingVisualTreeCandidates"] = startup_pending_tree_visual_diagnostics(
+        final_readiness_request_id, final_readiness_bounds)
     return StartupReadinessResultScript.failed("initial_region_readiness_timeout", {}, state.get("missing",[]), state)
+
+
+## Startup telemetry only: takes a bounded snapshot of pending tree-foliage
+## candidates and joins live tree publication work without changing readiness.
+func startup_pending_tree_visual_diagnostics(request_id: int, bounds: Rect2i) -> Dictionary:
+    var result := {"limit": MAX_STARTUP_PENDING_TREE_VISUAL_ROWS,
+        "rows": [], "capped": false,
+        "bounds": [bounds.position.x, bounds.position.y, bounds.size.x, bounds.size.y],
+        "sourcesInspected": 0, "candidatesInspected": 0,
+        "sourceInspectionLimit": 0, "candidateInspectionLimit": 0,
+        "sourceSnapshotReason": "", "matchingCount": 0, "pendingCount": 0,
+        "countsComplete": false, "rowsTruncated": false}
+    var runtime = get("voxel_terrain_runtime")
+    if request_id <= 0 or not bounds.has_area() or not is_instance_valid(runtime) \
+            or not runtime.has_method("visible_mesh_world_revision"):
+        result["reason"] = "visual_tree_diagnostics_authority_unavailable"
+        return result
+    var world_revision := String(runtime.call("visible_mesh_world_revision"))
+    var source_snapshot: Dictionary = {"rows":[], "sourcesInspected":0,
+        "candidatesInspected":0, "sourceInspectionLimit":0,
+        "candidateInspectionLimit":0, "truncated":false, "truncationReason":"",
+        "matchingCount":0, "pendingCount":0,
+        "matchingCountComplete":false, "pendingCountComplete":false}
+    if visible_world_demand_controller != null \
+            and visible_world_demand_controller.has_owner("player") \
+            and visible_world_demand_controller.has_method(
+                "pending_representation_diagnostic_snapshot"):
+        source_snapshot = visible_world_demand_controller.call(
+            "pending_representation_diagnostic_snapshot", "player", request_id, seed_text,
+            world_revision, MAX_STARTUP_PENDING_TREE_VISUAL_ROWS, "trees_foliage", bounds)
+    elif visible_world_readiness != null and is_instance_valid(visible_world_readiness) \
+            and visible_world_view_revision > 0 \
+            and visible_world_readiness.has_method("pending_candidate_diagnostic_snapshot"):
+        source_snapshot = visible_world_readiness.call("pending_candidate_diagnostic_snapshot",
+            request_id, seed_text, world_revision, visible_world_view_revision,
+            bounds, MAX_STARTUP_PENDING_TREE_VISUAL_ROWS, "trees_foliage")
+    else:
+        result["reason"] = "visual_tree_diagnostics_ledger_unavailable"
+        return result
+    result["sourcesInspected"] = int(source_snapshot.get("sourcesInspected", 0))
+    result["candidatesInspected"] = int(source_snapshot.get("candidatesInspected", 0))
+    result["sourceInspectionLimit"] = int(source_snapshot.get("sourceInspectionLimit", 0))
+    result["candidateInspectionLimit"] = int(source_snapshot.get("candidateInspectionLimit", 0))
+    result["capped"] = bool(source_snapshot.get("truncated", false))
+    result["truncationReason"] = String(source_snapshot.get("truncationReason", ""))
+    result["sourceSnapshotReason"] = String(source_snapshot.get("reason", ""))
+    result["matchingCount"] = int(source_snapshot.get("matchingCount", 0))
+    result["pendingCount"] = int(source_snapshot.get("pendingCount", 0))
+    result["countsComplete"] = bool(source_snapshot.get("matchingCountComplete", false)) \
+        and bool(source_snapshot.get("pendingCountComplete", false))
+    result["rowsTruncated"] = bool(source_snapshot.get("rowsTruncated", false))
+    result["matchingCountComplete"] = bool(source_snapshot.get("matchingCountComplete", false))
+    result["pendingCountComplete"] = bool(source_snapshot.get("pendingCountComplete", false))
+    var source_rows: Array = source_snapshot.get("rows", [])
+    var tree_source_rows: Array[Dictionary] = []
+    for source_value in source_rows:
+        if source_value is Dictionary \
+                and String((source_value as Dictionary).get("kind", "")) == "trees_foliage":
+            tree_source_rows.append(source_value)
+    if tree_source_rows.is_empty():
+        result["candidateCount"] = int(source_snapshot.get("pendingCount", 0))
+        return result
+    var queue = get("tree_publication_queue")
+    var tree_ids: Array[String] = []
+    for source_row: Dictionary in tree_source_rows:
+        tree_ids.append(String(source_row.get("candidateId", "")))
+    var queue_diagnostics := _startup_tree_queue_diagnostics(queue, tree_ids)
+    var queue_rows_by_tree_id: Dictionary = queue_diagnostics.get("byTreeId", {})
+    result["treeQueueRecordsInspected"] = int(queue_diagnostics.get("inspectedRecords", 0))
+    result["treeQueueScanCapped"] = bool(queue_diagnostics.get("scanCapped", false))
+    var section_compiler_diagnostics: Dictionary = queue_diagnostics.get("sectionCompiler", {
+        "status":"unavailable", "reason":"tree_section_compiler_diagnostics_missing"}).duplicate(true)
+    var exact_tree_stage_diagnostics: Dictionary = queue_diagnostics.get("exactTreeStages", {})
+    var active_compiler_candidate_id := String(
+        section_compiler_diagnostics.get("activeCandidateId", ""))
+    var active_candidate_matches_pending := not active_compiler_candidate_id.is_empty() \
+        and tree_ids.has(active_compiler_candidate_id)
+    section_compiler_diagnostics["activeCandidateMatchesPendingTreeRows"] = \
+        active_candidate_matches_pending
+    section_compiler_diagnostics["activeCandidateRelevance"] = \
+        "matched_pending_tree_row" if active_candidate_matches_pending else ( \
+            "active_candidate_outside_pending_tree_rows" if not active_compiler_candidate_id.is_empty() \
+            else "no_active_candidate")
+    result["sectionCompiler"] = section_compiler_diagnostics
+    var rows: Array = []
+    for source_row: Dictionary in tree_source_rows:
+        var row: Dictionary = {
+            "sourceId": String(source_row.get("sourceId", "")),
+            "sourceIdentity": String(source_row.get("sourceIdentity", "")),
+            "sourceRevision": String(source_row.get("sourceRevision", "")),
+            "candidateId": String(source_row.get("candidateId", "")),
+            "kind": String(source_row.get("kind", "")),
+            "requiredTier": String(source_row.get("requiredTier", "")),
+            "sourceCandidateRenderable": bool(source_row.get("sourceCandidateRenderable", false)),
+            "treeVisualState": String(source_row.get("treeVisualState", "")),
+            "treeRenderLodTier": String(source_row.get("treeRenderLodTier", "")),
+            "candidateFailed": bool(source_row.get("candidateFailed", false)),
+            "candidateFailureReason": String(source_row.get("candidateFailureReason", "")),
+            "receipt": {"tier": String(source_row.get("receiptTier", "")),
+                "representationId": String(source_row.get("representationId", "")),
+                "sourceIdentity": String(source_row.get("receiptSourceIdentity", "")),
+                "sourceRevision": String(source_row.get("receiptSourceRevision", "")),
+                "worldRevision": String(source_row.get("receiptWorldRevision", "")),
+                "viewRevision": int(source_row.get("receiptViewRevision", -1)),
+                "publisherInstanceId": int(source_row.get("receiptPublisherInstanceId", 0)),
+                "validatorMethod": String(source_row.get("receiptValidatorMethod", "")),
+                "ownerInstanceId": int(source_row.get("receiptOwnerInstanceId", 0)),
+                "representationInstanceId": int(source_row.get("receiptRepresentationInstanceId", 0)),
+                "current": bool(source_row.get("receiptCurrent", false)),
+                "missing": bool(source_row.get("receiptMissing", true))}}
+        var candidate_id := String(row.candidateId)
+        var queue_rows: Array = queue_rows_by_tree_id.get(candidate_id, [])
+        row["queue"] = queue_rows.duplicate(true)
+        row["queueJoinStatus"] = "matched" if not queue_rows.is_empty() \
+            else "not_found_scan_capped" if bool(queue_diagnostics.get("scanCapped", false)) \
+            else "no_live_queue_record"
+        var exact_by_id: Dictionary = exact_tree_stage_diagnostics.get("byPropId", {})
+        var exact_stages: Dictionary = exact_by_id.get(candidate_id, {})
+        row["exactTreeStageJoin"] = exact_stages.duplicate(true)
+        var revision_join: Dictionary = exact_stages.get("revisionJoin", {})
+        var expected_source_revision := ""
+        var acknowledged_revision: Dictionary = exact_stages.get("section_acknowledged", {})
+        if bool(acknowledged_revision.get("ownerIdentityCurrent", false)):
+            expected_source_revision = String(acknowledged_revision.get("sourceRevision", ""))
+        if revision_join.get("status") != "matched":
+            expected_source_revision = ""
+        row["expectedSectionSourceRevision"] = expected_source_revision
+        row["expectedSectionSourceRevisionDomain"] = \
+            "acknowledged_tree_source_revision" if not expected_source_revision.is_empty() else "unavailable"
+        var has_exact_section_lifecycle := false
+        for exact_stage: String in ["section_recipe_input", "section_compiled", "section_prepared"]:
+            if not exact_stages.get(exact_stage, []).is_empty():
+                has_exact_section_lifecycle = true
+                break
+        if exact_stages.has("section_acknowledged"):
+            has_exact_section_lifecycle = true
+        if queue_rows.is_empty() and has_exact_section_lifecycle:
+            row["queueJoinStatus"] = "matched_exact_section_lifecycle"
+        var coordinator: Variant = get("world_static_section_coordinator")
+        if is_instance_valid(coordinator) and coordinator.has_method("startup_source_install_diagnostics"):
+            var source_id := String(source_row.get("sourceId", ""))
+            var section_keys: Array[Vector3i] = []
+            for compiled_value: Variant in exact_stages.get("section_compiled", []):
+                if not compiled_value is Dictionary:
+                    continue
+                for section_value: Variant in compiled_value.get("sectionKeys", []):
+                    if section_value is Vector3i and not section_keys.has(section_value):
+                        section_keys.append(section_value)
+            for prepared_value: Variant in exact_stages.get("section_prepared", []):
+                if not prepared_value is Dictionary:
+                    continue
+                for section_value: Variant in prepared_value.get("sectionKeys", []):
+                    if section_value is Vector3i and not section_keys.has(section_value):
+                        section_keys.append(section_value)
+            var acknowledged: Dictionary = exact_stages.get("section_acknowledged", {})
+            for section_value: Variant in acknowledged.get("sectionKeys", []):
+                if section_value is Vector3i and not section_keys.has(section_value):
+                    section_keys.append(section_value)
+            section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+                if a.x != b.x: return a.x < b.x
+                if a.y != b.y: return a.y < b.y
+                return a.z < b.z)
+            row["coordinatorInstallJoin"] = coordinator.call(
+                "startup_source_install_diagnostics", source_id, section_keys,
+                expected_source_revision)
+        else:
+            row["coordinatorInstallJoin"] = {"status":"unavailable",
+                "reason":"static_section_coordinator_diagnostic_api_missing"}
+        row["failedReadinessClassification"] = _startup_tree_candidate_readiness_classification(row)
+        row["classificationBasis"] = "ledger_receipt_currentness_validated; source_flags_are_captured_metadata"
+        var chunk_key: Variant = _startup_tree_visual_source_chunk_key(String(row.sourceId))
+        if chunk_key != null:
+            row["chunkKey"] = [chunk_key.x, chunk_key.y]
+            var chunk: Variant = chunks.get(chunk_key)
+            if is_instance_valid(chunk) and chunk is Object:
+                row["chunkInstanceId"] = (chunk as Object).get_instance_id()
+        rows.append(row)
+    result["rows"] = rows
+    result["rowCount"] = rows.size()
+    result["candidateCount"] = int(source_snapshot.get("pendingCount", rows.size()))
+    return result
+
+
+func _startup_tree_candidate_readiness_classification(row: Dictionary) -> String:
+    if bool(row.get("candidateFailed", false)):
+        return "candidate_failed:%s" % String(row.get("candidateFailureReason", "unspecified"))
+    if not bool(row.get("sourceCandidateRenderable", false)):
+        return "source_candidate_not_renderable"
+    var receipt: Dictionary = row.get("receipt", {})
+    if bool(receipt.get("missing", true)):
+        var tree_state := String(row.get("treeVisualState", ""))
+        if not tree_state.is_empty():
+            return "tree_visual_%s_awaiting_current_receipt" % tree_state
+        return "receipt_missing"
+    var required_tier := String(row.get("requiredTier", ""))
+    var observed_tier := String(row.get("treeRenderLodTier", ""))
+    if required_tier == "near" and observed_tier != "near":
+        return "required_near_tier_not_published"
+    return "receipt_validator_reports_not_current"
+
+
+func _startup_tree_visual_source_chunk_key(source_id: String) -> Variant:
+    var parts := source_id.split(":")
+    if parts.size() < 3:
+        return null
+    var coordinates := String(parts[parts.size() - 2]).split(",")
+    if coordinates.size() != 2 or not String(coordinates[0]).is_valid_int() \
+            or not String(coordinates[1]).is_valid_int():
+        return null
+    return Vector2i(int(coordinates[0]), int(coordinates[1]))
+
+
+func _startup_tree_queue_diagnostics(queue: Variant, tree_ids: Array[String]) -> Dictionary:
+    var by_tree_id := {}
+    for tree_id: String in tree_ids:
+        by_tree_id[tree_id] = []
+    if not is_instance_valid(queue):
+        return {"byTreeId": by_tree_id, "inspectedRecords": 0, "scanCapped": false,
+            "sectionCompiler":{"status":"unavailable", "reason":"tree_publication_queue_missing"}}
+    var inspected := 0
+    for record_spec in [
+            ["staged_publication_task", "staged"],
+            ["active_tree_section_compile_record", "section_compile"]]:
+        var record_value: Variant = queue.get(String(record_spec[0]))
+        if record_value is Dictionary and not (record_value as Dictionary).is_empty():
+            _startup_match_tree_queue_record(by_tree_id, record_value, String(record_spec[1]))
+            inspected += 1
+    var active_value: Variant = queue.get("active")
+    if active_value is Array:
+        for task_value in active_value:
+            if inspected >= MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS:
+                break
+            _startup_match_tree_queue_record(by_tree_id, task_value, "active")
+            inspected += 1
+    var pending_value: Variant = queue.get("pending_tasks")
+    if pending_value is Dictionary:
+        var pending_tasks: Dictionary = pending_value
+        for sequence in pending_tasks:
+            if inspected >= MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS:
+                break
+            _startup_match_tree_queue_record(by_tree_id, pending_tasks[sequence], "pending")
+            inspected += 1
+    var completed_value: Variant = queue.get("completed")
+    if completed_value is Array:
+        var completed: Array = completed_value
+        for index in range(int(queue.get("completed_head")), completed.size()):
+            if inspected >= MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS:
+                break
+            if completed[index] is Dictionary and not (completed[index] as Dictionary).is_empty():
+                _startup_match_tree_queue_record(by_tree_id, completed[index], "completed")
+                inspected += 1
+    var exact_tree_stages: Dictionary = {}
+    if queue.has_method("startup_tree_candidate_diagnostics"):
+        var exact_value: Variant = queue.call("startup_tree_candidate_diagnostics", tree_ids)
+        if exact_value is Dictionary:
+            exact_tree_stages = exact_value
+    var compiler_diagnostics: Dictionary = {}
+    if queue.has_method("startup_tree_section_compile_diagnostics"):
+        var compiler_value: Variant = queue.call("startup_tree_section_compile_diagnostics")
+        if compiler_value is Dictionary:
+            compiler_diagnostics = compiler_value
+    else:
+        compiler_diagnostics = {"status":"unavailable",
+            "reason":"tree_section_compiler_diagnostics_api_missing"}
+    return {"byTreeId": by_tree_id, "inspectedRecords": inspected,
+        "scanCapped": inspected >= MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS,
+        "sectionCompiler":compiler_diagnostics,
+        "exactTreeStages":exact_tree_stages}
+
+
+func _startup_match_tree_queue_record(by_tree_id: Dictionary, record_value: Variant,
+        collection_stage: String, fallback_tree_id := "") -> void:
+    if not record_value is Dictionary:
+        return
+    var record: Dictionary = record_value
+    var nested: Dictionary = record.get("record", {}) if record.get("record", {}) is Dictionary else {}
+    var request: Dictionary = record.get("request", {}) if record.get("request", {}) is Dictionary else {}
+    var tree_id := String(request.get("treeId", record.get("propId",
+        nested.get("propId", record.get("treeId", fallback_tree_id)))))
+    if not by_tree_id.has(tree_id):
+        return
+    var body_value: Variant = record.get("body", nested.get("body"))
+    var body: Node
+    if body_value is WeakRef:
+        body = (body_value as WeakRef).get_ref() as Node
+    elif body_value is Node:
+        body = body_value as Node
+    var body_id := int(record.get("bodyInstanceId", nested.get("bodyInstanceId", 0)))
+    var queue_row := {"stage": String(record.get("renderStage", collection_stage)),
+        "queueCollection": collection_stage, "enqueueSequence": int(record.get("enqueueSequence", 0)),
+        "bodyInstanceId": body_id, "bodyLive": is_instance_valid(body)}
+    if is_instance_valid(body):
+        var live_body_id := body.get_instance_id()
+        queue_row["liveBodyInstanceId"] = live_body_id
+        queue_row["ownerIdentityCurrent"] = body_id <= 0 or body_id == live_body_id
+        if body_id <= 0:
+            queue_row["bodyInstanceId"] = live_body_id
+        var parent := body.get_parent()
+        if is_instance_valid(parent):
+            queue_row["ownerParentInstanceId"] = parent.get_instance_id()
+        queue_row["liveTreeVisualState"] = String(body.get_meta("tree_visual_state", ""))
+        queue_row["liveTreeRenderLodTier"] = String(body.get_meta("tree_render_lod_tier", ""))
+        queue_row["sectionValueFailureReason"] = String(
+            body.get_meta("tree_section_value_failure_reason", ""))
+    var rows: Array = by_tree_id[tree_id]
+    if rows.size() < 3:
+        rows.append(queue_row)
+        by_tree_id[tree_id] = rows
 
 func wait_for_initial_visible_world_readiness() -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
@@ -4045,6 +4422,9 @@ func _graceful_quit_deferred(exit_code: int) -> void:
             await wait_for_async_save_before_quit()
         else:
             save_system.save(seed_text, snapshot)
+    var section_presentation_drain: Dictionary = await drain_section_presentations_before_teardown()
+    if not section_presentation_drain.get("drained", false):
+        return
     await wait_for_terrain_workers_before_quit()
     # Streamed structures retire their shared door/resource bindings while the
     # NPC registry still exists. Only then release the navigation owner/map.
@@ -4063,10 +4443,14 @@ func retire_generated_scenes_before_world_reset() -> bool:
             if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
             if not navigation.advance_publication().get("busy",true): break
             await startup_loading_yield("Clearing previous navigation")
+    var section_drain: Dictionary
     if structure_system == null:
         var navigation_ready: bool = navigation == null or navigation.finish_publication_reset()
-        if navigation_ready: clear_static_section_render_owners()
-        return navigation_ready
+        if not navigation_ready: return false
+        section_drain = await drain_section_presentations_before_teardown()
+        if not section_drain.get("drained", false): return false
+        if not clear_static_section_render_owners(): return false
+        return true
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
     deadline = Time.get_ticks_msec() + 30000
@@ -4076,8 +4460,22 @@ func retire_generated_scenes_before_world_reset() -> bool:
         await startup_loading_yield("Clearing previous landmarks")
     var reset_ready: bool = not shutdown_requested \
         and (navigation == null or navigation.finish_publication_reset())
-    if reset_ready: clear_static_section_render_owners()
+    if not reset_ready: return false
+    section_drain = await drain_section_presentations_before_teardown()
+    if not section_drain.get("drained", false): return false
+    if not clear_static_section_render_owners(): return false
     return reset_ready
+
+func drain_section_presentations_before_teardown() -> Dictionary:
+    # Keep a strong world-lifetime reference while the coordinator rolls back
+    # pending promotions and waits for its stable RenderingServer callbacks.
+    var coordinator: Variant = world_static_section_coordinator
+    if coordinator == null or not is_instance_valid(coordinator):
+        return {"status":"ready", "drained":true, "pendingCallbackCount":0}
+    var result: Dictionary = await coordinator.drain_pending_frame_presentations()
+    if not result.get("drained", false):
+        push_error("Static section presentation drain failed; retaining world owners: %s" % result)
+    return result
 
 func wait_for_async_save_before_quit() -> void:
     if save_system == null or not save_system.has_method("has_async_save_pending"):
