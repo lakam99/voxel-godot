@@ -1,6 +1,37 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; 1 of 7 stages is complete (Stage 0); Stages 1–5 are partial and Stage 6 has not started. A tutorial-free headed diagnostic installed the previously mismatched pebble source into section `(-1, 0, 0)` with a current native receipt, then passed terrain edit replacement. A telemetry replay completed the exact fluid proof in seven census attempts; an earlier run took 134 attempts/117.9 seconds, and that outlier remains unexplained. Tree census and contribution now share a resource-aware Mesh/Material/texture and instance-value producer revision; focused tree/ecology contracts pass, and a headed synthetic native fixture cancels a stale staged replacement after resource mutation while retaining the previous root. A fresh-seed tutorial-free live sprint had a complete initial view, then 7 of 324 tree candidates pending after turning; traversal stopped at 42.67 m on a generated-prop capsule collision. Production tree contribution receipts and representative freshness/performance acceptance remain open, alongside legacy per-source visual retirement, complete generated-building membership, live harvest/reload replacement, full terrain collision/fluid/light parity, renderer memory budgets, and exact source-capture epochs.**
+Status: **Active; 1 of 7 stage exits is complete (Stage 0); Stages 1–5 are partial and Stage 6 has not started.** The latest tutorial-free Main gate failed readiness after 120 seconds: 61 of 64 ecology source captures were ready, three were still progressing, 55 of 56 tree preparation jobs were active, and no source manifest or native section install was accepted. The focused tree compiler gate now passes 25/25 checks for role output, cross-section support, stale-owner rejection, cancellation/replay, and work-slice invariance; it does not prove shared candidate installation or gameplay. Live visual/traversal, save/replay, collision/fluid/light parity, and performance exits remain open. The canonical charter has the exact reports, Minecraft 26.2 references, and ordered gates.
+
+**HEAD planner checkpoint — 2026-10-05:** separate leads own ecology contracts, tree geometry ownership, structure-provider coverage, and native/live acceptance audits. Work proceeds in parallel only across non-overlapping lanes; dependencies and stage promotion remain sequential. Focused green contracts and compile smoke are sub-gates, not stage exits; overall acceptance remains 1/7.
+
+**HEAD planner checkpoint — 2026-10-06:** Stage 1, Stage 3, Stage 4 and Stage 5 leads audited independent scopes in parallel. Stage 1 has a world-owned ecology support index and shared capture sessions, but current Main source closure is incomplete. Stage 3 still captures a resident Voxel Tools mesh block, so arbitrary/unloaded SDF sections are not source-proven. Stage 4 has transform-backed Citadel work in the dirty tree; its production shared-candidate/native-receipt and lifecycle proof is being traced. Stage 5's tree compiler contract is green, while production recipe-to-render work remains main-thread budgeted and blocks candidate admission. Minecraft 26.2 validates immutable bounded section inputs, async compile, cancellation, and old-section retention until all render layers upload; the game's variable procedural support closure and smooth terrain remain authoritative. Formal progress is unchanged at **1/7 exits**.
+
+Progress update — 2026-10-05: the ordinary-structure provider now has a clean
+headed native-receipt subgate. Run r6 passed 10/10 checks for one discoverable
+synthetic town member, receipt-backed legacy-visual retirement, retained body
+and collider, and native/backend teardown; its watchdog exited 0 with
+authoritative zero and empty stderr. This is not full generated-building
+coverage or the Stage 4 exit. A separate terrain path audit confirms r12 proves
+a 49-source current native receipt plus terrain-edit replacement, while
+VoxelTools remains the terrain visual/collision publisher; visual parity,
+retirement, collision/fluid/light and save/replay gates remain open. Work is
+being split into independent terrain, ordinary-building, and ecology lead
+scopes; their implementation and engine evidence remain dependency-ordered.
+The [canonical charter](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md)
+records the exact reports, boundaries, and remaining stage exits.
+
+Stage 5 update — the strengthened headed tree-ordering gate did not reach its
+receipt assertions. The fixed-seed tutorial-free Main run stopped at
+`initial_region_readiness_timeout`: 6/44 tree/foliage visuals remained pending,
+with 7/36 resident chunk snapshots missing and no eligible live multi-section
+tree selected. Godot then exited with access violation `3221225477`; owned
+process membership is confirmed empty, but watchdog cleanup failed. The failed
+run is preserved at
+`artifacts/citadel-runtime-integration/ecology-main-tree-section-receipt-20261005-ordering-r2/`.
+This is startup/readiness evidence, not a failed receipt-ordering assertion. Do
+not repeat unchanged; trace the pending tree sources and repair their producer
+or publication owner before retrying. The coordinator unload/replay API also
+has no production Main chunk-load/unload callers, so real replay remains open.
 
 Progress note — 2026-10-05: the full migration remains **1/7 stages complete**;
 Stages 1–5 are partial and Stage 6 has not started. Game commit `b081f2de`
