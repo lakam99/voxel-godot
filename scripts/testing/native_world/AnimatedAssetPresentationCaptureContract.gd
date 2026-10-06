@@ -20,6 +20,15 @@ func run() -> void:
 	check("active_capture_ready", bool(captured.get("ok", false)))
 	check("all_imported_rows_present", (captured.get("assets", []) as Array).size() == registry.asset_ids().size())
 	check("initial_current", registry.presentation_capture_is_current(captured))
+	check("sealed_projection_reused", is_same(captured, registry.capture_active_presentation()) \
+		and captured.is_read_only() and (captured.assets as Array).is_read_only())
+	check("native_v1_identity", String(captured.contentIdentity) == JSON.stringify({
+		"domain":"animated_asset_registry_presentation", "schemaVersion":1,
+		"assets":captured.assets}).sha256_text())
+	check("native_v1_owner_receipt", (captured.ownerReceipt as Dictionary).size() == 3 \
+		and int(captured.ownerReceipt.get("ownerInstanceId", 0)) == registry.get_instance_id() \
+		and int(captured.ownerReceipt.get("revision", 0)) > 0)
+	check("copied_projection_is_not_owner_proof", not registry.presentation_capture_is_current(captured.duplicate(true)))
 	var other_registry = RegistryScript.new()
 	check("other_registry_ready", other_registry.setup())
 	check("cross_registry_receipt_rejected", not other_registry.presentation_capture_is_current(captured))
@@ -33,34 +42,32 @@ func run() -> void:
 	changed_digest.contentIdentity = "tampered"
 	check("copied_identity_tamper_rejected", not registry.presentation_capture_is_current(changed_digest))
 	var first_id: String = registry.asset_ids()[0]
-	registry.assets_by_id[first_id] = (registry.assets_by_id[first_id] as Dictionary).duplicate(true)
-	var active_row: Dictionary = registry.assets_by_id[first_id]
-	var previous_expected: String = String(active_row.expected)
-	active_row.expected = "missing_expected_clip_contract"
-	check("in_place_expected_clip_missing_rejected", not bool(registry.capture_active_presentation().get("ok", false)))
-	check("in_place_expected_clip_invalidates", not registry.presentation_capture_is_current(captured))
-	active_row.expected = previous_expected
-	check("restored_content_current", registry.presentation_capture_is_current(captured))
-	var previous_path: String = String(active_row.path)
-	active_row.path = "res://different.glb"
-	check("in_place_path_mismatch_rejected", not bool(registry.capture_active_presentation().get("ok", false)))
-	active_row.path = previous_path
-	var prior_scene: PackedScene = registry.scene_cache[first_id]
-	registry.scene_cache.erase(first_id)
-	check("partial_import_cache_rejected", not bool(registry.capture_active_presentation().get("ok", false)))
-	registry.scene_cache[first_id] = prior_scene
-	check("restored_cache_current", registry.presentation_capture_is_current(captured))
-	var invalid_root := Node.new()
-	invalid_root.name = "InvalidRoot"
-	var invalid_scene := PackedScene.new()
-	check("invalid_root_scene_packed", invalid_scene.pack(invalid_root) == OK)
-	invalid_root.free()
-	registry.scene_cache[first_id] = invalid_scene
-	active_row.path = ""
-	check("invalid_root_rejected", String(registry.capture_active_presentation().get("reason", "")) == "scene_root_invalid:" + first_id)
-	registry.scene_cache[first_id] = prior_scene
-	active_row.path = previous_path
-	check("restored_after_invalid_root", registry.presentation_capture_is_current(captured))
+	var detached_row: Dictionary = registry.assets_by_id[first_id]
+	detached_row.expected = "missing_expected_clip_contract"
+	detached_row.path = "res://different.glb"
+	var detached_cache: Dictionary = registry.scene_cache
+	detached_cache.erase(first_id)
+	check("detached_edits_preserve_owner", registry.presentation_capture_is_current(captured))
+	var expected := String(registry.asset_definition_copy(first_id).expected)
+	var owner_library: AnimationLibrary = null
+	for resource: Variant in registry._bound_scene_resources.values():
+		if resource is AnimationLibrary and (resource as AnimationLibrary).has_animation(expected):
+			owner_library = resource as AnimationLibrary
+			break
+	check("authoritative_library_found", owner_library != null)
+	if owner_library != null:
+		var original_animation := owner_library.get_animation(expected)
+		owner_library.remove_animation(expected)
+		check("owner_clip_removal_rejects_capture", not bool(registry.capture_active_presentation().get("ok", false)))
+		check("owner_clip_removal_invalidates", not registry.presentation_capture_is_current(captured))
+		check("incomplete_reload_rejected", not registry.setup())
+		check("failed_reload_cannot_revive_projection", not registry.presentation_capture_is_current(captured))
+		check("owner_clip_restored", owner_library.add_animation(expected, original_animation) == OK)
+		check("restoration_requires_republication", not registry.presentation_capture_is_current(captured))
+		check("restored_owner_republished", registry.setup())
+		check("replacement_rejects_old_projection", not registry.presentation_capture_is_current(captured))
+		captured = registry.capture_active_presentation()
+		check("replacement_projection_current", registry.presentation_capture_is_current(captured))
 	registry.loaded = false
 	check("failed_state_rejected", not bool(registry.capture_active_presentation().get("ok", false)))
 	registry.loaded = true

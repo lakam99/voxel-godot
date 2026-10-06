@@ -45,7 +45,9 @@ func run() -> void:
 	main.biome_environment_catalog = biome
 	main.visual_asset_registry = visual
 	main.animated_asset_registry = animated
-	var bundle: Dictionary = BundleScript.capture(main)
+	var owner_bundle: Dictionary = BundleScript.capture(main)
+	check(BundleScript.is_current(main, owner_bundle), "sealed owner current before projection")
+	var bundle: Dictionary = BundleScript.native_admission_projection(main, owner_bundle)
 	check(bool(bundle.get("ok", false)), "coherent owner bundle")
 	check(backend.admit_wildlife_presentation_catalog(bundle).get("status") == "failed", "catalog prerequisites")
 	admit_prerequisites(backend, bundle)
@@ -72,16 +74,25 @@ func run() -> void:
 		and backend.status().get("wildlifePresentationReady") == false
 		and backend.wildlife_presentation_shadow("boar").get("status") == "failed",
 		"presentation identity tamper fails closed")
-	animated.assets_by_id.erase("deer_idle_walk")
-	animated.scene_cache.erase("deer_idle_walk")
-	var fallback_bundle: Dictionary = BundleScript.capture(main)
-	check(bool(fallback_bundle.get("ok", false)), "active missing-deer recapture")
+	# Synthetic native ABI variant: the production registry owns a fixed sealed
+	# manifest. Exercise native fallback without mutating that owner or claiming
+	# this copied input is a live catalog publication.
+	var fallback_bundle: Dictionary = bundle.duplicate(true)
+	var fallback_rows: Array = []
+	for row: Dictionary in fallback_bundle.presentation.assets:
+		if String(row.id) != "deer_idle_walk":
+			fallback_rows.append(row)
+	fallback_bundle.presentation.assets = fallback_rows
+	fallback_bundle.presentation.contentIdentity = JSON.stringify({
+		"domain":"animated_asset_registry_presentation", "schemaVersion":1,
+		"assets":fallback_rows}).sha256_text()
+	check(BundleScript.is_current(main, owner_bundle), "synthetic variant leaves owner current")
 	var fallback: Dictionary = backend.admit_wildlife_presentation_catalog(fallback_bundle)
 	check(fallback.get("status") == "ready", "missing deer admitted: " + str(fallback.get("reason")))
 	check(backend.wildlife_presentation_shadow("deer").get("presentationPath") == "procedural_fallback"
 		and backend.wildlife_presentation_shadow("boar").get("presentationPath") == "animated_playable"
 		and backend.wildlife_presentation_shadow("hare").get("presentationPath") == "animated_playable",
-		"per-variant live fallback parity")
+		"synthetic per-variant native fallback")
 	check(backend.admit_removed_props_tombstones(fallback_bundle.removed).get("status") == "ready"
 		and backend.status().get("wildlifePresentationReady") == false,
 		"removed replacement invalidates presentation")

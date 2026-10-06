@@ -138,7 +138,8 @@ func test_detail_parity(catalog) -> void:
 
 func test_fallback_and_validation(catalog) -> void:
 	var fallback = catalog.profile_for_biome("future_unknown_biome")
-	add_result("unknown_biome_uses_explicit_default_profile", fallback == catalog.profile_for_biome("default") and fallback.biome_id == "default", fallback.biome_id)
+	add_result("unknown_biome_uses_explicit_default_profile", fallback.biome_id == "default" \
+		and catalog.profile_values_for_biome("future_unknown_biome") == catalog.profile_values_for_biome("default"), fallback.biome_id)
 	var duplicate_catalog := CatalogScript.new()
 	var duplicate_ok: bool = duplicate_catalog.setup([
 		"res://resources/visual/biomes/default.tres",
@@ -162,7 +163,8 @@ func test_shared_consumer_injection(catalog) -> void:
 	var registry_ok: bool = registry.setup(catalog)
 	var weather = WeatherSystemScript.new()
 	weather.setup(null, 1492, catalog)
-	add_result("visual_registry_and_weather_share_one_catalog_instance", registry_ok and registry.environment_catalog == catalog and weather.environment_catalog == catalog and registry.profile_for_biome("forest") == catalog.profile_for_biome("forest"), {
+	add_result("visual_registry_and_weather_share_one_catalog_instance", registry_ok and registry.environment_catalog == catalog and weather.environment_catalog == catalog \
+		and registry.profile_for_biome("forest").get("tree_scale") == catalog.profile_values_for_biome("forest").get("tree_scale"), {
 		"registryReady": registry_ok,
 		"assetErrors": registry.last_errors,
 		"profileCount": registry.profile_count()
@@ -174,46 +176,93 @@ func test_generation_receipts() -> void:
 	var initial: Dictionary = first.generation_receipt()
 	var first_ok: bool = first.setup()
 	var ready: Dictionary = first.generation_receipt()
+	var ready_publication: Dictionary = first.published_catalog_snapshot()
 	var failed_ok: bool = first.setup(["res://resources/visual/biomes/does-not-exist.tres"])
 	var failed: Dictionary = first.generation_receipt()
+	var failed_publication: Dictionary = first.published_catalog_snapshot()
 	var recovered_ok: bool = first.setup()
 	var recovered: Dictionary = first.generation_receipt()
-	add_result("catalog_receipt_advances_across_failed_and_recovered_setup", first_ok and not failed_ok and recovered_ok \
-		and int(initial.revision) == 0 and not bool(initial.ready) \
-		and int(ready.revision) == 1 and bool(ready.ready) \
-		and int(failed.revision) == 2 and not bool(failed.ready) \
-		and int(recovered.revision) == 3 and bool(recovered.ready) \
-		and int(initial.owner_id) == int(recovered.owner_id), [initial, ready, failed, recovered])
+	add_result("catalog_receipt_retains_publication_across_failed_reload", first_ok and not failed_ok and recovered_ok \
+		and int(initial.publicationRevision) == 0 and not bool(initial.ready) \
+		and int(ready.publicationRevision) == 1 and bool(ready.ready) \
+		and int(failed.publicationRevision) == 1 and bool(failed.ready) \
+		and int(recovered.publicationRevision) == 2 and bool(recovered.ready) \
+		and int(initial.ownerInstanceId) == int(recovered.ownerInstanceId) \
+		and is_same(ready_publication, failed_publication), {
+		"receipts": [initial, ready, failed, recovered],
+		"readyPublication": _publication_summary(ready_publication),
+		"failedReloadPublication": _publication_summary(failed_publication)
+	})
 	var replacement := CatalogScript.new()
 	var replacement_ok: bool = replacement.setup()
 	var registry := VisualAssetRegistryScript.new()
 	var registry_ok: bool = registry.setup(first)
 	var registry_first: Dictionary = registry.generation_receipt()
+	var first_biome_publication: Dictionary = first.published_catalog_snapshot()
+	var registry_first_publication: Dictionary = registry.published_catalog_snapshot(first_biome_publication)
 	var registry_second_ok: bool = registry.setup(first)
 	var registry_second: Dictionary = registry.generation_receipt()
+	var registry_second_publication: Dictionary = registry.published_catalog_snapshot(first_biome_publication)
 	var registry_replacement_ok: bool = registry.setup(replacement)
 	var registry_replacement: Dictionary = registry.generation_receipt()
-	add_result("registry_receipt_tracks_reload_and_shared_catalog_replacement", replacement_ok and registry_ok and registry_second_ok and registry_replacement_ok \
-		and int(registry_first.revision) == 1 and int(registry_second.revision) == 2 and int(registry_replacement.revision) == 3 \
+	var replacement_biome_publication: Dictionary = replacement.published_catalog_snapshot()
+	var registry_replacement_publication: Dictionary = registry.published_catalog_snapshot(replacement_biome_publication)
+	add_result("registry_publication_tracks_reload_and_shared_catalog_owner_alias", replacement_ok and registry_ok and registry_second_ok and registry_replacement_ok \
+		and int(registry_first.publicationRevision) == 1 and int(registry_second.publicationRevision) == 2 and int(registry_replacement.publicationRevision) == 3 \
 		and bool(registry_first.ready) and bool(registry_second.ready) and bool(registry_replacement.ready) \
-		and int(registry_first.catalog.owner_id) == int(first.get_instance_id()) \
-		and int(registry_replacement.catalog.owner_id) == int(replacement.get_instance_id()) \
-		and registry_replacement.catalog != registry_first.catalog, [registry_first, registry_second, registry_replacement])
+		and String(registry_first_publication.get("status", "")) == "ready" \
+		and String(registry_second_publication.get("status", "")) == "ready" \
+		and is_same(registry_replacement_publication, registry.published_catalog_snapshot(replacement_biome_publication)) \
+		and not is_same(registry_first_publication, registry_replacement_publication) \
+		and String(registry_replacement_publication.get("ownerReceipt", {}).get("biomeContentDigest", "")) \
+			== String(replacement_biome_publication.get("contentDigest", "")), {
+		"registryReceipts": [registry_first, registry_second, registry_replacement],
+		"publications": [_publication_summary(registry_first_publication),
+			_publication_summary(registry_second_publication),
+			_publication_summary(registry_replacement_publication)]
+	})
 	var before_catalog_reload: Dictionary = registry.generation_receipt()
 	var catalog_reload_ok: bool = replacement.setup()
 	var after_catalog_reload: Dictionary = registry.generation_receipt()
-	add_result("registry_receipt_detects_shared_catalog_reload_without_registry_setup", catalog_reload_ok \
-		and int(before_catalog_reload.revision) == int(after_catalog_reload.revision) \
-		and before_catalog_reload.catalog != after_catalog_reload.catalog, [before_catalog_reload, after_catalog_reload])
+	var changed_biome_publication: Dictionary = replacement.published_catalog_snapshot()
+	var rebound_visual_publication: Dictionary = registry.published_catalog_snapshot(changed_biome_publication)
+	add_result("registry_rebinds_to_replaced_biome_publication_alias", catalog_reload_ok \
+		and int(before_catalog_reload.publicationRevision) == int(after_catalog_reload.publicationRevision) \
+		and String(rebound_visual_publication.get("status", "")) == "ready" \
+		and not is_same(registry_replacement_publication, rebound_visual_publication) \
+		and String(rebound_visual_publication.get("contentDigest", "")) \
+			== String(registry_replacement_publication.get("contentDigest", "")), {
+		"registryReceipts": [before_catalog_reload, after_catalog_reload],
+		"previousPublication": _publication_summary(registry_replacement_publication),
+		"publication": _publication_summary(rebound_visual_publication)
+	})
 	registry.disable_asset_for_test("contract_asset")
 	var disabled: Dictionary = registry.generation_receipt()
 	registry.disable_asset_for_test("contract_asset")
 	var disabled_again: Dictionary = registry.generation_receipt()
 	registry.clear_test_disabled_assets()
 	var cleared: Dictionary = registry.generation_receipt()
-	add_result("registry_receipt_tracks_test_asset_filter_mutations", int(disabled.revision) == int(after_catalog_reload.revision) + 1 \
-		and int(disabled_again.revision) == int(disabled.revision) \
-		and int(cleared.revision) == int(disabled.revision) + 1, [disabled, disabled_again, cleared])
+	add_result("registry_receipt_tracks_test_asset_filter_mutations", int(disabled.publicationRevision) == int(after_catalog_reload.publicationRevision) + 1 \
+		and int(disabled_again.publicationRevision) == int(disabled.publicationRevision) \
+		and int(cleared.publicationRevision) == int(disabled.publicationRevision) + 1, [disabled, disabled_again, cleared])
+
+func _publication_summary(publication: Dictionary) -> Dictionary:
+	var receipt: Dictionary = publication.get("ownerReceipt", {})
+	var payload: Dictionary = publication.get("payload", {})
+	var counts := {}
+	for key in ["assets", "families", "disabledIds", "sceneCache", "staticDescriptors"]:
+		var value: Variant = payload.get(key, null)
+		if value is Array:
+			counts[key] = value.size()
+	return {"schema":String(publication.get("schema", "")),
+		"ownerKind":String(publication.get("ownerKind", "")),
+		"status":String(publication.get("status", "")),
+		"contentDigest":String(publication.get("contentDigest", "")),
+		"ownerInstanceId":int(receipt.get("ownerInstanceId", 0)),
+		"publicationRevision":int(receipt.get("publicationRevision", 0)),
+		"biomeContentDigest":String(receipt.get("biomeContentDigest", "")),
+		"resourceCount":(receipt.get("resources", []) as Array).size(),
+		"payloadCounts":counts}
 
 func test_rng_and_source_firewall(catalog) -> void:
 	var control := RandomNumberGenerator.new()

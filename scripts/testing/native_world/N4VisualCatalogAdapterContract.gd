@@ -40,7 +40,9 @@ func run() -> void:
 	main.biome_environment_catalog = biome
 	main.visual_asset_registry = visual
 	main.animated_asset_registry = animated
-	var bundle: Dictionary = BundleScript.capture(main)
+	var owner_bundle: Dictionary = BundleScript.capture(main)
+	check(BundleScript.is_current(main, owner_bundle), "sealed owner current before projection")
+	var bundle: Dictionary = BundleScript.native_admission_projection(main, owner_bundle)
 	check(bool(bundle.get("ok", false)), "coherent owner bundle")
 	check(backend.admit_visual_asset_catalog(bundle).get("status") == "failed", "biome prerequisite")
 	var biome_receipt: Dictionary = backend.admit_biome_environment_catalog(bundle.biome)
@@ -90,55 +92,76 @@ func run() -> void:
 		var selected: Dictionary = backend.select_rock_asset_shadow(case.biome, case.id)
 		check(selected.get("status") == "ready" and selected.get("assetId") == visual.select_rock_asset_id(case.biome, case.id),
 			"registry selection parity: " + str(case))
-	var rock_record: Dictionary = visual.assets_by_id["rock_01"]
-	var original_geometry: Dictionary = rock_record.rockGeometry.duplicate(true)
-	rock_record.rockGeometry.glbSha256 = "0".repeat(64)
-	visual.assets_by_id["rock_01"] = rock_record
-	var stale_file_bundle: Dictionary = BundleScript.capture(main)
-	check(bool(stale_file_bundle.get("ok", false)), "stale rock file recapture constructed")
+	# Synthetic ABI mutations exercise native validation without editing the
+	# registry's detached compatibility views or asserting live publication.
+	var stale_file_bundle: Dictionary = bundle.duplicate(true)
+	for row: Dictionary in stale_file_bundle.visual.assets:
+		if String(row.id) == "rock_01":
+			row.value.rockGeometry.glbSha256 = "0".repeat(64)
+	_refresh_visual_identity(stale_file_bundle)
 	var stale_receipt: Dictionary = backend.admit_visual_asset_catalog(stale_file_bundle)
 	check(stale_receipt.get("status") == "failed"
 		and String(stale_receipt.get("reason", "")).contains("rock GLB bytes differ")
 		and backend.status().get("visualCatalogReady") == false,
-		"same owner recapture with stale rock GLB hash rejects")
-	rock_record.rockGeometry = original_geometry
-	visual.assets_by_id["rock_01"] = rock_record
+		"synthetic stale rock GLB hash rejects")
 	check(backend.admit_visual_asset_catalog(bundle).get("status") == "ready",
-		"valid rock geometry source recovers after rejected recapture")
+		"valid rock geometry source recovers after rejected input")
 	var tampered := bundle.duplicate(true)
 	tampered.visual.contentIdentity = "0".repeat(64)
 	check(backend.admit_visual_asset_catalog(tampered).get("status") == "failed"
 		and backend.status().get("visualCatalogReady") == false
 		and backend.select_rock_asset_shadow("forest", "id").get("status") == "failed",
 		"identity tamper fails closed")
-	var rock_ids: Array = visual.assets_by_family["rock"]
-	rock_ids.append(rock_ids[0])
-	var duplicate_bundle: Dictionary = BundleScript.capture(main)
-	check(bool(duplicate_bundle.get("ok", false)), "duplicate membership recapture")
+	var duplicate_bundle: Dictionary = bundle.duplicate(true)
+	var duplicate_ids: Array = []
+	for family: Dictionary in duplicate_bundle.visual.families:
+		if String(family.family) == "rock":
+			family.orderedIds.append(family.orderedIds[0])
+			duplicate_ids = family.orderedIds
+	_refresh_visual_identity(duplicate_bundle)
 	var duplicate_receipt: Dictionary = backend.admit_visual_asset_catalog(duplicate_bundle)
 	check(duplicate_receipt.get("status") == "ready"
 		and duplicate_receipt.get("nativeCatalogIdentity") != receipt.get("nativeCatalogIdentity"),
-		"duplicate membership changes native catalog")
+		"synthetic duplicate membership changes native catalog")
+	var candidates: Array[String] = []
+	for id: String in duplicate_ids:
+		var asset: Dictionary = visual.assets_by_id[id]
+		var tags: Array = asset.get("biomeTags", [])
+		if tags.is_empty() or tags.has("forest"):
+			candidates.append(id)
+	if candidates.is_empty():
+		for id: String in duplicate_ids:
+			candidates.append(id)
+	candidates.sort()
+	var expected_id := candidates[visual.stable_index("rock:forest:atlas-1492:10,20:3", candidates.size())]
 	var duplicate_selection: Dictionary = backend.select_rock_asset_shadow("forest", "atlas-1492:10,20:3")
 	check(duplicate_selection.get("candidateCount") == 7
-		and duplicate_selection.get("assetId") == visual.select_rock_asset_id("forest", "atlas-1492:10,20:3"),
-		"duplicate membership selection parity")
-	visual.assets_by_id["rock_01"].erase("biomeTags")
-	visual.assets_by_id["rock_01"].erase("boundingBox")
-	var fallback_bundle: Dictionary = BundleScript.capture(main)
-	check(bool(fallback_bundle.get("ok", false)), "active registry fallback recapture")
+		and duplicate_selection.get("assetId") == expected_id,
+		"synthetic duplicate membership ordered selection parity")
+	var fallback_bundle: Dictionary = bundle.duplicate(true)
+	for row: Dictionary in fallback_bundle.visual.assets:
+		if String(row.id) == "rock_01":
+			row.value.erase("biomeTags")
+			row.value.erase("boundingBox")
+	_refresh_visual_identity(fallback_bundle)
 	check(backend.admit_visual_asset_catalog(fallback_bundle).get("status") == "ready",
-		"missing optional registry fields admitted")
+		"synthetic missing optional registry fields admitted")
 	var fallback_selected: Dictionary = backend.select_rock_asset_shadow("future_biome", "id")
-	check(fallback_selected.get("assetId") == visual.select_rock_asset_id("future_biome", "id")
-		and fallback_selected.get("assetSize") == visual.asset_size("rock_01")
+	check(fallback_selected.get("assetId") == "rock_01"
 		and fallback_selected.get("assetSize") == Vector3.ONE,
-		"empty tags and missing size match live registry fallbacks")
+		"synthetic empty tags and missing size use native fallbacks")
+	check(BundleScript.is_current(main, owner_bundle), "synthetic variants leave sealed owner current")
 	var reset_biome: Dictionary = backend.admit_biome_environment_catalog(bundle.biome)
 	check(reset_biome.get("status") == "ready" and backend.status().get("visualCatalogReady") == false,
 		"biome replacement invalidates visual catalog")
 	main.free()
 	finish()
+
+func _refresh_visual_identity(bundle: Dictionary) -> void:
+	var visual: Dictionary = bundle.visual
+	visual.contentIdentity = JSON.stringify({"domain":"visual_asset_registry_active_values",
+		"schemaVersion":1, "assets":visual.assets, "families":visual.families,
+		"disabledIds":visual.disabledIds, "sceneCache":visual.sceneCache}).sha256_text()
 
 func finish() -> void:
 	var path := ProjectSettings.globalize_path("res://artifacts/native-world-backend/n4-visual-catalog-adapter-contract.json")

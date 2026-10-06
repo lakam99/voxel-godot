@@ -3,6 +3,7 @@ extends SceneTree
 const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 const RegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+const ActiveBiomeEnvironmentSnapshotScript := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const ProceduralTreeVisualFactoryScript := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
 const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
@@ -74,6 +75,7 @@ func test_biome_specs(registry) -> void:
 
 func test_registry_independent_runtime_requests(catalog, registry) -> void:
     var builder = TreeRuntimeRequestBuilderScript.new()
+    var catalog_snapshot := ActiveBiomeEnvironmentSnapshotScript.capture(catalog)
     var rows: Array[Dictionary] = []
     var valid := true
     for biome in ["forest", "taiga", "savanna", "plains", "beach"]:
@@ -81,7 +83,8 @@ func test_registry_independent_runtime_requests(catalog, registry) -> void:
         for index in range(12):
             var prop_id := "runtime-request-contract:%s:%d,36" % [biome, index]
             var cell := Vector2i(index * 37 - 190, 36)
-            var direct: Dictionary = builder.build(profile, biome, prop_id, 4.2, cell, "runtime-request-contract")
+            var direct: Dictionary = builder.build(profile, biome, prop_id, 4.2, cell,
+                "runtime-request-contract", catalog_snapshot)
             var via_registry: Dictionary = registry.tree_runtime_spec(biome, prop_id, 4.2, cell, "runtime-request-contract")
             var family := String(direct.get("family", ""))
             var expected_architecture := TreeRuntimeRequestBuilderScript.architecture_for_tree_family(family)

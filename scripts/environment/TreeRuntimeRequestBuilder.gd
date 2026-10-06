@@ -8,6 +8,7 @@ class_name TreeRuntimeRequestBuilder
 
 const TreeEcologySamplerScript := preload("res://scripts/environment/TreeEcologySampler.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const TreeRequestAdmissionScript := preload("res://scripts/environment/TreeRequestAdmission.gd")
 const INVALID_TREE_CELL := Vector2i(2147483647, 2147483647)
 
 var ecology_sampler = TreeEcologySamplerScript.new()
@@ -18,7 +19,8 @@ func build(
 	prop_id: String,
 	fallback_height := 4.0,
 	world_cell := INVALID_TREE_CELL,
-	world_seed := ""
+	world_seed := "",
+	profile_catalog_snapshot: Dictionary = {}
 ) -> Dictionary:
 	if profile == null:
 		return {}
@@ -62,7 +64,7 @@ func build(
 		collision_height_fraction = 0.82
 	elif architecture == "savanna":
 		collision_height_fraction = 0.52
-	return {
+	var request := {
 		"assetId": "",
 		"family": family,
 		"growthClass": String(ecology.get("ageBand", "standard")),
@@ -87,6 +89,7 @@ func build(
 		"canopyDensity": float(biome_parameters.get("canopyDensity", 0.0)),
 		"biomeParameters": biome_parameters,
 	}
+	return TreeRequestAdmissionScript.attach_certificate(request, profile_catalog_snapshot)
 
 func sample_ecology(
 	profile: BiomeEnvironmentProfile,

@@ -176,7 +176,7 @@ func direct_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionar
 	var bundle: Dictionary = Bundle.capture_terrain_chunk(main, chunk_key, backend)
 	var admissions := {}
 	if initialized.get("status") == "ready" and bool(bundle.get("ok", false)):
-		var owner: Dictionary = bundle.sources.owner
+		var owner: Dictionary = Bundle.native_admission_projection(main, bundle.sources.owner)
 		admissions["biome"] = backend.admit_biome_environment_catalog(owner.biome).get("status")
 		admissions["visual"] = backend.admit_visual_asset_catalog(owner).get("status")
 		admissions["removed"] = backend.admit_removed_props_tombstones(owner.removed).get("status")

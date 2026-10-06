@@ -40,8 +40,10 @@ static func capture(main: Object) -> Dictionary:
 		return _failed("source_changed_during_capture")
 	return {"ok": true, "schemaVersion": SCHEMA_VERSION, "complete": false,
 		"scope": "owner_catalogs_and_removals_only", "ownerInstanceId": owner_id,
-		"seed": seed, "biome": biome.duplicate(true), "visual": visual.duplicate(true),
-		"presentation": presentation.duplicate(true), "removed": removed.duplicate(true)}
+		# These catalog snapshots contain sealed owner aliases. Deep-copying them
+		# would replace their publication identity even when their values agree.
+		"seed": seed, "biome": biome, "visual": visual,
+		"presentation": presentation, "removed": removed.duplicate(true)}
 
 static func is_current(main: Object, bundle: Dictionary) -> bool:
 	if main == null or not is_instance_valid(main) or not bool(bundle.get("ok", false)) \
@@ -80,7 +82,7 @@ static func capture_chunk(main: Object, chunk: Vector2i) -> Dictionary:
 		return _failed("chunk_sources_changed_or_not_ready")
 	return {"ok": true, "schemaVersion": SCHEMA_VERSION, "complete": false,
 		"scope": "owner_and_structure_chunk_only", "chunk": chunk,
-		"owner": owner.duplicate(true), "exclusions": exclusions.duplicate(true)}
+		"owner": owner, "exclusions": exclusions.duplicate(true)}
 
 static func chunk_is_current(main: Object, bundle: Dictionary) -> bool:
 	if main == null or not is_instance_valid(main) or not bool(bundle.get("ok", false)) \
@@ -110,7 +112,7 @@ static func capture_terrain_chunk(main: Object, chunk: Vector2i, backend: Object
 		return _failed("terrain_or_chunk_changed_during_capture")
 	return {"ok":true, "schemaVersion":SCHEMA_VERSION, "complete":false,
 		"scope":"owner_structure_and_effective_terrain_chunk_only", "chunk":chunk,
-		"sources":sources.duplicate(true), "terrain":terrain.duplicate(true)}
+		"sources":sources, "terrain":terrain.duplicate(true)}
 
 static func terrain_chunk_is_current(main: Object, backend: Object, bundle: Dictionary) -> bool:
 	return main != null and is_instance_valid(main) and bool(bundle.get("ok", false)) \
@@ -123,6 +125,43 @@ static func terrain_chunk_is_current(main: Object, backend: Object, bundle: Dict
 		and bundle.terrain.get("chunk") == bundle.chunk \
 		and chunk_is_current(main, bundle.sources) \
 		and EffectiveTerrainPinScript.is_current(backend, String(bundle.sources.owner.seed), bundle.terrain)
+
+## Exact historical N4 value ABI, projected from current sealed publications.
+## Keep the original bundle for freshness checks; native receipts do not prove it.
+static func native_admission_projection(main: Object, bundle: Dictionary) -> Dictionary:
+	if not is_current(main, bundle):
+		return _failed("owner_bundle_stale")
+	var catalog := main.get("biome_environment_catalog") as BiomeEnvironmentCatalog
+	var biome := native_biome_projection(catalog, bundle.biome)
+	if not bool(biome.get("ok", false)):
+		return biome
+	var visual: Dictionary = bundle.visual
+	var receipt: Dictionary = visual.ownerReceipt
+	var native_visual := {"ok":true, "schemaVersion":1,
+		"ownerReceipt":{"owner_id":int(receipt.ownerInstanceId),
+			"revision":int(receipt.publicationRevision), "ready":true,
+			"catalog":biome.ownerReceipt},
+		"assets":visual.assets, "families":visual.families,
+		"disabledIds":visual.disabledIds, "sceneCache":visual.sceneCache}
+	native_visual["contentIdentity"] = JSON.stringify({
+		"domain":"visual_asset_registry_active_values", "schemaVersion":1,
+		"assets":visual.assets, "families":visual.families,
+		"disabledIds":visual.disabledIds, "sceneCache":visual.sceneCache}).sha256_text()
+	return {"ok":true, "schemaVersion":SCHEMA_VERSION, "complete":false,
+		"scope":"owner_catalogs_and_removals_only", "ownerInstanceId":bundle.ownerInstanceId,
+		"seed":bundle.seed, "biome":biome, "visual":native_visual,
+		"presentation":bundle.presentation, "removed":bundle.removed}
+
+static func native_biome_projection(catalog: BiomeEnvironmentCatalog,
+		snapshot: Dictionary) -> Dictionary:
+	if not BiomeSnapshotScript.is_current(catalog, snapshot):
+		return _failed("biome_publication_stale")
+	var receipt: Dictionary = catalog.published_catalog_snapshot().ownerReceipt
+	return {"ok":true, "schemaVersion":1,
+		"ownerReceipt":{"owner_id":int(receipt.ownerInstanceId),
+			"revision":int(receipt.publicationRevision), "ready":true},
+		"fallbackId":snapshot.fallbackId, "contentIdentity":snapshot.contentIdentity,
+		"profiles":snapshot.profiles}
 
 static func _failed(reason: String) -> Dictionary:
 	return {"ok": false, "complete": false, "reason": reason}

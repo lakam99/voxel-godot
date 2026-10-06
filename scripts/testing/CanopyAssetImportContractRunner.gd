@@ -65,7 +65,7 @@ func run() -> void:
 	var cached_tree_ids: Array[String] = []
 	for asset in canopy_assets:
 		var asset_id := String(asset.get("id", ""))
-		if registry.scene_cache.has(asset_id):
+		if registry.cached_asset_ids().has(asset_id):
 			cached_tree_ids.append(asset_id)
 	add_result("complete_tree_glbs_remain_importable_reference_assets_but_not_runtime_authority", registry_ready and registry.asset_count() == EXPECTED_RUNTIME_ASSET_COUNT and registry.cached_scene_count() < EXPECTED_RUNTIME_ASSET_COUNT and cached_tree_ids.is_empty(), {
 		"registryReady": registry_ready,
@@ -75,12 +75,15 @@ func run() -> void:
 		"errors": registry.last_errors,
 	})
 	var rock_id: String = registry.select_rock_asset_id("mountain", "headless-rock-cache-contract")
-	var cached_rock_scene := registry.scene_cache.get(rock_id) as PackedScene
+	var rock_descriptor: Dictionary = registry.describe_static_asset_without_instantiation(rock_id)
+	var rock_binding := {"resourcePath":String(rock_descriptor.get("packedScenePath", "")),
+		"resourceInstanceId":int(rock_descriptor.get("packedSceneId", 0))}
 	var rock: Node3D = registry.instantiate_asset(rock_id)
 	var rock_meshes: Array[MeshInstance3D] = []
 	if rock != null:
 		collect_meshes(rock, rock_meshes)
-	var importer_owned_scene := cached_rock_scene != null and not cached_rock_scene.resource_path.is_empty()
+	var importer_owned_scene := String(rock_descriptor.get("status", "")) == "ready" \
+		and _importer_owned_binding(rock_binding)
 	var rock_mesh_ready := rock_meshes.size() > 0 and rock_meshes.all(func(mesh_instance: MeshInstance3D) -> bool:
 		return mesh_instance.mesh != null and mesh_instance.mesh.get_surface_count() > 0)
 	var headless_renderer := DisplayServer.get_name().strip_edges().to_lower() == "headless"
@@ -88,14 +91,15 @@ func run() -> void:
 		and bool(rock.get_meta("headless_visual_proxy", false)) \
 		and String(rock.get_meta("visual_asset_id", "")) == rock_id \
 		and String(rock.get_meta("visual_source", "")) == "generated_asset" \
-		and String(rock.get_meta("imported_scene_resource_path", "")) == (cached_rock_scene.resource_path if cached_rock_scene != null else "") \
+		and String(rock.get_meta("imported_scene_resource_path", "")) == String(rock_binding.resourcePath) \
 		and rock.get_child_count() == 0 \
 		and rock_meshes.is_empty()
 	add_result("runtime_rock_retains_importer_owned_source_and_uses_renderer_appropriate_publication", registry_ready and importer_owned_scene and rock != null \
 		and (headless_proxy_ready if headless_renderer else rock_mesh_ready), {
 		"renderer": DisplayServer.get_name(),
 		"rockId": rock_id,
-		"cachedResourcePath": cached_rock_scene.resource_path if cached_rock_scene != null else "",
+		"cachedResourcePath": rock_binding.resourcePath,
+		"cachedResourceInstanceId":rock_binding.resourceInstanceId,
 		"meshCount": rock_meshes.size(),
 		"headlessProxy": headless_proxy_ready,
 		"threadId": OS.get_thread_caller_id(),
@@ -110,7 +114,8 @@ func run() -> void:
 	var character_id := String(character_ids[0]) if not character_ids.is_empty() else ""
 	var character_scene := character_registry.scene_cache.get(character_id) as PackedScene
 	var character: Node3D = character_registry.instantiate_asset(character_id)
-	sibling_registry_rows.append(_registry_instance_row("character", character_ready, character_id, character_scene, character))
+	sibling_registry_rows.append(_registry_instance_row("character", character_ready, character_id,
+		_scene_binding(character_scene), character))
 	if character != null:
 		character.free()
 	var static_registry = StaticItemAssetRegistryScript.new()
@@ -119,37 +124,61 @@ func run() -> void:
 	var static_id := String(static_ids[0]) if not static_ids.is_empty() else ""
 	var static_scene := static_registry.scene_cache.get(static_id) as PackedScene
 	var static_item: Node3D = static_registry.instantiate_item(static_id)
-	sibling_registry_rows.append(_registry_instance_row("static_item", static_ready, static_id, static_scene, static_item))
+	sibling_registry_rows.append(_registry_instance_row("static_item", static_ready, static_id,
+		_scene_binding(static_scene), static_item))
 	if static_item != null:
 		static_item.free()
 	var animated_registry = AnimatedAssetRegistryScript.new()
 	var animated_ready: bool = animated_registry.setup()
 	var animated_ids := animated_registry.asset_ids()
 	var animated_id := String(animated_ids[0]) if not animated_ids.is_empty() else ""
-	var animated_scene := animated_registry.scene_cache.get(animated_id) as PackedScene
+	var animated_binding: Dictionary = animated_registry.cached_scene_binding(animated_id)
 	var animated: Node3D = animated_registry.instantiate_asset(animated_id)
-	sibling_registry_rows.append(_registry_instance_row("animated", animated_ready, animated_id, animated_scene, animated))
+	sibling_registry_rows.append(_registry_instance_row("animated", animated_ready, animated_id,
+		animated_binding, animated))
 	if animated != null:
 		animated.free()
 	add_result("runtime_glb_registries_retain_importer_owned_scenes_in_headless_renderer", sibling_registry_rows.all(func(row: Dictionary) -> bool: return bool(row.get("passed", false))), sibling_registry_rows)
 	finish(imported_rows)
 
-func _registry_instance_row(label: String, ready: bool, asset_id: String, scene: PackedScene, instance: Node3D) -> Dictionary:
+func _scene_binding(scene: PackedScene) -> Dictionary:
+	# Character/static-item registries still expose their authoritative scene
+	# cache directly. Normalize its proof to the same binding shape.
+	return {"resourcePath":scene.resource_path, "resourceInstanceId":scene.get_instance_id()} \
+		if scene != null else {}
+
+func _importer_owned_binding(binding: Dictionary) -> bool:
+	var resource_path := String(binding.get("resourcePath", ""))
+	var resource_id := int(binding.get("resourceInstanceId", 0))
+	if resource_path.is_empty() or resource_id == 0 or not is_instance_id_valid(resource_id):
+		return false
+	var scene := instance_from_id(resource_id) as PackedScene
+	if scene == null or scene.resource_path != resource_path:
+		return false
+	var imported := ResourceLoader.load(resource_path, "PackedScene", ResourceLoader.CACHE_MODE_REUSE)
+	return imported is PackedScene and is_same(imported, scene)
+
+func _registry_instance_row(label: String, ready: bool, asset_id: String,
+		binding: Dictionary, instance: Node3D) -> Dictionary:
 	var meshes: Array[MeshInstance3D] = []
 	if instance != null:
 		collect_meshes(instance, meshes)
 	return {
 		"label": label,
-		"passed": ready and scene != null and not scene.resource_path.is_empty() and instance != null and not meshes.is_empty(),
+		"passed": ready and _importer_owned_binding(binding) and instance != null and not meshes.is_empty(),
 		"assetId": asset_id,
-		"cachedResourcePath": scene.resource_path if scene != null else "",
+		"cachedResourcePath": String(binding.get("resourcePath", "")),
+		"cachedResourceInstanceId":int(binding.get("resourceInstanceId", 0)),
 		"meshCount": meshes.size(),
 		"threadId": OS.get_thread_caller_id(),
 	}
 
-func _generated_rock_member_manifest_contract(registry: Object) -> Dictionary:
+func _generated_rock_member_manifest_contract(_imported_registry: Object) -> Dictionary:
+	# Synthetic render-policy fixture, isolated from the admitted imported catalog.
+	# Owner storage is seeded explicitly; compatibility getters are detached.
+	var registry := VisualAssetRegistryScript.new()
 	var asset_id := "generated-rock-member-manifest-contract"
-	registry.assets_by_id[asset_id] = {"family":"rock"}
+	registry._assets_by_id[asset_id] = {"family":"rock"}
 	var root_node := Node3D.new()
 	root_node.name = "RockAsset"
 	root_node.set_meta("visual_asset_id", asset_id)
@@ -204,8 +233,9 @@ func _generated_rock_member_manifest_contract(registry: Object) -> Dictionary:
 	var stable_ids := ids == repeat_ids and not ids.has("") \
 		and ids[0] != ids[1] if ids.size() == 2 else false
 	root_node.free()
-	registry.assets_by_id.erase(asset_id)
+	registry._assets_by_id.erase(asset_id)
 	return {"passed":exact_surface_bindings and stable_ids,
+		"evidenceLevel":"synthetic_render_policy_contract",
 		"surfaceCount":rows.size(), "memberIds":ids,
 		"repeatMemberIds":repeat_ids, "stableIds":stable_ids,
 		"exactSurfaceBindings":exact_surface_bindings}

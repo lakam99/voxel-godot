@@ -36,10 +36,10 @@ func _case(main: Node3D, registry: RefCounted, target_id: String, index: int, fa
 	body.rotation.y = float(spec.get("rotation", 0.0))
 	root.add_child(body)
 	if fallback:
-		registry.disabled_asset_ids[target_id] = true
+		registry.disable_asset_for_test(target_id)
 	main.add_rock_visual(body, prop_id, biome, spec)
 	if fallback:
-		registry.disabled_asset_ids.erase(target_id)
+		registry.clear_test_disabled_assets()
 	var meshes: Array[Dictionary] = []
 	_mesh_bounds(body, meshes)
 	var row := {"id": target_id, "propId": prop_id, "fallback": fallback,

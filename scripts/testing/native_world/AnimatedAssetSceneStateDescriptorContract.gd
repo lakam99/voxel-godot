@@ -32,6 +32,78 @@ func _run() -> void:
 			"diagnostic": descriptor.get("diagnostic", {}),
 			"availableClips": descriptor.get("availableClips", [])})
 
+	var original_publication: Dictionary = registry.published_catalog_snapshot()
+	var original_digest := String(original_publication.get("contentDigest", ""))
+	var original_owner_receipt: Dictionary = original_publication.get("ownerReceipt", {})
+	var imported_instance: Node = registry.instantiate_asset("door_open_close")
+	var animation_player := _find_animation_player(imported_instance)
+	var imported_library: AnimationLibrary = animation_player.get_animation_library("") \
+		if animation_player != null else null
+	var imported_library_is_owner_bound := false
+	if imported_library != null:
+		for bound_value: Variant in registry._bound_scene_resources.values():
+			if is_same(bound_value, imported_library):
+				imported_library_is_owner_bound = true
+				break
+	_check("instantiated_actor_owns_private_animation_library",
+		imported_library != null and not imported_library_is_owner_bound,
+		{"assetId":"door_open_close", "playerPath":String(
+			registry._published_descriptors.get("door_open_close", {}).get("animationPlayerPath", "")),
+			"libraryInstanceId":imported_library.get_instance_id() if imported_library != null else 0,
+			"bound":imported_library_is_owner_bound})
+	var expected_clip := String(registry._assets_by_id["door_open_close"].get("expected", ""))
+	var actor_animation: Animation = imported_library.get_animation(expected_clip) \
+		if imported_library != null else null
+	if actor_animation != null:
+		actor_animation.loop_mode = Animation.LOOP_LINEAR
+		actor_animation.length += 0.125
+	_check("actor_animation_mutation_keeps_catalog_owner_current",
+		actor_animation != null \
+		and String(registry.published_catalog_snapshot().get("status", "")) == "ready" \
+		and is_same(registry.published_catalog_snapshot(), original_publication),
+		{"assetId":"door_open_close", "expectedClip":expected_clip,
+			"actorLibraryInstanceId":imported_library.get_instance_id() if imported_library != null else 0})
+
+	var owner_library: AnimationLibrary = null
+	for bound_value: Variant in registry._bound_scene_resources.values():
+		if bound_value is AnimationLibrary \
+				and (bound_value as AnimationLibrary).has_animation(expected_clip):
+			owner_library = bound_value as AnimationLibrary
+			break
+	_check("resource_loader_animation_library_is_owner_bound", owner_library != null,
+		{"assetId":"door_open_close", "expectedClip":expected_clip,
+			"ownerLibraryInstanceId":owner_library.get_instance_id() if owner_library != null else 0})
+	if owner_library != null:
+		var original_animation: Animation = owner_library.get_animation(expected_clip)
+		owner_library.remove_animation(expected_clip)
+		var removed := not owner_library.has_animation(expected_clip)
+		_check("authoritative_library_remove_invalidates_cached_publication", removed \
+			and String(registry.published_catalog_snapshot().get("status", "")) == "pending",
+			{"expectedClip":expected_clip, "removed":removed})
+		var rejected_reload := not registry.setup()
+		_check("failed_reload_cannot_resurrect_invalidated_publication", rejected_reload \
+			and String(registry.published_catalog_snapshot().get("status", "")) == "pending" \
+			and is_same(registry._published_snapshot, original_publication),
+			{"reloadRejected":rejected_reload,
+				"publicationStatus":registry.published_catalog_snapshot().get("status", "")})
+		var restored := original_animation != null \
+			and owner_library.add_animation(expected_clip, original_animation) == OK
+		var restored_setup := restored and registry.setup()
+		var restored_publication: Dictionary = registry.published_catalog_snapshot()
+		_check("restoration_republishes_same_semantics_with_new_runtime_receipt",
+			restored_setup \
+			and String(restored_publication.get("contentDigest", "")) == original_digest \
+			and not is_same(restored_publication.get("ownerReceipt"), original_owner_receipt) \
+			and int(restored_publication.get("ownerReceipt", {}).get("publicationRevision", -1)) \
+				!= int(original_owner_receipt.get("publicationRevision", -1)),
+			{"restored":restored, "setup":restored_setup,
+				"originalDigest":original_digest,
+				"restoredDigest":restored_publication.get("contentDigest", ""),
+				"originalOwnerReceipt":original_owner_receipt,
+				"restoredOwnerReceipt":restored_publication.get("ownerReceipt", {})})
+	if imported_instance != null:
+		imported_instance.free()
+
 	var default_row := {"animations": [], "animationLibraryKeys": {},
 		"animationLibraryProperties": [], "animationLibrariesPresent": false}
 	var default_library := _library_with_clip("idle")
@@ -75,9 +147,7 @@ func _run() -> void:
 	var ambiguous_id := "synthetic_multiple_animation_players"
 	var ambiguous_path := "res://synthetic/multiple_animation_players.tscn"
 	ambiguous_scene.resource_path = ambiguous_path
-	registry.assets_by_id[ambiguous_id] = {"id": ambiguous_id, "path": ambiguous_path,
-		"expected": "idle"}
-	registry.scene_cache[ambiguous_id] = ambiguous_scene
+	_register_synthetic_asset(registry, ambiguous_id, ambiguous_path, ambiguous_scene)
 	var ambiguous_descriptor: Dictionary = registry.describe_asset_presentation_without_instantiation(ambiguous_id)
 	_check("multiple_animation_players_remain_ambiguous", \
 		String(ambiguous_descriptor.get("reason", "")) == "multiple_animation_players_order_unproven",
@@ -87,13 +157,11 @@ func _run() -> void:
 	var semantic_path := "res://synthetic/semantic_identity.tscn"
 	var first_scene := _pack_scene_with_animation_players(1)
 	first_scene.resource_path = semantic_path
-	registry.assets_by_id[semantic_id] = {"id": semantic_id, "path": semantic_path,
-		"expected": "idle"}
-	registry.scene_cache[semantic_id] = first_scene
+	_register_synthetic_asset(registry, semantic_id, semantic_path, first_scene)
 	var first_descriptor: Dictionary = registry.describe_asset_presentation_without_instantiation(semantic_id)
 	var second_scene := _pack_scene_with_animation_players(1)
 	second_scene.take_over_path(semantic_path)
-	registry.scene_cache[semantic_id] = second_scene
+	registry._scene_cache[semantic_id] = second_scene
 	var second_descriptor: Dictionary = registry.describe_asset_presentation_without_instantiation(semantic_id)
 	_check("semantic_digest_ignores_resource_owner_but_runtime_lease_does_not", \
 		bool(first_descriptor.get("ok", false)) and bool(second_descriptor.get("ok", false)) \
@@ -103,10 +171,10 @@ func _run() -> void:
 		and first_descriptor.get("sceneStateDigest") != second_descriptor.get("sceneStateDigest") \
 		and not registry.asset_presentation_descriptor_is_current(first_descriptor),
 		{"first": first_descriptor, "second": second_descriptor})
-	registry.scene_cache.erase(ambiguous_id)
-	registry.assets_by_id.erase(ambiguous_id)
-	registry.scene_cache.erase(semantic_id)
-	registry.assets_by_id.erase(semantic_id)
+	registry._scene_cache.erase(ambiguous_id)
+	registry._assets_by_id.erase(ambiguous_id)
+	registry._scene_cache.erase(semantic_id)
+	registry._assets_by_id.erase(semantic_id)
 	ambiguous_scene = null
 	first_scene = null
 	second_scene = null
@@ -126,8 +194,8 @@ func _run() -> void:
 		return
 	file.store_string(JSON.stringify({"schema": "animated-asset-scene-state-descriptor-contract/v1",
 		"passed": passed, "checkCount": checks.size(),
-		"evidenceLevel": "synthetic_parser_contract_and_imported_scene_state_descriptor",
-		"scope": "AnimationLibrary SceneState serialization and five registered animated asset descriptors; no runtime actor construction or live gameplay.",
+		"evidenceLevel": "synthetic_parser_contract_and_imported_scene_state_and_runtime_actor_resource_ownership",
+		"scope": "AnimationLibrary SceneState serialization, five registered animated asset descriptors, per-actor animation resource isolation, and authoritative owner mutation lifecycle; not live gameplay.",
 		"checks": checks, "importedDescriptors": imported}, "  "))
 	file.close()
 	quit(0 if passed else 1)
@@ -154,3 +222,23 @@ func _pack_scene_with_animation_players(player_count: int) -> PackedScene:
 	if pack_result != OK:
 		return null
 	return packed
+
+func _register_synthetic_asset(registry, asset_id: String, resource_path: String,
+		scene: PackedScene) -> void:
+	# These parser-only fixtures are outside the sealed production manifest. Seed
+	# the registry's owner storage directly because its compatibility getters are
+	# intentionally detached and no runtime registration API exists.
+	registry._assets_by_id[asset_id] = {"id": asset_id, "path": resource_path,
+		"expected": "idle"}
+	registry._scene_cache[asset_id] = scene
+
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node == null:
+		return null
+	if node is AnimationPlayer:
+		return node as AnimationPlayer
+	for child: Node in node.get_children():
+		var found := _find_animation_player(child)
+		if found != null:
+			return found
+	return null

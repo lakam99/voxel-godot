@@ -332,7 +332,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var bundle: Dictionary = Bundle.capture_terrain_chunk(main, chunk_key, backend)
 	var admissions := {}
 	if initialized.get("status") == "ready" and bool(bundle.get("ok", false)):
-		var owner: Dictionary = bundle.sources.owner
+		var owner: Dictionary = Bundle.native_admission_projection(main, bundle.sources.owner)
 		admissions["biome"] = backend.admit_biome_environment_catalog(owner.biome).get("status")
 		admissions["visual"] = backend.admit_visual_asset_catalog(owner).get("status")
 		admissions["removed"] = backend.admit_removed_props_tombstones(owner.removed).get("status")
@@ -480,11 +480,11 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if not String(row.feature.assetId).is_empty():
 			var feature: Dictionary = row.feature
 			var fallback_body := StaticBody3D.new()
-			main.visual_asset_registry.disabled_asset_ids[feature.assetId] = true
+			main.visual_asset_registry.disable_asset_for_test(String(feature.assetId))
 			main.add_rock_visual(fallback_body, feature.durableId, feature.visualBiome,
 				{"radius": feature.visualRadius, "height_factor": feature.visualHeightFactor,
 				"scale": feature.visualScale})
-			main.visual_asset_registry.disabled_asset_ids.erase(feature.assetId)
+			main.visual_asset_registry.clear_test_disabled_assets()
 			var fallback_projection: Dictionary = backend.project_published_rock_footprint_shadow(
 				bundle.terrain.page, structure_receipt.snapshot, ordinal,
 				fallback_body.get_meta("visual_source", ""),

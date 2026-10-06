@@ -1,7 +1,8 @@
 extends RefCounted
 class_name AnimatedAssetRegistry
 
-const ASSETS := [
+static func _default_asset_rows() -> Array:
+    return [
     {
         "id": "door_open_close",
         "path": "res://assets/generated/animated/door_open_close.glb",
@@ -29,31 +30,87 @@ const ASSETS := [
     },
 ]
 
-var assets_by_id := {}
-var scene_cache := {}
+var _assets_by_id: Dictionary = {}
+var _scene_cache: Dictionary = {}
+var _published_snapshot: Dictionary = {}
+var _published_native_presentation: Dictionary = {}
+var _published_descriptors: Dictionary = {}
+var _bound_scene_resources: Dictionary = {}
+var _capture_runtime_resources: Dictionary = {}
+var _publication_invalidated := false
 var last_errors: Array[String] = []
 var loaded := false
 var _generation_revision := 0
+var publication_seal_count := 0
+var descriptor_scan_count := 0
+
+# Compatibility reads are detached copies. Mutating these values cannot alter
+# the registry's manifest or imported scene ownership.
+var assets_by_id: Dictionary:
+    get:
+        return _assets_by_id.duplicate(true)
+var scene_cache: Dictionary:
+    get:
+        var detached: Dictionary = {}
+        for asset_id_value: Variant in _scene_cache:
+            var scene_value: Variant = _scene_cache[asset_id_value]
+            if scene_value is Resource:
+                detached[asset_id_value] = (scene_value as Resource).duplicate(true)
+            else:
+                detached[asset_id_value] = scene_value
+        return detached
 
 func setup() -> bool:
-    _generation_revision += 1
+    var previous_assets := _assets_by_id
+    var previous_scenes := _scene_cache
+    var previous_errors := last_errors
+    var previous_loaded := loaded
+    var previous_revision := _generation_revision
+    var previous_snapshot := _published_snapshot
+    var previous_native_presentation := _published_native_presentation
+    var previous_descriptors := _published_descriptors
+    var previous_bound_resources := _bound_scene_resources
+    var previous_invalidated := _publication_invalidated
+    _generation_revision = previous_revision + 1
     loaded = false
-    assets_by_id.clear()
-    scene_cache.clear()
-    last_errors.clear()
-    for row in ASSETS:
+    _assets_by_id = {}
+    _scene_cache = {}
+    _published_snapshot = {}
+    _published_native_presentation = {}
+    _published_descriptors = {}
+    _bound_scene_resources = {}
+    _publication_invalidated = false
+    last_errors = []
+    var candidate_ready := false
+    for row in _default_asset_rows():
         var asset_id := String(row.get("id", ""))
         if asset_id != "":
-            assets_by_id[asset_id] = row
-    loaded = cache_asset_scenes()
-    return loaded
+            _assets_by_id[asset_id] = row.duplicate(true)
+    loaded = _load_scene_cache()
+    if loaded:
+        loaded = _seal_publication()
+    candidate_ready = loaded
+    if not loaded:
+        var candidate_errors := last_errors.duplicate()
+        _assets_by_id = previous_assets
+        _scene_cache = previous_scenes
+        last_errors = candidate_errors if not candidate_errors.is_empty() else previous_errors
+        loaded = previous_loaded
+        _generation_revision = previous_revision
+        _published_snapshot = previous_snapshot
+        _published_native_presentation = previous_native_presentation
+        _published_descriptors = previous_descriptors
+        _bound_scene_resources = previous_bound_resources
+        _publication_invalidated = previous_invalidated
+    return candidate_ready
 
 func cache_asset_scenes() -> bool:
-    _generation_revision += 1
-    loaded = false
+    return setup()
+
+func _load_scene_cache() -> bool:
     var ok := true
-    for asset_id in assets_by_id.keys():
-        var asset: Dictionary = assets_by_id[asset_id]
+    for asset_id in _assets_by_id.keys():
+        var asset: Dictionary = _assets_by_id[asset_id]
         var resource_path := String(asset.get("path", ""))
         var absolute_path := ProjectSettings.globalize_path(resource_path)
         if not FileAccess.file_exists(absolute_path):
@@ -65,85 +122,256 @@ func cache_asset_scenes() -> bool:
             last_errors.append("%s imported PackedScene load failed: %s" % [asset_id, resource_path])
             ok = false
             continue
-        scene_cache[asset_id] = packed
-    loaded = ok and scene_cache.size() == assets_by_id.size()
+        _scene_cache[asset_id] = packed
+    loaded = ok and _scene_cache.size() == _assets_by_id.size()
     return loaded
 
 func is_ready() -> bool:
     return loaded
 
 func generation_receipt() -> Dictionary:
-    return {"ownerInstanceId": get_instance_id(), "revision": _generation_revision, "ready": loaded}
+    return {"ownerInstanceId": get_instance_id(), "publicationRevision": _generation_revision,
+        "ready": loaded and not _publication_invalidated}
+
+func published_catalog_snapshot() -> Dictionary:
+    if not loaded or _publication_invalidated:
+        return {"schema":"producer-catalog-owner-publication/v1",
+            "ownerKind":"animated_assets", "status":"pending",
+            "reason":"animated_catalog_publication_invalidated"}
+    return _published_snapshot
+
+func asset_definition_copy(asset_id: String) -> Dictionary:
+    var value: Variant = _assets_by_id.get(asset_id, null)
+    return value.duplicate(true) if value is Dictionary else {}
+
+func cached_scene_binding(asset_id: String) -> Dictionary:
+    var scene := _scene_cache.get(asset_id) as PackedScene
+    if scene == null:
+        return {}
+    return {"resourcePath":scene.resource_path, "resourceInstanceId":scene.get_instance_id()}
+
+func _seal_publication() -> bool:
+    _capture_runtime_resources = {}
+    var semantic_assets: Array[Dictionary] = []
+    var semantic_descriptors: Array[Dictionary] = []
+    var owner_scene_rows: Array[Dictionary] = []
+    var descriptors: Dictionary = {}
+    var resource_bindings: Dictionary = {}
+    var ids := asset_ids()
+    if ids.is_empty() or _scene_cache.size() != ids.size():
+        last_errors.append("animated catalog scene cache incomplete")
+        return false
+    for asset_id in ids:
+        var descriptor: Dictionary = _read_asset_presentation(asset_id)
+        if not bool(descriptor.get("ok", false)):
+            last_errors.append("%s descriptor failed: %s" % [asset_id,
+                String(descriptor.get("reason", "unknown"))])
+            return false
+        descriptors[asset_id] = descriptor
+        var definition: Dictionary = _assets_by_id[asset_id]
+        var semantic_dependencies: Array[Dictionary] = []
+        var runtime_dependencies: Array[Dictionary] = []
+        for dependency_value: Variant in descriptor.get("dependencies", []):
+            if not dependency_value is Dictionary:
+                continue
+            var dependency: Dictionary = dependency_value
+            var semantic_dependency: Dictionary = {}
+            var runtime_dependency: Dictionary = {}
+            for key in ["resourcePath", "sceneStatePath"]:
+                if dependency.has(key):
+                    semantic_dependency[key] = dependency[key]
+                    runtime_dependency[key] = dependency[key]
+            if dependency.has("resourceInstanceId"):
+                runtime_dependency["resourceInstanceId"] = dependency.resourceInstanceId
+            if not semantic_dependency.is_empty():
+                semantic_dependencies.append(semantic_dependency)
+            if not runtime_dependency.is_empty():
+                runtime_dependencies.append(runtime_dependency)
+        semantic_dependencies.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+            return JSON.stringify(a) < JSON.stringify(b))
+        runtime_dependencies.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+            return JSON.stringify(a) < JSON.stringify(b))
+        semantic_assets.append({"id":asset_id, "definition":definition.duplicate(true)})
+        semantic_descriptors.append({"assetId":asset_id,
+            "descriptorStatus":String(descriptor.status),
+            "descriptorReason":String(descriptor.reason),
+            "semanticSceneStateSchema":String(descriptor.semanticSceneStateSchema),
+                "semanticSceneStateDigest":String(descriptor.semanticSceneStateDigest),
+                "rootNodeType":String(descriptor.rootNodeType),
+                "animationPlayerPresent":bool(descriptor.animationPlayerPresent),
+                "animationPlayerPath":String(descriptor.animationPlayerPath),
+                "availableClips":descriptor.availableClips.duplicate(),
+                "expectedClip":String(descriptor.expectedClip),
+                "expectedClipAvailable":bool(descriptor.expectedClipAvailable),
+                "dependencyPaths":semantic_dependencies})
+        owner_scene_rows.append({"id":asset_id,
+            "sceneResourcePath":String(descriptor.sceneResourcePath),
+            "sceneInstanceId":int(descriptor.sceneInstanceId),
+            "sceneStateDigest":String(descriptor.sceneStateDigest),
+            "dependencies":runtime_dependencies})
+        var scene := _scene_cache.get(asset_id) as PackedScene
+        if scene == null:
+            return false
+        resource_bindings[scene.get_instance_id()] = scene
+        for resource_id: Variant in _capture_runtime_resources:
+            var captured_resource: Variant = _capture_runtime_resources[resource_id]
+            if captured_resource is Resource:
+                resource_bindings[int(resource_id)] = captured_resource
+        for dependency: Dictionary in runtime_dependencies:
+            var dependency_path := String(dependency.get("resourcePath", ""))
+            if dependency_path.is_empty():
+                continue
+            var dependency_resource := ResourceLoader.load(dependency_path)
+            if dependency_resource is Resource:
+                resource_bindings[(dependency_resource as Resource).get_instance_id()] = dependency_resource
+    semantic_assets.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("id", "")) < String(b.get("id", "")))
+    semantic_descriptors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("assetId", "")) < String(b.get("assetId", "")))
+    owner_scene_rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("id", "")) < String(b.get("id", "")))
+    var payload := {"assets":semantic_assets, "descriptors":semantic_descriptors}
+    _freeze_owned_value(payload)
+    var content_digest := _digest_value(payload)
+    if content_digest.length() != 64:
+        last_errors.append("animated catalog semantic digest unavailable")
+        return false
+    var owner_receipt := {"ownerInstanceId":get_instance_id(),
+        "publicationRevision":_generation_revision, "ready":true,
+        "resourceBindings":owner_scene_rows,
+        "dependencyResourceInstanceIds":_sorted_int_keys(resource_bindings)}
+    _freeze_owned_value(owner_receipt)
+    _freeze_owned_value(descriptors)
+    _published_descriptors = descriptors
+    _published_snapshot = {"schema":"producer-catalog-owner-publication/v1",
+        "ownerKind":"animated_assets", "status":"ready", "contentDigest":content_digest,
+        "ownerReceipt":owner_receipt, "payload":payload}
+    _freeze_owned_value(_published_snapshot)
+    # The historical N4 consumer has an exact value ABI. Project it once from
+    # this same admitted publication; it is not an independently sampled catalog.
+    var native_rows: Array[Dictionary] = []
+    for asset_id in ids:
+        var descriptor: Dictionary = descriptors[asset_id]
+        native_rows.append({"id":asset_id, "definition":_assets_by_id[asset_id].duplicate(true),
+            "sceneResourcePath":String(descriptor.sceneResourcePath),
+            "sceneInstanceId":int(descriptor.sceneInstanceId),
+            "animationPlayerPath":String(descriptor.animationPlayerPath),
+            "availableClips":descriptor.availableClips.duplicate()})
+    var native_owner := {"ownerInstanceId":get_instance_id(),
+        "revision":_generation_revision, "ready":true}
+    var native_identity := _digest_value({"domain":"animated_asset_registry_presentation",
+        "schemaVersion":1, "assets":native_rows})
+    _published_native_presentation = {"ok":true, "schemaVersion":1,
+        "ownerReceipt":native_owner, "contentIdentity":native_identity, "assets":native_rows}
+    _freeze_owned_value(_published_native_presentation)
+    _disconnect_resource_changes(_bound_scene_resources)
+    _bound_scene_resources = resource_bindings
+    for binding_id: int in _bound_scene_resources:
+        var resource: Resource = _bound_scene_resources[binding_id]
+        if resource is AnimationLibrary:
+            var library := resource as AnimationLibrary
+            var library_changed := Callable(self, "_on_published_animation_library_changed").bind(binding_id)
+            var library_renamed := Callable(self, "_on_published_animation_library_renamed").bind(binding_id)
+            if not library.animation_added.is_connected(library_changed):
+                library.animation_added.connect(library_changed)
+            if not library.animation_changed.is_connected(library_changed):
+                library.animation_changed.connect(library_changed)
+            if not library.animation_removed.is_connected(library_changed):
+                library.animation_removed.connect(library_changed)
+            if not library.animation_renamed.is_connected(library_renamed):
+                library.animation_renamed.connect(library_renamed)
+        else:
+            var changed_callable := Callable(self, "_on_published_scene_resource_changed").bind(binding_id)
+            if not resource.changed.is_connected(changed_callable):
+                resource.changed.connect(changed_callable)
+    publication_seal_count += 1
+    return true
+
+func _on_published_scene_resource_changed(binding_id: int) -> void:
+    _invalidate_published_resource(binding_id)
+
+func _on_published_animation_library_changed(_animation_name: StringName,
+        binding_id: int) -> void:
+    _invalidate_published_resource(binding_id)
+
+func _on_published_animation_library_renamed(_old_name: StringName,
+        _new_name: StringName, binding_id: int) -> void:
+    _invalidate_published_resource(binding_id)
+
+func _invalidate_published_resource(binding_id: int) -> void:
+    if _bound_scene_resources.has(binding_id):
+        _publication_invalidated = true
+        _generation_revision += 1
+
+func _disconnect_resource_changes(resources: Dictionary) -> void:
+    for binding_id_value: Variant in resources:
+        var resource: Variant = resources[binding_id_value]
+        if not resource is Resource:
+            continue
+        var changed_callable := Callable(self, "_on_published_scene_resource_changed").bind(
+            int(binding_id_value))
+        if (resource as Resource).changed.is_connected(changed_callable):
+            (resource as Resource).changed.disconnect(changed_callable)
+        if resource is AnimationLibrary:
+            var library := resource as AnimationLibrary
+            var library_changed := Callable(self, "_on_published_animation_library_changed").bind(
+                int(binding_id_value))
+            var library_renamed := Callable(self, "_on_published_animation_library_renamed").bind(
+                int(binding_id_value))
+            if library.animation_added.is_connected(library_changed):
+                library.animation_added.disconnect(library_changed)
+            if library.animation_changed.is_connected(library_changed):
+                library.animation_changed.disconnect(library_changed)
+            if library.animation_removed.is_connected(library_changed):
+                library.animation_removed.disconnect(library_changed)
+            if library.animation_renamed.is_connected(library_renamed):
+                library.animation_renamed.disconnect(library_renamed)
+
+func _sorted_int_keys(values: Dictionary) -> Array[int]:
+    var result: Array[int] = []
+    for key: Variant in values:
+        result.append(int(key))
+    result.sort()
+    return result
+
+func _freeze_owned_value(value: Variant) -> void:
+    if value is Dictionary:
+        var dictionary_value: Dictionary = value
+        for key: Variant in dictionary_value.keys():
+            _freeze_owned_value(dictionary_value[key])
+        dictionary_value.make_read_only()
+    elif value is Array:
+        var array_value: Array = value
+        for child_value: Variant in array_value:
+            _freeze_owned_value(child_value)
+        array_value.make_read_only()
 
 ## Explicit capture boundary; never called by the per-frame presentation path.
 ## The imported PackedScenes remain owned by this registry. A partial scene or
 ## missing expected clip is not admitted as a native wildlife presentation.
 func capture_active_presentation() -> Dictionary:
-    if not loaded or _generation_revision <= 0:
-        return {"ok": false, "reason": "registry_not_ready"}
-    var before := generation_receipt()
-    var first := _read_active_presentation_values()
-    if not bool(first.get("ok", false)):
-        return first
-    var middle := generation_receipt()
-    var second := _read_active_presentation_values()
-    var after := generation_receipt()
-    if before != middle or middle != after or not bool(second.get("ok", false)) \
-            or first.get("assets") != second.get("assets"):
-        return {"ok": false, "reason": "registry_changed_during_capture"}
-    var values := {"domain": "animated_asset_registry_presentation", "schemaVersion": 1,
-        "assets": first.assets}
-    var context := HashingContext.new()
-    context.start(HashingContext.HASH_SHA256)
-    context.update(JSON.stringify(values).to_utf8_buffer())
-    return {"ok": true, "schemaVersion": 1, "ownerReceipt": before.duplicate(true),
-        "contentIdentity": context.finish().hex_encode(), "assets": (first.assets as Array).duplicate(true)}
-
-func _read_active_presentation_values() -> Dictionary:
-    var rows: Array[Dictionary] = []
-    var ids := asset_ids()
-    if ids.is_empty() or scene_cache.size() != ids.size():
-        return {"ok": false, "reason": "scene_cache_incomplete"}
-    for asset_id in ids:
-        var row = assets_by_id.get(asset_id)
-        var scene := scene_cache.get(asset_id) as PackedScene
-        if not row is Dictionary or String(row.get("id", "")) != asset_id \
-                or scene == null or String(row.get("path", "")) != scene.resource_path:
-            return {"ok": false, "reason": "asset_row_or_scene_invalid:" + asset_id}
-        var expected := String(row.get("expected", ""))
-        if expected == "":
-            return {"ok": false, "reason": "expected_clip_missing:" + asset_id}
-        var raw_instance := scene.instantiate()
-        var instance := raw_instance as Node3D
-        if instance == null:
-            if raw_instance != null:
-                raw_instance.free()
-            return {"ok": false, "reason": "scene_root_invalid:" + asset_id}
-        var player := find_animation_player(instance)
-        var names := PackedStringArray()
-        var player_path := ""
-        if player != null:
-            names = player.get_animation_list()
-            names.sort()
-            player_path = String(instance.get_path_to(player))
-        var has_expected := player != null and names.has(expected)
-        instance.free()
-        if not has_expected:
-            return {"ok": false, "reason": "expected_clip_unavailable:" + asset_id}
-        rows.append({"id": asset_id, "definition": (row as Dictionary).duplicate(true),
-            "sceneResourcePath": scene.resource_path, "sceneInstanceId": scene.get_instance_id(),
-            "animationPlayerPath": player_path, "availableClips": Array(names)})
-    return {"ok": true, "assets": rows}
+    var publication := published_catalog_snapshot()
+    if String(publication.get("status", "")) != "ready":
+        return {"ok": false, "reason":String(publication.get("reason",
+            "registry_not_ready"))}
+    return _published_native_presentation
 
 ## Describes one cached PackedScene using its serialized SceneState only. No
 ## scene Nodes are instantiated. Any script, unresolved instance, extension
 ## node type, inheritance ambiguity, cycle, or incomplete animation metadata
 ## makes this proof unavailable.
 func describe_asset_presentation_without_instantiation(asset_id: String) -> Dictionary:
+    var cached: Variant = _published_descriptors.get(asset_id, null)
+    if not _publication_invalidated and cached is Dictionary:
+        return (cached as Dictionary).duplicate(true)
+    return _read_asset_presentation(asset_id)
+
+func _read_asset_presentation(asset_id: String) -> Dictionary:
+    descriptor_scan_count += 1
     if not loaded or _generation_revision <= 0:
         return _descriptor_failure(asset_id, "registry_not_ready")
-    var asset_value: Variant = assets_by_id.get(asset_id, null)
-    var scene_value: Variant = scene_cache.get(asset_id, null)
+    var asset_value: Variant = _assets_by_id.get(asset_id, null)
+    var scene_value: Variant = _scene_cache.get(asset_id, null)
     if not asset_value is Dictionary or String(asset_value.get("id", "")) != asset_id:
         return _descriptor_failure(asset_id, "asset_definition_unavailable")
     if not scene_value is PackedScene:
@@ -282,17 +510,12 @@ func describe_asset_presentation_without_instantiation(asset_id: String) -> Dict
 func asset_presentation_descriptor_is_current(descriptor: Dictionary) -> bool:
     if not bool(descriptor.get("ok", false)) \
             or int(descriptor.get("schemaVersion", -1)) != 1 \
+            or _publication_invalidated \
             or descriptor.get("registryReceipt") != generation_receipt():
         return false
     var asset_id := String(descriptor.get("assetId", ""))
-    var current := describe_asset_presentation_without_instantiation(asset_id)
-    return bool(current.get("ok", false)) \
-        and current.get("registryReceipt") == descriptor.get("registryReceipt") \
-        and current.get("sceneResourcePath") == descriptor.get("sceneResourcePath") \
-        and current.get("sceneInstanceId") == descriptor.get("sceneInstanceId") \
-        and current.get("sceneStateDigest") == descriptor.get("sceneStateDigest") \
-        and current.get("semanticSceneStateDigest") == descriptor.get("semanticSceneStateDigest") \
-        and current.get("dependencies") == descriptor.get("dependencies")
+    var current: Variant = _published_descriptors.get(asset_id, null)
+    return current is Dictionary and current == descriptor
 
 
 func _scan_packed_scene_state(scene: PackedScene, path_prefix: String,
@@ -443,6 +666,8 @@ func _record_scene_state_animation_library(node_row: Dictionary, node_path: Stri
     if not property_value is AnimationLibrary:
         return {"ok": false, "reason": "animation_library_resource_unavailable",
             "diagnostic": diagnostic}
+    var animation_library := property_value as AnimationLibrary
+    _capture_runtime_resources[animation_library.get_instance_id()] = animation_library
     var library_keys: Dictionary = node_row.get("animationLibraryKeys", {})
     if library_keys.has(library_key):
         return {"ok": false, "reason": "animation_library_key_ambiguous",
@@ -454,7 +679,10 @@ func _record_scene_state_animation_library(node_row: Dictionary, node_path: Stri
     properties.sort()
     node_row["animationLibraryProperties"] = properties
     var animations: Array = node_row.get("animations", [])
-    for animation_name: StringName in (property_value as AnimationLibrary).get_animation_list():
+    for animation_name: StringName in animation_library.get_animation_list():
+        var animation := animation_library.get_animation(animation_name)
+        if animation != null:
+            _capture_runtime_resources[animation.get_instance_id()] = animation
         var full_name := String(animation_name) if library_key.is_empty() \
             else library_key + "/" + String(animation_name)
         if animations.has(full_name):
@@ -511,24 +739,34 @@ func _descriptor_failure(asset_id: String, reason: String,
 func presentation_capture_is_current(snapshot: Dictionary) -> bool:
     if not bool(snapshot.get("ok", false)) or int(snapshot.get("schemaVersion", -1)) != 1 \
             or not snapshot.get("assets") is Array \
-            or not snapshot.get("contentIdentity") is String \
-            or snapshot.get("ownerReceipt") != generation_receipt():
+            or not snapshot.get("contentIdentity") is String:
         return false
-    var current := capture_active_presentation()
-    return bool(current.get("ok", false)) \
-        and current.get("ownerReceipt") == snapshot.get("ownerReceipt") \
-        and current.get("contentIdentity") == snapshot.get("contentIdentity") \
-        and current.get("assets") == snapshot.get("assets")
+    var publication := published_catalog_snapshot()
+    return String(publication.get("status", "")) == "ready" \
+        and is_same(_published_native_presentation, snapshot)
+
+func presentation_descriptor_for_publication(expected_owner_receipt: Dictionary,
+        asset_id: String) -> Dictionary:
+    var publication := published_catalog_snapshot()
+    if String(publication.get("status", "")) != "ready" \
+            or not is_same(expected_owner_receipt, publication.get("ownerReceipt", {})):
+        return {"ok":false, "status":"stale",
+            "reason":"animated_catalog_owner_receipt_stale"}
+    var descriptor: Variant = _published_descriptors.get(asset_id, null)
+    if not descriptor is Dictionary:
+        return {"ok":false, "status":"failed",
+            "reason":"animated_descriptor_not_published"}
+    return descriptor
 
 func asset_ids() -> PackedStringArray:
     var ids := PackedStringArray()
-    for asset_id in assets_by_id.keys():
+    for asset_id in _assets_by_id.keys():
         ids.append(String(asset_id))
     ids.sort()
     return ids
 
 func instantiate_asset(asset_id: String) -> Node3D:
-    var scene := scene_cache.get(asset_id) as PackedScene
+    var scene := _scene_cache.get(asset_id) as PackedScene
     if scene == null:
         return null
     var instance := scene.instantiate()
@@ -537,9 +775,44 @@ func instantiate_asset(asset_id: String) -> Node3D:
         if instance:
             instance.queue_free()
         return null
+    if not _make_instance_animation_libraries_private(node):
+        node.free()
+        return null
     node.set_meta("visual_source", "generated_animated_asset")
     node.set_meta("animated_asset_id", asset_id)
     return node
+
+func _make_instance_animation_libraries_private(root: Node) -> bool:
+    var players: Array[AnimationPlayer] = []
+    _collect_animation_players(root, players)
+    for player in players:
+        var library_names := player.get_animation_library_list()
+        for library_name: StringName in library_names:
+            var source_library := player.get_animation_library(library_name)
+            if source_library == null:
+                return false
+            var private_library := AnimationLibrary.new()
+            private_library.resource_name = source_library.resource_name
+            var animation_names := source_library.get_animation_list()
+            animation_names.sort()
+            for animation_name: StringName in animation_names:
+                var source_animation := source_library.get_animation(animation_name)
+                if source_animation == null:
+                    return false
+                var private_animation := source_animation.duplicate(true) as Animation
+                if private_animation == null or is_same(private_animation, source_animation) \
+                        or private_library.add_animation(animation_name, private_animation) != OK:
+                    return false
+            player.remove_animation_library(library_name)
+            if player.add_animation_library(library_name, private_library) != OK:
+                return false
+    return true
+
+func _collect_animation_players(node: Node, output: Array[AnimationPlayer]) -> void:
+    if node is AnimationPlayer:
+        output.append(node as AnimationPlayer)
+    for child: Node in node.get_children():
+        _collect_animation_players(child, output)
 
 func animation_names(asset_id: String) -> PackedStringArray:
     var names := PackedStringArray()
@@ -553,7 +826,7 @@ func animation_names(asset_id: String) -> PackedStringArray:
     return names
 
 func expected_animation_name(asset_id: String) -> String:
-    var asset: Dictionary = assets_by_id.get(asset_id, {})
+    var asset: Dictionary = _assets_by_id.get(asset_id, {})
     return String(asset.get("expected", ""))
 
 func find_animation_player(node: Node) -> AnimationPlayer:

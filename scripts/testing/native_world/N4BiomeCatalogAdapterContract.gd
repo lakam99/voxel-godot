@@ -2,6 +2,7 @@ extends SceneTree
 
 const Catalog := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 const Snapshot := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
+const Bundle := preload("res://scripts/world/ActiveSurfacePropOwnerBundle.gd")
 
 var failures: Array[String] = []
 
@@ -29,7 +30,7 @@ func run() -> void:
 	check(not bool(backend.status().get("biomeCatalogReady", false)), "native catalog initially absent")
 	var catalog = Catalog.new()
 	check(catalog.setup(), "source catalog ready")
-	var capture: Dictionary = Snapshot.capture(catalog)
+	var capture: Dictionary = Bundle.native_biome_projection(catalog, Snapshot.capture(catalog))
 	check(capture.get("ok") == true, "source capture")
 	var receipt: Dictionary = backend.admit_biome_environment_catalog(capture)
 	check(receipt.get("status") == "ready", "typed admission: " + str(receipt.get("reason")))

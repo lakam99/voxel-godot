@@ -45,6 +45,12 @@ func run() -> void:
 	var initially_current: bool = BundleScript.is_current(main, bundle)
 	var freshness_ms := float(Time.get_ticks_usec() - freshness_start_usec) / 1000.0
 	check("initial_current", initially_current)
+	check("sealed_biome_alias_retained", is_same(bundle.biome, BiomeSnapshot.capture(catalog)))
+	check("sealed_visual_alias_retained", is_same(bundle.visual.publication,
+		visual.published_catalog_snapshot(catalog.published_catalog_snapshot())))
+	check("sealed_presentation_alias_retained", is_same(bundle.presentation,
+		animated.capture_active_presentation()))
+	check("copied_catalog_bundle_rejected", not BundleScript.is_current(main, bundle.duplicate(true)))
 	var structures := Structures.new()
 	var admission := Admission.new()
 	admission.configure(main.seed_text, {}, {"regionCells":384, "spawnChance":0.0})
@@ -71,6 +77,10 @@ func run() -> void:
 		check("terrain_bundle_explicitly_incomplete", terrain_bundle.get("complete") == false \
 			and terrain_bundle.get("scope") == "owner_structure_and_effective_terrain_chunk_only")
 		check("terrain_bundle_current", BundleScript.terrain_chunk_is_current(main, backend, terrain_bundle))
+		check("nested_catalog_alias_retained", is_same(terrain_bundle.sources.owner.biome, bundle.biome) \
+			and is_same(terrain_bundle.sources.owner.presentation, bundle.presentation))
+		var native_owner: Dictionary = BundleScript.native_admission_projection(main, terrain_bundle.sources.owner)
+		check("native_projection_admitted_from_current_owner", bool(native_owner.get("ok", false)))
 		var structure_receipt: Dictionary = backend.admit_structure_exclusion_chunk(
 			terrain_bundle.sources.exclusions)
 		check("native_structure_chunk_admitted", structure_receipt.get("status") == "ready")
@@ -84,13 +94,13 @@ func run() -> void:
 			check("native_structure_chunk_clear", native_clear.get("complete") == true \
 				and native_clear.get("blocked") == false)
 			check("ordered_biome_admitted", backend.admit_biome_environment_catalog(
-				terrain_bundle.sources.owner.biome).get("status") == "ready")
+				native_owner.biome).get("status") == "ready")
 			check("ordered_visual_admitted", backend.admit_visual_asset_catalog(
-				terrain_bundle.sources.owner).get("status") == "ready")
+				native_owner).get("status") == "ready")
 			check("ordered_removed_admitted", backend.admit_removed_props_tombstones(
 				terrain_bundle.sources.owner.removed).get("status") == "ready")
 			check("ordered_wildlife_admitted", backend.admit_wildlife_presentation_catalog(
-				terrain_bundle.sources.owner).get("status") == "ready")
+				native_owner).get("status") == "ready")
 			var ordered: Dictionary = backend.compose_surface_prop_ordered_shadow(
 				terrain_bundle.terrain.page, native_chunk)
 			check("ordered_native_28_attempts", ordered.get("status") == "ready" \
@@ -115,7 +125,8 @@ func run() -> void:
 			forged_exclusions.chunk, forged_exclusions.bounds, forged_exclusions.content])).sha256_text()
 		check("native_structure_missing_region_rejected",
 			backend.admit_structure_exclusion_chunk(forged_exclusions).get("status") == "failed")
-		var tampered_terrain := terrain_bundle.duplicate(true)
+		var tampered_terrain := terrain_bundle.duplicate()
+		tampered_terrain.terrain = terrain_bundle.terrain.duplicate(true)
 		tampered_terrain.terrain.pageStatus.terrainDeltaRevision = -1
 		check("terrain_bundle_pin_tamper_rejected", not BundleScript.terrain_chunk_is_current(main, backend, tampered_terrain))
 		main.seed_text = "replacement-seed"
@@ -135,7 +146,8 @@ func run() -> void:
 	check("chunk_same_seed_new_generation_rejected", not BundleScript.chunk_is_current(main, chunk_bundle))
 	chunk_bundle = BundleScript.capture_chunk(main, Vector2i.ZERO)
 	check("chunk_recap_after_admission_reset", BundleScript.chunk_is_current(main, chunk_bundle))
-	var changed_chunk := chunk_bundle.duplicate(true)
+	var changed_chunk := chunk_bundle.duplicate()
+	changed_chunk.exclusions = chunk_bundle.exclusions.duplicate(true)
 	changed_chunk.exclusions.content.citadel[0].reason = "forged"
 	check("chunk_exclusion_tamper_rejected", not BundleScript.chunk_is_current(main, changed_chunk))
 	structures.regional_source_generation += 1
@@ -157,10 +169,11 @@ func run() -> void:
 	part_start = Time.get_ticks_usec()
 	check("removed_current", RemovedSnapshot.is_current(main, bundle.removed))
 	freshness_parts["removedMs"] = float(Time.get_ticks_usec() - part_start) / 1000.0
-	var forged_complete := bundle.duplicate(true)
+	var forged_complete := bundle.duplicate()
 	forged_complete.complete = true
 	check("complete_claim_rejected", not BundleScript.is_current(main, forged_complete))
-	var tampered := bundle.duplicate(true)
+	var tampered := bundle.duplicate()
+	tampered.removed = bundle.removed.duplicate(true)
 	(tampered.removed.ids as Array)[0] = "tampered"
 	check("nested_removal_tamper_rejected", not BundleScript.is_current(main, tampered))
 	var other = MainScript.new()
@@ -183,6 +196,8 @@ func run() -> void:
 	check("replacement_visual_ready", other_visual.setup(catalog))
 	main.visual_asset_registry = other_visual
 	check("registry_replacement_rejected", not BundleScript.is_current(main, recaptured))
+	check("stale_owner_cannot_project_native", not bool(BundleScript.native_admission_projection(
+		main, recaptured).get("ok", false)))
 	main.free()
 	var passed := true
 	for item in results:

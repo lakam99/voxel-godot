@@ -26,43 +26,53 @@ func run() -> void:
 	check("active_matches_direct_resolved_digest", captured.get("contentIdentity") == expected)
 	check("active_matches_direct_resolved_rows", captured.get("profiles") == semantic)
 	check("initial_receipt_current", SnapshotScript.is_current(catalog, captured))
-	var tampered_row: Dictionary = captured.duplicate(true)
-	((tampered_row.profiles as Array)[0] as Dictionary)["tree_scale"] = {"value": 999.0}
-	check("tampered_row_not_current", not SnapshotScript.is_current(catalog, tampered_row))
-	var tampered_fallback: Dictionary = captured.duplicate(true)
-	tampered_fallback.fallbackId = "alpine"
-	check("tampered_fallback_not_current", not SnapshotScript.is_current(catalog, tampered_fallback))
-	var tampered_schema: Dictionary = captured.duplicate(true)
-	tampered_schema.schemaVersion = 2
-	check("tampered_schema_not_current", not SnapshotScript.is_current(catalog, tampered_schema))
-	var tampered_receipt: Dictionary = captured.duplicate(true)
-	tampered_receipt.ownerReceipt.revision = int(tampered_receipt.ownerReceipt.revision) + 1
-	check("tampered_receipt_not_current", not SnapshotScript.is_current(catalog, tampered_receipt))
-	var tampered_identity: Dictionary = captured.duplicate(true)
-	tampered_identity.contentIdentity = "not-the-content"
-	check("tampered_identity_not_current", not SnapshotScript.is_current(catalog, tampered_identity))
-	var old_row: Dictionary = (captured.get("profiles", []) as Array)[0]
-	var old_scale: Dictionary = old_row.get("tree_scale", {})
-	var alpine = catalog.profile_for_biome("alpine")
-	var original_scale: float = alpine.tree_scale
-	alpine.tree_scale = original_scale + 0.125
-	check("mutable_resource_invalidates_content", not SnapshotScript.is_current(catalog, captured))
-	var changed: Dictionary = SnapshotScript.capture(catalog)
-	check("mutation_changes_digest_without_receipt", changed.get("contentIdentity") != captured.get("contentIdentity") \
-		and changed.get("ownerReceipt") == captured.get("ownerReceipt"))
-	check("capture_is_value_copy", old_scale == ((captured.get("profiles", []) as Array)[0] as Dictionary).get("tree_scale") \
-		and old_scale != ((changed.get("profiles", []) as Array)[0] as Dictionary).get("tree_scale"))
-	alpine.tree_scale = original_scale
-	check("restored_content_revalidates", SnapshotScript.is_current(catalog, captured))
-	var original_families: PackedStringArray = alpine.tree_families
-	alpine.tree_families = PackedStringArray()
-	check("invalid_profile_rejected", not bool(SnapshotScript.capture(catalog).get("ok", false)))
-	alpine.tree_families = original_families
-	var original_id: String = alpine.biome_id
-	alpine.biome_id = "other"
-	check("changed_biome_identity_rejected", not bool(SnapshotScript.capture(catalog).get("ok", false)))
-	alpine.biome_id = original_id
-	check("setup_revision_invalidates", catalog.setup() and not SnapshotScript.is_current(catalog, captured))
+	var publication: Dictionary = catalog.published_catalog_snapshot()
+	check("publication_envelope_frozen_values_only", _value_graph_is_frozen_values(publication))
+	check("publication_read_returns_same_alias", is_same(publication, catalog.published_catalog_snapshot()))
+	check("capture_returns_published_payload_alias", is_same(captured, publication.get("payload", {})))
+	var seals_before_reads := int(catalog.snapshot_seal_count)
+	var serializations_before_reads := int(catalog.snapshot_serialization_count)
+	var repeated_reads_same_alias := true
+	for index in range(12):
+		repeated_reads_same_alias = repeated_reads_same_alias \
+			and is_same(catalog.published_catalog_snapshot(), publication) \
+			and is_same(SnapshotScript.capture(catalog), captured)
+	check("repeated_reads_do_not_reseal_or_reserialize", repeated_reads_same_alias \
+		and catalog.snapshot_seal_count == seals_before_reads \
+		and catalog.snapshot_serialization_count == serializations_before_reads)
+	var alpine_path := "res://resources/visual/biomes/alpine.tres"
+	var cached_alpine := load(alpine_path) as BiomeEnvironmentProfile
+	var cached_scale := float(cached_alpine.tree_scale)
+	var owner_scale := float(catalog.profile_values_for_biome("alpine").get("tree_scale", -1.0))
+	var alpine_copy = catalog.profile_for_biome("alpine")
+	alpine_copy.tree_scale = cached_scale + 0.125
+	alpine_copy.tree_families = PackedStringArray(["mutated_copy_only"])
+	check("profile_copy_mutation_isolated_from_owner", catalog.profile_values_for_biome("alpine").get("tree_scale") == owner_scale \
+		and SnapshotScript.is_current(catalog, captured))
+	check("profile_copy_mutation_isolated_from_resource_loader", cached_alpine.tree_scale == cached_scale \
+		and not cached_alpine.tree_families.has("mutated_copy_only"))
+	var prior_envelope: Dictionary = catalog.published_catalog_snapshot()
+	check("invalid_reload_rejected", not catalog.setup(["res://resources/visual/biomes/does-not-exist.tres"]))
+	check("invalid_reload_retains_prior_publication", catalog.is_ready() \
+		and is_same(prior_envelope, catalog.published_catalog_snapshot()) \
+		and SnapshotScript.is_current(catalog, captured))
+	var original_digest := String(prior_envelope.get("contentDigest", ""))
+	var original_receipt: Dictionary = prior_envelope.get("ownerReceipt", {})
+	check("same_content_reload_keeps_semantic_identity", catalog.setup() \
+		and catalog.published_catalog_snapshot().get("contentDigest") == original_digest)
+	check("same_content_reload_advances_owner_receipt", catalog.published_catalog_snapshot().get("ownerReceipt") != original_receipt \
+		and not SnapshotScript.is_current(catalog, captured))
+	var restored_capture: Dictionary = SnapshotScript.capture(catalog)
+	var cached_original_scale := float(cached_alpine.tree_scale)
+	cached_alpine.tree_scale = cached_original_scale + 0.25
+	check("resource_loader_source_mutation_does_not_change_published_owner", SnapshotScript.is_current(catalog, restored_capture) \
+		and catalog.profile_values_for_biome("alpine").get("tree_scale") == owner_scale)
+	check("explicit_reload_publishes_changed_resource_content", catalog.setup() \
+		and catalog.published_catalog_snapshot().get("contentDigest") != original_digest)
+	check("changed_content_invalidates_previous_receipt", not SnapshotScript.is_current(catalog, restored_capture))
+	cached_alpine.tree_scale = cached_original_scale
+	check("restoring_source_and_reloading_restores_semantic_identity", catalog.setup() \
+		and catalog.published_catalog_snapshot().get("contentDigest") == original_digest)
 	var passed := true
 	for result in results:
 		passed = passed and bool(result.passed)
@@ -81,3 +91,22 @@ func run() -> void:
 
 func check(name: String, passed: bool) -> void:
 	results.append({"name": name, "passed": passed})
+
+func _value_graph_is_frozen_values(value: Variant) -> bool:
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		if not dictionary.is_read_only():
+			return false
+		for key in dictionary.keys():
+			if not key is String or not _value_graph_is_frozen_values(dictionary[key]):
+				return false
+		return true
+	if value is Array:
+		var array: Array = value
+		if not array.is_read_only():
+			return false
+		for item in array:
+			if not _value_graph_is_frozen_values(item):
+				return false
+		return true
+	return typeof(value) in [TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]

@@ -1,8 +1,8 @@
 extends RefCounted
 class_name ActiveBiomeEnvironmentSnapshot
 
-## Capture-only value boundary for the active production catalog. The snapshot
-## owns no profiles and never reloads resources or selects gameplay policy.
+## Seals the mutable authoring Resources into owned value data during catalog
+## setup. Runtime consumers read the catalog's published copy of this snapshot.
 
 const SCHEMA_VERSION := 1
 const IDS := ["alpine", "beach", "default", "desert", "forest", "ocean", "plains", "savanna", "snow", "swamp", "taiga", "town", "tundra"]
@@ -27,76 +27,83 @@ const FLOAT32_ARRAY_FIELDS := [
 ]
 
 static func capture(catalog: BiomeEnvironmentCatalog) -> Dictionary:
-	if catalog == null or not catalog.is_ready():
+	if catalog == null:
 		return _failed("catalog_not_ready")
-	var before := catalog.generation_receipt()
-	if not bool(before.get("ready", false)) or int(before.get("revision", 0)) <= 0:
-		return _failed("catalog_receipt_invalid")
-	var first := _read_values(catalog)
-	if not bool(first.get("ok", false)):
-		return first
-	var middle := catalog.generation_receipt()
-	var second := _read_values(catalog)
-	var after := catalog.generation_receipt()
-	if before != middle or middle != after or not bool(second.get("ok", false)) \
-			or first.get("contentIdentity") != second.get("contentIdentity"):
-		return _failed("catalog_changed_during_capture")
-	return {"ok": true, "schemaVersion": SCHEMA_VERSION, "ownerReceipt": before.duplicate(true),
-		"fallbackId": "default", "contentIdentity": first.contentIdentity,
-		"profiles": (first.profiles as Array).duplicate(true)}
+	var publication := catalog.published_catalog_snapshot()
+	if String(publication.get("status", "")) != "ready":
+		return _failed("catalog_not_ready")
+	return publication.get("payload", {})
 
 static func is_current(catalog: BiomeEnvironmentCatalog, snapshot: Dictionary) -> bool:
-	if not bool(snapshot.get("ok", false)) or int(snapshot.get("schemaVersion", -1)) != SCHEMA_VERSION \
-			or snapshot.get("fallbackId") != "default" or not snapshot.get("profiles") is Array \
-			or not snapshot.get("contentIdentity") is String \
-			or catalog == null or not catalog.is_ready() \
-			or catalog.generation_receipt() != snapshot.get("ownerReceipt", {}):
+	if catalog == null or not bool(snapshot.get("ok", false)):
 		return false
-	var current := capture(catalog)
-	return bool(current.get("ok", false)) and current.get("contentIdentity") == snapshot.get("contentIdentity") \
-		and current.get("ownerReceipt") == snapshot.get("ownerReceipt") \
-		and current.get("profiles") == snapshot.get("profiles")
+	var publication := catalog.published_catalog_snapshot()
+	return String(publication.get("status", "")) == "ready" \
+		and is_same(publication.get("payload", {}), snapshot) \
+		and publication.get("contentDigest", "") == snapshot.get("contentIdentity", "")
 
-static func _read_values(catalog: BiomeEnvironmentCatalog) -> Dictionary:
-	if catalog.biome_ids() != IDS or catalog.profile_count() != IDS.size():
+static func capture_profiles(profiles_by_biome: Dictionary, owner_receipt: Dictionary) -> Dictionary:
+	if profiles_by_biome.size() != IDS.size():
 		return _failed("catalog_ids_invalid")
-	var fallback := catalog.profile_for_biome("future_unknown_biome")
-	if fallback == null or fallback.biome_id != "default":
-		return _failed("fallback_invalid")
-	var rows: Array[Dictionary] = []
+	var ids: Array[String] = []
+	for key in profiles_by_biome.keys():
+		ids.append(String(key))
+	ids.sort()
+	if ids != IDS:
+		return _failed("catalog_ids_invalid")
+	var normalized_rows: Array[Dictionary] = []
+	var value_rows: Dictionary = {}
+	var validator := BiomeEnvironmentCatalog.new()
 	for id in IDS:
-		var profile := catalog.profiles_by_biome.get(id) as BiomeEnvironmentProfile
+		var profile := profiles_by_biome.get(id) as BiomeEnvironmentProfile
 		if profile == null or String(profile.biome_id) != id \
-				or not bool(catalog.validate_profile(profile).get("ok", false)):
+				or not bool(validator.validate_profile(profile).get("ok", false)):
 			return _failed("profile_invalid:" + id)
-		var row := {"biomeId": id}
+		var normalized := {"biomeId": id}
+		var values := {"biome_id": id}
 		for field in TEXT_FIELDS:
-			row[field] = String(profile.get(field))
+			var text_value := String(profile.get(field))
+			normalized[field] = text_value
+			values[field] = text_value
 		for field in BOOL_FIELDS:
-			row[field] = bool(profile.get(field))
+			var bool_value := bool(profile.get(field))
+			normalized[field] = bool_value
+			values[field] = bool_value
 		for field in INT_FIELDS:
-			row[field] = int(profile.get(field))
+			var int_value := int(profile.get(field))
+			normalized[field] = int_value
+			values[field] = int_value
 		for field in SCALAR_FIELDS:
 			var value := float(profile.get(field))
 			if not is_finite(value):
 				return _failed("nonfinite_scalar:" + id + ":" + field)
-			row[field] = _numeric(value)
+			normalized[field] = _numeric(value)
+			values[field] = value
 		for field in STRING_ARRAY_FIELDS:
-			var values: Array[String] = []
-			for value in profile.get(field):
-				values.append(String(value))
-			row[field] = values
+			var string_values: Array[String] = []
+			for item in profile.get(field):
+				string_values.append(String(item))
+			normalized[field] = string_values.duplicate()
+			values[field] = string_values.duplicate()
 		for field in FLOAT32_ARRAY_FIELDS:
-			var values: Array[Dictionary] = []
-			for value in profile.get(field):
-				if not is_finite(float(value)):
+			var normalized_array: Array[Dictionary] = []
+			var float_values: Array[float] = []
+			for item in profile.get(field):
+				var value := float(item)
+				if not is_finite(value):
 					return _failed("nonfinite_array:" + id + ":" + field)
-				values.append(_numeric(float(value)))
-			row[field] = values
-		rows.append(row)
+				normalized_array.append(_numeric(value))
+				float_values.append(value)
+			normalized[field] = normalized_array
+			values[field] = float_values
+		normalized_rows.append(normalized)
+		value_rows[id] = values
 	var canonical := JSON.stringify({"domain": "biome_environment_resolved_catalog",
-		"schemaVersion": SCHEMA_VERSION, "fallbackId": "default", "profiles": rows})
-	return {"ok": true, "profiles": rows, "contentIdentity": _sha256(canonical)}
+		"schemaVersion": SCHEMA_VERSION, "fallbackId": "default", "profiles": normalized_rows})
+	return {"ok": true, "schemaVersion": SCHEMA_VERSION,
+		"fallbackId": "default",
+		"contentIdentity": _sha256(canonical), "profiles": normalized_rows.duplicate(true),
+		"valueRows": value_rows.duplicate(true)}
 
 static func _numeric(value: float) -> Dictionary:
 	return {"value": value, "float32BytesHex": PackedFloat32Array([value]).to_byte_array().hex_encode(),

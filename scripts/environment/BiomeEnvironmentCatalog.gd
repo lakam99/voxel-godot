@@ -17,66 +17,129 @@ const PROFILE_PATHS := [
 	"res://resources/visual/biomes/town.tres",
 ]
 
-var profiles_by_biome := {}
+var _profiles_by_biome := {}
+var _profile_value_rows := {}
+var _published_envelope := {}
+var _not_ready_envelope := {}
 var last_errors: Array[Dictionary] = []
 var loaded := false
 var generation_revision := 0
+var snapshot_seal_count := 0
+var snapshot_serialization_count := 0
+
+func _init() -> void:
+	_not_ready_envelope = {"schema": "producer-catalog-owner-publication/v1", "ownerKind": "biome_environment",
+		"status": "not_ready", "contentDigest": "", "ownerReceipt": {"ownerInstanceId": get_instance_id(), "publicationRevision": 0, "ready": false}, "payload": {}}
+	_freeze_value_graph(_not_ready_envelope)
 
 func setup(profile_paths: Array = PROFILE_PATHS) -> bool:
-	generation_revision += 1
-	loaded = false
-	profiles_by_biome.clear()
-	last_errors.clear()
+	var staged_profiles := {}
+	var staged_errors: Array[Dictionary] = []
 	for path_variant in profile_paths:
 		var path := String(path_variant)
 		if not ResourceLoader.exists(path):
-			append_error("missing_or_invalid_profile", path, "BiomeEnvironmentProfile resource does not exist")
+			staged_errors.append({"code": "missing_or_invalid_profile", "path": path, "message": "BiomeEnvironmentProfile resource does not exist"})
 			continue
 		var profile := load(path) as BiomeEnvironmentProfile
 		if profile == null:
-			append_error("missing_or_invalid_profile", path, "BiomeEnvironmentProfile resource could not be loaded")
+			staged_errors.append({"code": "missing_or_invalid_profile", "path": path, "message": "BiomeEnvironmentProfile resource could not be loaded"})
 			continue
 		var validation := validate_profile(profile, path)
 		if not bool(validation.get("ok", false)):
-			append_error(String(validation.get("code", "invalid_profile")), path, String(validation.get("message", "Profile validation failed")))
+			staged_errors.append({"code": String(validation.get("code", "invalid_profile")), "path": path, "message": String(validation.get("message", "Profile validation failed"))})
 			continue
-		if profiles_by_biome.has(profile.biome_id):
-			append_error("duplicate_biome_id", path, "Duplicate biome id '%s'" % profile.biome_id)
+		if staged_profiles.has(profile.biome_id):
+			staged_errors.append({"code": "duplicate_biome_id", "path": path, "message": "Duplicate biome id '%s'" % profile.biome_id})
 			continue
-		profiles_by_biome[profile.biome_id] = profile
-	loaded = profiles_by_biome.has("default") and last_errors.is_empty()
-	return loaded
+		# The registry owns a deep copy. ResourceLoader's cached source remains an
+		# authoring input and is never the published runtime authority.
+		staged_profiles[profile.biome_id] = profile.duplicate(true) as BiomeEnvironmentProfile
+	var candidate_receipt := {"ownerInstanceId": get_instance_id(), "publicationRevision": generation_revision + 1, "ready": true}
+	snapshot_seal_count += 1
+	var captured := ActiveBiomeEnvironmentSnapshot.capture_profiles(staged_profiles, candidate_receipt)
+	if bool(captured.get("ok", false)):
+		snapshot_serialization_count += 1
+	if not staged_profiles.has("default") or not staged_errors.is_empty() or not bool(captured.get("ok", false)):
+		if not bool(captured.get("ok", false)):
+			staged_errors.append({"code": "snapshot_capture_failed", "path": "", "message": String(captured.get("reason", "Snapshot capture failed"))})
+		# Before the first successful publication, retain the prior compatibility
+		# behavior that allows diagnostics to inspect any valid staged fallback.
+		# Once a publication exists, a failed reload cannot replace its owners.
+		if not loaded:
+			_profiles_by_biome = staged_profiles
+		last_errors = staged_errors
+		return false
+	# Publish all owner state together. A failed reload leaves the last valid
+	# snapshot available while reporting the failed attempt through last_errors.
+	generation_revision += 1
+	_profiles_by_biome = staged_profiles
+	_profile_value_rows = captured.get("valueRows", {}).duplicate(true)
+	captured.erase("valueRows")
+	_freeze_value_graph(_profile_value_rows)
+	var envelope := {"schema": "producer-catalog-owner-publication/v1", "ownerKind": "biome_environment",
+		"status": "ready", "contentDigest": String(captured.get("contentIdentity", "")),
+		"ownerReceipt": candidate_receipt.duplicate(true), "payload": captured}
+	_freeze_value_graph(envelope)
+	_published_envelope = envelope
+	last_errors = []
+	loaded = true
+	return true
 
 func is_ready() -> bool:
 	return loaded
 
 func generation_receipt() -> Dictionary:
-	# Lifecycle only: callers can still mutate the Resource instances returned by
-	# profile_for_biome. A native capture must copy/validate its actual values.
-	return {"owner_id": get_instance_id(), "revision": generation_revision, "ready": loaded}
+	return {"ownerInstanceId": get_instance_id(), "publicationRevision": generation_revision, "ready": loaded}
+
+func published_catalog_snapshot() -> Dictionary:
+	return _published_envelope if loaded and not _published_envelope.is_empty() else _not_ready_envelope
+
+static func _freeze_value_graph(value: Variant) -> void:
+	if value is Dictionary:
+		var dictionary: Dictionary = value
+		for key in dictionary.keys():
+			_freeze_value_graph(dictionary[key])
+		dictionary.make_read_only()
+	elif value is Array:
+		var array: Array = value
+		for item in array:
+			_freeze_value_graph(item)
+		array.make_read_only()
+
+func profile_values_for_biome(biome: String) -> Dictionary:
+	if not loaded:
+		return {}
+	return _profile_value_rows.get(biome, _profile_value_rows.get("default", {}))
 
 func profile_count() -> int:
-	return profiles_by_biome.size()
+	return _profiles_by_biome.size()
 
 func biome_ids() -> Array[String]:
 	var result: Array[String] = []
-	for biome_variant in profiles_by_biome.keys():
+	for biome_variant in _profiles_by_biome.keys():
 		result.append(String(biome_variant))
 	result.sort()
 	return result
 
 func profile_for_biome(biome: String) -> BiomeEnvironmentProfile:
-	var profile := profiles_by_biome.get(biome) as BiomeEnvironmentProfile
+	return profile_resource_copy_for_biome(biome)
+
+func profile_resource_copy_for_biome(biome: String) -> BiomeEnvironmentProfile:
+	var profile := _profiles_by_biome.get(biome) as BiomeEnvironmentProfile
 	if profile != null:
-		return profile
-	return profiles_by_biome.get("default") as BiomeEnvironmentProfile
+		return profile.duplicate(true) as BiomeEnvironmentProfile
+	profile = _profiles_by_biome.get("default") as BiomeEnvironmentProfile
+	if profile == null:
+		return null
+	return profile.duplicate(true) as BiomeEnvironmentProfile
 
 func detail_choice(biome: String, height: float, water_level: float, roll: float) -> Dictionary:
-	var profile := profile_for_biome(biome)
-	if profile == null or height > water_level + profile.detail_max_height_above_water:
+	var profile := profile_values_for_biome(biome)
+	if profile.is_empty() or height > water_level + float(profile.detail_max_height_above_water):
 		return {}
-	for index in range(profile.detail_thresholds.size()):
-		if roll >= float(profile.detail_thresholds[index]):
+	var thresholds: Array = profile.detail_thresholds
+	for index in range(thresholds.size()):
+		if roll >= float(thresholds[index]):
 			continue
 		var detail_type := String(profile.detail_types[index])
 		if detail_type == "":

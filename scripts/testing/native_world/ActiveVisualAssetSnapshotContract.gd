@@ -18,6 +18,11 @@ func run() -> void:
 	var captured: Dictionary = SnapshotScript.capture(registry)
 	check("capture_ready", bool(captured.get("ok", false)))
 	check("initial_current", SnapshotScript.is_current(registry, captured))
+	var publication: Dictionary = captured.get("publication", {})
+	check("capture_retains_published_owner_alias", not publication.is_empty() \
+		and is_same(publication, registry.published_catalog_snapshot(catalog.published_catalog_snapshot())))
+	check("second_capture_keeps_current_owner_publication", SnapshotScript.is_current(registry,
+		SnapshotScript.capture(registry)))
 	var ordered: Dictionary = {}
 	for row in captured.get("families", []):
 		ordered[String(row.family)] = row.orderedIds
@@ -25,64 +30,49 @@ func run() -> void:
 	check("rock_family_order_exact", rock_ids == registry.assets_by_family.get("rock", []))
 	var selection := registry.select_rock_asset_id("forest", "snapshot-selection-contract")
 	check("selection_uses_captured_family", rock_ids.has(selection))
+	check("rock_support_envelope_uses_forward_transformed_raw_mesh_bounds",
+		_rock_envelope_matches_forward_bounds(registry, publication, selection,
+			"forest", "snapshot-selection-contract"))
+	var detached_assets: Dictionary = registry.assets_by_id
+	var detached_asset: Dictionary = detached_assets.get(selection, {})
+	var original_path := String(detached_asset.get("path", ""))
+	detached_asset["path"] = "tampered.glb"
+	detached_assets[selection] = detached_asset
+	check("compatibility_asset_copy_cannot_mutate_owner", registry.assets_by_id.get(selection, {}).get("path") == original_path \
+		and SnapshotScript.is_current(registry, captured))
+	var detached_families: Dictionary = registry.assets_by_family
+	var detached_rock_ids: Array = detached_families.get("rock", [])
+	detached_rock_ids.reverse()
+	detached_rock_ids.append(selection)
+	check("compatibility_family_copy_cannot_mutate_owner", registry.assets_by_family.get("rock", []) == rock_ids \
+		and SnapshotScript.is_current(registry, captured))
+	var detached_scenes: Dictionary = registry.scene_cache
+	var selected_scene_copy := detached_scenes.get(selection) as PackedScene
+	var cached_scene_count_before := registry.cached_scene_count()
+	detached_scenes.erase(selection)
+	var selected_descriptor: Dictionary = registry.describe_static_asset_without_instantiation(selection)
+	check("compatibility_scene_cache_copy_cannot_unload_owner", selected_scene_copy != null \
+		and registry.cached_scene_count() == cached_scene_count_before \
+		and String(selected_descriptor.get("status", "")) == "ready" \
+		and SnapshotScript.is_current(registry, captured))
 	var duplicate_snapshot: Dictionary = captured.duplicate(true)
-	(duplicate_snapshot.families as Array)[0].orderedIds.append("tampered")
-	check("tampered_family_rejected", not SnapshotScript.is_current(registry, duplicate_snapshot))
-	var row_snapshot: Dictionary = captured.duplicate(true)
-	(row_snapshot.assets as Array)[0].value["path"] = "tampered"
-	check("tampered_asset_rejected", not SnapshotScript.is_current(registry, row_snapshot))
-	var cache_snapshot: Dictionary = captured.duplicate(true)
-	(cache_snapshot.sceneCache as Array)[0].resourcePath = "tampered"
-	check("tampered_cache_rejected", not SnapshotScript.is_current(registry, cache_snapshot))
-	var old_path = registry.assets_by_id[selection].get("path")
-	registry.assets_by_id[selection]["path"] = "mutated.glb"
-	check("public_asset_mutation_invalidates", not SnapshotScript.is_current(registry, captured))
-	check("wrong_manifest_path_rejects_new_capture", not bool(SnapshotScript.capture(registry).get("ok", false)))
-	registry.assets_by_id[selection]["path"] = old_path
-	var family: Array = registry.assets_by_family["rock"]
-	var original_family: Array = family.duplicate(true)
-	family.reverse()
-	check("public_family_order_mutation_invalidates", not SnapshotScript.is_current(registry, captured))
-	registry.assets_by_family["rock"] = original_family
-	var duplicate_ids: Array = original_family.duplicate(true)
-	duplicate_ids.append(selection)
-	registry.assets_by_family["rock"] = duplicate_ids
-	var duplicate_capture: Dictionary = SnapshotScript.capture(registry)
-	var duplicate_rock_ids: Array = []
-	for row in duplicate_capture.get("families", []):
-		if String(row.family) == "rock":
-			duplicate_rock_ids = row.orderedIds
-	check("duplicate_family_members_preserved", duplicate_rock_ids == duplicate_ids \
-		and (duplicate_capture.assets as Array).size() == (captured.assets as Array).size())
-	registry.assets_by_family["rock"] = original_family
-	var original_scene := registry.scene_cache.get(selection) as PackedScene
-	check("selected_scene_cached", original_scene != null)
-	registry.scene_cache.erase(selection)
-	check("missing_import_keeps_selection", registry.select_rock_asset_id("forest", "snapshot-selection-contract") == selection)
-	check("missing_import_invalidates", not SnapshotScript.is_current(registry, captured))
-	check("missing_import_rejects_new_capture", not bool(SnapshotScript.capture(registry).get("ok", false)))
-	check("missing_import_cannot_instantiate", registry.instantiate_asset(selection) == null)
-	registry.scene_cache[selection] = original_scene
-	var replacement_scene := PackedScene.new()
-	registry.scene_cache[selection] = replacement_scene
-	check("scene_identity_replacement_invalidates", not SnapshotScript.is_current(registry, captured))
-	check("wrong_scene_path_rejects_new_capture", not bool(SnapshotScript.capture(registry).get("ok", false)))
-	var wrong_root := Node2D.new()
-	var wrong_root_scene := PackedScene.new()
-	check("wrong_root_fixture_packed", wrong_root_scene.pack(wrong_root) == OK)
-	wrong_root.free()
-	registry.assets_by_id[selection]["path"] = "snapshot-invalid-root-only.glb"
-	wrong_root_scene.resource_path = "res://snapshot-invalid-root-only.glb"
-	registry.scene_cache[selection] = wrong_root_scene
-	check("wrong_root_rejects_new_capture", not bool(SnapshotScript.capture(registry).get("ok", false)))
-	registry.scene_cache[selection] = original_scene
-	registry.assets_by_id[selection]["path"] = old_path
+	check("detached_snapshot_copy_is_not_owner_publication", not SnapshotScript.is_current(registry, duplicate_snapshot))
+	var prior_digest := String(publication.get("contentDigest", ""))
 	registry.disable_asset_for_test(selection)
-	check("disabled_still_selected", registry.select_rock_asset_id("forest", "snapshot-selection-contract") == selection)
-	check("disabled_invalidates", not SnapshotScript.is_current(registry, captured))
-	check("disabled_cannot_instantiate", registry.instantiate_asset(selection) == null)
+	var disabled_capture: Dictionary = SnapshotScript.capture(registry)
+	check("explicit_owner_mutation_replaces_publication", not SnapshotScript.is_current(registry, captured) \
+		and not bool(disabled_capture.get("ok", false)) \
+		and String(disabled_capture.get("reason", "")).begins_with("eligible_rock_asset_disabled:"),
+		{"priorDigest":prior_digest, "disabledCaptureReason":disabled_capture.get("reason", "")})
+	check("disabled_asset_remains_selected_but_cannot_instantiate", \
+		registry.select_rock_asset_id("forest", "snapshot-selection-contract") == selection \
+		and registry.instantiate_asset(selection) == null)
 	registry.clear_test_disabled_assets()
-	check("lifecycle_revision_does_not_revalidate_old", not SnapshotScript.is_current(registry, captured))
+	var restored_capture: Dictionary = SnapshotScript.capture(registry)
+	check("explicit_owner_restore_publishes_current_snapshot", bool(restored_capture.get("ok", false)) \
+		and SnapshotScript.is_current(registry, restored_capture) \
+		and not SnapshotScript.is_current(registry, disabled_capture) \
+		and String(restored_capture.get("contentIdentity", "")) == prior_digest)
 	var passed := true
 	for result in results:
 		passed = passed and bool(result.passed)
@@ -93,10 +83,63 @@ func run() -> void:
 		quit(1)
 		return
 	file.store_string(JSON.stringify({"finished": true, "passed": passed, "evidenceLevel": "contract",
-		"scope": "VisualAssetRegistry active value capture, ordered rock selection, and import readiness only; excludes AnimatedAssetRegistry, native adapter, and live gameplay.",
+		"scope": "VisualAssetRegistry published owner alias, detached compatibility reads, ordered rock selection, explicit disabled-asset publication, and reload identity; excludes native adapter and live gameplay.",
 		"resultCount": results.size(), "results": results, "capturedDigest": captured.get("contentIdentity", "")}, "  "))
 	file.close()
 	quit(0 if passed else 1)
 
-func check(name: String, passed: bool) -> void:
-	results.append({"name": name, "passed": passed})
+func check(name: String, passed: bool, detail: Variant = {}) -> void:
+	results.append({"name": name, "passed": passed, "detail": detail})
+
+
+func _rock_envelope_matches_forward_bounds(registry: Object, publication: Dictionary,
+		selected_id: String, biome: String, prop_id: String) -> bool:
+	var receipt: Dictionary = publication.get("ownerReceipt", {})
+	var selected: Dictionary = registry.rock_source_descriptor_for_publication(
+		receipt, biome, prop_id)
+	if String(selected.get("status", "")) != "ready" \
+			or String(selected.get("assetId", "")) != selected_id:
+		return false
+	var descriptor: Dictionary = selected.get("descriptor", {})
+	var asset_size: Vector3 = selected.get("assetSize", Vector3.ZERO)
+	var profile_scale := float(selected.get("profileScale", 0.0))
+	if asset_size.x <= 0.0 or asset_size.y <= 0.0 or asset_size.z <= 0.0 \
+			or profile_scale <= 0.0:
+		return false
+	var root_scale := Vector3(
+		(2.0 * 1.25 * 1.75) / maxf(0.1, asset_size.x),
+		(1.25 * 1.55 * 1.30) / maxf(0.1, asset_size.z),
+		(2.0 * 1.25 * 1.50) / maxf(0.1, asset_size.y)) * profile_scale
+	var root_transform := Transform3D(Basis.IDENTITY.scaled(root_scale), Vector3.ZERO)
+	var expected_horizontal := 0.0
+	var expected_vertical := 0.0
+	var has_member := false
+	for member_value: Variant in descriptor.get("renderMembers", []):
+		if not member_value is Dictionary:
+			return false
+		var member: Dictionary = member_value
+		var mesh_bounds: Variant = member.get("meshBounds", null)
+		var member_transform: Variant = member.get("transform", null)
+		if not mesh_bounds is AABB or not member_transform is Transform3D:
+			return false
+		var forward_transform := root_transform * (member_transform as Transform3D)
+		var raw_bounds: AABB = mesh_bounds
+		for x: float in [raw_bounds.position.x, raw_bounds.end.x]:
+			for y: float in [raw_bounds.position.y, raw_bounds.end.y]:
+				for z: float in [raw_bounds.position.z, raw_bounds.end.z]:
+					var point: Vector3 = forward_transform * Vector3(x, y, z)
+					expected_horizontal = maxf(expected_horizontal,
+						Vector2(point.x, point.z).length())
+					expected_vertical = maxf(expected_vertical, absf(point.y))
+		has_member = true
+	if not has_member:
+		return false
+	var envelope: Dictionary = publication.get("payload", {}).get("rockSupportEnvelope", {})
+	for row_value: Variant in envelope.get("assetRows", []):
+		if row_value is Dictionary and String(row_value.get("assetId", "")) == selected_id \
+				and String(row_value.get("biomeId", "")) == biome:
+			return is_equal_approx(float(row_value.get("maxHorizontalSupportMeters", 0.0)),
+				expected_horizontal) and is_equal_approx(
+				float(row_value.get("maxVerticalSupportMeters", 0.0)),
+				expected_vertical)
+	return false
