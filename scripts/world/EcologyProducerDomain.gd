@@ -7,6 +7,7 @@ class_name EcologyProducerDomain
 
 const StaticRenderSectionGridScript := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SCHEMA := "ecology-support-policy/v1"
+const STATIC_MEMBER_ENVELOPE_SCHEMA := "ecology-certified-static-member-envelope/v1"
 const CENSUS_SCHEMA := "ecology-source-domain-census/v1"
 const REQUIRED_CATEGORIES := ["trees", "surface_rocks", "ore", "forage", "details", "underground_props"]
 const TREE_SUPPORT_ENVELOPE_REVISION := "procedural-tree-support-envelope-v2"
@@ -59,10 +60,13 @@ const FAMILY_POLICY := {
 }
 
 const MAX_COMPLETED_SNAPSHOTS := 2048
+const MAX_RUNTIME_SUPPORT_POLICY_CACHE_ENTRIES := 128
 
 var _completed_snapshot_cache: Dictionary = {}
 var _completed_snapshot_order: Array[String] = []
 var _pending_capture_progress: Dictionary = {}
+static var _runtime_support_policy_cache: Dictionary = {}
+static var _runtime_support_policy_cache_order: Array[String] = []
 
 
 func completed_snapshot_for(world_id: String, source_chunk_key: Vector2i,
@@ -131,6 +135,26 @@ func invalidate_source_chunk(world_id: String, source_chunk_key: Vector2i) -> vo
 
 
 static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
+	# Policy derivation reads the active resource/source catalog. Workers receive
+	# its sealed value through admission; they never mutate this Main-owned cache.
+	if not Thread.is_main_thread():
+		return {"status":"pending", "runtimePolicyReason":"ecology_support_policy_requires_main_thread"}
+	var policy_context_digest := support_policy_context_digest(source_inputs) \
+		if not source_inputs.is_empty() else ""
+	var declared_context_digest := String(source_inputs.get("supportPolicyContextDigest", ""))
+	if not declared_context_digest.is_empty() \
+			and declared_context_digest != policy_context_digest:
+		return {"status":"pending", "runtimePolicyStatus":"pending",
+			"runtimePolicyReason":"ecology_support_policy_context_digest_mismatch"}
+	var cache_identity := _digest(["ecology-runtime-support-policy-cache/v2",
+		policy_context_digest]) if not policy_context_digest.is_empty() else ""
+	if not cache_identity.is_empty() \
+			and _runtime_support_policy_cache.has(cache_identity):
+		_runtime_support_policy_cache_order.erase(cache_identity)
+		_runtime_support_policy_cache_order.append(cache_identity)
+		var cached: Variant = _runtime_support_policy_cache.get(cache_identity, null)
+		if cached is Dictionary:
+			return cached.duplicate(true)
 	var families: Dictionary = _canonical_value(FAMILY_POLICY)
 	var runtime_policy := derive_runtime_support_policy(source_inputs) \
 		if not source_inputs.is_empty() else {"status":"pending", "reason":"runtime_ecology_catalog_inputs_required"}
@@ -153,7 +177,36 @@ static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
 	policy["status"] = "ready" if _all_families_bounded(families) \
 		and String(runtime_policy.get("status", "")) == "ready" else "pending"
 	policy["digest"] = _digest(policy)
+	if not cache_identity.is_empty():
+		var frozen: Variant = _freeze_value(policy)
+		if frozen is Dictionary and frozen.is_read_only():
+			_runtime_support_policy_cache[cache_identity] = frozen
+			_runtime_support_policy_cache_order.append(cache_identity)
+			while _runtime_support_policy_cache_order.size() \
+					> MAX_RUNTIME_SUPPORT_POLICY_CACHE_ENTRIES:
+				var retired: String = _runtime_support_policy_cache_order.pop_front()
+				_runtime_support_policy_cache.erase(retired)
 	return policy
+
+
+static func support_policy_context_digest(source_inputs: Dictionary) -> String:
+	## Derives identity from actual canonical policy/catalog inputs, never from a
+	## caller-provided digest or per-source terrain/admission/removal revisions.
+	var values := {
+		"schema":"ecology-support-policy-context/v1",
+		"biomeProfileSnapshotStatus":source_inputs.get("biomeProfileSnapshotStatus", ""),
+		"biomeProfileSnapshot":source_inputs.get("biomeProfileSnapshot", {}),
+		"treeGrammarEnvelopeStatus":source_inputs.get("treeGrammarEnvelopeStatus", ""),
+		"treeGrammarEnvelope":source_inputs.get("treeGrammarEnvelope", {}),
+		"treeGrammarEnvelopeDigest":source_inputs.get("treeGrammarEnvelopeDigest", ""),
+		"rockSupportEnvelopeStatus":source_inputs.get("rockSupportEnvelopeStatus", ""),
+		"rockSupportEnvelope":source_inputs.get("rockSupportEnvelope", {}),
+		"staticRecipeEnvelopeStatus":source_inputs.get("staticRecipeEnvelopeStatus", ""),
+		"staticRecipeEnvelope":source_inputs.get("staticRecipeEnvelope", {}),
+		"detailProducerInputs":source_inputs.get("detailProducerInputs", {}),
+		"producerCatalogRevision":source_inputs.get("producerCatalogRevision", ""),
+		"catalogInputSchema":source_inputs.get("catalogInputSchema", "")}
+	return _digest(values)
 
 
 static func derive_runtime_support_policy(source_inputs: Dictionary) -> Dictionary:
@@ -850,6 +903,53 @@ static func digest_value(value: Variant) -> String:
 	return _digest(value)
 
 
+## Stable identity for one static render member. This deliberately excludes
+## source-domain/removal revisions: those are freshness authorities carried
+## alongside the member revision, while this value changes only when the
+## immutable render content changes.
+static func static_member_content_revision(world_id: String, source_id: String,
+		source_part_id: String, family: String, render_content: Dictionary) -> String:
+	if world_id.is_empty() or source_id.is_empty() or source_part_id.is_empty() \
+			or family.is_empty() or render_content.is_empty():
+		return ""
+	var world_bounds: Variant = render_content.get("worldBounds", null)
+	var mesh_bounds: Variant = render_content.get("meshLocalBounds", null)
+	var world_transform: Variant = render_content.get("worldTransform", null)
+	var source_chunk: Variant = render_content.get("sourceChunkKey", null)
+	var mesh_digest := String(render_content.get("meshContentDigest", ""))
+	var material_digest := String(render_content.get("materialContentDigest", ""))
+	var resource_revision := String(render_content.get("resourceDescriptorRevision", ""))
+	var material_key := String(render_content.get("materialKey", ""))
+	var render_layer := String(render_content.get("renderLayer", ""))
+	if not world_bounds is AABB or not mesh_bounds is AABB \
+			or not world_transform is Transform3D or not source_chunk is Vector2i \
+			or mesh_digest.length() != 64 or material_digest.length() != 64 \
+			or resource_revision.length() != 64 or material_key.is_empty() \
+			or render_layer.is_empty():
+		return ""
+	for attribute_name: String in ["customData", "instanceColor"]:
+		if not render_content.get(attribute_name, null) is Color:
+			return ""
+	return _digest([
+		"ecology-static-member-render-content/v1", world_id, source_id,
+		source_part_id, family, source_chunk, world_transform, mesh_bounds,
+		world_bounds, mesh_digest, material_digest, material_key, render_layer,
+		resource_revision, render_content.customData, render_content.instanceColor,
+		float(render_content.get("visibilityRangeEnd", 0.0)),
+	])
+
+
+static func static_member_envelope_digest(world_id: String, source_id: String,
+		source_part_id: String, family: String, world_bounds: AABB,
+		mesh_content_digest: String, policy_revision: String, policy_digest: String,
+		source_domain_revision: String, producer_snapshot_revision: String,
+		resource_descriptor_revision: String) -> String:
+	return _digest([STATIC_MEMBER_ENVELOPE_SCHEMA, world_id, source_id,
+		source_part_id, family, world_bounds, mesh_content_digest, policy_revision,
+		policy_digest, source_domain_revision, producer_snapshot_revision,
+		resource_descriptor_revision])
+
+
 static func inverse_source_chunk_keys_for_section(section_key: Vector3i,
 		source_inputs: Dictionary = {}) -> Array[Vector2i]:
 	var bounds := section_bounds(section_key)
@@ -1138,3 +1238,8 @@ static func _freeze_value(value: Variant) -> Variant:
 		frozen.make_read_only()
 		return frozen
 	return value
+
+
+static func freeze_value(value: Variant) -> Variant:
+	## Public immutable-value boundary for runtime support-policy snapshots.
+	return _freeze_value(value)
