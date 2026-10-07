@@ -212,7 +212,9 @@ func chunk_packet_replay_controls() -> void:
 		"sourcePartId":"replay-wall",
 		"sourceRevision":"revision-1","materialKey":"material-key","preparedSegments":segments}
 	publisher.static_visual_batches={"group":group}
-	publisher._pending_publication_boundary={"epoch":1,"sourcePartIds":["replay-wall"],"committed":false}
+	publisher._pending_publication_boundary={"epoch":1,"sourcePartIds":["replay-wall"],
+		"sourceRevisions":{"replay-wall":"revision-1"},"sourceKinds":{"replay-wall":"wall"},
+		"transformArtifactRejections":{},"committed":false}
 	publisher._finish_validated=true
 	publisher._begin_static_flush(parent,false,true)
 	var turns:=0

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { cli, options, context, prepare, launchRecord, phaseRun, read, demand } from './lib/building-runner.mjs';
+import { cli, options, context, prepare, launchRecord, phaseRun, read, demand, stable } from './lib/building-runner.mjs';
 
 cli(async () => {
   const o = options(process.argv.slice(2), { outputdirectory: '', godotexe: '', projectpath: '' });
@@ -9,19 +9,24 @@ cli(async () => {
     'scripts/testing/buildings/BuildingStaticBatchFlushContract.gd',
     'scripts/buildings/BuildingStaticBatchFlush.gd',
     'scripts/buildings/BuildingPartPublisher.gd',
+    'scripts/buildings/BuildingPublicationPreparation.gd',
+    'scripts/buildings/BuildingSourceRecordBinding.gd',
+    'scripts/buildings/BuildingSourceRecordBinding.gd.uid',
+    'scripts/world/CitadelPublicationPlan.gd',
     'scripts/buildings/BuildingInstanceBuffer.gd',
     'scripts/world/ChunkRenderPacketOwner.gd',
     'tools/run-building-static-packet-replay-contract.mjs',
     'tools/lib/building-runner.mjs',
     'tools/run-godot-scene-watchdog.mjs'
   ];
-  launchRecord(c, files, { schema: 'building-static-packet-replay-launch/v1', evidenceLevel: 'synthetic_chunk_unload_recreate_replay', headed: false, timeoutSeconds: 60 });
+  const sourceHashes = launchRecord(c, files, { schema: 'building-static-packet-replay-launch/v1', evidenceLevel: 'synthetic_chunk_unload_recreate_replay', headed: false, timeoutSeconds: 60 });
   await phaseRun(c, {
     args: ['--headless', '--script', 'res://scripts/testing/buildings/BuildingStaticBatchFlushContract.gd'],
     env: { BUILDING_STATIC_FLUSH_REPORT: path.join(c.run, 'report.json'), BUILDING_STATIC_FLUSH_REPLAY_ONLY: '1' },
     timeout: 60,
     logPolicy: { emptyStderr: false }
   });
+  stable(c.project, sourceHashes);
   const report = read(path.join(c.run, 'report.json'));
   demand(report.evidence === 'synthetic_chunk_packet_replay_contract' && report.passed === true
     && report.checks?.static_packet_initial_receipt_installed === true

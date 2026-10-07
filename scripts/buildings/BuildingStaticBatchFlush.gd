@@ -3,6 +3,7 @@ const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparat
 const InstanceBuffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
 const InstanceAttributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const GeometryAdapter = preload("res://scripts/world/OrdinaryStructureSectionGeometryAdapter.gd")
 ## One existing static-batch boundary, prepared in small main-thread units.
 ## No Node references survive a call. The owner pauses part publication until
 ## ready, and retains retired containers until its existing worker disposal.
@@ -62,6 +63,18 @@ var _packet_retire_sources: Array[String] = []
 var _packet_retire_source_index := 0
 var _replay_only := false
 var replay_source_id := ""
+var _section_transform_prepared_group_keys: Dictionary = {}
+var _section_transform_artifacts_by_part: Dictionary = {}
+var _section_transform_source_index := 0
+var _section_transform_segment_index := 0
+var _section_transform_segments: Array[Dictionary] = []
+var _section_transform_group: Dictionary = {}
+var _section_transform_bounds := AABB()
+var _section_transform_digest: HashingContext
+var _section_transform_digest_index := 0
+var _section_transform_source_to_world := Transform3D.IDENTITY
+var _section_transform_mesh_content_digest := ""
+var _section_transform_material_content_digest := ""
 
 func begin(groups: Dictionary, records: Dictionary, parent: Node3D, publication_boundary: Dictionary = {}) -> void:
 	if state != "idle": return
@@ -100,6 +113,176 @@ func _packet_owner_is_current(publisher) -> bool:
 	var current: Dictionary=publisher.resolve_chunk_render_packet_backend(_packet_owner_cell)
 	return current.get("status")=="ready" and is_same(current.get("backend"),_packet_backend) \
 		and is_same(current.get("chunk"),_packet_chunk)
+
+
+func _begin_section_transform_artifact(group: Dictionary, _parent: Node3D, publisher) -> bool:
+	var key: Variant = _keys[_group_index]
+	# Prepared upload segments still have the flattened source transforms and
+	# custom data. Capture those into the immutable section artifact as well;
+	# preparedSegments only selects the existing packet upload path below.
+	if _transforms.is_empty():
+		_reject_section_transform_artifact(publisher, "transform_group_source_transforms_unavailable")
+		return false
+	var part_id := String(group.get("sourcePartId", ""))
+	var revision := String(group.get("sourceRevision", ""))
+	var material_key := String(group.get("materialKey", ""))
+	var owner_cell: Variant = group.get("ownerCell")
+	var render_chunk: Variant = group.get("renderChunkKey")
+	var material: Variant = group.get("material")
+	var mesh: Variant = group.get("mesh", publisher.unit_box)
+	if part_id.is_empty() or revision.is_empty() or material_key.is_empty() \
+			or not owner_cell is Vector2i or not render_chunk is Vector2i \
+			or not material is Material or not mesh is Mesh \
+			or _custom.size()!=_transforms.size():
+		_reject_section_transform_artifact(publisher, "transform_group_identity_or_payload_incomplete")
+		_section_transform_prepared_group_keys[key]=true
+		return false
+	_section_transform_group=group
+	_section_transform_source_index=0
+	_section_transform_segment_index=0
+	_section_transform_segments=[]
+	_section_transform_bounds=AABB()
+	return true
+
+
+func _begin_section_transform_artifact_digest(parent: Node3D, publisher) -> bool:
+	var group := _section_transform_group
+	var part_id := String(group.get("sourcePartId", ""))
+	var mesh := group.get("mesh", publisher.unit_box) as Mesh
+	var material := group.get("material") as Material
+	var mesh_identity: Dictionary = MeshFingerprint.inspect(mesh)
+	var material_identity: Dictionary = GeometryAdapter._material_identity(material)
+	if _section_transform_segments.is_empty() or mesh_identity.get("status")!="ready" \
+			or String(material_identity.get("digest", "")).length()!=64 \
+			or not is_instance_valid(parent):
+		_reject_section_transform_artifact(publisher, "transform_group_mesh_or_segment_identity_unavailable")
+		_section_transform_prepared_group_keys[_keys[_group_index]]=true
+		_section_transform_group={}
+		return false
+	var material_key := String(group.get("materialKey", ""))
+	var revision := String(group.get("sourceRevision", ""))
+	var owner_cell: Vector2i = group.get("ownerCell", Vector2i.ZERO)
+	var render_chunk: Vector2i = group.get("renderChunkKey", Vector2i.ZERO)
+	var tier := String(group.get("renderTier", "structural"))
+	var render_layer := String(group.get("renderLayer", ""))
+	var sort_policy := String(group.get("transparencySortPolicy", ""))
+	if render_layer not in ["opaque", "cutout", "translucent"] \
+			or (render_layer in ["opaque", "cutout"] and sort_policy != "none") \
+			or (render_layer == "translucent" and sort_policy not in ["camera_depth", "weighted_oit"]):
+		_reject_section_transform_artifact(publisher, "transform_group_render_layer_policy_missing")
+		_section_transform_group={}
+		return false
+	_section_transform_mesh_content_digest=String(mesh_identity.contentDigest)
+	_section_transform_material_content_digest=String(material_identity.digest)
+	_section_transform_source_to_world=parent.global_transform
+	_section_transform_digest = HashingContext.new()
+	if _section_transform_digest.start(HashingContext.HASH_SHA256)!=OK \
+			or _section_transform_digest.update(var_to_bytes([part_id,revision,owner_cell,render_chunk,
+			material_key,tier,render_layer,sort_policy,String(mesh_identity.contentDigest),
+			String(material_identity.digest),_section_transform_source_to_world,
+			_section_transform_group["transforms"].size()]))!=OK:
+		_reject_section_transform_artifact(publisher, "transform_group_digest_start_failed")
+		_section_transform_prepared_group_keys[_keys[_group_index]]=true
+		_section_transform_group={}
+		return false
+	_section_transform_digest_index=0
+	return true
+
+
+func _finish_section_transform_artifact(parent: Node3D, publisher) -> void:
+	var group := _section_transform_group
+	var part_id := String(group.get("sourcePartId", ""))
+	var mesh := group.get("mesh", publisher.unit_box) as Mesh
+	var material := group.get("material") as Material
+	var mesh_identity: Dictionary = MeshFingerprint.inspect(mesh)
+	var material_identity: Dictionary = GeometryAdapter._material_identity(material)
+	var material_key := String(group.get("materialKey", ""))
+	var revision := String(group.get("sourceRevision", ""))
+	var owner_cell: Vector2i = group.get("ownerCell", Vector2i.ZERO)
+	var render_chunk: Vector2i = group.get("renderChunkKey", Vector2i.ZERO)
+	var tier := String(group.get("renderTier", "structural"))
+	var render_layer := String(group.get("renderLayer", ""))
+	var sort_policy := String(group.get("transparencySortPolicy", ""))
+	if not is_instance_valid(parent) or _section_transform_digest == null \
+			or parent.global_transform != _section_transform_source_to_world:
+		_reject_section_transform_artifact(publisher, "transform_group_digest_finalization_unavailable")
+		_section_transform_prepared_group_keys[_keys[_group_index]]=true
+		_section_transform_group={}
+		return
+	if mesh_identity.get("status") != "ready" \
+			or String(mesh_identity.get("contentDigest", "")) != _section_transform_mesh_content_digest \
+			or String(material_identity.get("digest", "")) != _section_transform_material_content_digest:
+		_reject_section_transform_artifact(publisher, "transform_group_resource_identity_changed_during_digest")
+		_section_transform_prepared_group_keys[_keys[_group_index]]=true
+		_section_transform_group={}
+		return
+	var segments: Array[Dictionary] = _section_transform_segments
+	segments.make_read_only()
+	var content_digest := _section_transform_digest.finish().hex_encode()
+	var resource_bindings := {"mesh":mesh,"material":material}
+	resource_bindings.make_read_only()
+	var stable_site_id := String(publisher.publication_site_id)
+	if stable_site_id.is_empty(): stable_site_id=String(publisher.source_blueprint_id)
+	if stable_site_id.is_empty():
+		_reject_section_transform_artifact(publisher, "transform_group_site_identity_missing")
+		_section_transform_group={}
+		return
+	var artifact := {"schema":"building-static-transform-section-artifact/v1",
+		"sourceId":"building-transform:%s:%s:%s" % [stable_site_id,
+			part_id,content_digest.substr(0,24)],
+		"sourcePartId":part_id,"sourceRevision":revision,
+		"ownerCell":owner_cell,"renderChunkKey":render_chunk,
+		"renderTier":tier,"materialKey":material_key,
+		"renderLayer":render_layer,"transparencySortPolicy":sort_policy,
+		"materialContentDigest":_section_transform_material_content_digest,
+		"meshKey":"building-mesh:"+String(mesh_identity.contentDigest),
+		"meshContentDigest":_section_transform_mesh_content_digest,
+		"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
+		"localBounds":_section_transform_bounds,
+		"worldBounds":_section_transform_source_to_world*_section_transform_bounds,
+		"sourceToWorld":_section_transform_source_to_world,
+		"instanceCount":_transforms.size(),"segments":segments,
+		"contentDigest":content_digest,"resourceBindings":resource_bindings}
+	artifact.make_read_only()
+	var part_artifacts: Array = _section_transform_artifacts_by_part.get(part_id, [])
+	part_artifacts.append(artifact)
+	_section_transform_artifacts_by_part[part_id]=part_artifacts
+	_section_transform_prepared_group_keys[_keys[_group_index]]=true
+	_section_transform_group={}
+
+
+func _reject_section_transform_artifact(publisher, reason: String) -> void:
+	var group_key := ""
+	var source_part_id := ""
+	if _group_index < _keys.size():
+		group_key=String(_keys[_group_index])
+		var group_value: Variant=_groups.get(_keys[_group_index],{})
+		if group_value is Dictionary: source_part_id=String(group_value.get("sourcePartId",""))
+		_section_transform_prepared_group_keys[_keys[_group_index]]=true
+	# This unbounded-by-diagnostics ledger belongs to this exact boundary. A
+	# surviving group must never stand in for a rejected sibling's geometry.
+	if not _publication_boundary.is_empty():
+		publisher.record_static_section_transform_boundary_rejection(
+			_publication_boundary, source_part_id, reason)
+	if publisher.has_method("record_static_section_transform_artifact_rejection"):
+		publisher.call("record_static_section_transform_artifact_rejection",
+			source_part_id,group_key,reason)
+	else:
+		var diagnostics: Dictionary = publisher.get("_static_section_transform_artifact_diagnostics")
+		if diagnostics is Dictionary:
+			diagnostics["rejectedGroups"]=int(diagnostics.get("rejectedGroups",0))+1
+			diagnostics["lastRejectReason"]=reason
+	_section_transform_group={}
+	_section_transform_segments=[]
+
+
+func _finite_transform(value: Transform3D) -> bool:
+	for component: float in [value.basis.x.x,value.basis.x.y,value.basis.x.z,
+			value.basis.y.x,value.basis.y.y,value.basis.y.z,
+			value.basis.z.x,value.basis.z.y,value.basis.z.z,
+			value.origin.x,value.origin.y,value.origin.z]:
+		if not is_finite(component): return false
+	return true
 
 func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 	if budget_usec < 1 or budget_usec > 4000:
@@ -144,6 +327,11 @@ func _step(publisher) -> void:
 			if _transforms.is_empty() and int(group.get("packetInstanceCount",0))<=0:
 				_group_index += 1
 				return
+			var group_key: Variant = _keys[_group_index]
+			if not _replay_only and not _section_transform_prepared_group_keys.has(group_key) \
+					and _begin_section_transform_artifact(group, parent, publisher):
+				state="section_transform_compile"
+				return
 			if publisher.static_packet_group_eligible(group,parent):
 				_packet_owner_cell=group.renderChunkKey
 				_packet_source_revision=String(group.sourceRevision)
@@ -171,6 +359,59 @@ func _step(publisher) -> void:
 			_mesh.mesh = publisher.unit_box
 			_instance_index = 0
 			state = "instances"
+		"section_transform_compile":
+			if _section_transform_source_index >= _transforms.size():
+				state="section_transform_digest" if _begin_section_transform_artifact_digest(parent, publisher) else "group"
+				return
+			var end_index := mini(_section_transform_source_index + InstanceBuffer.SEGMENT_INSTANCES,
+				_transforms.size())
+			var transform_slice: Array = _transforms.slice(_section_transform_source_index, end_index)
+			var custom_slice: Array = _custom.slice(_section_transform_source_index, end_index)
+			for transform_value: Variant in transform_slice:
+				if not transform_value is Transform3D or not _finite_transform(transform_value):
+					_reject_section_transform_artifact(publisher, "nonfinite_transform")
+					state="group"
+					return
+			for custom_value: Variant in custom_slice:
+				if not custom_value is Color or not InstanceAttributes.is_finite_color(custom_value):
+					_reject_section_transform_artifact(publisher, "nonfinite_custom_data")
+					state="group"
+					return
+			var compiled: Array = InstanceBuffer.compile(transform_slice, custom_slice,
+				Transform3D.IDENTITY, Callable(), "static_section_transform_artifact")
+			if compiled.size()!=1 or not compiled[0] is Dictionary:
+				_reject_section_transform_artifact(publisher, "bounded_segment_compile_failed")
+				state="group"
+				return
+			var segment: Dictionary = compiled[0].duplicate(false)
+			segment["segmentId"]="segment:%06d" % _section_transform_segment_index
+			var segment_hash := HashingContext.new()
+			if segment_hash.start(HashingContext.HASH_SHA256)!=OK \
+					or segment_hash.update(var_to_bytes([segment.segmentId,segment.instanceCount,
+						segment.bounds,segment.buffer]))!=OK:
+				_reject_section_transform_artifact(publisher, "transform_segment_digest_failed")
+				state="group"
+				return
+			segment["contentDigest"]=segment_hash.finish().hex_encode()
+			segment.make_read_only()
+			_section_transform_segments.append(segment)
+			_section_transform_bounds = segment.bounds if _section_transform_segments.size()==1 \
+				else _section_transform_bounds.merge(segment.bounds)
+			_section_transform_source_index=end_index
+			_section_transform_segment_index+=1
+		"section_transform_digest":
+			if _section_transform_digest_index >= _section_transform_segments.size():
+				_finish_section_transform_artifact(parent, publisher)
+				state="group"
+				return
+			var segment: Dictionary = _section_transform_segments[_section_transform_digest_index]
+			var bounds: AABB = segment.get("bounds", AABB())
+			if _section_transform_digest.update(var_to_bytes([String(segment.segmentId),bounds,
+					int(segment.instanceCount),String(segment.contentDigest)]))!=OK:
+				_reject_section_transform_artifact(publisher, "transform_group_digest_update_failed")
+				state="group"
+				return
+			_section_transform_digest_index+=1
 		"instances":
 			if _segments.has(_instance_index):
 				var segment = _segments[_instance_index]
@@ -453,9 +694,19 @@ func _step(publisher) -> void:
 				state="failed"; reason="stale_static_flush_source"; return
 			if not _publication_boundary.is_empty() and not publisher._publication_boundary_is_current(_publication_boundary):
 				state="failed"; reason="publication_boundary_owner_changed"; return
+			var transform_artifact_preflight: Dictionary = publisher.prepare_static_section_transform_artifacts(
+				_section_transform_artifacts_by_part, _publication_boundary)
+			if transform_artifact_preflight.get("status")!="ready":
+				state="failed"; reason=String(transform_artifact_preflight.get("reason",
+					"static_transform_artifact_preflight_failed")); return
 			if not _records.is_empty() and (not is_instance_valid(publisher.static_collision_body) \
 					or publisher.static_collision_body.is_queued_for_deletion() or publisher.static_collision_body.get_parent()!=parent):
 				state="failed"; reason="static_collision_owner_lost"; return
+			# Commit source revision/artifacts before mutating collision metadata or
+			# replacing caches. Every possible rejection is above this point.
+			if not _publication_boundary.is_empty() and not publisher._commit_publication_boundary(
+					_publication_boundary, _section_transform_artifacts_by_part):
+				state="failed"; reason="publication_boundary_owner_changed"; return
 			if is_instance_valid(publisher.static_collision_body):
 				if publisher.static_collision_body.has_meta("building_part_records"):
 					publisher._publication_retirement.append(publisher.static_collision_body.get_meta("building_part_records"))
@@ -470,8 +721,6 @@ func _step(publisher) -> void:
 			publisher.static_visual_batches = {}
 			publisher.static_visual_transform_count = 0
 			publisher.incremental_static_flush_count += 1
-			if not _publication_boundary.is_empty() and not publisher._commit_publication_boundary(_publication_boundary):
-				state="failed"; reason="publication_boundary_owner_changed"; return
 			state = "packet_retire_begin" if not _publication_boundary.is_empty() else "ready"
 		"packet_retire_begin":
 			_packet_retire_parts=publisher.chunk_static_packet_part_ids()

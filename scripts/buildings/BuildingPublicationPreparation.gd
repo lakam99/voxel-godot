@@ -135,12 +135,7 @@ class PreparedHistory extends RefCounted:
 			and is_same(field.history_events, _identity.events) \
 			and is_same(field.history_event_cells, _identity.cells)
 
-class RecordBinding extends RefCounted:
-	static func encode(record: Dictionary) -> String:
-		var encoded := var_to_bytes(record)
-		encoded.fill(0)
-		if encoded.encode_var(0, record) != encoded.size(): return ""
-		return encoded.hex_encode()
+const RecordBinding = preload("res://scripts/buildings/BuildingSourceRecordBinding.gd")
 
 class MasonrySelection extends RefCounted:
 	static func selected(part) -> bool:

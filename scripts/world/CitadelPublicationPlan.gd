@@ -5,6 +5,7 @@ class_name CitadelPublicationPlan
 ## source. It is not geometry, collision, navigation, or readiness authority.
 ## Those owners still validate every selected physical group at publication.
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
+const SourceRecordBinding = preload("res://scripts/buildings/BuildingSourceRecordBinding.gd")
 const CELL := 1.35
 const BUCKET_WORLD_SIZE := 32.0
 # Exact readiness closures are admitted before optional presentation. Sixteen
@@ -32,6 +33,7 @@ var dependency_closures: Dictionary = {}
 var center_buckets: Dictionary = {}
 var bounds_buckets: Dictionary = {}
 var member_records: Array[Dictionary] = []
+var visual_source_revisions: Dictionary = {}
 var member_buckets: Dictionary = {}
 var door_group_ids: Array[String] = []
 var structural_group_ids: Array[String] = []
@@ -112,6 +114,11 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 	var building_visuals: Dictionary = {}
 	for raw_part in building_source.get("parts",[]):
 		if raw_part is Dictionary:
+			var part_id := String(raw_part.get("id", ""))
+			var source_revision := SourceRecordBinding.encode(raw_part)
+			if part_id.is_empty() or source_revision.is_empty() or plan.visual_source_revisions.has(part_id):
+				return {"ready":false, "reason":"publication_plan_visual_source_identity_invalid"}
+			plan.visual_source_revisions[part_id] = source_revision
 			var recipe: Variant = raw_part.get("recipe",{})
 			building_visuals["building:"+String(raw_part.get("id",""))] = \
 				bool(recipe.get("visual",true)) if recipe is Dictionary else true
@@ -120,10 +127,13 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 	part_member_ids.sort()
 	for member_id: String in part_member_ids:
 		if not by_part.has(member_id): return {"ready":false,"reason":"publication_plan_member_group_missing","memberId":member_id}
+		if member_id.begins_with("building:") and not plan.visual_source_revisions.has(member_id.trim_prefix("building:")):
+			return {"ready":false,"reason":"publication_plan_visual_source_missing","memberId":member_id}
 		var member_bounds: Variant = description.parts[member_id].get("bounds")
 		if not _member_bounds_valid(member_bounds): return {"ready":false,"reason":"publication_plan_member_bounds_invalid","memberId":member_id}
 		_add_member_record(plan,member_id,String(by_part[member_id]),member_bounds,
-			bool(building_visuals.get(member_id,true)))
+			bool(building_visuals.get(member_id,true)),
+			String(plan.visual_source_revisions.get(member_id.trim_prefix("building:"), "")) if member_id.begins_with("building:") else "")
 	var tree_members: Dictionary = description.publication_groups.get("treeMembers",{})
 	var tree_member_ids: Array[String] = []
 	for member_id: String in tree_members: tree_member_ids.append(member_id)
@@ -188,8 +198,13 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 		plan.selected_courtyard_group_ids]))
 	var canonical_members: Array = []
 	for record: Dictionary in plan.member_records:
-		canonical_members.append([record.memberId,record.groupId,record.bounds,record.visual])
+		canonical_members.append([record.memberId,record.groupId,record.bounds,record.visual,record.sourceRevision])
 	signature.update(var_to_bytes(canonical_members))
+	var source_ids: Array = plan.visual_source_revisions.keys()
+	source_ids.sort()
+	for source_id: String in source_ids:
+		signature.update(var_to_bytes([source_id, plan.visual_source_revisions[source_id]]))
+	plan.visual_source_revisions.make_read_only()
 	plan.order.make_read_only()
 	plan.dependency_closures.make_read_only()
 	plan.center_buckets.make_read_only()
@@ -223,6 +238,7 @@ func matches(expected_binding: Dictionary, expected_groups: Dictionary) -> bool:
 		and order.is_read_only() and dependency_closures.is_read_only() \
 		and center_buckets.is_read_only() and bounds_buckets.is_read_only() \
 		and member_records.is_read_only() and member_buckets.is_read_only() \
+		and visual_source_revisions.is_read_only() \
 		and first_useful_home_ids.is_read_only() and eligible_group_ids.is_read_only() \
 		and selected_first_useful_home_ids.is_read_only() and selected_first_useful_home_group_ids.is_read_only() \
 		and selected_first_useful_structural_group_ids.is_read_only() and courtyard_group_ids.is_read_only() \
@@ -435,9 +451,9 @@ static func _freeze_bucket_index(index: Dictionary) -> void:
 
 
 static func _add_member_record(plan, member_id: String, group_id: String, bounds: AABB,
-		visual := true) -> void:
+		visual := true, source_revision := "") -> void:
 	var index: int = plan.member_records.size()
-	var record := {"memberId":member_id,"groupId":group_id,"bounds":bounds,"visual":visual}
+	var record := {"memberId":member_id,"groupId":group_id,"bounds":bounds,"visual":visual,"sourceRevision":source_revision}
 	record.make_read_only()
 	plan.member_records.append(record)
 	var low := _bucket_for_point(bounds.position)
