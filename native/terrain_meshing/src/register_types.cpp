@@ -7,6 +7,7 @@
 #include "chunk_static_render_backend.h"
 #include "chunk_render_packet_backend.h"
 #include "native_section_compile_dispatcher.h"
+#include "native_tree_geometry_dispatcher.h"
 
 #include <godot_cpp/godot.hpp>
 
@@ -24,6 +25,7 @@ void initialize_terrain_meshing_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<ChunkStaticRenderBackend>();
 	ClassDB::register_class<ChunkRenderPacketBackend>();
 	ClassDB::register_class<NativeSectionCompileDispatcher>();
+	ClassDB::register_class<NativeTreeGeometryDispatcher>();
 	register_building_support_kernel();
 }
 
