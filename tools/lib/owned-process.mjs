@@ -60,7 +60,9 @@ function integer(value, fallback, min, max, name) {
  */
 export async function runOwnedProcess(options = {}) {
   let emergencyResult;
-  const runId = randomUUID().replaceAll('-', '');
+  const runId = options.runId ?? randomUUID().replaceAll('-', '');
+  if (typeof runId !== 'string' || !/^[a-f0-9]{32}$/i.test(runId))
+    throw new Error('runId must be exactly 32 hexadecimal characters');
   const s = {
     schema: 'godot-scene-watchdog/v5', runId,
     projectPath: null, executable: null, godotExe: null,

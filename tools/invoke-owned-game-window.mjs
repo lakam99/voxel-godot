@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const directory = dirname(fileURLToPath(import.meta.url));
+export const NATIVE_WINDOW_HELPER_TIMEOUT_MS = 5000;
 const fields = ['LiveOwnershipPath', 'RunId', 'ProjectPath', 'Action', 'WindowHandle',
   'CapturePath', 'X', 'Y', 'Dx', 'Dy', 'Button', 'Key', 'HoldMilliseconds',
   'ExpectedClientWidth', 'ExpectedClientHeight'];
@@ -74,6 +75,15 @@ export function buildOwnedWindowHelper({ tests = false } = {}) {
   return executable;
 }
 
+/** Bound non-hold actions; Key/Click must reach the native finally-based release. */
+export function runNativeWindowHelper(executable, request, spawn = spawnSync) {
+  const holdsInput = /^(key|click)$/i.test(String(request.Action ?? ''));
+  return spawn(executable, [], {
+    input: JSON.stringify(request), encoding: 'utf8', windowsHide: true, shell: false,
+    ...(holdsInput ? {} : { timeout: NATIVE_WINDOW_HELPER_TIMEOUT_MS }),
+  });
+}
+
 export function main(args = process.argv.slice(2)) {
   if (args.length === 1 && /^(--help|-Help)$/i.test(args[0])) {
     process.stdout.write('Usage: node tools/invoke-owned-game-window.mjs -LiveOwnershipPath PATH -RunId ID -ProjectPath PATH [-Action Inspect|Focus|Capture|Click|Key|MouseLook] [options]\nInput requires -WindowHandle, -ExpectedClientWidth and -ExpectedClientHeight from Inspect.\n');
@@ -83,9 +93,7 @@ export function main(args = process.argv.slice(2)) {
   const executable = buildOwnedWindowHelper();
   // Do not impose a Node kill timer during a key/button hold: the helper owns
   // finally-based release and its bounded hold loop. Never retry failed input.
-  const result = spawnSync(executable, [], {
-    input: JSON.stringify(request), encoding: 'utf8', windowsHide: true, shell: false,
-  });
+  const result = runNativeWindowHelper(executable, request);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) throw result.error;

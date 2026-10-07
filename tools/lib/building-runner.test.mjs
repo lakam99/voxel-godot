@@ -4,8 +4,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { options, choice, integer, ownedPath, inside, fresh, hashes, stable, assertReport, assertWatchdog, assertNoGodot, checkLogs, phaseRun, projectDefault, uid, watchdogSources, write, read, context, resolveExecutablePair } from './building-runner.mjs';
+import { deflateSync } from 'node:zlib';
+import { options, choice, integer, ownedPath, inside, fresh, hashes, stable, assertReport, assertWatchdog, assertNoGodot, checkLogs, phaseRun, classifyHeadedTestProgress, readProgressSnapshot, captureWithBoundedRetries, projectDefault, uid, watchdogSources, write, read, context, resolveExecutablePair } from './building-runner.mjs';
+import { createHeadedTestEvidence, headedCapturePath, inspectFocusCaptureOwnedWindow,
+	persistVisualInspection, validateVisualInspection } from './headed-test-evidence.mjs';
 import { removeClass, replaceOnce, archiveGraph, landscapeCapture, errorInventory, expectedCompoundError, eligibleBaseline, normalized } from './building-frozen.mjs';
 import { runSpecial as runSpecialImplementation } from './building-special.mjs';
 import { specs } from './building-contract-specs.mjs';
@@ -231,6 +235,246 @@ test('synthetic watchdog adapter passes complete child environment without mutat
   assert.deepEqual(captured.env, { ONLY_CHILD: 'yes', OUTPUT: dir }); assert.equal(captured.timeoutSeconds, 3); assert.equal(process.env.BUILDING_UNIT_PARENT, original);
   assert.deepEqual(captured.args, ['--path', dir, '--headless', '--script', 'res://fixture.gd']);
 });
+test('headed phaseRun binds supplied runId to live ownership and test environment', async t => {
+  const dir = temporary(t), runId = 'abcdef0123456789abcdef0123456789';
+  let captured;
+  await phaseRun({ project: dir, run: dir, executable: 'never-launched', env: {} }, {
+    args: ['--script', 'res://fixture.gd'], live: true, headedTest: { runnerId: 'fixture-headed-gate' },
+  }, async o => {
+    captured = o;
+    fs.writeFileSync(o.stdoutPath, ''); fs.writeFileSync(o.stderrPath, '');
+    return { ...clean, runId: o.runId };
+  });
+  assert.match(captured.runId, /^[a-f0-9]{32}$/);
+  assert.equal(captured.env.VOXEL_AUTOMATED_TEST, '1');
+  assert.equal(captured.env.VOXEL_AUTOMATED_TEST_RUN_ID, captured.runId);
+  assert.equal(captured.liveOwnershipPath, path.join(dir, 'he', 'l.json'));
+  const evidence = read(path.join(dir, 'he', 'e.json'));
+  assert.equal(evidence.watchdogRunId, captured.runId);
+  assert.equal(evidence.accepted, false);
+});
+test('default owned-window completion writes failure acknowledgement even when capture is unavailable', async t => {
+  const dir = temporary(t), progressPath = path.join(dir, 'progress.json');
+  let acknowledgement;
+  await phaseRun({ project: dir, run: dir, executable: 'never-launched', env: {} }, {
+    args: [], live: true,
+    headedTest: { runnerId: 'default-window-ack-fixture', completionHandshake: true, progressPath },
+  }, async o => {
+    fs.writeFileSync(o.stdoutPath, ''); fs.writeFileSync(o.stderrPath, '');
+    write(progressPath, { stage: 'finished', details: { passed: false } });
+    const ackPath = o.env.VOXEL_AUTOMATED_TEST_FINAL_CAPTURE_ACK;
+    const deadline = Date.now() + 3000;
+    while (!fs.existsSync(ackPath) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.ok(fs.existsSync(ackPath), 'terminal capture must acknowledge through the configured path');
+    acknowledgement = read(ackPath);
+    assert.equal(acknowledgement.runId, o.runId);
+    return { ...clean, runId: o.runId };
+  });
+  assert.equal(acknowledgement.schema, 'headed-test-capture-ack/v1');
+  assert.equal(acknowledgement.checkpoint, 'test-failure');
+  assert.equal(acknowledgement.accepted, false);
+  assert.equal(read(path.join(dir, 'he', 'e.json')).accepted, false);
+});
+test('headed screenshot inspects first, retries transient ambiguity/focus refusal, and reuses that exact HWND', async t => {
+  const dir = temporary(t), runId = '22155664000000000000000000000001';
+  const liveOwnershipPath = path.join(dir, 'live-ownership.json');
+  fs.writeFileSync(liveOwnershipPath, JSON.stringify({ schema: 'godot-live-ownership/v1', runId,
+    state: 'running', projectPath: dir, authority: 'Windows Job Object membership',
+    members: [{ pid: 38852 }] }));
+  const calls = [], waits = [];
+  let inspectCount = 0, focusCount = 0;
+  const window = { Hwnd: 22155664, Pid: 38852, Width: 1280, Height: 720, Foreground: true };
+  const result = await inspectFocusCaptureOwnedWindow({ liveOwnershipPath, projectPath: dir, runId,
+    capturePath: path.join(dir, 'capture.png'), wait: async milliseconds => waits.push(milliseconds),
+    invoke: async (args, action) => {
+      calls.push({ args, action });
+      assert.equal(args[args.indexOf('--run-id') + 1], runId);
+      if (action === 'Inspect') {
+        inspectCount++;
+        assert.equal(args.includes('--window-handle'), false);
+        if (inspectCount === 1) throw new Error('Inspect failed: Expected exactly one visible owned Godot game client; provide an inspected HWND if ambiguous.');
+        return { schema: 'owned-game-window-action/v1', runId, action, status: 'completed',
+          window: { ...window, Foreground: false } };
+      }
+      assert.equal(args[args.indexOf('--window-handle') + 1], String(window.Hwnd));
+      if (action === 'Focus') {
+        focusCount++;
+        if (focusCount === 1) throw new Error('Focus failed: Windows refused foreground focus.');
+        return { schema: 'owned-game-window-action/v1', runId, action, status: 'completed', window };
+      }
+      assert.equal(action, 'Capture');
+      assert.equal(args[args.indexOf('--expected-client-width') + 1], '1280');
+      assert.equal(args[args.indexOf('--expected-client-height') + 1], '720');
+      return { schema: 'owned-game-window-action/v1', runId, action, status: 'completed', window };
+    } });
+  assert.equal(result.window.Hwnd, window.Hwnd);
+  assert.deepEqual(calls.map(call => call.action), ['Inspect', 'Inspect', 'Focus', 'Inspect', 'Focus', 'Capture']);
+  assert.deepEqual(waits, [150, 150]);
+});
+test('headed capture filenames stay compact and sequence-unique under deep run paths', t => {
+  const dir = temporary(t), deepRun = path.join(dir, 'artifacts', 'citadel-runtime-integration',
+    'terrain-fluid-section-native-receipt-r4');
+  const evidence = createHeadedTestEvidence({ projectPath: dir, runnerId: 'compact-path-test',
+    runId: '22155664000000000000000000000002', outputDirectory: path.join(deepRun, 'he') });
+  const first = headedCapturePath(evidence.metadata.captureDirectory, 0);
+  const second = headedCapturePath(evidence.metadata.captureDirectory, 1);
+  assert.equal(evidence.metadata.captureDirectory, path.join(deepRun, 'he', 's'));
+  assert.equal(path.basename(first), '00.png');
+  assert.equal(path.basename(second), '01.png');
+  assert.notEqual(first, second);
+  assert.ok(first.length < path.join(deepRun, 'headed-test-evidence', 'screenshots',
+    '000001-test-success.png').length - 30, 'compact path materially reduces Windows path length');
+});
+test('Main gate progress distinguishes real startup readiness from harness and search phases', () => {
+  assert.deepEqual(classifyHeadedTestProgress({ stage: 'waiting_for_main_startup' }), {
+    phase: 'waiting_for_main_startup', phaseKind: 'initialized_main_readiness_wait', checkpoint: 'main-readiness'
+  });
+  assert.deepEqual(classifyHeadedTestProgress({ stage: 'waiting_for_real_main_startup' }), {
+    phase: 'waiting_for_main_startup', phaseKind: 'initialized_main_readiness_wait', checkpoint: 'main-readiness'
+  });
+  assert.deepEqual(classifyHeadedTestProgress({ stage: 'searching_installed_production_candidates', details: { scanCount: 10 } }), {
+    phase: 'candidate_search', phaseKind: 'harness', checkpoint: 'candidate-search'
+  });
+  assert.equal(classifyHeadedTestProgress({ stage: 'finished', details: { passed: false } }).phaseKind, 'failure');
+});
+test('transient truncated progress snapshots are retried and retained as diagnostics', t => {
+  const file = path.join(temporary(t), 'progress.json'), diagnostics = [];
+  fs.writeFileSync(file, '{"stage":"waiting_for_main_startup"');
+  assert.equal(readProgressSnapshot(file, diagnostics), null);
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0].error, /JSON/);
+  fs.writeFileSync(file, JSON.stringify({ stage: 'searching_installed_production_candidates' }));
+  assert.equal(readProgressSnapshot(file, diagnostics).stage, 'searching_installed_production_candidates');
+  assert.equal(diagnostics.length, 1, 'successful retry preserves the earlier parse race for final evidence');
+});
+test('screenshot retries are bounded and yield to a terminal phase', async () => {
+  let terminal = false, calls = 0;
+  const result = await captureWithBoundedRetries({
+    capture: async () => { calls++; throw new Error('native helper transient failure'); },
+    shouldRetry: () => !terminal,
+    maxAttempts: 5,
+    wait: async () => { terminal = true; },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.attempts, 2);
+  assert.match(result.error.message, /native helper/);
+});
+test('terminal phase polling can advance while an async screenshot action is pending', async () => {
+  let terminal = false, calls = 0, phasePolls = 0;
+  const pollTimer = setInterval(() => { phasePolls++; terminal = true; }, 2);
+  try {
+    const result = await captureWithBoundedRetries({
+      capture: async () => { calls++; await new Promise(resolve => setTimeout(resolve, 25)); throw new Error('capture failed'); },
+      shouldRetry: () => !terminal,
+      maxAttempts: 4,
+      wait: async () => {},
+    });
+    assert.equal(result.attempts, 1);
+    assert.equal(calls, 1);
+    assert.ok(phasePolls > 0, 'progress polling ran while screenshot work was pending');
+  } finally { clearInterval(pollTimer); }
+});
+test('screenshot review rejects mismatched run and screenshot hashes', () => {
+  const evidence = { runnerId: 'headed-fixture', runId: 'a'.repeat(32), captures: [
+    { captureId: 'capture-1', sha256: '1'.repeat(64) }
+  ] };
+  assert.throws(() => validateVisualInspection(evidence, { schema: 'voxel-automated-test-visual-review/v1',
+    runnerId: evidence.runnerId, runId: 'b'.repeat(32), reviewer: 'human', captures: [] }), /identity/);
+  assert.throws(() => validateVisualInspection(evidence, { schema: 'voxel-automated-test-visual-review/v1',
+    runnerId: evidence.runnerId, runId: evidence.runId, reviewer: 'human', captures: [
+      { captureId: 'capture-1', screenshotSha256: '2'.repeat(64), inspected: true, result: 'pass', notes: 'Reviewed image' }
+    ] }), /hash-matched/);
+});
+test('unclean watchdog failure remains durable evidence and cannot be accepted', t => {
+  const dir = temporary(t), runId = '0123456789abcdef0123456789abcdef';
+  const evidenceRun = createHeadedTestEvidence({ projectPath: dir, runnerId: 'headed-failure-fixture', runId,
+    outputDirectory: path.join(dir, 'headed-test-evidence'), sourceIdentity: { head: 'fixture' } });
+  evidenceRun.publishPhase('watchdog_or_test_failure', 'failure', 'owned process cleanup failed');
+  evidenceRun.recordCaptureFailure({ phase: 'watchdog_or_test_failure', phaseKind: 'failure', reason: 'owned window closed before capture' });
+  const evidence = evidenceRun.finalize({ watchdogSummary: { runId, overallExitCode: 125,
+    functionalExitCode: 1, cleanupPassed: false, authoritativeZeroProven: false } });
+  assert.equal(evidence.accepted, false);
+  assert.equal(evidence.watchdog.cleanupPassed, false);
+  assert.equal(evidence.captureFailures.length, 1);
+  assert.equal(evidence.visualInspection.status, 'unavailable');
+});
+test('headed phaseRun finalizes failure evidence when watchdog invocation rejects', async t => {
+  const dir = temporary(t);
+  let runId = '';
+  await assert.rejects(phaseRun({ project: dir, run: dir, executable: 'never-launched', env: {} }, {
+    args: ['--script', 'res://fixture.gd'], live: true, headedTest: { runnerId: 'rejected-watchdog-fixture' },
+  }, async options => { runId = options.runId; throw new Error('injected watchdog rejection'); }),
+  /injected watchdog rejection.*headed-test failure evidence/);
+  const evidence = read(path.join(dir, 'he', 'e.json'));
+  assert.equal(evidence.runId, runId);
+  assert.equal(evidence.watchdog.schema, 'watchdog-invocation-failure/v1');
+  assert.equal(evidence.watchdog.cleanupPassed, false);
+  assert.equal(evidence.accepted, false);
+  assert.ok(evidence.captureFailures.some(row => row.phase === 'watchdog_or_test_failure'));
+});
+function syntheticPngForEvidenceTest() {
+  const crc32 = bytes => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const typeBytes = Buffer.from(type, 'ascii'), length = Buffer.alloc(4), checksum = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    checksum.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])));
+    return Buffer.concat([length, typeBytes, data, checksum]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 6;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.from([0, 64, 128, 192, 255]))),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+test('pending visual review keeps otherwise passing headed evidence unaccepted until persisted review', t => {
+  const dir = temporary(t), runId = 'aabbccddeeff0011aabbccddeeff0011';
+  const evidenceRun = createHeadedTestEvidence({ projectPath: dir, runnerId: 'headed-review-fixture', runId,
+    outputDirectory: path.join(dir, 'headed-test-evidence'), sourceIdentity: { head: 'fixture' } });
+  const status = evidenceRun.publishPhase('test_success', 'harness');
+  const imagePath = path.join(evidenceRun.metadata.captureDirectory, 'checkpoint.png');
+  const png = syntheticPngForEvidenceTest();
+  fs.writeFileSync(imagePath, png);
+  const screenshotSha256 = createHash('sha256').update(png).digest('hex');
+  const sourceIdentity = evidenceRun.metadata.sourceIdentity;
+  fs.appendFileSync(evidenceRun.metadata.captureManifestPath, `${JSON.stringify({
+    schema: 'voxel-automated-test-capture/v1', captureId: `${runId}:000001`, runnerId: 'headed-review-fixture',
+    runId, watchdogRunId: runId, phase: 'test_success', phaseKind: 'harness', elapsedMilliseconds: 40,
+    statusSequence: status.sequence, captureType: 'owned-window', sourceIdentity,
+    sourceSha256: sourceIdentity.sourceSha256 ?? {},
+    sourceIdentitySha256: evidenceRun.metadata.sourceIdentitySha256,
+    capturedAtUnixMilliseconds: Date.now(), path: imagePath, screenshotBytes: png.length, screenshotSha256,
+    windowHandle: '4', pid: 3, ownershipSequence: 2,
+    nativeCaptureReceipt: { runId, window: { Hwnd: 4, Pid: 3 } },
+  })}\n`);
+  const evidence = evidenceRun.finalize({ watchdogSummary: { ...clean, runId }, acceptancePassed: true });
+  assert.equal(evidence.processAcceptancePassed, true);
+  assert.equal(evidence.visualInspection.status, 'pending');
+  assert.equal(evidence.accepted, false);
+  const review = { schema: 'voxel-automated-test-visual-review/v1', runnerId: evidence.runnerId, runId,
+    reviewer: 'test reviewer', inspectedAtUtc: new Date().toISOString(), captures: [
+      { captureId: `${runId}:000001`, screenshotSha256, inspected: true, result: 'pass', notes: 'Badge and loading UI are legible.' }
+    ] };
+  const persisted = persistVisualInspection({ evidencePath: evidenceRun.metadata.evidencePath, review });
+  const reviewedEvidence = read(persisted.outputPath);
+  assert.equal(persisted.accepted, true);
+  assert.equal(reviewedEvidence.visualInspection.status, 'passed');
+  assert.equal(reviewedEvidence.accepted, true);
+  assert.throws(() => validateVisualInspection(evidence, { ...review, captures: [review.captures[0], review.captures[0]] }), /exactly once/);
+});
 test('synthetic watcher signals owned stop promptly on script error', async t => {
   const dir = temporary(t);
   await assert.rejects(phaseRun({ project: dir, run: dir, executable: 'never-launched', env: {} }, { args: [] }, async o => {
@@ -286,7 +530,7 @@ test('synthetic main menu clears fixture variables case-insensitively only in ch
   try {
     const result = await runSpecial('citadel-main-menu-diagnostic', ['-OutputDirectory', dir], async o => {
       assert.equal(o.env[key], undefined); assert.equal(o.env.APPDATA, path.join(dir, 'userdata')); assert.ok(o.liveOwnershipPath);
-      fs.writeFileSync(o.stdoutPath, ''); fs.writeFileSync(o.stderrPath, ''); write(o.summaryPath, clean); return clean;
+      fs.writeFileSync(o.stdoutPath, ''); fs.writeFileSync(o.stderrPath, ''); write(o.summaryPath, clean); return { ...clean, runId: o.runId };
     });
     assert.equal(result.launcherClean, true); assert.equal(process.env[key], 'must-not-reach-menu');
   } finally { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; }

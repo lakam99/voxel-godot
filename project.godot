@@ -14,6 +14,10 @@ config/name="Voxel Biome World Godot"
 run/main_scene="res://scenes/MainMenu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 
+[autoload]
+
+AutomatedTestOverlay="*res://scripts/testing/AutomatedTestOverlay.gd"
+
 [native_extensions]
 
 paths=["res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension", "res://addons/zylann.voxel/voxel.gdextension"]

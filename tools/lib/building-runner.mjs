@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHeadedTestEvidence } from './headed-test-evidence.mjs';
 
 export const projectDefault = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const godotDefault = 'C:/Users/arkam/Desktop/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stable_win64_console.exe';
@@ -104,10 +105,159 @@ export function checkLogs(stdout, stderr, { pattern = engineWarnings, emptyStder
   demand(lines.length === expectedCount && lines.every(line => line === expectedError), `Unexpected engine diagnostics: ${lines.join('\n')}`);
   return lines;
 }
-export async function phaseRun(c, { args, env = {}, timeout = 45, prefix = '', membership = false, logPolicy = {}, live = false, logExtension = 'log', summaryName } = {}, runOwnedProcess) {
+export function classifyHeadedTestProgress(progress) {
+  const stage = typeof progress?.stage === 'string' ? progress.stage : '';
+  if (stage === 'waiting_for_main_startup') return { phase: stage, phaseKind: 'initialized_main_readiness_wait', checkpoint: 'main-readiness' };
+  if (stage === 'waiting_for_real_main_startup') return { phase: 'waiting_for_main_startup', phaseKind: 'initialized_main_readiness_wait', checkpoint: 'main-readiness' };
+  if (stage === 'main_startup_step') return { phase: stage, phaseKind: 'initialized_main_readiness_wait', checkpoint: '' };
+  if (stage === 'searching_installed_production_candidates') return { phase: 'candidate_search', phaseKind: 'harness', checkpoint: 'candidate-search' };
+  if (stage === 'awaiting_final_viewport_capture') {
+    const passed = progress?.details?.passed === true;
+    return { phase: passed ? 'test_success' : 'test_failure', phaseKind: passed ? 'harness' : 'failure',
+      checkpoint: passed ? 'test-success' : 'test-failure', acceptancePassed: passed };
+  }
+  if (stage === 'finished') {
+    const passed = progress?.details?.passed === true;
+    return { phase: passed ? 'test_success' : 'test_failure', phaseKind: passed ? 'harness' : 'failure',
+      checkpoint: passed ? 'test-success' : 'test-failure', acceptancePassed: passed };
+  }
+  if (/fail|error|timeout/i.test(stage)) return { phase: stage || 'test_failure', phaseKind: 'failure', checkpoint: 'test-failure' };
+  return stage ? { phase: stage, phaseKind: 'harness', checkpoint: '' } : null;
+}
+
+/** Parse a progress snapshot without turning an atomic-rewrite race into a watchdog stop. */
+export function readProgressSnapshot(progressPath, diagnostics = []) {
+  try { return JSON.parse(fs.readFileSync(progressPath, 'utf8').replace(/^\uFEFF/, '')); }
+  catch (error) {
+    let size = null;
+    let mtimeMs = null;
+    try { const stat = fs.statSync(progressPath); size = stat.size; mtimeMs = stat.mtimeMs; } catch { /* file may be between replacement steps */ }
+    const previous = diagnostics.at(-1);
+    const key = `${progressPath}\0${error.message}\0${size}\0${mtimeMs}`;
+    if (previous?._dedupeKey === key) previous.count++;
+    else diagnostics.push({ path: progressPath, observedAtUtc: new Date().toISOString(), size, mtimeMs,
+      error: error.message.slice(0, 1000), count: 1, _dedupeKey: key });
+    if (diagnostics.length > 32) diagnostics.splice(0, diagnostics.length - 32);
+    return null;
+  }
+}
+
+/** Bounded retries keep a slow native capture from starving terminal checkpoints. */
+export async function captureWithBoundedRetries({ capture, shouldRetry, maxAttempts = 3, delayMs = 150,
+  wait = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  let lastError = null;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
+    try { await capture(); return { attempts, error: null }; }
+    catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !shouldRetry()) break;
+      await wait(delayMs);
+    }
+  }
+  return { attempts, error: lastError };
+}
+
+export async function phaseRun(c, { args, env = {}, timeout = 45, prefix = '', membership = false, logPolicy = {}, live = false, logExtension = 'log', summaryName, headedTest = null } = {}, runOwnedProcess) {
   const at = name => path.join(c.run, prefix + name);
   const stdoutPath = at('stdout.' + logExtension), stderrPath = at('stderr.' + logExtension), stopRequestPath = at('stop-request.txt');
+  demand(!headedTest || live, 'headedTest evidence requires live ownership publication');
+  const evidence = headedTest ? createHeadedTestEvidence({
+    projectPath: c.project, runnerId: headedTest.runnerId ?? path.basename(process.argv[1] ?? 'headed-test', '.mjs'),
+    runId: randomUUID().replaceAll('-', ''), outputDirectory: at('he'),
+    sourceIdentity: headedTest.sourceIdentity ?? {},
+    captureMode: headedTest.captureMode ?? 'owned_window',
+  }) : null;
+  if (evidence) evidence.publishPhase('loading_game_window', 'harness');
   let watcherError, stopped = false;
+  let progressAcceptance = false;
+  const progressReadDiagnostics = [];
+  let finalCheckpointAckPath = '';
+  if (evidence && headedTest.completionHandshake === true) {
+    finalCheckpointAckPath = evidence.metadata.finalCaptureAckPath;
+    fs.mkdirSync(evidence.metadata.outputDirectory, { recursive: true });
+  }
+  let checkpointChain = Promise.resolve();
+  const queuedCheckpoints = new Set();
+  let testTerminalObserved = false;
+  let ownedProcessTerminated = false;
+  const queueCheckpoint = checkpoint => {
+    if (!evidence || !checkpoint?.checkpoint || queuedCheckpoints.has(checkpoint.checkpoint)) return;
+    queuedCheckpoints.add(checkpoint.checkpoint);
+    checkpointChain = checkpointChain.then(async () => {
+      evidence.publishPhase(checkpoint.phase, checkpoint.phaseKind, checkpoint.detail ?? '');
+      const retryInitialUntil = checkpoint.checkpoint === 'initial-loading';
+      let captureRow = null;
+      const captureResult = await captureWithBoundedRetries({
+        capture: async () => {
+          captureRow = await evidence.captureScreenshot({ name: checkpoint.checkpoint, phase: checkpoint.phase,
+            phaseKind: checkpoint.phaseKind, detail: checkpoint.detail ?? '' });
+        },
+        shouldRetry: () => retryInitialUntil && !testTerminalObserved && !ownedProcessTerminated,
+        maxAttempts: retryInitialUntil ? 3 : 1,
+        delayMs: 150,
+      });
+      if (captureResult.error) evidence.recordCaptureFailure({ phase: checkpoint.phase, phaseKind: checkpoint.phaseKind,
+        reason: captureResult.error.message, detail: `${checkpoint.detail ?? ''} (attempts=${captureResult.attempts})` });
+      try {
+        if (checkpoint.acceptancePassed !== undefined) {
+          progressAcceptance = checkpoint.acceptancePassed === true && captureResult.error === null && captureRow !== null;
+        }
+        if (checkpoint.checkpoint.startsWith('test-') && finalCheckpointAckPath) {
+          if (evidence.metadata.captureMode === 'godot_viewport') {
+            fs.writeFileSync(finalCheckpointAckPath, JSON.stringify({
+              schema: 'godot-viewport-final-capture-ack/v1',
+              runId: evidence.metadata.runId, runnerId: evidence.metadata.runnerId,
+              checkpoint: checkpoint.checkpoint, phase: checkpoint.phase, phaseKind: checkpoint.phaseKind,
+              accepted: checkpoint.acceptancePassed === true,
+              captured: captureResult.error === null && captureRow !== null,
+              captureId: captureRow?.captureId ?? '', screenshotSha256: captureRow?.screenshotSha256 ?? '',
+              sourceIdentitySha256: evidence.metadata.sourceIdentitySha256,
+              viewportCaptureReceipt: captureRow?.viewportCaptureReceipt ?? {},
+              failure: captureResult.error?.message ?? '',
+            }));
+          } else {
+            fs.writeFileSync(finalCheckpointAckPath, JSON.stringify({ schema: 'headed-test-capture-ack/v1',
+              runId: evidence.metadata.runId, checkpoint: checkpoint.checkpoint,
+              accepted: checkpoint.acceptancePassed === true }));
+          }
+        }
+      } catch (error) { evidence.recordCaptureFailure({ phase: checkpoint.phase, phaseKind: 'failure', reason: error.message }); }
+    }).catch(error => {
+      try { evidence.recordCaptureFailure({ phase: 'evidence_capture_error', phaseKind: 'failure', reason: error.message }); } catch { /* evidence failure remains recorded by phaseRun */ }
+    });
+  };
+  let initialCaptureQueued = false;
+  const pollEvidence = () => {
+    if (!evidence) return;
+    try {
+      const livePath = evidence.metadata.liveOwnershipPath;
+      if (!initialCaptureQueued && fs.existsSync(livePath)) {
+        const ownership = read(livePath);
+        if (ownership.schema === 'godot-live-ownership/v1' && ownership.runId === evidence.metadata.runId && ownership.state === 'running') {
+          initialCaptureQueued = true;
+          queueCheckpoint({ phase: 'loading_initial_game_window', phaseKind: 'harness', checkpoint: 'initial-loading' });
+        }
+      }
+      if (headedTest.progressPath && fs.existsSync(headedTest.progressPath)) {
+        const progress = readProgressSnapshot(headedTest.progressPath, progressReadDiagnostics);
+        if (!progress) return;
+        const checkpoint = classifyHeadedTestProgress(progress);
+        if (checkpoint) {
+          if (checkpoint.checkpoint === 'test-success' || checkpoint.checkpoint === 'test-failure') testTerminalObserved = true;
+          if (checkpoint.acceptancePassed !== undefined) progressAcceptance = checkpoint.acceptancePassed;
+          if (checkpoint.checkpoint === 'main-readiness') queueCheckpoint({ ...checkpoint, detail: 'Main startup readiness is pending' });
+          else if (checkpoint.checkpoint === 'candidate-search') queueCheckpoint({ ...checkpoint,
+            detail: `Installed production candidates are being searched; ${progress.details?.scanCount ?? 0} scans observed` });
+          else if (checkpoint.checkpoint) queueCheckpoint(checkpoint);
+        }
+      }
+    } catch (error) {
+      watcherError ??= error;
+      try { fs.writeFileSync(stopRequestPath + '.evidence-error.txt', String(error)); } catch { /* preserve evidence error in memory */ }
+    }
+  };
   const inspect = () => {
     if (stopped) return;
     try {
@@ -125,15 +275,51 @@ export async function phaseRun(c, { args, env = {}, timeout = 45, prefix = '', m
     }
   };
   if (!runOwnedProcess) ({ runOwnedProcess } = await import('../run-godot-scene-watchdog.mjs'));
-  const timer = setInterval(inspect, 100);
+  const timer = setInterval(() => { inspect(); pollEvidence(); }, 100);
   let result;
+  let invocationError = null;
   try {
-    result = await runOwnedProcess({ projectPath: c.project, executable: c.executable, args: ['--path', c.project, ...args], env: { ...c.env, ...env }, timeoutSeconds: timeout, stdoutPath, stderrPath, summaryPath: at(summaryName ?? 'watchdog.json'), stopRequestPath, liveOwnershipPath: live ? at('live-ownership.json') : undefined });
-  } finally { clearInterval(timer); inspect(); }
+    const childEnv = evidence ? evidence.environment({ ...c.env, ...env }) : { ...c.env, ...env };
+    if (finalCheckpointAckPath) childEnv.VOXEL_AUTOMATED_TEST_FINAL_CAPTURE_ACK = finalCheckpointAckPath;
+    result = await runOwnedProcess({ projectPath: c.project, executable: c.executable, args: ['--path', c.project, ...args],
+      env: childEnv, timeoutSeconds: timeout,
+      runId: evidence?.metadata.runId,
+      stdoutPath, stderrPath, summaryPath: at(summaryName ?? 'watchdog.json'), stopRequestPath,
+      liveOwnershipPath: live ? evidence?.metadata.liveOwnershipPath ?? at('live-ownership.json') : undefined });
+  } catch (error) {
+    invocationError = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    clearInterval(timer); ownedProcessTerminated = true; inspect(); pollEvidence();
+    if (evidence && (!result || result.overallExitCode !== 0)) {
+      queueCheckpoint({ phase: 'watchdog_or_test_failure', phaseKind: 'failure', checkpoint: 'test-failure',
+        detail: invocationError ? `Watchdog invocation threw: ${invocationError.message}`
+          : `Watchdog overallExitCode=${result.overallExitCode}; functionalExitCode=${result.functionalExitCode}` });
+    }
+    await checkpointChain;
+    if (evidence) {
+      const evidenceWatchdog = result ?? {
+        schema: 'watchdog-invocation-failure/v1', runId: evidence.metadata.runId,
+        overallExitCode: 127, functionalExitCode: 127, cleanupPassed: false,
+        authoritativeZeroProven: false, cleanupUnresolved: true,
+        invocationError: String(invocationError ?? 'Watchdog returned no summary'),
+      };
+      evidence.finalize({ watchdogSummary: evidenceWatchdog,
+        acceptancePassed: result ? progressAcceptance : false,
+        diagnostics: progressReadDiagnostics.map(({ _dedupeKey, ...row }) => row) });
+    }
+  }
+  if (invocationError) {
+    if (evidence) invocationError.message += `; headed-test failure evidence: ${evidence.metadata.evidencePath}`;
+    throw invocationError;
+  }
   demand(!watcherError, `Error watcher failed: ${watcherError}`);
   assertWatchdog(result, membership);
   checkLogs(fs.readFileSync(stdoutPath, 'utf8'), fs.readFileSync(stderrPath, 'utf8'), logPolicy);
   demand(!fs.existsSync(stopRequestPath), `Run received a stop request: ${stopRequestPath}`);
+  if (evidence) {
+    result.headedTestEvidencePath = evidence.metadata.evidencePath;
+    result.headedTestCaptureManifestPath = evidence.metadata.captureManifestPath;
+  }
   return result;
 }
 export function context(o, prefix = null, within = false) {

@@ -41,6 +41,16 @@ test('automated Godot launches select the dummy audio driver before project star
   assert.deepEqual(automatedGodotArguments(process.execPath, ['fixture.mjs']), ['fixture.mjs']);
 });
 
+test('caller-supplied runId is validated and propagated unchanged to the watchdog summary', async () => {
+  const runId = '0123456789abcdef0123456789abcdef';
+  const result = await runOwnedProcess(options('exit', { runId }));
+  assert.equal(result.runId, runId);
+  zero(result);
+  for (const invalid of ['', 'not-a-run-id', '0123456789abcdef0123456789abcdeg']) {
+    await assert.rejects(runOwnedProcess(options('exit', { runId: invalid })), /32 hexadecimal characters/);
+  }
+});
+
 test('synthetic live replacement contention retries briefly but persistent failure still terminates', { skip: process.platform !== 'win32' }, async () => {
   for (const failures of [2, Infinity]) {
     const o = options('exit', { args: ['-e', 'setTimeout(()=>process.exit(0),500)'],
