@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/geometry_instance3d.hpp>
 #include <godot_cpp/classes/hashing_context.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -427,6 +428,17 @@ void ChunkRenderPacketBackend::_retire_root(uint64_t p_root_id, int64_t p_payloa
 	_retiring_payload_by_root[p_root_id] = retained_bytes;
 	_retiring_payload_bytes += retained_bytes;
 	root->set_visible(false);
+	std::vector<uint64_t> render_batch_ids;
+	std::vector<Node *> pending_nodes{root};
+	while (!pending_nodes.empty()) {
+		Node *current = pending_nodes.back();
+		pending_nodes.pop_back();
+		if (_owned_render_batches.count(current->get_instance_id()))
+			render_batch_ids.push_back(current->get_instance_id());
+		for (int32_t child_index = 0; child_index < current->get_child_count(); ++child_index)
+			pending_nodes.push_back(current->get_child(child_index));
+	}
+	for (uint64_t instance_id : render_batch_ids) _release_render_batch(instance_id);
 	Callable exiting = callable_mp(this, &ChunkRenderPacketBackend::_on_retired_root_exiting).bind(static_cast<int64_t>(p_root_id));
 	if (!root->is_connected("tree_exiting", exiting)) root->connect("tree_exiting", exiting, Object::CONNECT_ONE_SHOT);
 	root->queue_free();
@@ -972,6 +984,150 @@ void ChunkRenderPacketBackend::_on_attachment_owner_exiting(int64_t p_owner_id) 
 			_withdraw_source(source);
 		}
 	}
+}
+
+void ChunkRenderPacketBackend::_release_render_batch(uint64_t p_instance_id) {
+	auto found = _owned_render_batches.find(p_instance_id);
+	if (found == _owned_render_batches.end()) return;
+	RenderingServer *server = RenderingServer::get_singleton();
+	VisualInstance3D *instance = Object::cast_to<VisualInstance3D>(_node3d_for_id(p_instance_id));
+	// Detach the scene-owned instance before freeing its base resources. This is
+	// shared by explicit root retirement and the tree_exiting fallback, so both
+	// paths sever the renderer dependency before dropping retained materials.
+	if (instance != nullptr && instance->get_base() == found->second.multimesh)
+		instance->set_base(RID());
+	if (server != nullptr) {
+		if (found->second.multimesh.is_valid()) server->free_rid(found->second.multimesh);
+		if (found->second.mesh.is_valid()) server->free_rid(found->second.mesh);
+	}
+	_owned_render_batches.erase(found);
+}
+
+void ChunkRenderPacketBackend::_on_render_batch_retiring(int64_t p_instance_id) {
+	_release_render_batch(static_cast<uint64_t>(p_instance_id));
+}
+
+bool ChunkRenderPacketBackend::_create_opaque_render_batch(const Batch &batch,
+		StagedPacket &packet, Node3D *staging_root, Dictionary &receipt) {
+	RenderingServer *server = RenderingServer::get_singleton();
+	if (server == nullptr || batch.mesh.is_null() || staging_root == nullptr) return false;
+	const int32_t surface_count = batch.mesh->get_surface_count();
+	if (surface_count < 1) return false;
+	std::vector<Ref<Material>> surface_materials;
+	surface_materials.reserve(surface_count);
+	RID mesh_rid = server->mesh_create();
+	if (!mesh_rid.is_valid()) return false;
+	for (int32_t surface = 0; surface < surface_count; ++surface) {
+		const Array arrays = batch.mesh->surface_get_arrays(surface);
+		const TypedArray<Array> blend_shapes = batch.mesh->surface_get_blend_shape_arrays(surface);
+		const int32_t primitive = int32_t(batch.mesh->call("surface_get_primitive_type", surface));
+		server->mesh_add_surface_from_arrays(mesh_rid,
+			static_cast<RenderingServer::PrimitiveType>(primitive), arrays, blend_shapes);
+		Ref<Material> surface_material = batch.material.is_valid() ? batch.material :
+			batch.mesh->surface_get_material(surface);
+		if (surface_material.is_null()) {
+			Ref<StandardMaterial3D> default_material;
+			default_material.instantiate();
+			surface_material = default_material;
+		}
+		surface_materials.push_back(surface_material);
+		if (surface_material.is_valid()) server->mesh_surface_set_material(mesh_rid,
+			surface, surface_material->get_rid());
+	}
+	if (server->mesh_get_surface_count(mesh_rid) != surface_count) {
+		server->free_rid(mesh_rid);
+		return false;
+	}
+	server->mesh_set_custom_aabb(mesh_rid, batch.bounds);
+	RID multimesh_rid = server->multimesh_create();
+	if (!multimesh_rid.is_valid()) {
+		server->free_rid(mesh_rid);
+		return false;
+	}
+	const int32_t instance_count = batch.buffer.size() / FLOATS_PER_INSTANCE;
+	server->multimesh_allocate_data(multimesh_rid, instance_count,
+		RenderingServer::MULTIMESH_TRANSFORM_3D, true, true);
+	server->multimesh_set_mesh(multimesh_rid, mesh_rid);
+	server->multimesh_set_custom_aabb(multimesh_rid, batch.bounds);
+	server->multimesh_set_buffer(multimesh_rid, batch.buffer);
+	if (server->multimesh_get_instance_count(multimesh_rid) != instance_count ||
+			server->multimesh_get_mesh(multimesh_rid) != mesh_rid) {
+		server->free_rid(multimesh_rid);
+		server->free_rid(mesh_rid);
+		return false;
+	}
+	VisualInstance3D *instance = memnew(VisualInstance3D);
+	instance->set_name(String("Packet_") + batch.id.validate_node_name());
+	instance->set_visible(batch.intended_visible);
+	instance->set_meta("packet_batch_id", batch.id);
+	instance->set_meta("packet_render_layer", batch.render_layer);
+	instance->set_meta("packet_render_tier", batch.render_tier);
+	instance->set_meta("packet_bounds", batch.bounds);
+	instance->set_meta("packet_batch_intended_visible", batch.intended_visible);
+	instance->set_meta("packet_material_id", batch.material.is_valid() ? int64_t(batch.material->get_instance_id()) : int64_t(0));
+	instance->set_meta("packet_cast_shadows", batch.cast_shadows);
+	instance->set_meta("packet_visibility_range", batch.visibility_range);
+	instance->set_meta("packet_fade_margin", batch.fade_margin);
+	staging_root->add_child(instance);
+	instance->set_base(multimesh_rid);
+	const RID instance_rid = instance->get_instance();
+	if (!instance_rid.is_valid()) {
+		staging_root->remove_child(instance);
+		memdelete(instance);
+		server->free_rid(multimesh_rid);
+		server->free_rid(mesh_rid);
+		return false;
+	}
+	server->instance_geometry_set_cast_shadows_setting(instance_rid,
+		batch.cast_shadows ? RenderingServer::SHADOW_CASTING_SETTING_ON :
+		RenderingServer::SHADOW_CASTING_SETTING_OFF);
+	server->instance_geometry_set_visibility_range(instance_rid, 0.0f,
+		static_cast<float>(batch.visibility_range), 0.0f,
+		static_cast<float>(batch.fade_margin), RenderingServer::VISIBILITY_RANGE_FADE_SELF);
+	server->instance_set_custom_aabb(instance_rid, batch.bounds);
+	const uint64_t object_id = instance->get_instance_id();
+	Callable retiring = callable_mp(this, &ChunkRenderPacketBackend::_on_render_batch_retiring)
+		.bind(static_cast<int64_t>(object_id));
+	if (instance->connect("tree_exiting", retiring, Object::CONNECT_ONE_SHOT) != OK) {
+		staging_root->remove_child(instance);
+		memdelete(instance);
+		server->free_rid(multimesh_rid);
+		server->free_rid(mesh_rid);
+		return false;
+	}
+	OwnedRenderBatch owned;
+	owned.mesh = mesh_rid;
+	owned.multimesh = multimesh_rid;
+	owned.override_material = batch.material;
+	owned.surface_materials = std::move(surface_materials);
+	owned.mesh_handle = ++_next_render_resource_handle;
+	owned.multimesh_handle = ++_next_render_resource_handle;
+	_owned_render_batches.emplace(object_id, owned);
+	const int64_t payload_bytes = static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES + batch.mesh_payload_bytes;
+	receipt["batchId"] = batch.id;
+	receipt["attachmentKey"] = batch.attachment_key;
+	receipt["parentRootId"] = static_cast<int64_t>(staging_root->get_instance_id());
+	receipt["instanceId"] = static_cast<int64_t>(object_id);
+	// These are backend receipt handles, not engine object IDs or RenderingServer RIDs.
+	receipt["multimeshId"] = owned.multimesh_handle;
+	receipt["meshId"] = owned.mesh_handle;
+	receipt["meshContentDigest"] = batch.mesh_content_digest;
+	receipt["renderLayer"] = batch.render_layer;
+	receipt["intendedVisible"] = batch.intended_visible;
+	receipt["materialId"] = batch.material.is_valid() ? static_cast<int64_t>(batch.material->get_instance_id()) : 0;
+	receipt["bounds"] = batch.bounds;
+	receipt["renderTier"] = batch.render_tier;
+	receipt["castShadows"] = batch.cast_shadows;
+	receipt["visibilityRange"] = batch.visibility_range;
+	receipt["fadeMargin"] = batch.fade_margin;
+	receipt["instanceCount"] = instance_count;
+	receipt["usesColors"] = true;
+	receipt["usesCustomData"] = true;
+	receipt["bufferBytes"] = static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
+	receipt["meshPayloadBytes"] = batch.mesh_payload_bytes;
+	receipt["payloadBytes"] = payload_bytes;
+	if (!batch.attachment_key.is_empty()) packet.attachments.at(_key(batch.attachment_key)).payload_bytes += payload_bytes;
+	return true;
 }
 
 Dictionary ChunkRenderPacketBackend::settle_attachment_owner_loss(const String &source, int64_t generation, const String &token) {
@@ -1521,56 +1677,12 @@ Dictionary ChunkRenderPacketBackend::advance_packet(const String &p_source_id,
 			packet.failure_reason = "mesh_content_changed_after_admission";
 			return _status("failed", packet.failure_reason);
 		}
-		Ref<MultiMesh> multi;
-		multi.instantiate();
-		multi->set_transform_format(MultiMesh::TRANSFORM_3D);
-		multi->set_use_colors(true);
-		multi->set_use_custom_data(true);
-		multi->set_instance_count(batch.buffer.size() / FLOATS_PER_INSTANCE);
-		multi->set_mesh(batch.mesh);
-		multi->set_custom_aabb(batch.bounds);
-		multi->set_buffer(batch.buffer);
-		MultiMeshInstance3D *instance = memnew(MultiMeshInstance3D);
-		instance->set_name(String("Packet_") + batch.id.validate_node_name());
-		instance->set_multimesh(multi);
-		instance->set_visible(batch.intended_visible);
-		instance->set_material_override(batch.material);
-		instance->set_cast_shadows_setting(batch.cast_shadows ?
-				GeometryInstance3D::SHADOW_CASTING_SETTING_ON :
-				GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
-		instance->set_visibility_range_end(batch.visibility_range);
-		instance->set_visibility_range_end_margin(batch.fade_margin);
-		instance->set_visibility_range_fade_mode(GeometryInstance3D::VISIBILITY_RANGE_FADE_SELF);
-		instance->set_custom_aabb(batch.bounds);
-		instance->set_meta("packet_batch_id", batch.id);
-		instance->set_meta("packet_render_layer", batch.render_layer);
-		instance->set_meta("packet_render_tier", batch.render_tier);
-		instance->set_meta("packet_bounds", batch.bounds);
-		instance->set_meta("packet_batch_intended_visible", batch.intended_visible);
-		staging_root->add_child(instance);
 		Dictionary receipt;
-		receipt["batchId"] = batch.id;
-		receipt["attachmentKey"] = batch.attachment_key;
-		receipt["parentRootId"] = static_cast<int64_t>(staging_root->get_instance_id());
-		receipt["instanceId"] = static_cast<int64_t>(instance->get_instance_id());
-		receipt["multimeshId"] = static_cast<int64_t>(multi->get_instance_id());
-		receipt["meshId"] = static_cast<int64_t>(batch.mesh->get_instance_id());
-		receipt["meshContentDigest"] = batch.mesh_content_digest;
-		receipt["renderLayer"] = batch.render_layer;
-		receipt["intendedVisible"] = batch.intended_visible;
-		receipt["materialId"] = batch.material.is_valid() ? static_cast<int64_t>(batch.material->get_instance_id()) : 0;
-		receipt["bounds"] = batch.bounds;
-		receipt["renderTier"] = batch.render_tier;
-		receipt["castShadows"] = batch.cast_shadows;
-		receipt["visibilityRange"] = batch.visibility_range;
-		receipt["fadeMargin"] = batch.fade_margin;
-		receipt["instanceCount"] = batch.buffer.size() / FLOATS_PER_INSTANCE;
-		receipt["usesColors"] = true;
-		receipt["usesCustomData"] = true;
-		receipt["bufferBytes"] = static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
-		receipt["meshPayloadBytes"] = batch.mesh_payload_bytes;
-		receipt["payloadBytes"] = int64_t(receipt["bufferBytes"]) + batch.mesh_payload_bytes;
-		if (!batch.attachment_key.is_empty()) packet.attachments.at(_key(batch.attachment_key)).payload_bytes += int64_t(receipt["payloadBytes"]);
+		if (!_create_opaque_render_batch(batch, packet, staging_root, receipt)) {
+			packet.state = "failed";
+			packet.failure_reason = "opaque_render_batch_install_failed";
+			return _status("failed", packet.failure_reason);
+		}
 		packet.batch_receipts.push_back(receipt);
 		packet.buffer_bytes -= static_cast<int64_t>(batch.buffer.size()) * FLOAT_BYTES;
 		batch.buffer.clear();
@@ -1674,33 +1786,32 @@ Dictionary ChunkRenderPacketBackend::commit_packet(const String &p_source_id, in
 	pending.replacement = replacement;
 	pending.has_previous = old != _installed.end();
 	pending.replacement_active = false;
-	pending.previous_active = pending.has_previous;
+	pending.previous_active = false;
 	if (pending.has_previous) {
 		pending.previous = old->second;
+		pending.previous_unavailable =
+			String(_installed_snapshot(pending.previous).get("status", "")) != "ready";
 	}
 	pending.token = p_source_id.sha256_text().substr(0, 16) + ":" +
 		String::num_int64(p_generation) + ":" + String::num_int64(_presentation_sequence + 1) + ":" +
 		String::num_int64(static_cast<int64_t>(replacement.root_instance_id));
 	_pending_presentations.emplace(key, pending);
 	PendingPresentation &transaction = _pending_presentations.find(key)->second;
-	// Transfer the borrowed-root activation claim before validating the retained
-	// packet. Shared mounts stay visible across this synchronous main-thread
-	// transition, so the replacement must already own their active claim while
-	// old-only mounts are expected hidden. No frame can observe the intermediate
-	// claim change.
+	// Promote synchronously at the install-to-frame boundary: the candidate is
+	// visible and the previous packet is hidden, while both remain owned until
+	// the frame acknowledgement accepts this exact candidate.
 	transaction.replacement_active = true;
-	transaction.previous_active = false;
 	if (transaction.has_previous) {
 		Node3D *old_root = _node3d_for_id(transaction.previous.root_instance_id);
-		if (old_root) old_root->set_visible(false);
-		_show_attachments_transition(transaction.previous.attachments, false, transaction.replacement.attachments);
-		// Retained validation checks hidden attachment roots. Evaluate after the
-		// synchronous hide, before exposing the fully uploaded replacement.
-		transaction.previous_unavailable = old_root == nullptr || old_root->get_parent() != this ||
-			String(_installed_snapshot(transaction.previous, true).get("status", "")) != "ready";
+		transaction.previous_unavailable = transaction.previous_unavailable || old_root == nullptr ||
+			old_root->get_parent() != this;
+		// Retire old visibility only, not its packet or resources. Preserving
+		// borrowed mounts claimed by the candidate avoids a one-frame hole.
+		transaction.previous_active = false;
+		_show_attachments_transition(transaction.previous.attachments, false,
+			transaction.replacement.attachments);
+		if (old_root != nullptr) old_root->set_visible(false);
 	}
-	// Candidate show and previous-root hide are one main-thread promotion step;
-	// the previous packet remains retained for rollback until frame acceptance.
 	_hide_legacy(replacement.attachments);
 	_hide_legacy(replacement.suppressed_legacy);
 	staging_root->set_visible(true);
@@ -1714,7 +1825,16 @@ Dictionary ChunkRenderPacketBackend::commit_packet(const String &p_source_id, in
 	_staged_payload_bytes = std::max<int64_t>(0, _staged_payload_bytes - staged.reserved_bytes);
 	_staged.erase(found);
 	Dictionary result = _pending_presentation_snapshot(transaction);
-	result["status"] = "pending_presentation";
+	if (String(result.get("status", "")) != "pending_presentation") {
+		// Never report a presented candidate unless its post-promotion identity
+		// validates. Attempt restoration immediately, retaining explicit failure
+		// evidence if the old representation itself is no longer usable.
+		const String pending_token = transaction.token;
+		Dictionary rollback = rollback_presentation(p_source_id, p_generation, pending_token);
+		result["rollbackStatus"] = rollback.get("status", "failed");
+		result["presentationToken"] = pending_token;
+		return result;
+	}
 	return result;
 }
 
@@ -1745,11 +1865,13 @@ Dictionary ChunkRenderPacketBackend::_pending_presentation_snapshot(
 		return _status("failed", "pending_presentation_candidate_root_unavailable");
 	}
 	const bool previous_available = p_pending.has_previous && !p_pending.previous_unavailable &&
+		_legacy_hidden(p_pending.previous.attachments) &&
+		_suppressed_legacy_hidden(p_pending.previous.suppressed_legacy) &&
 		String(_installed_snapshot(p_pending.previous, true).get("status", "")) == "ready";
-	if (p_pending.has_previous) {
+	if (p_pending.has_previous && previous_available) {
 		Node3D *previous_root = _node3d_for_id(p_pending.previous.root_instance_id);
-		if (previous_root && previous_root->is_visible()) {
-			return _status("failed", "pending_presentation_previous_root_visible");
+		if (previous_root == nullptr || previous_root->is_visible()) {
+			return _status("failed", "pending_presentation_previous_root_not_hidden");
 		}
 	}
 	Dictionary candidate_snapshot = _installed_snapshot(p_pending.replacement);
@@ -1808,10 +1930,12 @@ Dictionary ChunkRenderPacketBackend::finalize_presentation(const String &p_sourc
 	if (validated.get("status", String()) != String("pending_presentation")) return validated;
 	const uint64_t old_root_id = pending.has_previous ? pending.previous.root_instance_id : 0;
 	const int64_t old_payload_bytes = pending.has_previous ? pending.previous.payload_bytes - _attachment_payload_bytes(pending.previous.attachments) : 0;
+	const AttachmentRoots old_attachments = pending.has_previous ? pending.previous.attachments : AttachmentRoots();
 	_installed[key] = pending.replacement;
 	if (pending.has_previous) _retire_attachments(pending.previous.attachments);
 	_pending_presentations.erase(found);
 	_retire_root(old_root_id, old_payload_bytes);
+	if (!old_attachments.empty()) _restore_borrowed_source_visibility(old_attachments);
 	return _installed_snapshot(_installed.find(key)->second);
 }
 
@@ -1824,27 +1948,20 @@ Dictionary ChunkRenderPacketBackend::rollback_presentation(const String &p_sourc
 	if (pending.replacement.generation != p_generation || pending.token != p_token)
 		return _status("failed", "pending_presentation_identity_mismatch");
 	Node3D *candidate_root = _node3d_for_id(pending.replacement.root_instance_id);
-	// Failure to restore old geometry must never leave an unaccepted replacement visible.
-	// The old claim takes ownership of any shared visible mount before the
-	// replacement claim is withdrawn. This keeps `_borrowed_root_active` true
-	// throughout rollback's synchronous visibility transition.
-	if (pending.has_previous) pending.previous_active = true;
-	pending.replacement_active = false;
-	_show_attachments_transition(pending.replacement.attachments, false,
-		pending.has_previous ? pending.previous.attachments : AttachmentRoots());
-	if (candidate_root != nullptr) candidate_root->set_visible(false);
+	// Validate the retained, hidden previous packet before changing claims. This
+	// also verifies borrowed mounts in their pending candidate/previous role.
 	if (pending.has_previous) {
-		// Restore only old borrowed mounts before validation. Previous geometry
-		// attachment roots must stay hidden until the old packet is accepted.
-		for (const auto &entry : pending.previous.attachments) {
-			if (entry.second.ownership_kind != "borrowed_presentation") continue;
-			Node3D *root = _node3d_for_id(entry.second.root_id);
-			if (root) root->set_visible(entry.second.intended_visible);
-		}
 		Node3D *previous_root = _node3d_for_id(pending.previous.root_instance_id);
 		if (previous_root == nullptr || previous_root->get_parent() != this ||
+				previous_root->is_visible() || !_legacy_hidden(pending.previous.attachments) ||
+				!_suppressed_legacy_hidden(pending.previous.suppressed_legacy) ||
 				!_attachments_valid(pending.previous.attachments, false, false) ||
 				String(_installed_snapshot(pending.previous, true).get("status", "")) != "ready") {
+			pending.previous_active = false;
+			pending.replacement_active = false;
+			_show_attachments_transition(pending.replacement.attachments, false,
+				pending.has_previous ? pending.previous.attachments : AttachmentRoots());
+			if (candidate_root != nullptr) candidate_root->set_visible(false);
 			// Door fallback is only a partial restoration of this section. Keep the
 			// pending transaction and previous ownership for explicit cleanup/retry.
 			_show_attachments(pending.previous.attachments, false);
@@ -1862,6 +1979,13 @@ Dictionary ChunkRenderPacketBackend::rollback_presentation(const String &p_sourc
 			result["token"] = pending.token;
 			return result;
 		}
+		// Claim the old borrowed mounts before withdrawing the candidate claim,
+		// then atomically restore the old root and geometry attachments.
+		pending.previous_active = true;
+		_show_attachments_transition(pending.replacement.attachments, false,
+			pending.previous.attachments);
+		pending.replacement_active = false;
+		if (candidate_root != nullptr) candidate_root->set_visible(false);
 		_merge_suppressed_legacy(pending.previous.suppressed_legacy, pending.replacement.attachments, pending.previous.attachments);
 		_merge_suppressed_legacy(pending.previous.suppressed_legacy, pending.replacement.suppressed_legacy, pending.previous.attachments);
 		_hide_legacy(pending.previous.attachments);
@@ -1871,6 +1995,9 @@ Dictionary ChunkRenderPacketBackend::rollback_presentation(const String &p_sourc
 		_show_attachments(pending.previous.attachments, true);
 		_installed[key] = pending.previous;
 	} else {
+		pending.replacement_active = false;
+		_show_attachments(pending.replacement.attachments, false);
+		if (candidate_root != nullptr) candidate_root->set_visible(false);
 		_restore_legacy(pending.replacement.attachments);
 		_restore_legacy(pending.replacement.suppressed_legacy);
 	}
@@ -1931,12 +2058,12 @@ Dictionary ChunkRenderPacketBackend::release_packet(const String &p_source_id, i
 }
 
 Dictionary ChunkRenderPacketBackend::_batch_snapshot(const Batch &p_batch, int32_t p_index,
-		MultiMeshInstance3D *p_instance) const {
+		VisualInstance3D *p_instance) const {
 	Dictionary result;
 	result["batchId"] = p_batch.id;
 	result["index"] = p_index;
 	result["instanceId"] = p_instance != nullptr ? static_cast<int64_t>(p_instance->get_instance_id()) : 0;
-	result["meshId"] = p_batch.mesh.is_valid() ? static_cast<int64_t>(p_batch.mesh->get_instance_id()) : 0;
+	result["meshContentDigest"] = p_batch.mesh_content_digest;
 	result["materialId"] = p_batch.material.is_valid() ? static_cast<int64_t>(p_batch.material->get_instance_id()) : 0;
 	result["bounds"] = p_batch.bounds;
 	result["renderTier"] = p_batch.render_tier;
@@ -1950,6 +2077,7 @@ Dictionary ChunkRenderPacketBackend::_batch_snapshot(const Batch &p_batch, int32
 
 Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &p_packet,
 		bool p_allow_hidden_root) const {
+	++_installed_receipt_validation_polls;
 	if (!p_allow_hidden_root && !_legacy_hidden(p_packet.attachments)) return _status("stale", "installed_legacy_visibility_changed");
 	if (!p_allow_hidden_root && !_suppressed_legacy_hidden(p_packet.suppressed_legacy)) return _status("stale", "installed_suppressed_legacy_visibility_changed");
 	if (!_attachments_valid(p_packet.attachments, !p_allow_hidden_root, !p_allow_hidden_root)) return _status("stale", "attachment_root_set_stale");
@@ -1972,44 +2100,39 @@ Dictionary ChunkRenderPacketBackend::_installed_snapshot(const InstalledPacket &
 			!root->has_meta("packet_digest") || String(root->get_meta("packet_digest")) != p_packet.packet_digest) return _status("stale", "installed_root_missing_or_identity_changed");
 	for (int64_t index = 0; index < static_cast<int64_t>(p_packet.batch_receipts.size()); ++index) {
 		const Dictionary &expected = p_packet.batch_receipts[index];
-		MultiMeshInstance3D *instance = Object::cast_to<MultiMeshInstance3D>(_node3d_for_id(int64_t(expected.get("instanceId", 0))));
+		VisualInstance3D *instance = Object::cast_to<VisualInstance3D>(_node3d_for_id(int64_t(expected.get("instanceId", 0))));
 		if (instance == nullptr || instance->get_parent() != _node3d_for_id(int64_t(expected.get("parentRootId", p_packet.root_instance_id)))) return _status("stale", "installed_batch_parent_replaced");
 		if (instance == nullptr || static_cast<int64_t>(instance->get_instance_id()) != int64_t(expected.get("instanceId", 0))) {
 			return _status("stale", "installed_batch_node_replaced");
 		}
-		Ref<MultiMesh> multi = instance->get_multimesh();
-		if (multi.is_null() || static_cast<int64_t>(multi->get_instance_id()) != int64_t(expected.get("multimeshId", 0)) ||
-				multi->get_instance_count() != int64_t(expected.get("instanceCount", 0)) ||
-				!multi->is_using_colors() || !bool(expected.get("usesColors", false)) ||
-				!multi->is_using_custom_data() ||
-				!bool(expected.get("usesCustomData", false)) ||
-				multi->get_mesh().is_null() || static_cast<int64_t>(multi->get_mesh()->get_instance_id()) != int64_t(expected.get("meshId", 0))) {
+		auto owned = _owned_render_batches.find(static_cast<uint64_t>(instance->get_instance_id()));
+		RenderingServer *server = RenderingServer::get_singleton();
+		if (owned == _owned_render_batches.end() || server == nullptr ||
+				!owned->second.mesh.is_valid() || !owned->second.multimesh.is_valid() ||
+				owned->second.mesh_handle != int64_t(expected.get("meshId", 0)) ||
+				owned->second.multimesh_handle != int64_t(expected.get("multimeshId", 0)) ||
+				instance->get_base() != owned->second.multimesh ||
+				server->multimesh_get_instance_count(owned->second.multimesh) != int64_t(expected.get("instanceCount", 0)) ||
+				server->multimesh_get_mesh(owned->second.multimesh) != owned->second.mesh ||
+				server->mesh_get_surface_count(owned->second.mesh) < 1 ||
+				!bool(expected.get("usesColors", false)) || !bool(expected.get("usesCustomData", false))) {
 			return _status("stale", "installed_batch_resource_replaced");
 		}
-		int64_t current_mesh_bytes = 0;
-		String current_mesh_digest;
-		if (!mesh_surface_fingerprint(multi->get_mesh(), current_mesh_bytes, current_mesh_digest) ||
-				current_mesh_bytes != int64_t(expected.get("meshPayloadBytes", -1)) ||
-				current_mesh_digest != String(expected.get("meshContentDigest", ""))) {
-			return _status("stale", "installed_mesh_content_changed");
-		}
-		Ref<Material> material = instance->get_material_override();
-		const int64_t material_id = material.is_valid() ? static_cast<int64_t>(material->get_instance_id()) : 0;
+		const int64_t material_id = int64_t(expected.get("materialId", 0));
 		const Variant actual_bounds = instance->get_meta("packet_bounds", Variant());
 		const Variant expected_bounds = expected.get("bounds", Variant());
 		const AABB expected_aabb = expected_bounds;
-		if (material_id != int64_t(expected.get("materialId", 0)) ||
-				instance->get_cast_shadows_setting() != (bool(expected.get("castShadows", true)) ?
-					GeometryInstance3D::SHADOW_CASTING_SETTING_ON : GeometryInstance3D::SHADOW_CASTING_SETTING_OFF) ||
-				std::abs(instance->get_visibility_range_end() - double(expected.get("visibilityRange", 0.0))) > 0.0001 ||
-				std::abs(instance->get_visibility_range_end_margin() - double(expected.get("fadeMargin", 0.0))) > 0.0001 ||
+		if (!instance->has_meta("packet_material_id") || int64_t(instance->get_meta("packet_material_id")) != material_id ||
+				!instance->has_meta("packet_cast_shadows") || bool(instance->get_meta("packet_cast_shadows")) != bool(expected.get("castShadows", true)) ||
+				!instance->has_meta("packet_visibility_range") || std::abs(double(instance->get_meta("packet_visibility_range")) - double(expected.get("visibilityRange", 0.0))) > 0.0001 ||
+				!instance->has_meta("packet_fade_margin") || std::abs(double(instance->get_meta("packet_fade_margin")) - double(expected.get("fadeMargin", 0.0))) > 0.0001 ||
 				!instance->has_meta("packet_batch_id") || String(instance->get_meta("packet_batch_id")) != String(expected.get("batchId", "")) ||
 				!instance->has_meta("packet_render_layer") || String(instance->get_meta("packet_render_layer")) != String(expected.get("renderLayer", "")) ||
 				instance->is_visible() != bool(expected.get("intendedVisible", true)) ||
 				!instance->has_meta("packet_batch_intended_visible") || bool(instance->get_meta("packet_batch_intended_visible")) != bool(expected.get("intendedVisible", true)) ||
 				!instance->has_meta("packet_render_tier") || String(instance->get_meta("packet_render_tier")) != String(expected.get("renderTier", "")) ||
 				!instance->has_meta("packet_bounds") || actual_bounds != expected_bounds ||
-				!instance->get_custom_aabb().is_equal_approx(expected_aabb)) {
+				!server->multimesh_get_custom_aabb(owned->second.multimesh).is_equal_approx(expected_aabb)) {
 			return _status("stale", "installed_batch_policy_replaced");
 		}
 	}
@@ -2139,6 +2262,8 @@ Dictionary ChunkRenderPacketBackend::metrics() const {
 	result["installedBatches"] = installed_batches;
 	result["installedInstances"] = installed_instances;
 	result["installedBytes"] = installed_bytes;
+	result["installedReceiptValidationPolls"] = _installed_receipt_validation_polls;
+	result["ownedRenderBatchRidSets"] = static_cast<int64_t>(_owned_render_batches.size());
 	result["stagedPackets"] = staged_packets;
 	result["stagedBatches"] = staged_batches;
 	result["stagedInstances"] = staged_instances;

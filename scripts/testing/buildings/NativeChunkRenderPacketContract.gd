@@ -20,6 +20,7 @@ const SOURCE_REVISION := "revision-1"
 const PACKET_DIGEST := "digest-contract-v1"
 var checks: Dictionary = {}
 var diagnostics: Dictionary = {}
+var last_mutation_source_weakref: WeakRef
 
 class SceneRegistry extends Node3D:
 	var chunks: Dictionary={}
@@ -116,6 +117,8 @@ func _run() -> void:
 	if not ClassDB.class_exists("ChunkRenderPacketBackend"):
 		_finish(false,"native_chunk_render_packet_backend_missing")
 		return
+	# A current camera makes SceneTree's real 3D world scenario available to
+	# RenderingServer cull checks in this script-hosted fixture.
 	var scene := SceneRegistry.new()
 	scene.name="NativeChunkPacketContractScene"
 	scene.world_static_section_coordinator=WorldStaticSectionCoordinator.new()
@@ -124,7 +127,27 @@ func _run() -> void:
 	scene.static_section_render_root=Node3D.new()
 	scene.static_section_render_root.name="StaticSectionOwners"
 	scene.add_child(scene.static_section_render_root)
+	var contract_camera := Camera3D.new()
+	contract_camera.name = "NativeChunkPacketContractCamera"
+	contract_camera.position = Vector3(0.0, 0.0, 8.0)
+	contract_camera.current = true
+	scene.add_child(contract_camera)
 	current_scene=scene
+	await process_frame
+	var contract_world := scene.get_world_3d()
+	var scenario_valid := contract_world != null and contract_world.get_scenario().is_valid()
+	var contract_world_ready := scenario_valid and contract_camera.current \
+		and is_same(current_scene, scene)
+	diagnostics["contractWorldSetup"] = {"sceneWorldValid":contract_world != null,
+		"sceneScenarioValid":scenario_valid,
+		"cameraCurrent":contract_camera.current, "currentScenePreserved":is_same(current_scene, scene),
+		"cameraWorldValid":contract_camera.get_world_3d() != null,
+		"cameraScenarioValid":contract_camera.get_world_3d() != null \
+			and contract_camera.get_world_3d().get_scenario().is_valid()}
+	_check("native_packet_fixture_has_rendered_world_scenario", contract_world_ready)
+	if not contract_world_ready:
+		_finish(false, "contract_world_scenario_setup_failed")
+		return
 	await _test_attachment_root_set(scene)
 	await _test_borrowed_presentation_cutover(scene)
 	await _test_visible_borrowed_source_mount(scene)
@@ -157,6 +180,19 @@ func _run() -> void:
 		SOURCE_REVISION,PACKET_DIGEST))
 	_check("native_packet_rejects_mesh_mutated_after_candidate_binding",
 		_reject_mutated_mesh_after_begin(backend))
+	_check("native_installed_box_source_mutation_cannot_reach_opaque_rid",
+		await _reject_installed_mesh_mutation(backend, BoxMesh.new(), "box"))
+	var mutable_array_mesh := ArrayMesh.new()
+	var mutable_arrays: Array=[]
+	mutable_arrays.resize(Mesh.ARRAY_MAX)
+	mutable_arrays[Mesh.ARRAY_VERTEX]=PackedVector3Array([
+		Vector3.ZERO,Vector3.RIGHT,Vector3.UP])
+	mutable_array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,mutable_arrays)
+	var array_source_held_by_renderer := await _reject_installed_mesh_mutation(backend, mutable_array_mesh, "array")
+	mutable_array_mesh=null
+	await process_frame
+	_check("native_installed_array_source_ref_released_after_commit",
+		array_source_held_by_renderer and last_mutation_source_weakref.get_ref()==null)
 	_check("native_packet_generation_two_replaces_generation_one",_install(backend,2) \
 		and backend.call("receipt_installed",SOURCE_ID,2,SOURCE_REVISION,PACKET_DIGEST) \
 		and not backend.call("receipt_installed",SOURCE_ID,1,SOURCE_REVISION,PACKET_DIGEST))
@@ -279,11 +315,13 @@ func _run() -> void:
 	var section_backend_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id) \
 		if is_instance_valid(section_backend) else {"status":"missing"}
 	var installed_batch_receipts: Array=section_backend_snapshot.get("batches",[])
-	var installed_multimesh: MultiMesh = null
+	var installed_multimesh_rid := RID()
 	if not installed_batch_receipts.is_empty():
-		var installed_batch_node := instance_from_id(int(installed_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D
+		var installed_batch_node := instance_from_id(int(installed_batch_receipts[0].get("instanceId",0))) as VisualInstance3D
 		if is_instance_valid(installed_batch_node):
-			installed_multimesh = installed_batch_node.multimesh
+			installed_multimesh_rid = installed_batch_node.get_base()
+	var installed_multimesh_buffer: PackedFloat32Array = RenderingServer.multimesh_get_buffer(installed_multimesh_rid) \
+		if installed_multimesh_rid.is_valid() else PackedFloat32Array()
 	var installed_section_layers: Array=section_backend_snapshot.get("layers",[])
 	var session_layer_receipts_match:=installed_section_layers.size()==3 \
 		and String(installed_section_layers[0].get("layer",""))=="cutout" \
@@ -313,32 +351,31 @@ func _run() -> void:
 		and int(section_backend_snapshot.get("expectedBatchCount",0))==1 \
 		and session_layer_receipts_match \
 		and section_promoted.get("status")=="committed")
-	_check("native_section_receipt_and_multimesh_keep_independent_color_and_custom_lanes",
+	_check("native_section_receipt_and_opaque_rid_keep_independent_color_and_custom_lanes",
 		installed_batch_receipts.size()==1 \
 		and bool(installed_batch_receipts[0].get("usesColors",false)) \
 		and bool(installed_batch_receipts[0].get("usesCustomData",false)) \
-		and installed_multimesh is MultiMesh and installed_multimesh.use_colors \
-		and installed_multimesh.use_custom_data \
-		and installed_multimesh.get_buffer().size()==InstanceAttributes.FLOATS_PER_INSTANCE \
-		and Color(installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET],
-			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+1],
-			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+2],
-			installed_multimesh.get_buffer()[InstanceAttributes.COLOR_OFFSET+3]).is_equal_approx(expected_instance_color) \
-		and Color(installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET],
-			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+1],
-			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+2],
-			installed_multimesh.get_buffer()[InstanceAttributes.CUSTOM_DATA_OFFSET+3]).is_equal_approx(expected_custom_data))
+		and installed_multimesh_rid.is_valid() \
+		and RenderingServer.multimesh_get_instance_count(installed_multimesh_rid)==1 \
+		and installed_multimesh_buffer.size()==InstanceAttributes.FLOATS_PER_INSTANCE \
+		and Color(installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET],
+			installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+1],
+			installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+2],
+			installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+3]).is_equal_approx(expected_instance_color) \
+		and Color(installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET],
+			installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+1],
+			installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+2],
+			installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+3]).is_equal_approx(expected_custom_data))
 	diagnostics["instanceAttributeLanes"]={"receiptCount":installed_batch_receipts.size(),
 		"receiptUsesColors":bool(installed_batch_receipts[0].get("usesColors",false)) if not installed_batch_receipts.is_empty() else false,
 		"receiptUsesCustomData":bool(installed_batch_receipts[0].get("usesCustomData",false)) if not installed_batch_receipts.is_empty() else false,
-		"multimeshValid":installed_multimesh is MultiMesh,
-		"usesColors":installed_multimesh.use_colors if installed_multimesh is MultiMesh else false,
-		"usesCustomData":installed_multimesh.use_custom_data if installed_multimesh is MultiMesh else false,
+		"multimeshRidValid":installed_multimesh_rid.is_valid(),
+		"instanceCount":RenderingServer.multimesh_get_instance_count(installed_multimesh_rid) if installed_multimesh_rid.is_valid() else 0,
 		"expectedColor":expected_instance_color,
-		"actualColor":installed_multimesh.get_instance_color(0) if installed_multimesh is MultiMesh else Color.TRANSPARENT,
+		"actualColor":Color(installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET],installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+1],installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+2],installed_multimesh_buffer[InstanceAttributes.COLOR_OFFSET+3]) if installed_multimesh_buffer.size()>=InstanceAttributes.FLOATS_PER_INSTANCE else Color.TRANSPARENT,
 		"expectedCustom":expected_custom_data,
-		"actualCustom":installed_multimesh.get_instance_custom_data(0) if installed_multimesh is MultiMesh else Color.TRANSPARENT,
-		"readbackBuffer":installed_multimesh.get_buffer() if installed_multimesh is MultiMesh else PackedFloat32Array()}
+		"actualCustom":Color(installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET],installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+1],installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+2],installed_multimesh_buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+3]) if installed_multimesh_buffer.size()>=InstanceAttributes.FLOATS_PER_INSTANCE else Color.TRANSPARENT,
+		"readbackBuffer":installed_multimesh_buffer}
 	var replacement_color:=Color(0.9,0.2,0.1,1.0)
 	var replacement_custom:=Color(0.8,0.1,0.6,1.0)
 	var replacement_buffer: Array[float]=[]
@@ -387,9 +424,13 @@ func _run() -> void:
 		replacement_first_turn=replacement_session.advance(1)
 	var still_installed_before_swap: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
 	var old_batch_receipts: Array=still_installed_before_swap.get("batches",[])
-	var old_batch_node:=instance_from_id(int(old_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D \
+	var old_batch_node:=instance_from_id(int(old_batch_receipts[0].get("instanceId",0))) as VisualInstance3D \
 		if not old_batch_receipts.is_empty() else null
-	var old_multimesh: MultiMesh=old_batch_node.multimesh if is_instance_valid(old_batch_node) else null
+	var old_multimesh_rid: RID=old_batch_node.get_base() if is_instance_valid(old_batch_node) else RID()
+	var old_color_custom_preserved_before_ack := old_multimesh_rid.is_valid() \
+		and old_batch_node.is_visible_in_tree() \
+		and _multimesh_color(old_multimesh_rid).is_equal_approx(expected_instance_color) \
+		and _multimesh_custom(old_multimesh_rid).is_equal_approx(expected_custom_data)
 	var replacement_turns:=0
 	var replacement_result: Dictionary={"status":replacement_started.get("status","failed")}
 	while replacement_session is RefCounted \
@@ -399,10 +440,10 @@ func _run() -> void:
 		replacement_turns+=1
 	var replacement_snapshot: Dictionary=section_backend.call("installed_snapshot",section_slot_id)
 	var replacement_batch_receipts: Array=replacement_snapshot.get("batches",[])
-	var replacement_batch_node:=instance_from_id(int(replacement_batch_receipts[0].get("instanceId",0))) as MultiMeshInstance3D \
+	var replacement_batch_node:=instance_from_id(int(replacement_batch_receipts[0].get("instanceId",0))) as VisualInstance3D \
 		if not replacement_batch_receipts.is_empty() else null
-	var replacement_multimesh: MultiMesh=replacement_batch_node.multimesh \
-		if is_instance_valid(replacement_batch_node) else null
+	var replacement_multimesh_rid: RID=replacement_batch_node.get_base() \
+		if is_instance_valid(replacement_batch_node) else RID()
 	var replacement_section_receipts: Array[Dictionary]=[]
 	if replacement_result.get("status")=="installed" and replacement_result.get("receipt") is Dictionary:
 		replacement_section_receipts.append(replacement_result.receipt)
@@ -415,18 +456,16 @@ func _run() -> void:
 		and replacement_first_turn.get("status")=="pending" \
 		and still_installed_before_swap.get("status")=="ready" \
 		and int(still_installed_before_swap.get("generation",0))==1 \
-		and is_instance_valid(old_multimesh) \
-		and _multimesh_color(old_multimesh).is_equal_approx(expected_instance_color) \
-		and _multimesh_custom(old_multimesh).is_equal_approx(expected_custom_data) \
+		and old_color_custom_preserved_before_ack \
 		and replacement_result.get("status")=="installed" \
 		and replacement_snapshot.get("status")=="ready" \
 		and int(replacement_snapshot.get("generation",0))==2 \
 		and replacement_batch_receipts.size()==1 \
 		and bool(replacement_batch_receipts[0].get("usesColors",false)) \
 		and bool(replacement_batch_receipts[0].get("usesCustomData",false)) \
-		and is_instance_valid(replacement_multimesh) \
-		and _multimesh_color(replacement_multimesh).is_equal_approx(replacement_color) \
-		and _multimesh_custom(replacement_multimesh).is_equal_approx(replacement_custom) \
+		and replacement_multimesh_rid.is_valid() \
+		and _multimesh_color(replacement_multimesh_rid).is_equal_approx(replacement_color) \
+		and _multimesh_custom(replacement_multimesh_rid).is_equal_approx(replacement_custom) \
 		and replacement_promoted.get("status")=="committed")
 	_check("native_section_slot_installs_transvoxel_shaped_array_mesh",
 		section_mesh_expected.get_surface_count()==1 \
@@ -1617,7 +1656,7 @@ func _test_attachment_root_set(scene: Node3D) -> void:
 			continue
 		var batch_receipt: Dictionary = batch_receipt_value
 		if String(batch_receipt.get("attachmentKey", "")) != "swing": continue
-		var batch_node := instance_from_id(int(batch_receipt.get("instanceId", 0))) as MultiMeshInstance3D
+		var batch_node := instance_from_id(int(batch_receipt.get("instanceId", 0))) as VisualInstance3D
 		var should_be_visible := String(batch_receipt.get("batchId", "")) == "attachment-batch-1"
 		per_batch_visibility = per_batch_visibility \
 			and bool(batch_receipt.get("intendedVisible", !should_be_visible)) == should_be_visible \
@@ -1932,7 +1971,7 @@ func _test_borrowed_presentation_cutover(scene: Node3D) -> void:
 		and mount.visible and after_register.get("status") == "ready"
 	var second_ack: Dictionary = backend.call("finalize_presentation", source, 2, String(second_pending.get("token", "")))
 	var second_installed: Dictionary = backend.call("installed_snapshot", source)
-	_check("borrowed_same_mount_transfer_keeps_previous_receipt_and_candidate_visible", second.get("status") == "ready_to_commit" \
+	_check("borrowed_same_mount_transfer_retains_hidden_previous_claim_without_mount_flicker", second.get("status") == "ready_to_commit" \
 		and second_pending.get("status") == "pending_presentation" and same_mount_transfer \
 		and second_ack.get("status") == "ready" and mount.visible and is_instance_id_valid(mount_id) \
 		and shared_mount_visibility_changes[0] == 0)
@@ -1975,18 +2014,22 @@ func _test_borrowed_presentation_cutover(scene: Node3D) -> void:
 	var other_mount_id := other_mount.get_instance_id()
 	var fourth := _prepare_borrowed_packet(backend, source, 4, body, pivot, other_mount, "torch-light:owner-0")
 	var fourth_pending: Dictionary = backend.call("commit_packet", source, 4, true)
-	var old_hidden_new_visible := not mount.visible and other_mount.visible \
+	var promoted_candidate_only := not mount.visible and other_mount.visible \
 		and is_instance_id_valid(mount_id) and is_instance_id_valid(other_mount_id)
 	var fourth_rollback: Dictionary = backend.call("rollback_presentation", source, 4, String(fourth_pending.get("token", "")))
 	_check("borrowed_different_mount_rollback_hides_only_candidate_and_retains_old", \
 		fourth.get("status") == "ready_to_commit" and fourth_pending.get("status") == "pending_presentation" \
-		and old_hidden_new_visible and fourth_rollback.get("status") == "rolled_back" \
+		and promoted_candidate_only and fourth_rollback.get("status") == "rolled_back" \
 		and mount.visible and not other_mount.visible and is_instance_id_valid(other_mount_id))
 
 	var fifth := _prepare_borrowed_packet(backend, source, 5, body, pivot, other_mount, "torch-light:owner-0")
 	var fifth_pending: Dictionary = backend.call("commit_packet", source, 5, true)
 	var fifth_ack: Dictionary = backend.call("finalize_presentation", source, 5, String(fifth_pending.get("token", "")))
 	var replacement_installed: Dictionary = backend.call("installed_snapshot", source)
+	var previous_only_mount_restored := not mount.visible and other_mount.visible
+	_check("borrowed_ack_restores_original_hidden_previous_only_source_mount",
+		fifth_pending.get("status") == "pending_presentation" and fifth_ack.get("status") == "ready" \
+		and previous_only_mount_restored and replacement_installed.get("status") == "ready")
 	var released: Dictionary = backend.call("release_packet", source, 5)
 	await process_frame
 	await process_frame
@@ -3368,14 +3411,103 @@ func _reject_mutated_mesh_after_begin(backend: Node) -> bool:
 		and String(appended.get("reason",""))=="mesh_content_identity_mismatch"
 
 
+func _reject_installed_mesh_mutation(backend: Node, source_mesh: Mesh,
+		mutation_kind: String) -> bool:
+	last_mutation_source_weakref=weakref(source_mesh)
+	var source_id := "native-contract:installed-mesh-mutation:" + mutation_kind
+	var identity: Dictionary=StaticMeshFingerprint.inspect(source_mesh)
+	if identity.get("status")!="ready": return false
+	var source_arrays_before: Array=source_mesh.surface_get_arrays(0)
+	var begun: Dictionary=backend.call("begin_packet",source_id,OWNER_CELL,1,
+		"installed-mesh-revision",PACKET_DIGEST,Transform3D.IDENTITY,1,1)
+	if begun.get("status")!="ready_to_append": return false
+	var buffer: PackedFloat32Array=InstanceBuffer.encode(Transform3D.IDENTITY,Color.WHITE)
+	var appended: Dictionary=backend.call("append_batch",source_id,1,"batch-installed-mutation",
+		source_mesh,String(identity.contentDigest),StandardMaterial3D.new(),buffer,
+		AABB(Vector3(-1.0,-1.0,-1.0),Vector3(2.0,2.0,2.0)),"structural",true,240.0,18.0)
+	if appended.get("status")!="accepted":
+		backend.call("abort_packet",source_id,1)
+		return false
+	var uploaded: Dictionary=backend.call("advance_packet",source_id,1,1)
+	if uploaded.get("status")!="ready_to_commit":
+		backend.call("abort_packet",source_id,1)
+		return false
+	var staging_anchor: VisualInstance3D = backend.find_child("Packet_batch-installed-mutation", true, false) \
+		as VisualInstance3D
+	var staged_hidden := is_instance_valid(staging_anchor) \
+		and staging_anchor.get_base().is_valid() and not staging_anchor.is_visible_in_tree()
+	var committed: Dictionary=backend.call("commit_packet",source_id,1)
+	if committed.get("status")!="ready": return false
+	await process_frame
+	var receipts: Array=committed.get("batches",[])
+	if receipts.size()!=1: return false
+	var instance_id:=int(receipts[0].get("instanceId",0))
+	var instance:=instance_from_id(instance_id) as VisualInstance3D
+	if not is_instance_valid(instance): return false
+	var multimesh_rid: RID=instance.get_base()
+	if not multimesh_rid.is_valid() or int(receipts[0].get("meshId",0))<=0 \
+			or int(receipts[0].get("multimeshId",0))<=0: return false
+	var mesh_rid: RID=RenderingServer.multimesh_get_mesh(multimesh_rid)
+	if not mesh_rid.is_valid() or RenderingServer.mesh_get_surface_count(mesh_rid)!=1: return false
+	var copied_surface_material: RID=RenderingServer.mesh_surface_get_material(mesh_rid,0)
+	var copied_surface_material_valid := copied_surface_material.is_valid()
+	var owner_chunk := backend.get_parent() as Node3D
+	var owner_world := owner_chunk.get_world_3d() if is_instance_valid(owner_chunk) else null
+	if owner_world == null or not owner_world.get_scenario().is_valid(): return false
+	var renderer_instance_rid: RID=instance.get_instance()
+	var renderer_cull_ids: PackedInt64Array=RenderingServer.instances_cull_aabb(
+		AABB(Vector3(-8.0,-8.0,-8.0),Vector3(16.0,16.0,16.0)), owner_world.get_scenario())
+	var renderer_registered:=renderer_instance_rid.is_valid() \
+		and instance_id in renderer_cull_ids \
+		and instance.get_base()==multimesh_rid and instance.is_visible_in_tree()
+	var rid_count_before:=int(backend.call("metrics").get("ownedRenderBatchRidSets",-1))
+	if mutation_kind=="box" and source_mesh is BoxMesh:
+		var box_mesh:=source_mesh as BoxMesh
+		box_mesh.size=Vector3(2.0,1.0,1.0)
+	elif mutation_kind=="array" and source_mesh is ArrayMesh:
+		var array_mesh:=source_mesh as ArrayMesh
+		array_mesh.clear_surfaces()
+	else:
+		return false
+	var source_mutated: bool=source_mesh.get_surface_count()==0 if mutation_kind=="array" \
+		else source_mesh.surface_get_arrays(0)!=source_arrays_before
+	var snapshot: Dictionary=backend.call("installed_snapshot",source_id)
+	var candidate_unchanged: bool=snapshot.get("status")=="ready" \
+		and backend.call("receipt_installed",source_id,1,"installed-mesh-revision",PACKET_DIGEST) \
+		and renderer_registered \
+		and RenderingServer.mesh_get_surface_count(mesh_rid)==1 \
+		and RenderingServer.mesh_surface_get_arrays(mesh_rid,0)==source_arrays_before
+	source_mesh=null
+	await process_frame
+	var released: Dictionary=backend.call("release_packet",source_id,1)
+	var detached_before_rid_free := is_instance_valid(instance) \
+		and not instance.get_base().is_valid() \
+		and int(backend.call("metrics").get("ownedRenderBatchRidSets",-1))==rid_count_before-1
+	await process_frame
+	var retired: bool=not is_instance_valid(instance) \
+		and int(backend.call("metrics").get("ownedRenderBatchRidSets",-1))==rid_count_before-1 \
+		and int(backend.call("metrics").get("retiringRoots",-1))==0 \
+		and int(backend.call("metrics").get("retiringPayloadBytes",-1))==0
+	checks["native_installed_%s_renderer_draw_and_mutation_isolation" % mutation_kind]=renderer_registered \
+		and source_mutated \
+		and candidate_unchanged
+	checks["native_installed_%s_surface_material_rid_valid" % mutation_kind]=copied_surface_material_valid
+	checks["native_installed_%s_anchor_detached_before_rid_release" % mutation_kind]=detached_before_rid_free
+	checks["native_%s_candidate_rid_hidden_until_commit" % mutation_kind]=staged_hidden
+	checks["native_installed_%s_rids_retired_on_unload" % mutation_kind]=released.get("status")=="released" and retired
+	return source_mutated and candidate_unchanged and released.get("status")=="released" \
+		and detached_before_rid_free and retired
+
+
 func _has_installed_mesh(root_node: Node, expected: Mesh) -> bool:
-	if root_node is MultiMeshInstance3D:
-		var instance := root_node as MultiMeshInstance3D
-		if instance.multimesh != null and instance.multimesh.mesh != expected \
-				and instance.multimesh.mesh.get_surface_count()==expected.get_surface_count() \
-				and instance.multimesh.mesh.surface_get_primitive_type(0)==expected.surface_get_primitive_type(0) \
-				and instance.multimesh.mesh.surface_get_arrays(0)==expected.surface_get_arrays(0) \
-				and instance.is_visible_in_tree(): return true
+	if root_node is VisualInstance3D:
+		var instance := root_node as VisualInstance3D
+		var multimesh_rid: RID=instance.get_base()
+		if multimesh_rid.is_valid():
+			var mesh_rid: RID=RenderingServer.multimesh_get_mesh(multimesh_rid)
+			if mesh_rid.is_valid() and RenderingServer.mesh_get_surface_count(mesh_rid)==expected.get_surface_count() \
+					and RenderingServer.mesh_surface_get_arrays(mesh_rid,0)==expected.surface_get_arrays(0) \
+					and instance.is_visible_in_tree(): return true
 	for child: Node in root_node.get_children():
 		if _has_installed_mesh(child,expected): return true
 	return false
@@ -3396,16 +3528,16 @@ func _mesh_payload_bytes(mesh: Mesh) -> int:
 	return total
 
 
-func _multimesh_color(multimesh: MultiMesh) -> Color:
-	var buffer: PackedFloat32Array=multimesh.get_buffer()
+func _multimesh_color(multimesh_rid: RID) -> Color:
+	var buffer: PackedFloat32Array=RenderingServer.multimesh_get_buffer(multimesh_rid)
 	if buffer.size()<InstanceAttributes.FLOATS_PER_INSTANCE:
 		return Color.TRANSPARENT
 	return Color(buffer[InstanceAttributes.COLOR_OFFSET],buffer[InstanceAttributes.COLOR_OFFSET+1],
 		buffer[InstanceAttributes.COLOR_OFFSET+2],buffer[InstanceAttributes.COLOR_OFFSET+3])
 
 
-func _multimesh_custom(multimesh: MultiMesh) -> Color:
-	var buffer: PackedFloat32Array=multimesh.get_buffer()
+func _multimesh_custom(multimesh_rid: RID) -> Color:
+	var buffer: PackedFloat32Array=RenderingServer.multimesh_get_buffer(multimesh_rid)
 	if buffer.size()<InstanceAttributes.FLOATS_PER_INSTANCE:
 		return Color.TRANSPARENT
 	return Color(buffer[InstanceAttributes.CUSTOM_DATA_OFFSET],buffer[InstanceAttributes.CUSTOM_DATA_OFFSET+1],
@@ -3432,15 +3564,50 @@ func _advance_presented_session(session: RefCounted, units: int, pov := -1) -> D
 		result = session.advance(units,pov)
 	if result.get("status") == "pending_presentation":
 		await process_frame
+		var backend: Node = session.call("_current_backend") as Node
+		var source_id := String(session.get("_source_id"))
+		var pending: Dictionary = backend.call("pending_presentation_snapshot", source_id) \
+			if is_instance_valid(backend) else {}
+		var previous: Dictionary = pending.get("previousReceipt", {})
+		var previous_batches: Array = previous.get("batches", [])
+		var current_batches: Array = pending.get("batches", [])
+		var old_instance_ids: Array[int] = []
+		if pending.get("status") == "pending_presentation" and not previous_batches.is_empty():
+			var old_hidden := _batch_instances_have_visibility(previous_batches, false)
+			var candidate_visible := _batch_instances_have_visibility(current_batches, true)
+			var previous_root := instance_from_id(int(pending.get("previousRootInstanceId", 0))) as Node3D
+			var previous_retained: bool = previous.get("status", "") == "retained_previous" \
+				and previous_root != null and not previous_root.is_visible_in_tree()
+			checks["pending_ack_shows_candidate_hides_but_retains_previous_render_instances"] = \
+				old_hidden and candidate_visible and previous_retained
+			for receipt: Dictionary in previous_batches:
+				old_instance_ids.append(int(receipt.get("instanceId", 0)))
 		result = session.advance(units,pov)
 		if result.get("status") == "pending_presentation" and bool(result.get("frameDrawn",false)):
 			result = session.finalize_presentation(String(result.get("presentationToken","")))
+			if not old_instance_ids.is_empty():
+				await process_frame
+				var old_retired := true
+				for instance_id: int in old_instance_ids:
+					old_retired = old_retired and not is_instance_id_valid(instance_id)
+				checks["presentation_ack_retires_previous_render_instances"] = old_retired
 	return result
+
+
+func _batch_instances_have_visibility(receipts: Array, expected_visible: bool) -> bool:
+	if receipts.is_empty(): return false
+	for receipt: Dictionary in receipts:
+		var instance_id := int(receipt.get("instanceId", 0))
+		if instance_id <= 0 or not is_instance_id_valid(instance_id): return false
+		var instance := instance_from_id(instance_id) as VisualInstance3D
+		if not is_instance_valid(instance) or instance.is_visible_in_tree() != expected_visible \
+				or not instance.get_base().is_valid(): return false
+	return true
 
 
 func _finish(passed: bool, reason: String) -> void:
 	var report := {"schema":"native_chunk_render_packet_contract/v1",
-		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section manifest binds actual ArrayMesh content digest and rejects mismatched resource binding; native upload owns a content-preserving mesh snapshot with CPU mesh-array accounting; canceled replacement retains old root through replacement; no generated-world/live-gameplay acceptance",
+		"evidence":"native_building_packet_flush_and_replay; world-owned coordinator installs a census-checked candidate through the native backend and rejects incomplete replacement census; section manifest binds actual ArrayMesh content digest and rejects mismatched resource binding; packet batches install as backend-owned RenderingServer mesh and MultiMesh RIDs under engine-managed VisualInstance3D anchors; source mesh mutation leaves installed renderer data intact; cancellation, acknowledgement, rollback, and unload retain or retire native batches; no generated-world/live-gameplay acceptance",
 		"checks":checks,"diagnostics":diagnostics,"passed":passed,"reason":reason}
 	var path := OS.get_environment("NATIVE_CHUNK_PACKET_REPORT")
 	if not path.is_empty():
