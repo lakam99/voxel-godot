@@ -209,7 +209,9 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
         mark_world_dirty("prop_removed")
         var ecology_source_id := str(collider.get_meta("static_ecology_source_id", ""))
         var ecology_source_bounds: Variant = collider.get_meta("static_ecology_source_bounds", AABB())
-        if not ecology_source_id.is_empty() and ecology_source_bounds is AABB:
+        if collider.is_in_group("generated_tree_trunks"):
+            _invalidate_visible_world_tree_source(collider)
+        elif not ecology_source_id.is_empty() and ecology_source_bounds is AABB:
             invalidate_static_render_source("ecology_and_static_props", ecology_source_id,
                 str(removed_props_revision), ecology_source_bounds)
         if npc_system and npc_system.has_method("notify_navigation_prop_removed"):

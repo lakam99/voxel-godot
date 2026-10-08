@@ -100,9 +100,23 @@ func _run() -> void:
 	checks["rejects_nonfinite_transform_component"] = _rejects_nonfinite_input()
 	checks["rejects_nonfinite_custom_data_component"] = _rejects_nonfinite_custom_data()
 	checks["rejects_nonfinite_source_to_world_coordinate"] = _rejects_nonfinite_source_to_world()
-	checks["rejects_conflicting_revisions_for_source"] = _rejects_conflicting_revision()
+	checks["accepts_distinct_revisions_for_producer_local_member_parts"] = \
+		_accepts_per_part_revisions()
+	checks["rejects_conflicting_revisions_for_same_source_part"] = _rejects_conflicting_revision()
 	checks["rejects_singular_source_transform"] = _rejects_singular_source()
 	checks["rejects_truncated_buffer"] = _rejects_truncated_buffer()
+	var same_source_multiple_parts := _input_list([
+		_input_with_part("tree-source", "tree-rev", "bole:00000000", "bole-segment",
+			Transform3D(Basis.IDENTITY, Vector3(3.0, 2.0, 3.0)), "wood-bole", [0.0]),
+		_input_with_part("tree-source", "tree-rev", "foliage:00000000", "foliage-segment",
+			Transform3D(Basis.IDENTITY, Vector3(3.0, 4.0, 3.0)), "wood-leaves", [0.0])])
+	var same_source_result := Partitioner.partition(same_source_multiple_parts)
+	checks["one_source_can_publish_multiple_producer_local_member_parts"] = \
+		same_source_result.get("status") == "ready" \
+		and same_source_result.result.inputInstanceCount == 2 \
+		and same_source_result.result.sourceManifest.size() == 2 \
+		and _manifest_has_pair(same_source_result.result, "tree-source", "bole:00000000") \
+		and _manifest_has_pair(same_source_result.result, "tree-source", "foliage:00000000")
 
 	var report := {"schema":"chunk-static-render-section-instance-partitioner-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
@@ -124,6 +138,14 @@ func _run() -> void:
 func _input(source_id: String, revision: String, segment_id: String, source_to_world: Transform3D,
 		batch_key: String, origins: Array[float],
 		mesh_local_bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)) -> Dictionary:
+	return _input_with_part(source_id, revision, source_id + ":part", segment_id,
+		source_to_world, batch_key, origins, mesh_local_bounds)
+
+
+func _input_with_part(source_id: String, revision: String, source_part_id: String,
+		segment_id: String, source_to_world: Transform3D, batch_key: String,
+		origins: Array[float],
+		mesh_local_bounds := AABB(Vector3(-0.5, -0.5, -0.5), Vector3.ONE)) -> Dictionary:
 	var buffer: Array[float] = []
 	for x_value: float in origins:
 		buffer.append_array(_encode(Transform3D(Basis.IDENTITY, Vector3(x_value, 0.0, 0.0)),
@@ -131,7 +153,7 @@ func _input(source_id: String, revision: String, segment_id: String, source_to_w
 	buffer.make_read_only()
 	var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 		"sourceId":source_id, "sourceRevision":revision,
-		"sourcePartId":source_id + ":part",
+		"sourcePartId":source_part_id,
 		"ownerCell":Grid.logical_owner_cell_for_world_position(source_to_world.origin),
 		"sourceToWorld":source_to_world, "meshLocalBounds":mesh_local_bounds,
 		"batchKey":batch_key,
@@ -139,6 +161,14 @@ func _input(source_id: String, revision: String, segment_id: String, source_to_w
 		"instanceCount":origins.size()}
 	input.make_read_only()
 	return input
+
+
+func _manifest_has_pair(result: Dictionary, source_id: String, source_part_id: String) -> bool:
+	for row_value: Variant in result.get("sourceManifest", []):
+		if row_value is Dictionary and String(row_value.get("sourceId", "")) == source_id \
+				and String(row_value.get("sourcePartId", "")) == source_part_id:
+			return true
+	return false
 
 
 func _input_list(values: Array) -> Array:
@@ -245,9 +275,27 @@ func _rejects_nonfinite_source_to_world() -> bool:
 
 func _rejects_conflicting_revision() -> bool:
 	return Partitioner.partition(_input_list([
-		_input("same", "r1", "a", Transform3D.IDENTITY, "stone", [0.0]),
-		_input("same", "r2", "b", Transform3D.IDENTITY, "stone", [1.0])])).get("reason") \
-		== "conflicting_source_revisions"
+		_input_with_part("same", "r1", "same-part", "segment-a", Transform3D.IDENTITY,
+			"stone", [0.0]),
+		_input_with_part("same", "r2", "same-part", "segment-b",
+			Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0)), "stone", [1.0])])).get("reason") \
+		== "conflicting_source_part_revisions"
+
+
+func _accepts_per_part_revisions() -> bool:
+	var result := Partitioner.partition(_input_list([
+		_input_with_part("same", "r-bole", "bole:00000000", "bole-segment",
+			Transform3D.IDENTITY, "wood", [0.0]),
+		_input_with_part("same", "r-foliage", "foliage:00000000", "foliage-segment",
+			Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0)), "leaves", [1.0])]))
+	if result.get("status") != "ready":
+		return false
+	var revisions: Dictionary = {}
+	for value: Variant in result.result.get("sourceManifest", []):
+		if value is Dictionary:
+			revisions[String(value.get("sourcePartId", ""))] = String(
+				value.get("sourceRevision", ""))
+	return revisions == {"bole:00000000":"r-bole", "foliage:00000000":"r-foliage"}
 
 
 func _rejects_singular_source() -> bool:

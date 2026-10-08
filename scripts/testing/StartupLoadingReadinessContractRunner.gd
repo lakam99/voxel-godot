@@ -1425,7 +1425,8 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		and terrain_mesh_gate < terrain_view_source.find("return StartupReadinessResultScript.ready({}, metrics)")
 	var terrain_mesh_gate_uses_native_receipts := terrain_mesh_helper.contains("visible_mesh_world_revision") \
 		and terrain_mesh_helper.contains("manifest.advance(12)") \
-		and terrain_mesh_helper.contains("initial_visible_terrain_mesh_coverage_timeout") \
+		and terrain_mesh_helper.contains("while true:") \
+		and not terrain_mesh_helper.to_lower().contains("timeout") \
 		and terrain_mesh_helper.contains("StartupReadinessResultScript.ready({}, state)")
 	var visible_prop_discovery_is_incremental := terrain_mesh_helper.contains("advance_visible_world_prop_manifest()") \
 		and main_source.contains("visible_world_prop_chunk_cursor = (visible_world_prop_chunk_cursor + 1) % visible_world_prop_chunk_keys.size()") \

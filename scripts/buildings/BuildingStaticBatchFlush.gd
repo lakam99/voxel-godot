@@ -75,6 +75,7 @@ var _section_transform_digest_index := 0
 var _section_transform_source_to_world := Transform3D.IDENTITY
 var _section_transform_mesh_content_digest := ""
 var _section_transform_material_content_digest := ""
+var _section_transform_mesh_bounds := AABB()
 
 func begin(groups: Dictionary, records: Dictionary, parent: Node3D, publication_boundary: Dictionary = {}) -> void:
 	if state != "idle": return
@@ -138,6 +139,23 @@ func _begin_section_transform_artifact(group: Dictionary, _parent: Node3D, publi
 		_section_transform_prepared_group_keys[key]=true
 		return false
 	_section_transform_group=group
+	_section_transform_mesh_bounds = group.get("meshSupportBounds", (mesh as Mesh).get_aabb())
+	var actual_mesh_bounds := (mesh as Mesh).get_aabb()
+	if not _section_transform_mesh_bounds is AABB \
+			or not _section_transform_mesh_bounds.position.is_finite() \
+			or not _section_transform_mesh_bounds.size.is_finite() \
+			or _section_transform_mesh_bounds.size.x <= 0.0 \
+			or _section_transform_mesh_bounds.size.y <= 0.0 \
+			or _section_transform_mesh_bounds.size.z <= 0.0 \
+			or _section_transform_mesh_bounds.position.x > actual_mesh_bounds.position.x \
+			or _section_transform_mesh_bounds.position.y > actual_mesh_bounds.position.y \
+			or _section_transform_mesh_bounds.position.z > actual_mesh_bounds.position.z \
+			or _section_transform_mesh_bounds.end.x < actual_mesh_bounds.end.x \
+			or _section_transform_mesh_bounds.end.y < actual_mesh_bounds.end.y \
+			or _section_transform_mesh_bounds.end.z < actual_mesh_bounds.end.z:
+		_reject_section_transform_artifact(publisher, "transform_mesh_support_bounds_invalid")
+		_section_transform_group={}
+		return false
 	_section_transform_source_index=0
 	_section_transform_segment_index=0
 	_section_transform_segments=[]
@@ -240,6 +258,7 @@ func _finish_section_transform_artifact(parent: Node3D, publisher) -> void:
 		"instanceAttributeLayout":InstanceAttributes.LAYOUT_SCHEMA,
 		"localBounds":_section_transform_bounds,
 		"worldBounds":_section_transform_source_to_world*_section_transform_bounds,
+		"meshSupportBounds":_section_transform_mesh_bounds,
 		"sourceToWorld":_section_transform_source_to_world,
 		"instanceCount":_transforms.size(),"segments":segments,
 		"contentDigest":content_digest,"resourceBindings":resource_bindings}
@@ -332,6 +351,11 @@ func _step(publisher) -> void:
 					and _begin_section_transform_artifact(group, parent, publisher):
 				state="section_transform_compile"
 				return
+			# Keep the exact legacy MeshInstance visible until shared section ACK.
+			# A per-source packet or MultiMesh here would duplicate the same surface.
+			if bool(group.get("sectionArtifactOnly", false)):
+				_group_index += 1
+				return
 			if publisher.static_packet_group_eligible(group,parent):
 				_packet_owner_cell=group.renderChunkKey
 				_packet_source_revision=String(group.sourceRevision)
@@ -356,7 +380,7 @@ func _step(publisher) -> void:
 			_mesh.use_custom_data = true
 			_mesh.instance_count = _transforms.size()
 			publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
-			_mesh.mesh = publisher.unit_box
+			_mesh.mesh = group.get("mesh", publisher.unit_box) as Mesh
 			_instance_index = 0
 			state = "instances"
 		"section_transform_compile":
@@ -385,6 +409,24 @@ func _step(publisher) -> void:
 				return
 			var segment: Dictionary = compiled[0].duplicate(false)
 			segment["segmentId"]="segment:%06d" % _section_transform_segment_index
+			var actual_bounds := AABB()
+			var has_actual_bounds := false
+			# The sealed instance buffer is float32. Bounds must describe the
+			# transforms the renderer will actually receive, including rounding at
+			# distant world coordinates.
+			for instance_index in range(transform_slice.size()):
+				var encoded_transform := InstanceAttributes.decode_transform(segment.buffer,
+					instance_index * InstanceAttributes.FLOATS_PER_INSTANCE)
+				var instance_bounds: AABB = encoded_transform * _section_transform_mesh_bounds
+				actual_bounds = instance_bounds if not has_actual_bounds else actual_bounds.merge(instance_bounds)
+				has_actual_bounds = true
+			if not has_actual_bounds or not actual_bounds.position.is_finite() \
+					or not actual_bounds.size.is_finite() or actual_bounds.size.x <= 0.0 \
+					or actual_bounds.size.y <= 0.0 or actual_bounds.size.z <= 0.0:
+				_reject_section_transform_artifact(publisher, "transform_mesh_support_bounds_invalid")
+				state="group"
+				return
+			segment["bounds"] = actual_bounds
 			var segment_hash := HashingContext.new()
 			if segment_hash.start(HashingContext.HASH_SHA256)!=OK \
 					or segment_hash.update(var_to_bytes([segment.segmentId,segment.instanceCount,
@@ -439,7 +481,7 @@ func _step(publisher) -> void:
 			instance.set_meta("building_source_part_id",source_part_id)
 			instance.set_meta("building_source_blueprint",publisher.source_blueprint_id)
 			parent.add_child(instance)
-			publisher.published_nodes.append(instance)
+			publisher.register_published_visual(instance, source_part_id)
 			publisher.visual_batch_count += 1
 			_mesh = null
 			_group_index += 1
@@ -456,7 +498,7 @@ func _step(publisher) -> void:
 					_mesh.use_custom_data = true
 					_mesh.instance_count = _transforms.size()
 					publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
-					_mesh.mesh = publisher.unit_box
+					_mesh.mesh = packet_group.get("mesh",publisher.unit_box) as Mesh
 					_instance_index = 0
 					state = "instances"
 					return
@@ -719,6 +761,7 @@ func _step(publisher) -> void:
 			publisher._static_record_cache_stats.copiedEncodedBytes+=_copied_encoded_bytes
 			publisher._static_record_cache_stats.unsupportedCopies+=_unsupported_copies
 			publisher.static_visual_batches = {}
+			publisher.static_mesh_visual_batches = {}
 			publisher.static_visual_transform_count = 0
 			publisher.incremental_static_flush_count += 1
 			state = "packet_retire_begin" if not _publication_boundary.is_empty() else "ready"

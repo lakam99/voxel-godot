@@ -1,6 +1,7 @@
 extends Node3D
 
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const CertifiedTreeRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 const CAPTURE_SIZE := Vector2i(1280, 720)
 const DEFAULT_SEED := 0x4D415448
@@ -248,7 +249,7 @@ func review_request(seed: int, maturity: float) -> Dictionary:
 		height = 42.0
 		trunk_radius = 3.10
 		canopy_radius = 28.0
-	return {
+	var request := {
 		"treeId": "mathematical-tree-poc:%s:%d" % [selected_species, seed],
 		"worldSeed": str(seed),
 		# The requested PoC seed is the tree's genetics as well as its world
@@ -270,6 +271,14 @@ func review_request(seed: int, maturity: float) -> Dictionary:
 		# for the complete review fixture.
 		"presentation": selected_presentation
 	}
+	if selected_presentation == "runtime":
+		# Runtime mode follows the profile-certified production dimensions. The
+		# large botanical review dimensions above remain exclusive to review mode.
+		request.erase("visualHeight")
+		request.erase("trunkRadius")
+		request.erase("canopyRadius")
+		return CertifiedTreeRequestFixture.prepare_or_fail(request)
+	return request
 
 func add_player_scale_reference(trunk_radius: float, canopy_radius: float) -> void:
 	var reference := Node3D.new()

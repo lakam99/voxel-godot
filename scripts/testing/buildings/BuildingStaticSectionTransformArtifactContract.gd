@@ -1,4 +1,5 @@
 extends SceneTree
+const DoorCapture := preload("res://scripts/buildings/BuildingDoorSectionCapture.gd")
 ## Synthetic producer contract: immutable building transform artifacts and the
 ## legacy visual remain together until the shared section receipt is integrated.
 
@@ -97,6 +98,11 @@ func _run() -> void:
 		publisher.advance_static_flush(parent,1)
 		turns += 1
 	var capture: Dictionary = publisher.capture_static_section_transform_artifacts(part.id,revision)
+	var capture_groups: Array = capture.get("groups", [])
+	checks["artifact_watch_receipt_accepts_exact_immutable_roster"] = capture.get("status") == "ready" \
+		and publisher.static_section_transform_artifact_receipt_is_current(part.id, revision, capture_groups)
+	checks["artifact_watch_receipt_rejects_replaced_roster_reference"] = capture.get("status") == "ready" \
+		and not publisher.static_section_transform_artifact_receipt_is_current(part.id, revision, [])
 	var groups: Array = capture.get("groups",[])
 	var artifact: Dictionary = groups[0] if not groups.is_empty() else {}
 	var segments: Array = artifact.get("segments",[])
@@ -207,13 +213,17 @@ func _run() -> void:
 		and material.get_shader_parameter("base_color")==Color(0.285,0.300,0.275)
 	var changed_material: ShaderMaterial = material as ShaderMaterial
 	changed_material.set_shader_parameter("base_color",Color(0.4,0.2,0.1))
+	checks["artifact_watch_receipt_revokes_on_material_change"] = not \
+		publisher.static_section_transform_artifact_receipt_is_current(part.id, revision, capture_groups)
 	checks["material_parameter_mutation_invalidates_capture"] = publisher.capture_static_section_transform_artifacts( \
 		part.id,revision).get("status")=="pending"
 	changed_material.set_shader_parameter("base_color",Color(0.285,0.300,0.275))
 	var restored_capture: Dictionary = publisher.capture_static_section_transform_artifacts(part.id,revision)
 	publisher.unit_box.size=Vector3(2.0,1.0,1.0)
 	checks["mesh_resource_mutation_invalidates_capture"] = restored_capture.get("status")=="ready" \
-		and publisher.capture_static_section_transform_artifacts(part.id,revision).get("status")=="pending"
+		and publisher.capture_static_section_transform_artifacts(part.id,revision).get("status")=="pending" \
+		and not publisher.static_section_transform_artifact_receipt_is_current(part.id, revision,
+			restored_capture.get("groups", []))
 	var previous_artifacts: Array = publisher._static_section_transform_artifacts[part.id]
 	var previous_artifact_revision: String = publisher._static_section_transform_artifact_revisions[part.id]
 	publisher._record_completed_source_part(part)
@@ -259,7 +269,16 @@ func _run() -> void:
 	var delayed_evidence := _delayed_resumable_prepared_source_contract()
 	for check_name: String in delayed_evidence.get("checks", {}):
 		checks[check_name] = bool(delayed_evidence.checks[check_name])
+	_exercise_real_door_capture()
+	var masonry_support_evidence: Dictionary = {}
+	if OS.get_environment("BUILDING_MASONRY_SUPPORT_DIAGNOSTIC") == "1":
+		masonry_support_evidence = _actual_citadel_masonry_support()
+		checks["actual_citadel_masonry_source_captured"] = masonry_support_evidence.get("status") == "ready"
+		checks["actual_citadel_masonry_plan_covers_committed_instances"] = masonry_support_evidence.get("missingSections", ["unavailable"]).is_empty()
+		checks["actual_citadel_masonry_visual_support_does_not_expand_physical_bounds"] = masonry_support_evidence.get("physicalBoundsUnchanged", false)
+		checks["actual_citadel_masonry_declared_support_contains_committed_geometry"] = masonry_support_evidence.get("declaredSupportContainsGeometry", false)
 	var report := {"evidence":"synthetic_building_static_section_transform_artifact_contract",
+		"actualCitadelMasonrySupport":masonry_support_evidence,
 		"mixedGroupEvidence":mixed_group_evidence,
 		"checks":checks,"artifactCount":groups.size(),
 		"delayedResumableSource":delayed_evidence.get("evidence", {}),
@@ -285,6 +304,77 @@ func _run() -> void:
 	prepared_parent.queue_free()
 	parent.queue_free()
 	quit(0 if report.passed else 1)
+
+
+func _actual_citadel_masonry_support() -> Dictionary:
+	# Exact generated source and production material/descriptor path. This is a
+	# producer/plan diagnostic, not live traversal or a fabricated roof fixture.
+	var source: Dictionary = preload("res://scripts/world/CitadelSitePreparation.gd").prepare(
+		"atlas-1492", Vector2i(1, -3), {}, {"regionCells":140, "spawnChance":0.26})
+	if source.get("status") != "prepared": return {"status":"failed", "sourceStatus":source.get("status"), "reason":source.get("reason")}
+	var blueprint = source.blueprint
+	var target_id := OS.get_environment("BUILDING_MASONRY_SUPPORT_MEMBER")
+	if target_id.is_empty(): target_id = "castle_tower_01_roof_deck"
+	var target: Variant = null
+	for value: Variant in blueprint.parts:
+		if value.id == target_id: target = value; break
+	if target == null: return {"status":"failed", "reason":"actual_part_missing"}
+	var origin: Vector3 = source.profile.origin
+	var binding := {"siteId":source.profile.siteId, "sourceKey":"masonry-support-diagnostic", "generation":1}
+	var description = Spatial.compile_description(blueprint, source.furnishingPlan, binding, origin, Callable())
+	if description == null: return {"status":"failed", "reason":"description_missing"}
+	var building_source: Dictionary = Preparation._freeze_value(blueprint.snapshot())
+	var furnishing_source: Dictionary = Preparation._freeze_value(source.furnishingPlan.snapshot())
+	var eligibility := Preparation.classify_physical_group_packet_eligibility(description.publication_groups, building_source, furnishing_source)
+	var planned := CitadelPlan.build(description, building_source, furnishing_source, eligibility)
+	if not planned.get("ready", false): return {"status":"failed", "reason":"plan_failed", "planReason":planned.get("reason")}
+	var parent := Node3D.new()
+	parent.position = origin
+	root.add_child(parent)
+	var publisher := Publisher.new()
+	publisher.source_blueprint_id = blueprint.id
+	publisher.publication_site_id = source.profile.siteId
+	publisher._scene_parent = weakref(parent)
+	var history := Preparation._compile_history(blueprint)
+	if history.get("preparedHistory") != null: publisher.surface_history = history.preparedHistory.history
+	publisher.publish_static_part(target, parent)
+	publisher._record_completed_source_part(target)
+	publisher._begin_static_flush(parent, false)
+	var turns := 0
+	while publisher.has_pending_static_flush() and turns < 20000:
+		publisher.advance_static_flush(parent, 4000)
+		turns += 1
+	var capture := publisher.capture_committed_static_visual_source(target.id, Preparation.static_record_binding(target.snapshot()))
+	var nominal: AABB = description.parts["building:" + target.id].bounds
+	var declared: AABB = description.parts["building:" + target.id].get("visualSupportBounds", nominal)
+	var physical_unchanged: bool = nominal == Transform3D(Basis.from_euler(target.rotation), origin + target.position) * AABB(-target.size * 0.5, target.size)
+	var missing: Array[String] = []
+	var offending: Array[Dictionary] = []
+	var count := 0
+	var actual := AABB()
+	for group: Dictionary in capture.get("groups", []):
+		var mesh: Mesh = group.resourceBindings.mesh
+		for segment: Dictionary in group.segments:
+			for index in int(segment.instanceCount):
+				var local := Attributes.decode_transform(segment.buffer, index * Attributes.FLOATS_PER_INSTANCE)
+				var bounds: AABB = group.sourceToWorld * local * mesh.get_aabb()
+				actual = bounds if count == 0 else actual.merge(bounds)
+				count += 1
+				for key: Vector3i in StaticSectionGrid.keys_intersecting_bounds(bounds):
+					var indexed := false
+					var query: Dictionary = planned.plan.visual_members_intersecting_bounds(AABB(StaticSectionGrid.origin_for_key(key), Vector3.ONE * StaticSectionGrid.SECTION_SIZE_METERS))
+					for member: Dictionary in query.get("members", []):
+						if member.memberId == "building:" + target.id: indexed = true; break
+					if not indexed:
+						if not missing.has(str(key)): missing.append(str(key))
+						if offending.size() < 8: offending.append({"section":key, "instance":index, "bounds":bounds, "meshAabb":mesh.get_aabb(), "transform":local})
+	var evidence := {"status":"ready" if capture.get("status") == "ready" and count > 0 else "failed", "captureStatus":capture.get("status"), "captureReason":capture.get("reason", ""),
+		"sourceSeed":"atlas-1492", "site":source.profile.siteId, "origin":origin, "part":target.snapshot(), "nominalBounds":nominal,
+		"nominalSections":StaticSectionGrid.keys_intersecting_bounds(nominal), "actualBounds":actual, "actualSections":StaticSectionGrid.keys_intersecting_bounds(actual),
+		"declaredSupportBounds":declared, "declaredSupportContainsGeometry":declared.encloses(actual), "physicalBoundsUnchanged":physical_unchanged,
+		"instanceCount":count, "missingSections":missing, "offendingInstances":offending}
+	parent.free()
+	return evidence
 
 
 func _visual_plan_identity_contract() -> void:
@@ -399,7 +489,7 @@ func _mixed_group_completeness_contract() -> void:
 		Preparation.static_record_binding(door.snapshot()))
 	checks["direct_door_visual_is_explicit_pending_dependency_not_empty"] = door_committed \
 		and door_capture.get("status") == "pending" \
-		and door_capture.get("reason") == "direct_door_visual_section_attachment_pending" \
+		and door_capture.get("reason") == "static_transform_artifact_source_incomplete" \
 		and door.collision_enabled
 	publisher.clear_published()
 	parent.queue_free()
@@ -554,3 +644,134 @@ func _delayed_resumable_prepared_source_contract() -> Dictionary:
 	current.clear_published()
 	target_parent.queue_free()
 	return {"checks":results,"evidence":evidence}
+
+
+## Actual producer geometry, synthetic pose changes. This does not prove player
+## interaction, native installation, or visible same-frame presentation.
+func _exercise_real_door_capture() -> void:
+	for motion: String in ["swing", "raise"]:
+		var parent := Node3D.new()
+		root.add_child(parent)
+		var publisher := Publisher.new()
+		publisher.unit_box = BoxMesh.new()
+		publisher.source_blueprint_id = "attachment-capture"
+		publisher.publication_site_id = "attachment-capture-site"
+		publisher._scene_parent = weakref(parent)
+		var recipe := {"doorMotion":motion, "doorPresentation":"portcullis" if motion == "raise" else "door"}
+		var part := Part.new({"id":"door-"+motion, "kind":"door", "material":"painted_door",
+			"position":Vector3(42.8,2,0), "size":Vector3(1.1,2.4,0.22), "collision":true, "recipe":recipe})
+		var body: StaticBody3D = publisher.publish_part(part, parent)
+		publisher._record_completed_source_part(part)
+		var committed: bool = publisher._commit_publication_boundary(publisher._pending_publication_boundary, {})
+		var revision := Preparation.static_record_binding(part.snapshot())
+		var capture: Dictionary = publisher.capture_committed_static_visual_source(part.id,revision)
+		var prefix := "real_"+motion+"_producer_"
+		checks[prefix+"complete_capture"] = committed and body != null and capture.get("status") == "ready" \
+			and capture.get("groupCount", 0) == 6
+		if body == null or capture.get("status") != "ready":
+			parent.queue_free()
+			continue
+		var pivot := body.get_node("DoorPivot") as Node3D
+		var collision_id := 0
+		for child: Node in body.get_children():
+			if child is CollisionShape3D: collision_id = child.get_instance_id()
+		var attachment_count := 0
+		var typed := true
+		var anchored := true
+		var group_digests_coherent := true
+		var shared_attachment_identity := true
+		var shared_attachment_key := ""
+		var shared_attachment_sweep := AABB()
+		var body_id := body.get_instance_id()
+		var old_identity: Dictionary = capture.visualSourceReceipt
+		for group: Dictionary in capture.groups:
+			group_digests_coherent = group_digests_coherent \
+				and DoorCapture.content_digest(group) == String(group.get("contentDigest", "")) \
+				and String(group.get("sourceId", "")) == "building-transform:attachment-capture-site:%s:%s" % [
+					part.id, String(group.get("contentDigest", "")).substr(0, 24)]
+			anchored = anchored and group.get("compoundAnchor", {}).get("worldPosition") == body.global_position \
+				and group.get("compoundAnchor", {}).get("key") == "building-door:attachment-capture-site:"+part.id+":bundle"
+			for segment: Dictionary in group.segments:
+				typed = typed and segment.buffer.is_read_only() and segment.buffer.get_typed_builtin() == TYPE_FLOAT
+			if String(group.get("attachmentKey", "")).is_empty(): continue
+			attachment_count += 1
+			var group_attachment_key := String(group.attachmentKey)
+			var group_sweep: AABB = group.sweptWorldBounds
+			if shared_attachment_key.is_empty():
+				shared_attachment_key = group_attachment_key
+				shared_attachment_sweep = group_sweep
+			else:
+				shared_attachment_identity = shared_attachment_identity \
+					and group_attachment_key == shared_attachment_key \
+					and group_sweep == shared_attachment_sweep
+			typed = typed and group.attachmentBinding.is_read_only() \
+				and group.attachmentBinding.parentInstanceId == pivot.get_instance_id() \
+				and group.sweptWorldBounds is AABB \
+				and group.attachmentBinding.get("sweptWorldBounds") == group.sweptWorldBounds
+		checks[prefix+"complete_moving_and_fixed_roster"] = typed and attachment_count == 3
+		checks[prefix+"moving_batches_share_one_complete_attachment_envelope"] = \
+			shared_attachment_identity and attachment_count == 3 \
+			and not shared_attachment_key.is_empty() and typed
+		checks[prefix+"shared_envelope_reseals_each_group_digest_and_identity"] = group_digests_coherent
+		checks[prefix+"motion_descriptor_uses_only_the_active_motion_axis"] = \
+			capture.groups.all(func(group: Dictionary) -> bool:
+				if String(group.get("attachmentKey", "")).is_empty(): return true
+				var descriptor: Dictionary = group.motion
+				return (descriptor.kind == "raise" and descriptor.swing == 0.0 \
+					and descriptor.raiseOffset.length_squared() > 0.0) \
+					or (descriptor.kind == "swing" and descriptor.raiseOffset == Vector3.ZERO \
+					and absf(descriptor.swing) > 0.0))
+		checks[prefix+"complete_bundle_uses_body_anchor"] = anchored
+		var policy_capture := DoorCapture.capture(publisher, body, parent, part.id, revision)
+		checks[prefix+"visibility_policy_sealed_for_every_batch"] = policy_capture.get("status") == "ready" \
+			and policy_capture.groups.all(func(group: Dictionary) -> bool:
+				return group.get("intendedVisible") is bool and group.intendedVisible)
+		var moving_visual: GeometryInstance3D
+		for proof: Dictionary in policy_capture.get("proofs", []):
+			if not String(proof.group.get("attachmentKey", "")).is_empty():
+				moving_visual = proof.visual.get_ref() as GeometryInstance3D
+				break
+		checks[prefix+"mixed_batch_visibility_preserved"] = false
+		checks[prefix+"visibility_changes_source_content_identity"] = false
+		if is_instance_valid(moving_visual):
+			moving_visual.visible = false
+			var hidden_capture := DoorCapture.capture(publisher, body, parent, part.id, revision)
+			var hidden_count := 0
+			var visible_count := 0
+			var changed_digest := false
+			for index: int in hidden_capture.get("groups", []).size():
+				var group: Dictionary = hidden_capture.groups[index]
+				if not String(group.get("attachmentKey", "")).is_empty():
+					if group.intendedVisible: visible_count += 1
+					else: hidden_count += 1
+				changed_digest = changed_digest or group.contentDigest != policy_capture.groups[index].contentDigest
+			checks[prefix+"mixed_batch_visibility_preserved"] = hidden_count == 1 and visible_count > 0
+			checks[prefix+"visibility_changes_source_content_identity"] = changed_digest
+			moving_visual.visible = true
+		parent.visible = false
+		var externally_gated := DoorCapture.capture(publisher, body, parent, part.id, revision)
+		checks[prefix+"loading_parent_does_not_rewrite_source_visibility"] = externally_gated.get("status") == "ready" \
+			and externally_gated.groups.all(func(group: Dictionary) -> bool: return group.intendedVisible)
+		parent.visible = true
+		if motion == "raise": pivot.position += body.get_meta("open_visual_offset") as Vector3
+		else: pivot.rotation.y = float(body.get_meta("open_swing"))
+		var open_capture: Dictionary = publisher.capture_committed_static_visual_source(part.id,revision)
+		checks[prefix+"pose_preserves_neutral_geometry_identity"] = open_capture.get("status") == "ready" \
+			and open_capture.groups == capture.groups and open_capture.visualSourceReceipt == old_identity
+		checks[prefix+"collision_and_body_preserved"] = body.get_instance_id() == body_id and collision_id > 0 \
+			and is_instance_id_valid(collision_id) and publisher.collision_count == 1
+		var valid_open_pose := pivot.transform
+		if motion == "raise": pivot.position += body.get_meta("open_visual_offset") as Vector3
+		else: pivot.rotation.y = float(body.get_meta("open_swing"))*1.25
+		checks[prefix+"outside_declared_motion_keeps_capture_pending"] = publisher.capture_committed_static_visual_source(part.id,revision).get("status") == "pending"
+		pivot.transform = valid_open_pose
+		var unknown := MeshInstance3D.new()
+		unknown.mesh = BoxMesh.new()
+		body.add_child(unknown)
+		checks[prefix+"unknown_child_keeps_capture_pending"] = publisher.capture_committed_static_visual_source(part.id,revision).get("status") == "pending"
+		body.remove_child(unknown)
+		unknown.free()
+		body.position.x += 1.0
+		checks[prefix+"moved_body_invalidates_capture"] = publisher.capture_committed_static_visual_source(part.id,revision).get("status") == "pending"
+		publisher.clear_published()
+		parent.queue_free()

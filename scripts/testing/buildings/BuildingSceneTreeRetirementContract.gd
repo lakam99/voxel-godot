@@ -33,6 +33,14 @@ class SyntheticTreeOwner extends Node3D:
 	var durable_removed: Dictionary = {}
 	var missing_calls := 0
 	var missing_mode := "normal"
+	func tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+		if not is_instance_valid(body): return {"status":"failed", "reason":"synthetic_tree_owner_lost"}
+		var reference: Variant = registry.get("prop:" + String(body.get_meta("prop_id", "")))
+		var ready := reference is WeakRef and reference.get_ref() == body \
+			and body.get_node_or_null("GeneratedTreeVisual") != null
+		return {"status":"ready" if ready else "pending", "bodyInstanceId":body.get_instance_id(),
+			"sourcePrepared":ready, "installed":ready and include_installed}
+	func tree_source_is_durably_removed(prop_id: String) -> bool: return durable_removed.has(prop_id)
 
 	static func child_ids(node: Node) -> Array:
 		var ids: Array = []

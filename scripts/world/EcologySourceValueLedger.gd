@@ -29,7 +29,6 @@ func configure(seed_text: String, key: Vector2i, revision: String,
 	_tombstones.clear()
 	_complete_categories.clear()
 	_sealed = false
-
 func record_candidate(candidate: Dictionary) -> bool:
 	if _sealed or not _candidate_is_valid(candidate):
 		return false

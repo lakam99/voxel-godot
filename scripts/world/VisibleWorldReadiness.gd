@@ -9,6 +9,8 @@ const REPRESENTATION_TIERS := ["horizon", "near"]
 const MAX_SOURCES := 4096
 const MAX_CANDIDATES := 250000
 const MAX_FAILURES := 256
+const MAX_DIAGNOSTIC_SOURCE_INSPECTIONS := 256
+const MAX_DIAGNOSTIC_CANDIDATE_INSPECTIONS := 4096
 
 var _request_id := 0
 var _seed := ""
@@ -635,7 +637,7 @@ func region_readiness(request_id: int, seed: String, world_revision: String,
 
 func pending_candidate_diagnostics(request_id: int, seed: String,
 		world_revision: String, view_revision: int, bounds: Rect2i,
-		limit := 8) -> Array[Dictionary]:
+		limit := 8, kind_filter := "") -> Array[Dictionary]:
 	var rows: Array[Dictionary] = []
 	if not _view_active or request_id != _request_id or seed != _seed \
 			or world_revision != _world_revision or view_revision != _view_revision \
@@ -643,6 +645,7 @@ func pending_candidate_diagnostics(request_id: int, seed: String,
 		return rows
 	for source_id_value in _sources:
 		var source: Dictionary = _sources[source_id_value]
+		if not kind_filter.is_empty() and String(source.kind) != kind_filter: continue
 		if not (source.bounds as Rect2i).intersects(bounds): continue
 		for candidate_id_value in source.candidates:
 			var candidate: Dictionary = source.candidates[candidate_id_value]
@@ -653,16 +656,121 @@ func pending_candidate_diagnostics(request_id: int, seed: String,
 			if _candidate_receipt_current(source, candidate, view_revision): continue
 			var receipt: Dictionary = candidate.get("receipt", {})
 			rows.append({"sourceId": String(source_id_value),
+				"sourceIdentity": String(source.identity),
+				"sourceRevision": String(source.revision),
 				"candidateId": String(candidate_id_value), "kind": String(source.kind),
 				"requiredTier": String(candidate.requiredTier),
 				"sourceCandidateRenderable": bool(candidate.metadata.get("sourceCandidateRenderable", false)),
 				"treeVisualState": String(candidate.metadata.get("sourceCandidateTreeVisualState", "")),
 				"treeRenderLodTier": String(candidate.metadata.get("sourceCandidateTreeLodTier", "")),
+				"candidateFailed": bool(candidate.get("failed", false)),
+				"candidateFailureReason": String(candidate.get("failureReason", "")),
 				"receiptTier": String(receipt.get("tier", "")),
 				"representationId": String(receipt.get("representationId", "")),
-				"receiptMissing": receipt.is_empty()})
+				"receiptSourceIdentity": String(receipt.get("sourceIdentity", "")),
+				"receiptSourceRevision": String(receipt.get("sourceRevision", "")),
+				"receiptWorldRevision": String(receipt.get("worldRevision", "")),
+				"receiptViewRevision": int(receipt.get("viewRevision", -1)),
+				"receiptPublisherInstanceId": int(receipt.get("publisherInstanceId", 0)),
+				"receiptValidatorMethod": String(receipt.get("validatorMethod", "")),
+				"receiptOwnerInstanceId": int(receipt.get("ownerInstanceId", 0)),
+				"receiptRepresentationInstanceId": int(receipt.get("representationInstanceId", 0)),
+				"receiptCurrent": false,
+				"receiptMissing": receipt.is_empty(),
+				"receipt": {"tier": String(receipt.get("tier", "")),
+					"representationId": String(receipt.get("representationId", "")),
+					"sourceIdentity": String(receipt.get("sourceIdentity", "")),
+					"sourceRevision": String(receipt.get("sourceRevision", "")),
+					"worldRevision": String(receipt.get("worldRevision", "")),
+					"viewRevision": int(receipt.get("viewRevision", -1)),
+					"publisherInstanceId": int(receipt.get("publisherInstanceId", 0)),
+					"validatorMethod": String(receipt.get("validatorMethod", "")),
+					"ownerInstanceId": int(receipt.get("ownerInstanceId", 0)),
+					"representationInstanceId": int(receipt.get("representationInstanceId", 0)),
+					"current": false, "missing": receipt.is_empty()}})
 			if rows.size() >= maxi(1, limit): return rows
 	return rows
+
+
+func pending_candidate_diagnostic_snapshot(request_id: int, seed: String,
+		world_revision: String, view_revision: int, bounds: Rect2i,
+		limit := 8, kind_filter := "") -> Dictionary:
+	var snapshot := {"rows": [], "sourcesInspected": 0,
+		"candidatesInspected": 0, "sourceInspectionLimit": MAX_DIAGNOSTIC_SOURCE_INSPECTIONS,
+		"candidateInspectionLimit": MAX_DIAGNOSTIC_CANDIDATE_INSPECTIONS,
+		"truncated": false, "truncationReason": "", "rowsTruncated": false,
+		"matchingCount": 0, "pendingCount": 0,
+		"matchingCountComplete": true, "pendingCountComplete": true}
+	if not _view_active or request_id != _request_id or seed != _seed \
+			or world_revision != _world_revision or view_revision != _view_revision \
+			or not _bounds.encloses(bounds):
+		snapshot["matchingCountComplete"] = false
+		snapshot["pendingCountComplete"] = false
+		snapshot["truncationReason"] = "readiness_view_mismatch"
+		return snapshot
+	var rows: Array[Dictionary] = []
+	for source_id_value in _sources:
+		if int(snapshot.sourcesInspected) >= MAX_DIAGNOSTIC_SOURCE_INSPECTIONS:
+			snapshot["truncated"] = true
+			snapshot["matchingCountComplete"] = false
+			snapshot["pendingCountComplete"] = false
+			snapshot["truncationReason"] = "source_inspection_limit"
+			break
+		snapshot["sourcesInspected"] = int(snapshot.sourcesInspected) + 1
+		var source: Dictionary = _sources[source_id_value]
+		if not kind_filter.is_empty() and String(source.kind) != kind_filter: continue
+		if not (source.bounds as Rect2i).intersects(bounds): continue
+		for candidate_id_value in source.candidates:
+			if int(snapshot.candidatesInspected) >= MAX_DIAGNOSTIC_CANDIDATE_INSPECTIONS:
+				snapshot["truncated"] = true
+				snapshot["matchingCountComplete"] = false
+				snapshot["pendingCountComplete"] = false
+				snapshot["truncationReason"] = "candidate_inspection_limit"
+				break
+			snapshot["candidatesInspected"] = int(snapshot.candidatesInspected) + 1
+			var candidate: Dictionary = source.candidates[candidate_id_value]
+			var position: Vector2 = candidate.get("metadata", {}).get("positionXZ", Vector2(INF, INF))
+			if String(source.kind) != "terrain" \
+					and not bounds.has_point(Vector2i(floori(position.x), floori(position.y))):
+				continue
+			snapshot["matchingCount"] = int(snapshot.matchingCount) + 1
+			if _candidate_receipt_current(source, candidate, view_revision): continue
+			snapshot["pendingCount"] = int(snapshot.pendingCount) + 1
+			var receipt: Dictionary = candidate.get("receipt", {})
+			var row := {"sourceId": String(source_id_value),
+				"sourceIdentity": String(source.identity),
+				"sourceRevision": String(source.revision),
+				"candidateId": String(candidate_id_value), "kind": String(source.kind),
+				"requiredTier": String(candidate.requiredTier),
+				"sourceCandidateRenderable": bool(candidate.metadata.get("sourceCandidateRenderable", false)),
+				"treeVisualState": String(candidate.metadata.get("sourceCandidateTreeVisualState", "")),
+				"treeRenderLodTier": String(candidate.metadata.get("sourceCandidateTreeLodTier", "")),
+				"candidateFailed": bool(candidate.get("failed", false)),
+				"candidateFailureReason": String(candidate.get("failureReason", "")),
+				"receiptTier": String(receipt.get("tier", "")),
+				"representationId": String(receipt.get("representationId", "")),
+				"receiptSourceIdentity": String(receipt.get("sourceIdentity", "")),
+				"receiptSourceRevision": String(receipt.get("sourceRevision", "")),
+				"receiptWorldRevision": String(receipt.get("worldRevision", "")),
+				"receiptViewRevision": int(receipt.get("viewRevision", -1)),
+				"receiptPublisherInstanceId": int(receipt.get("publisherInstanceId", 0)),
+				"receiptValidatorMethod": String(receipt.get("validatorMethod", "")),
+				"receiptOwnerInstanceId": int(receipt.get("ownerInstanceId", 0)),
+				"receiptRepresentationInstanceId": int(receipt.get("representationInstanceId", 0)),
+				# Rows are emitted only after _candidate_receipt_current returned false.
+				"receiptCurrent": false,
+				"receiptMissing": receipt.is_empty()}
+			if rows.size() < maxi(1, limit):
+				rows.append(row)
+			else:
+				snapshot["rowsTruncated"] = true
+				snapshot["truncated"] = true
+				if String(snapshot.truncationReason).is_empty():
+					snapshot["truncationReason"] = "pending_row_limit"
+		if String(snapshot.truncationReason) in ["source_inspection_limit", "candidate_inspection_limit"]:
+			break
+	snapshot["rows"] = rows
+	return snapshot
 
 
 func _source_coverage_gaps(bounds: Rect2i) -> Array[Dictionary]:

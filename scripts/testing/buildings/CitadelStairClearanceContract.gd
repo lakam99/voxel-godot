@@ -85,7 +85,7 @@ func _run() -> void:
 					collisions.append(String(hit.collider.get_meta("building_part_id","unknown")))
 			checks[part.id+"_standing_and_turning_clear"] = collisions.is_empty()
 			evidence[part.id+"_blockers"] = collisions
-		world.free(); pub.published_nodes.clear()
+		world.free(); pub.clear_published_node_roster()
 		# Real physical-validator negative controls for the revised two-seat frame.
 		for fault in ["missing","duplicate","floating","outside_patch"]:
 			var test = Blueprint.new("negative",1,"stone")

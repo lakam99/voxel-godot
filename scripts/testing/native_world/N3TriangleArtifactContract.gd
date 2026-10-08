@@ -103,7 +103,7 @@ func _await_window_layout_reason(broker, initial: Dictionary, reason: String,
 func _init() -> void:
 	call_deferred("run")
 
-func analytic_seam(block_x: int, cell_meters: float) -> Dictionary:
+func analytic_seam(block_x: int, cell_meters: float, edit_revision: int = 0) -> Dictionary:
 	var format := VoxelFormat.new()
 	format.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
 	format.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
@@ -112,7 +112,10 @@ func analytic_seam(block_x: int, cell_meters: float) -> Dictionary:
 	for z in range(19):
 		for y in range(19):
 			for x in range(19):
-				buffer.set_voxel_f(float(y) - 9.5, x, y, z, VoxelBuffer.CHANNEL_SDF)
+				var global_sample_x := block_x * 16 + x - 1
+				var edited_ridge := 2.0 if edit_revision > 0 and global_sample_x == 0 else 0.0
+				buffer.set_voxel_f(float(y) - 9.5 - edited_ridge, x, y, z,
+					VoxelBuffer.CHANNEL_SDF)
 	var mesher := VoxelMesherTransvoxel.new()
 	mesher.texturing_mode = VoxelMesherTransvoxel.TEXTURES_SINGLE_S4
 	mesher.transitions_enabled = false
@@ -255,6 +258,13 @@ func run() -> void:
 		and is_equal_approx(float(right_seam.bounds.size.x), 16.0)
 		and not left_seam.seam.is_empty() and left_seam.seam == right_seam.seam,
 		"negative and adjacent padded Transvoxel blocks meet at one world seam")
+	var edited_left_seam: Dictionary = analytic_seam(-1, main.CELL, 1)
+	var edited_right_seam: Dictionary = analytic_seam(0, main.CELL, 1)
+	var post_edit_seam_matches := not edited_left_seam.seam.is_empty() \
+		and edited_left_seam.seam == edited_right_seam.seam
+	var post_edit_contour_changed := edited_left_seam.seam != left_seam.seam
+	check(post_edit_seam_matches and post_edit_contour_changed,
+		"same-lod transvoxel seam remains matched after shared boundary edit rebuild")
 	var distant_broker = ARTIFACT_REQUESTS.new()
 	check(distant_broker.setup(backend, pages,
 		main.structure_system.citadel_terrain_admission, planner,
@@ -894,7 +904,21 @@ func run() -> void:
 		"emptyReason":empty_result.get("reason", ""),
 		"emptyVertexCount":(empty_row.get("vertices", PackedVector3Array()) as PackedVector3Array).size(),
 		"emptySnapshotStatus":empty_snapshot.get("status", ""),
-		"emptyArtifact":bool(row.get("empty", false))}
+		"emptyArtifact":bool(row.get("empty", false)),
+		"transvoxelSectionSeam":{"evidenceLevel":"synthetic_actual_transvoxel_mesher_same_lod",
+			"mesherConfiguration":{"class":"VoxelMesherTransvoxel",
+				"texturingMode":"TEXTURES_SINGLE_S4", "transitionsEnabled":false,
+				"meshOptimizationEnabled":false},
+			"beforeEdit":{"leftVertexCount":left_seam.seam.size(),
+				"rightVertexCount":right_seam.seam.size(), "matched":left_seam.seam == right_seam.seam},
+			"afterEdit":{"leftVertexCount":edited_left_seam.seam.size(),
+				"rightVertexCount":edited_right_seam.seam.size(),
+				"matched":post_edit_seam_matches, "contourChanged":post_edit_contour_changed,
+				"leftBuildUsec":edited_left_seam.buildUsec,
+				"rightBuildUsec":edited_right_seam.buildUsec},
+			"crossLod":"not_applicable_current_fixed_lod_voxel_terrain; future_lod_path_open",
+			"doesNotProve":["production_resident_capture", "section_candidate_install_or_receipt",
+				"voxel_tools_render_parity", "collision_or_visual_retirement"]}}
 	var path := OS.get_environment("VWB_TRIANGLE_ARTIFACT_REPORT")
 	if not path.is_empty():
 		var file := FileAccess.open(path, FileAccess.WRITE)

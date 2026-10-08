@@ -24,6 +24,7 @@ const CivicInfill := preload("res://scripts/buildings/CivicHouseInfillRecipe.gd"
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const ActiveBiomeEnvironmentSnapshotScript := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
 const GablePurlinFrameBuilderScript := preload("res://scripts/buildings/GablePurlinFrameBuilder.gd")
 const RigidHouseholdLayoutRecipeScript := preload("res://scripts/buildings/RigidHouseholdLayoutRecipe.gd")
 const ShopRecipeScript := preload("res://scripts/buildings/CitadelShopRecipe.gd")
@@ -816,9 +817,12 @@ static func build_tree_placement_records(sites: Array, seed: int, continuation: 
 	var catalog = BiomeEnvironmentCatalogScript.new()
 	if not catalog.setup():
 		return sites.duplicate(true)
-	var profile = catalog.profile_for_biome("town")
+	var profile = catalog.profile_resource_copy_for_biome("town")
 	if profile == null:
 		return sites.duplicate(true)
+	var catalog_snapshot := ActiveBiomeEnvironmentSnapshotScript.capture(catalog)
+	if not bool(catalog_snapshot.get("ok", false)):
+		return []
 	var request_builder = TreeRuntimeRequestBuilderScript.new()
 	var tree_service = TreeSpawnServiceScript.new()
 	var records: Array = []
@@ -827,7 +831,9 @@ static func build_tree_placement_records(sites: Array, seed: int, continuation: 
 		var position: Vector3 = sites[index] as Vector3
 		var tree_id := "citadel-urban-tree-%d:%d,%d:%02d" % [seed, roundi(position.x), roundi(position.z), index]
 		var rotation_y := float(index) * 1.17
-		var request: Dictionary = request_builder.build(profile, "town", tree_id, 6.2 + float(index % 3) * 0.9, Vector2i(roundi(position.x), roundi(position.z)), str(seed))
+		var request: Dictionary = request_builder.build(profile, "town", tree_id,
+			6.2 + float(index % 3) * 0.9, Vector2i(roundi(position.x), roundi(position.z)),
+			str(seed), catalog_snapshot)
 		request["treeId"] = tree_id
 		request["worldSeed"] = str(seed)
 		request["biome"] = "town"

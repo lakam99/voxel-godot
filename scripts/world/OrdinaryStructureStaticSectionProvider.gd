@@ -11,6 +11,7 @@ const SourceCapture := preload("res://scripts/world/OrdinaryStructureVisualSourc
 const Partitioner := preload("res://scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd")
 const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const OwnerCompletion := preload("res://scripts/world/StaticGeometryOwnerCompletion.gd")
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 
 const PROVIDER_ID := "ordinary-structures"
@@ -62,7 +63,37 @@ var _geometry_capture_cache_misses := 0
 var _geometry_capture_cache_evictions := 0
 var _geometry_capture_cache_resource_bindings: Dictionary = {}
 var _installed_members_by_section: Dictionary = {}
+var _visual_retirement_closures: Dictionary = {}
+var _visual_closure_keys_by_section: Dictionary = {}
+var _pending_visual_retirement_closure_keys: Dictionary = {}
 var _latest_by_section: Dictionary = {}
+var _geometry_owner_rosters: Dictionary = {}
+var _geometry_owner_prior_rosters: Dictionary = {}
+var _geometry_owner_live_rows: Dictionary = {}
+var _geometry_owner_removal_claims: Dictionary = {}
+var _geometry_owner_removal_parts_by_section: Dictionary = {}
+var _geometry_completion_owner: WeakRef
+
+
+func bind_geometry_completion_owner(owner: Object) -> void:
+	_geometry_completion_owner = weakref(owner)
+
+
+func geometry_owner_expectation(source_id: String, part_id: String, revision: String) -> Dictionary:
+	var roster: Dictionary = _geometry_owner_rosters.get(part_id, {})
+	if source_id != part_id or roster.get("sourceRevision") != revision: return {}
+	var context := _context(_world_id)
+	var sections := OwnerCompletion.owner_sections(roster)
+	if bool(roster.get("explicitRemoval", false)):
+		return roster if OwnerCompletion.validate(roster) and _durable_geometry_removal_is_current(context, part_id) else {}
+	if context.is_empty() or sections.is_empty(): return {}
+	return roster if _current_live_recipe_visual(context, _geometry_owner_live_rows.get(part_id, {}),
+		sections[0]).get("status") == "ready" else {}
+
+
+func geometry_owner_prior_expectations(source_id: String, part_id: String, revision: String) -> Array:
+	if geometry_owner_expectation(source_id, part_id, revision).is_empty(): return []
+	return _geometry_owner_prior_rosters.get(part_id, []).duplicate()
 
 
 func configure(world_id: String, structure_system: Object, main: Object) -> Dictionary:
@@ -472,6 +503,7 @@ func capture_static_section_sources(world_id: String,
 	sections.sort_custom(_section_less)
 	var section_rows: Dictionary = {}
 	var source_revisions: Dictionary = {}
+	var source_identities: Dictionary = {}
 	var prepared_sections: Dictionary = {}
 	var authority_rows: Array = []
 	# Capture and advance each shared window only once per provider call. This
@@ -536,8 +568,7 @@ func capture_static_section_sources(world_id: String,
 		var status := "empty" if member_ids.is_empty() else "complete"
 		var row := {"status":status, "sourcePartIds":member_ids,
 			"coverageRevision":coverage_revision}
-		row.make_read_only()
-		section_rows[section] = row
+		var source_parts: Array[Dictionary] = []
 		for part_id: String in member_ids:
 			var revision := String(snapshot.sourceRevisions.get(part_id, ""))
 			if revision.is_empty():
@@ -547,6 +578,25 @@ func capture_static_section_sources(world_id: String,
 				return _failed("ordinary_section_member_revision_conflict", {
 					"sourcePartId":part_id})
 			source_revisions[part_id] = revision
+			var live_owners: Dictionary = snapshot.prepared.get("liveOwnersByPart", {})
+			var owner_row: Dictionary = live_owners.get(part_id, {})
+			var source_id := part_id
+			var identity_key := _source_part_identity_key(source_id, part_id)
+			if identity_key.is_empty():
+				return _failed("ordinary_section_member_source_identity_missing", {
+					"sourcePartId":part_id})
+			var source_identity := {"sourceId":source_id, "sourcePartId":part_id}
+			source_identity.make_read_only()
+			if source_identities.has(part_id) \
+					and source_identities[part_id] != source_identity:
+				return _failed("ordinary_section_member_source_identity_conflict", {
+					"sourcePartId":part_id})
+			source_identities[part_id] = source_identity
+			source_parts.append(source_identity)
+		source_parts.make_read_only()
+		row["sourceParts"] = source_parts
+		row.make_read_only()
+		section_rows[section] = row
 		prepared_sections[section] = snapshot.prepared
 		authority_rows.append([[section.x, section.y, section.z],
 			String(snapshot.discoveryRevision), coverage_revision])
@@ -560,6 +610,7 @@ func capture_static_section_sources(world_id: String,
 		revisions[section] = _removals_for(section, snapshot, revision)
 	section_rows.make_read_only()
 	source_revisions.make_read_only()
+	source_identities.make_read_only()
 	prepared_sections.make_read_only()
 	revisions.make_read_only()
 	sections.make_read_only()
@@ -567,6 +618,7 @@ func capture_static_section_sources(world_id: String,
 		"providerId":PROVIDER_ID, "worldId":_world_id,
 		"authorityRevision":authority_digest,
 		"sections":section_rows, "sourceRevisions":source_revisions,
+		"sourceIdentities":source_identities,
 		"preparedSections":prepared_sections,
 		"removalsBySection":revisions}
 	result.make_read_only()
@@ -599,14 +651,17 @@ func capture_static_section_contribution(census: Dictionary,
 	if coverage_revision.is_empty() or provider_revision.is_empty() \
 			or coverage_revision != _coverage_revision(section_key, snapshot):
 		return _pending("ordinary_section_contribution_revision_stale")
-	var authority_revisions: Dictionary = snapshot.get("sourceRevisions", {})
-	if not authority_revisions.is_read_only() \
+	var source_authority_revisions: Dictionary = snapshot.get("sourceRevisions", {})
+	if not source_authority_revisions.is_read_only() \
 			or not prepared.get("inputs", []) is Array \
 			or not prepared.get("inputs", []).is_read_only() \
 			or not prepared.get("compatibilityByKey", {}) is Dictionary \
 			or not prepared.get("compatibilityByKey", {}).is_read_only():
 		return _pending("ordinary_section_contribution_snapshot_unsealed")
 	var live_owners: Dictionary = prepared.get("liveOwnersByPart", {})
+	var census_source_revisions: Dictionary = census.get("sourceRevisions", {})
+	var authority_revisions: Dictionary = {}
+	var support_ranges_by_source: Dictionary = {}
 	for part_id_value: Variant in prepared.get("memberIds", []):
 		var part_id := String(part_id_value)
 		var owner_row: Dictionary = live_owners.get(part_id, {})
@@ -615,9 +670,24 @@ func capture_static_section_contribution(census: Dictionary,
 			_invalidate_section_snapshot(section_id)
 			return _pending("ordinary_section_contribution_live_owner_stale", {
 				"sourcePartId":part_id})
+		var source_id := part_id
+		var identity_key := _source_part_identity_key(source_id, part_id)
+		var revision := String(source_authority_revisions.get(part_id, ""))
+		if identity_key.is_empty() or revision.is_empty() \
+				or String(census_source_revisions.get(identity_key, "")) != revision:
+			return _pending("ordinary_section_contribution_source_revision_stale", {
+				"sourceId":source_id, "sourcePartId":part_id})
+		authority_revisions[identity_key] = revision
+		var part_support_ranges: Array = prepared.get(
+			"supportRangesBySource", {}).get(identity_key, [])
+		if not part_support_ranges.is_empty():
+			support_ranges_by_source[identity_key] = part_support_ranges
+	authority_revisions.make_read_only()
+	support_ranges_by_source.make_read_only()
 	var contribution := {"providerId":PROVIDER_ID, "sectionKey":section_key,
 		"coverageRevision":coverage_revision, "authorityRevision":provider_revision,
 		"authoritySourceRevisions":authority_revisions,
+		"supportRangesBySource":support_ranges_by_source,
 		"inputs":prepared.get("inputs", []),
 		"compatibilityByKey":prepared.get("compatibilityByKey", {}),
 		"materialBindings":prepared.get("materialBindings", {}),
@@ -684,24 +754,307 @@ func acknowledge_section_install(section_key: Vector3i,
 			return _pending(String(live_check.get("reason",
 				"ordinary_section_visual_retirement_owner_stale")), {
 				"sourcePartId":part_id, "section":section_key})
-		retirements.append({"partId":part_id, "visuals":live_check.visuals,
-			"sourceRevision":String(owner_row.get("sourceRevision", ""))})
-	# The roster calls this only after the coordinator validates the live native
-	# receipt. Validate every body and source revision before retiring any visual.
+		retirements.append({"partId":part_id,
+			"sourceRevision":String(installed[part_id].get("sourceRevision", "")),
+			"visuals":live_check.get("visuals", [])})
+	installed.make_read_only()
+	var stored_receipt := receipt.duplicate(true)
+	stored_receipt.make_read_only()
+	_installed_members_by_section[section_id] = {
+		"coverageRevision":coverage_revision, "members":installed,
+		"receipt":stored_receipt}
+	var retired_count := 0
+	var waiting_visuals: Array[Dictionary] = []
+	# Empty section publication has the same full previous-owner obligation as
+	# a replacement with geometry. Installed membership is no longer its ledger.
+	for removal: Dictionary in _removals_for(section_key, snapshot, coverage_revision):
+		var part_id := String(removal.sourcePartId)
+		var identity := _source_part_identity_key(String(removal.sourceId), part_id)
+		var revision := String(removal.sourceRevision)
+		var removal_completion := _ordinary_geometry_owner_completion(context, part_id, revision)
+		if receipt.get("removalRevisions", {}).get(identity) != revision \
+				or removal_completion.get("status") != "ready":
+			waiting_visuals.append({"sourcePartId":part_id, "reason":"ordinary_removal_owner_receipts_pending",
+				"completion":removal_completion})
+	# A visual can overlap more than one render section even though its gameplay
+	# owner is one generated block. Keep the source visual until its owner section
+	# has matching member coverage and every affected section has a live receipt.
 	for retirement: Dictionary in retirements:
 		for visual_value: Variant in retirement.visuals:
 			var visual := visual_value as MeshInstance3D
 			if not is_instance_valid(visual):
 				continue
-			visual.visible = false
-			visual.set_meta("ordinary_structure_section_owned", true)
-			visual.set_meta("ordinary_structure_section_retired_source_revision",
-				String(retirement.sourceRevision))
-	installed.make_read_only()
-	_installed_members_by_section[section_id] = {
-		"coverageRevision":coverage_revision, "members":installed}
+			var advanced: Dictionary = _advance_visual_retirement_closure(context,
+				visual, String(retirement.partId), String(retirement.sourceRevision),
+				section_key, receipt)
+			if advanced.get("status") == "retired":
+				retired_count += 1
+			else:
+				var waiting := advanced.duplicate(false)
+				waiting["visualInstanceId"] = visual.get_instance_id()
+				waiting_visuals.append(waiting)
+	# A later receipt can close a previously pending cross-section visual even
+	# when that adjacent section does not own the visual's source member.
+	for closure_key_value: Variant in _pending_visual_retirement_closure_keys.keys():
+		var closure_key := String(closure_key_value)
+		var closure: Dictionary = _visual_retirement_closures.get(closure_key, {})
+		var visual_ref: WeakRef = closure.get("visual") as WeakRef
+		var visual := visual_ref.get_ref() as MeshInstance3D if visual_ref != null else null
+		if not is_instance_valid(visual) or visual.is_queued_for_deletion():
+			_forget_visual_retirement_closure(closure_key)
+			continue
+		if not visual.visible:
+			continue
+		var already_waiting := false
+		for waiting: Dictionary in waiting_visuals:
+			if int(waiting.get("visualInstanceId", -1)) == visual.get_instance_id():
+				already_waiting = true
+				break
+		if already_waiting:
+			continue
+		var advanced: Dictionary = _advance_visual_retirement_closure(context, visual,
+			String(closure.get("sourcePartId", "")),
+			String(closure.get("sourceRevision", "")), section_key, receipt)
+		if advanced.get("status") == "retired":
+			retired_count += 1
+		else:
+			var waiting := advanced.duplicate(false)
+			waiting["visualInstanceId"] = visual.get_instance_id()
+			waiting_visuals.append(waiting)
+	if not waiting_visuals.is_empty():
+		return {"status":"pending", "retryable":true,
+			"reason":"ordinary_visual_section_receipt_closure_pending",
+			"section":section_key, "coverageRevision":coverage_revision,
+			"memberCount":installed.size(), "retiredVisualCount":retired_count,
+			"waitingVisualCount":waiting_visuals.size(),
+			"visualClosures":waiting_visuals}
 	return {"status":"acknowledged", "section":section_key,
-		"coverageRevision":coverage_revision, "memberCount":installed.size()}
+		"coverageRevision":coverage_revision, "memberCount":installed.size(),
+		"retiredVisualCount":retired_count}
+
+
+## Match the complete installed token, including its generation and renderer
+## owner. A delayed release must not erase a replacement with identical geometry.
+func release_section_install(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary = {}) -> Dictionary:
+	if coverage_revision.is_empty() or not receipt.is_read_only() \
+			or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key \
+			or String(receipt.get("contentManifestDigest", "")).is_empty():
+		return _pending("ordinary_section_release_receipt_invalid")
+	var section_id := _section_id(section_key)
+	var stored: Dictionary = _installed_members_by_section.get(section_id, {})
+	if stored.is_empty():
+		return {"status":"acknowledged", "reason":"ordinary_section_release_claim_already_absent"}
+	if stored.get("coverageRevision") != coverage_revision \
+			or stored.get("receipt", {}) != receipt:
+		return {"status":"acknowledged", "reason":"ordinary_section_release_claim_replaced"}
+	_installed_members_by_section.erase(section_id)
+	var restored_count := 0
+	# Visit only closures intersecting this section, including support-only
+	# claims. Weak references retain no gameplay bodies or mesh resources.
+	var affected: Dictionary = _visual_closure_keys_by_section.get(section_id, {})
+	for key_value: Variant in affected.keys():
+		var key := String(key_value)
+		var closure: Dictionary = _visual_retirement_closures.get(key, {})
+		var visual_ref: WeakRef = closure.get("visual") as WeakRef
+		var visual := visual_ref.get_ref() as MeshInstance3D if visual_ref != null else null
+		if not is_instance_valid(visual) or visual.is_queued_for_deletion():
+			_forget_visual_retirement_closure(key)
+			continue
+		if not visual.visible and bool(visual.get_meta("ordinary_structure_section_owned", false)):
+			_restore_pending_ordinary_visual(visual, "ordinary_section_install_released")
+			restored_count += 1
+		var retained_claim := false
+		for required_section: Vector3i in closure.get("sections", []):
+			if _installed_members_by_section.has(_section_id(required_section)):
+				retained_claim = true
+				break
+		if not retained_claim:
+			_forget_visual_retirement_closure(key)
+		else:
+			_pending_visual_retirement_closure_keys[key] = true
+	return {"status":"acknowledged", "sectionKey":section_key,
+		"reason":"ordinary_section_release_exact_claim_removed",
+		"restoredVisualCount":restored_count}
+
+
+func _forget_visual_retirement_closure(key: String) -> void:
+	var closure: Dictionary = _visual_retirement_closures.get(key, {})
+	for section: Vector3i in closure.get("sections", []):
+		var section_id := _section_id(section)
+		var keys: Dictionary = _visual_closure_keys_by_section.get(section_id, {})
+		keys.erase(key)
+		if keys.is_empty():
+			_visual_closure_keys_by_section.erase(section_id)
+	_visual_retirement_closures.erase(key)
+	_pending_visual_retirement_closure_keys.erase(key)
+
+
+func _advance_visual_retirement_closure(context: Dictionary, visual: MeshInstance3D,
+		part_id: String, source_revision: String, acknowledged_section: Vector3i,
+		acknowledged_receipt: Dictionary) -> Dictionary:
+	if context.is_empty() or not is_instance_valid(visual) \
+			or part_id.is_empty() or source_revision.is_empty():
+		return {"status":"pending", "reason":"ordinary_visual_retirement_identity_unavailable"}
+	var world_bounds := visual.global_transform * visual.get_aabb()
+	var roster: Dictionary = _geometry_owner_rosters.get(part_id, {})
+	var sections: Array[Vector3i] = OwnerCompletion.owner_sections(roster)
+	for previous: Dictionary in _geometry_owner_prior_rosters.get(part_id, []):
+		for section: Vector3i in OwnerCompletion.owner_sections(previous):
+			if section not in sections: sections.append(section)
+	if sections.is_empty() or sections.size() > 256:
+		return _restore_pending_ordinary_visual(visual,
+			"ordinary_visual_retirement_section_bounds_unavailable", {
+				"sourcePartId":part_id, "worldBounds":world_bounds})
+	sections.sort_custom(_section_less)
+	sections.make_read_only()
+	var visual_key := str(visual.get_instance_id())
+	var closure: Dictionary = _visual_retirement_closures.get(visual_key, {})
+	if closure.is_empty() or closure.get("visualInstanceId") != visual.get_instance_id() \
+			or closure.get("sourcePartId") != part_id \
+			or closure.get("sourceRevision") != source_revision \
+			or closure.get("worldBounds") != world_bounds \
+			or closure.get("sections", []) != sections:
+		_forget_visual_retirement_closure(visual_key)
+		closure = {"visual":weakref(visual), "visualInstanceId":visual.get_instance_id(),
+			"sourcePartId":part_id, "sourceRevision":source_revision,
+			"worldBounds":world_bounds, "sections":sections}
+		_visual_retirement_closures[visual_key] = closure
+		for section: Vector3i in sections:
+			var section_id := _section_id(section)
+			if not _visual_closure_keys_by_section.has(section_id):
+				_visual_closure_keys_by_section[section_id] = {}
+			_visual_closure_keys_by_section[section_id][visual_key] = true
+	var completion := _ordinary_geometry_owner_completion(context, part_id, source_revision)
+	if completion.get("status") != "ready":
+		_pending_visual_retirement_closure_keys[visual_key] = true
+		return _restore_pending_ordinary_visual(visual,
+			String(completion.get("reason", "ordinary_geometry_owner_completion_pending")), {
+				"sourcePartId":part_id, "sourceRevision":source_revision,
+				"requiredSections":sections, "completion":completion,
+				"worldBounds":world_bounds})
+	if not is_instance_valid(visual) or visual.is_queued_for_deletion():
+		return {"status":"pending", "reason":"ordinary_visual_owner_changed",
+			"sourcePartId":part_id}
+	visual.visible = false
+	visual.set_meta("ordinary_structure_section_owned", true)
+	visual.set_meta("ordinary_structure_section_retired_source_revision", source_revision)
+	visual.set_meta("ordinary_structure_section_owned_sections", sections)
+	_pending_visual_retirement_closure_keys.erase(visual_key)
+	_geometry_owner_prior_rosters.erase(part_id)
+	# Retain this weak closure until release: a support-only section may own no
+	# source member from which its hidden crossing visual could be rediscovered.
+	return {"status":"retired", "sourcePartId":part_id,
+		"sourceRevision":source_revision, "sections":sections}
+
+
+func _ordinary_geometry_owner_completion(context: Dictionary, part_id: String, revision: String) -> Dictionary:
+	var roster: Dictionary = _geometry_owner_rosters.get(part_id, {})
+	if not OwnerCompletion.validate(roster) or roster.get("sourceRevision") != revision:
+		return _pending("ordinary_full_geometry_owner_roster_missing_or_stale")
+	var owner_row: Dictionary = _geometry_owner_live_rows.get(part_id, {})
+	var sections := OwnerCompletion.owner_sections(roster)
+	var is_removal := bool(roster.get("explicitRemoval", false))
+	if is_removal:
+		if not _durable_geometry_removal_is_current(context, part_id):
+			return _pending("ordinary_geometry_removal_authority_changed")
+	else:
+		if sections.is_empty(): return _pending("ordinary_full_geometry_owner_roster_empty")
+		var live := _current_live_recipe_visual(context, owner_row, sections[0])
+		if live.get("status") != "ready": return live
+		if str(owner_row.get("bodyInstanceId", 0)) != String(roster.sourceIncarnation):
+			return _pending("ordinary_geometry_owner_incarnation_changed")
+	var coordinator: Object = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if not is_instance_valid(coordinator) or not coordinator.has_method("validate_geometry_owner_completion"):
+		return _pending("ordinary_geometry_owner_completion_authority_unavailable")
+	var completion: Dictionary = coordinator.call("validate_geometry_owner_completion", roster,
+		_geometry_owner_prior_rosters.get(part_id, []))
+	if completion.get("status") != "ready": return completion
+	if is_removal:
+		return completion if _durable_geometry_removal_is_current(context, part_id) \
+			else _pending("ordinary_geometry_removal_authority_changed")
+	var live := _current_live_recipe_visual(context, owner_row, sections[0])
+	return completion if live.get("status") == "ready" else live
+
+
+func _durable_geometry_removal_is_current(context: Dictionary, part_id: String) -> bool:
+	if context.is_empty(): return false
+	var row: Dictionary = _geometry_owner_live_rows.get(part_id, {})
+	var cell: Variant = row.get("cell")
+	var authority_id := String(row.get("authoritySourceId", ""))
+	var block_type := String(row.get("blockType", ""))
+	if not cell is Vector3i or authority_id.is_empty() or block_type.is_empty(): return false
+	var source: Dictionary = context.system.get("ordinary_visual_sources").get(authority_id, {})
+	return bool(source.get("completed", false)) and bool(context.system.call(
+		"generated_visual_block_is_removed", authority_id, cell, block_type))
+
+
+func _capture_explicit_geometry_removal(context: Dictionary, part_id: String) -> Dictionary:
+	var current: Dictionary = _geometry_owner_rosters.get(part_id, {})
+	if not OwnerCompletion.validate(current) or not _durable_geometry_removal_is_current(context, part_id):
+		return _pending("ordinary_geometry_removal_not_authoritative")
+	if bool(current.get("explicitRemoval", false)): return {"status":"ready", "roster":current}
+	var row: Dictionary = _geometry_owner_live_rows.get(part_id, {})
+	var revision := _sha256(var_to_bytes(["ordinary-member-removal/v1", _world_id,
+		part_id, current.sourceRevision, row.get("authoritySourceId"), row.get("cell"), row.get("blockType")]))
+	var sealed := OwnerCompletion.seal(_world_id, part_id, part_id, revision,
+		String(current.sourceIncarnation), [], true)
+	if sealed.get("status") != "ready": return sealed
+	var previous: Array = _geometry_owner_prior_rosters.get(part_id, [])
+	if current not in previous: previous.append(current)
+	_geometry_owner_prior_rosters[part_id] = previous
+	_geometry_owner_rosters[part_id] = sealed.roster
+	return sealed
+
+
+func _capture_full_geometry_owner_roster(part_id: String, source_row: Dictionary) -> Dictionary:
+	var members: Array[Dictionary] = []
+	for binding: Dictionary in source_row.get("bindings", []):
+		var input: Dictionary = binding.input
+		for index: int in range(int(input.instanceCount)):
+			var member := OwnerCompletion.capture_member(String(input.sourceId), part_id,
+				String(input.sourceRevision), String(input.segmentId), index, input.sourceToWorld,
+				input.meshLocalBounds, input.buffer, index * Attributes.FLOATS_PER_INSTANCE, binding.compatibility)
+			if member.is_empty(): return _pending("ordinary_full_geometry_owner_member_invalid")
+			members.append(member)
+	var live: Dictionary = source_row.liveOwner
+	var sealed := OwnerCompletion.seal(_world_id, part_id, part_id, String(live.sourceRevision),
+		str(live.bodyInstanceId), members)
+	if sealed.get("status") != "ready": return sealed
+	var previous: Dictionary = _geometry_owner_rosters.get(part_id, {})
+	if not previous.is_empty() and previous != sealed.roster:
+		var history: Array = _geometry_owner_prior_rosters.get(part_id, [])
+		if previous not in history: history.append(previous)
+		_geometry_owner_prior_rosters[part_id] = history
+	_geometry_owner_rosters[part_id] = sealed.roster
+	_geometry_owner_live_rows[part_id] = live
+	for section: Vector3i in OwnerCompletion.owner_sections(sealed.roster):
+		_record_geometry_owner_section(part_id, section)
+	return sealed
+
+
+func _record_geometry_owner_section(part_id: String, section: Vector3i) -> void:
+	var claim: Dictionary = _geometry_owner_removal_claims.get(part_id, {"sections":{}})
+	claim.sections[section] = true
+	_geometry_owner_removal_claims[part_id] = claim
+	if not _geometry_owner_removal_parts_by_section.has(section):
+		_geometry_owner_removal_parts_by_section[section] = {}
+	_geometry_owner_removal_parts_by_section[section][part_id] = true
+
+
+
+
+func _restore_pending_ordinary_visual(visual: MeshInstance3D, reason: String,
+		details: Dictionary = {}) -> Dictionary:
+	if is_instance_valid(visual) and not visual.is_queued_for_deletion() \
+			and bool(visual.get_meta("ordinary_structure_section_owned", false)):
+		visual.visible = true
+	var result := details.duplicate(false)
+	result["status"] = "pending"
+	result["retryable"] = true
+	result["reason"] = reason
+	return result
 
 
 func _capture_or_reuse_block(context: Dictionary, raw: Dictionary,
@@ -756,6 +1109,7 @@ func _capture_or_reuse_block(context: Dictionary, raw: Dictionary,
 	if captured.get("status") != "ready":
 		return {"status":String(captured.get("status", "pending")),
 			"reason":String(captured.get("reason", "ordinary_geometry_capture_pending"))}
+	captured = _bind_geometry_capture_incarnation(captured, body.get_instance_id())
 	var live_visual := _capture_live_recipe_visual(main, captured, cell, block_type)
 	if live_visual.get("status") != "ready":
 		return {"status":"pending", "reason":String(live_visual.get("reason",
@@ -816,6 +1170,37 @@ func _retain_geometry_capture(cache_key: String, captured: Dictionary,
 		"lastUse":_geometry_capture_cache_clock}
 	_geometry_capture_cache[cache_key] = entry
 	_geometry_capture_cache_bytes += estimated_bytes
+
+
+func _bind_geometry_capture_incarnation(captured: Dictionary, body_id: int) -> Dictionary:
+	# Geometry equality does not certify installation for a replacement body.
+	# Bind the admitted revision used by census, partition and native receipts.
+	var revision := _sha256(var_to_bytes(["ordinary-installed-owner/v1",
+		String(captured.sourceRevision), body_id]))
+	var inputs: Array[Dictionary] = []
+	var bindings: Array[Dictionary] = []
+	for value: Dictionary in captured.memberBindings:
+		var input: Dictionary = value.input.duplicate(false)
+		input["sourceRevision"] = revision
+		input.make_read_only()
+		var binding := value.duplicate(false)
+		binding["input"] = input
+		binding.make_read_only()
+		inputs.append(input)
+		bindings.append(binding)
+	inputs.make_read_only()
+	bindings.make_read_only()
+	var manifest: Dictionary = captured.manifest.duplicate(false)
+	manifest["sourceRevision"] = revision
+	manifest.make_read_only()
+	var owned := captured.duplicate(false)
+	owned["sourceInput"] = inputs[0]
+	owned["sourceInputs"] = inputs
+	owned["memberBindings"] = bindings
+	owned["manifest"] = manifest
+	owned["sourceRevision"] = revision
+	owned.make_read_only()
+	return owned
 
 
 func _track_geometry_cache_resource(resource: Resource, cache_key: String) -> void:
@@ -1029,7 +1414,8 @@ func _current_live_recipe_visual(context: Dictionary, owner_row: Dictionary,
 					"ordinary_structure_section_owned", false))):
 			return _pending("ordinary_section_live_visual_member_stale", {
 				"segmentId":String(row.get("segmentId", ""))})
-		if row.get("sectionKey") == section_key:
+		var visual_bounds := visual.global_transform * visual.get_aabb()
+		if Grid.keys_intersecting_bounds(visual_bounds).has(section_key):
 			visuals.append(visual)
 	return {"status":"ready", "visuals":visuals}
 
@@ -1042,23 +1428,92 @@ func _transform_approximately_equal(a: Transform3D, b: Transform3D) -> bool:
 
 
 func _input_owned_by_section(input: Dictionary, section: Vector3i) -> bool:
+	var bounds_result := _ordinary_input_world_bounds(input)
+	return bounds_result.get("status") == "ready" \
+		and Grid.key_for_world_position(
+			(bounds_result.worldBounds as AABB).get_center()) == section
+
+
+func _ordinary_input_world_bounds(input: Dictionary) -> Dictionary:
 	var source_to_world: Variant = input.get("sourceToWorld")
 	var buffer_value: Variant = input.get("buffer")
 	var bounds_value: Variant = input.get("meshLocalBounds")
 	if not source_to_world is Transform3D or not buffer_value is Array \
-			or not bounds_value is AABB:
-		return false
+			or buffer_value.size() < Attributes.FLOATS_PER_INSTANCE \
+			or not bounds_value is AABB or not _valid_bounds(bounds_value):
+		return {"status":"failed"}
 	var local_transform := Attributes.decode_transform(buffer_value, 0)
 	var world_bounds: AABB = source_to_world * local_transform * bounds_value
-	return Grid.key_for_world_position(world_bounds.get_center()) == section
+	if not _valid_bounds(world_bounds):
+		return {"status":"failed"}
+	return {"status":"ready", "worldBounds":world_bounds,
+		"geometryOwnerSection":Grid.key_for_world_position(world_bounds.get_center())}
+
+
+func _ordinary_support_range(input: Dictionary, support_section: Vector3i,
+		world_bounds: AABB, mesh_digest: String) -> Dictionary:
+	var source_id := String(input.get("sourceId", ""))
+	var part_id := String(input.get("sourcePartId", ""))
+	var revision := String(input.get("sourceRevision", ""))
+	var segment_id := String(input.get("segmentId", ""))
+	var owner_cell: Variant = input.get("ownerCell")
+	var owner_section := Grid.key_for_world_position(world_bounds.get_center())
+	if source_id.is_empty() or source_id != part_id or revision.is_empty() \
+			or segment_id.is_empty() or not owner_cell is Vector2i \
+			or owner_section == support_section or mesh_digest.length() != 64 \
+			or not mesh_digest.is_valid_hex_number(false):
+		return {}
+	var source_owner_chunk := Grid.chunk_key_for_section(owner_section)
+	var dependencies: Array[Vector2i] = _stream_chunk_keys_intersecting_bounds(
+		world_bounds)
+	if source_owner_chunk not in dependencies:
+		dependencies.append(source_owner_chunk)
+	dependencies.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		return a.y < b.y)
+	dependencies.make_read_only()
+	var result := {"sourceId":source_id, "sourcePartId":part_id,
+		"sourceRevision":revision, "memberId":segment_id,
+		"propId":part_id, "sourceSegmentId":segment_id,
+		"sourceInstance":0, "ownerCell":owner_cell,
+		"sourceOwnerChunk":source_owner_chunk,
+		"geometryOwnerSection":owner_section,
+		"supportSectionKey":support_section, "worldBounds":world_bounds,
+		"streamChunkDependencies":dependencies,
+		"ownershipPolicy":"ordinary_center_geometry_owner/aabb_support_sections_v1",
+		"meshContentDigest":mesh_digest}
+	result.make_read_only()
+	return result
+
+
+func _stream_chunk_keys_intersecting_bounds(bounds: AABB) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var size := Grid.STREAM_CHUNK_SIZE_METERS
+	var low_x := floori(bounds.position.x / size)
+	var low_z := floori(bounds.position.z / size)
+	var high_x := ceili(bounds.end.x / size) - 1
+	var high_z := ceili(bounds.end.z / size) - 1
+	for z in range(low_z, high_z + 1):
+		for x in range(low_x, high_x + 1):
+			result.append(Vector2i(x, z))
+	return result
+
+
+func _valid_bounds(bounds: AABB) -> bool:
+	return bounds.position.is_finite() and bounds.size.is_finite() \
+		and bounds.size.x > 0.0 and bounds.size.y > 0.0 and bounds.size.z > 0.0
 
 
 func _snapshot_lifecycle_is_current(snapshot: Dictionary, context: Dictionary) -> bool:
+	if context.is_empty(): return false
 	var prepared: Dictionary = snapshot.get("prepared", {})
 	var lifecycle: Dictionary = prepared.get("lifecycle", {})
 	var bounds: Variant = lifecycle.get("bounds")
 	if lifecycle.is_empty() or not bounds is Rect2i:
 		return false
+	for owner_row: Dictionary in prepared.get("liveOwnersByPart", {}).values():
+		if _current_live_recipe_visual(context, owner_row, snapshot.sectionKey).get("status") != "ready":
+			return false
 	var system: Object = context.system
 	return String(context.main.get("seed_text")) == String(lifecycle.get("seed", "")) \
 		and int(system.get("ordinary_visual_revision")) == int(lifecycle.get("ordinaryRevision", -1)) \
@@ -1216,6 +1671,9 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			return _pending("ordinary_section_source_revision_changed", {
 				"section":job.section, "restart":true})
 		var inputs: Array[Dictionary] = []
+		for part_id: String in job.sourceRows:
+			var full_roster := _capture_full_geometry_owner_roster(part_id, job.sourceRows[part_id])
+			if full_roster.get("status") != "ready": return full_roster
 		for row_value: Variant in job.sourceRows.values():
 			var row: Dictionary = row_value
 			for binding_value: Variant in row.get("bindings", []):
@@ -1240,6 +1698,23 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 				if part_id.is_empty() or not job.sourceRows.has(part_id):
 					return _failed("ordinary_section_partition_member_unbound")
 				member_ids[part_id] = true
+		# Every intersected section carries a source/member row. Geometry remains
+		# center-owned by the partitioner; neighboring rows are support-only and
+		# never add another draw of the same instance.
+		for part_id_value: Variant in job.sourceRows:
+			var part_id := String(part_id_value)
+			var source_row: Dictionary = job.sourceRows[part_id]
+			for binding_value: Variant in source_row.get("bindings", []):
+				if not binding_value is Dictionary:
+					return _failed("ordinary_section_member_binding_invalid")
+				var binding: Dictionary = binding_value
+				var input: Dictionary = binding.get("input", {})
+				var bounds_result := _ordinary_input_world_bounds(input)
+				if bounds_result.get("status") != "ready":
+					return _failed("ordinary_section_support_bounds_invalid")
+				var world_bounds: AABB = bounds_result.worldBounds
+				if Grid.keys_intersecting_bounds(world_bounds).has(section):
+					member_ids[part_id] = true
 		var ordered_ids: Array[String] = []
 		for part_id_value: Variant in member_ids:
 			ordered_ids.append(String(part_id_value))
@@ -1253,6 +1728,7 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		var live_owners_by_part: Dictionary = {}
 		var declarations: Array[Dictionary] = []
 		var prepared_segments: Array[Dictionary] = []
+		var support_ranges_by_source: Dictionary = {}
 		for part_id: String in ordered_ids:
 			var source_row: Dictionary = job.sourceRows[part_id]
 			var bindings: Array = source_row.get("bindings", [])
@@ -1260,28 +1736,40 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 				return _failed("ordinary_section_member_binding_list_empty")
 			var first_input: Dictionary = bindings[0].input
 			var segment_declarations: Array[Dictionary] = []
+			var part_support_ranges: Array[Dictionary] = []
 			for binding_value: Variant in bindings:
 				if not binding_value is Dictionary:
 					return _failed("ordinary_section_member_binding_invalid")
 				var binding: Dictionary = binding_value
 				var input: Dictionary = binding.input
 				var compatibility: Dictionary = binding.compatibility
-				if not _input_owned_by_section(input, section):
+				var bounds_result := _ordinary_input_world_bounds(input)
+				if bounds_result.get("status") != "ready":
+					return _failed("ordinary_section_support_bounds_invalid")
+				var world_bounds: AABB = bounds_result.worldBounds
+				if not Grid.keys_intersecting_bounds(world_bounds).has(section):
 					continue
 				if String(input.sourcePartId) != part_id \
 						or String(input.sourceRevision) != String(first_input.sourceRevision):
 					return _failed("ordinary_section_member_source_identity_conflict")
-				owned_inputs.append(input)
-				var batch_key := String(input.batchKey)
-				owned_compatibility[batch_key] = compatibility
-				owned_resources[batch_key] = job.resourcesByBatch[batch_key]
-				owned_meshes[String(compatibility.meshResourceKey)] = job.meshBindings[String(compatibility.meshResourceKey)]
-				owned_materials[String(compatibility.materialKey)] = job.materialBindings[String(compatibility.materialKey)]
-				var segment_declaration := _segment_declaration(input, compatibility)
-				segment_declaration.make_read_only()
-				segment_declarations.append(segment_declaration)
-				prepared_segments.append(input)
-			if segment_declarations.is_empty():
+				if _input_owned_by_section(input, section):
+					owned_inputs.append(input)
+					var batch_key := String(input.batchKey)
+					owned_compatibility[batch_key] = compatibility
+					owned_resources[batch_key] = job.resourcesByBatch[batch_key]
+					owned_meshes[String(compatibility.meshResourceKey)] = job.meshBindings[String(compatibility.meshResourceKey)]
+					owned_materials[String(compatibility.materialKey)] = job.materialBindings[String(compatibility.materialKey)]
+					var segment_declaration := _segment_declaration(input, compatibility)
+					segment_declaration.make_read_only()
+					segment_declarations.append(segment_declaration)
+					prepared_segments.append(input)
+				else:
+					var support_range := _ordinary_support_range(input, section,
+						world_bounds, String(compatibility.meshContentDigest))
+					if support_range.is_empty():
+						return _failed("ordinary_section_support_range_invalid")
+					part_support_ranges.append(support_range)
+			if segment_declarations.is_empty() and part_support_ranges.is_empty():
 				return _failed("ordinary_section_member_has_no_owned_render_segments", {
 					"sourcePartId":part_id, "section":section})
 			owned_revisions[part_id] = String(first_input.sourceRevision)
@@ -1292,6 +1780,13 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 					"sourcePartId":part_id})
 			live_owner.make_read_only()
 			live_owners_by_part[part_id] = live_owner
+			if not part_support_ranges.is_empty():
+				part_support_ranges.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+					return String(a.get("sourceSegmentId", "")) \
+						< String(b.get("sourceSegmentId", "")))
+				part_support_ranges.make_read_only()
+				support_ranges_by_source[_source_part_identity_key(part_id, part_id)] = \
+					part_support_ranges
 			segment_declarations.make_read_only()
 			var declaration := {"sourceId":String(first_input.sourceId),
 			"sourcePartId":part_id, "sourceRevision":String(first_input.sourceRevision),
@@ -1307,6 +1802,7 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 		owned_materials.make_read_only()
 		owned_revisions.make_read_only()
 		live_owners_by_part.make_read_only()
+		support_ranges_by_source.make_read_only()
 		declarations.make_read_only()
 		prepared_segments.make_read_only()
 		var owned_partition: Dictionary = Partitioner.partition(owned_inputs).get("result", {})
@@ -1324,6 +1820,7 @@ func _advance_job(job: Dictionary, context: Dictionary) -> Dictionary:
 			"lifecycle":lifecycle,
 			"memberIds":ordered_ids, "sourceRevisions":owned_revisions,
 			"liveOwnersByPart":live_owners_by_part,
+			"supportRangesBySource":support_ranges_by_source,
 			"inputs":owned_inputs, "declarations":declarations,
 			"preparedSegments":prepared_segments,
 			"partition":owned_partition,
@@ -1411,6 +1908,12 @@ func _job_is_current(job: Dictionary, context: Dictionary) -> bool:
 	if context.is_empty() or job.is_empty() or not job.get("censusWindow") is Rect2i \
 			or not job.get("membershipToken") is Array:
 		return false
+	# Membership revisions describe deterministic source content; they do not
+	# certify the live incarnation captured by an earlier preparation slice.
+	# Validate only this job's already captured rows, including incomplete jobs.
+	for source_row: Dictionary in job.get("sourceRows", {}).values():
+		if _current_live_recipe_visual(context, source_row.get("liveOwner", {}), job.section).get("status") != "ready":
+			return false
 	return String(context.main.get("seed_text")) == String(job.get("seed", 
 		context.main.get("seed_text"))) \
 		and int(context.system.get("ordinary_visual_revision")) == int(job.get("ordinaryRevision", -1)) \
@@ -1447,6 +1950,12 @@ static func _continuation_hint(stage: String, cursor: int) -> Dictionary:
 	return hint
 
 
+static func _source_part_identity_key(source_id: String, source_part_id: String) -> String:
+	if source_id.is_empty() or source_part_id.is_empty():
+		return ""
+	return "section-part:" + var_to_bytes([source_id, source_part_id]).hex_encode()
+
+
 func _coverage_revision(section: Vector3i, snapshot: Dictionary) -> String:
 	var context := _context(_world_id)
 	if context.is_empty(): return ""
@@ -1461,23 +1970,39 @@ func _removals_for(section: Vector3i, snapshot: Dictionary,
 	var old_members: Dictionary = previous.get("members", {})
 	var current_members: Dictionary = snapshot.get("sourceRevisions", {})
 	var removals: Array[Dictionary] = []
-	var old_ids: Array[String] = []
+	var known_parts: Dictionary = {}
 	for part_id_value: Variant in old_members:
-		old_ids.append(String(part_id_value))
+		var part_id := String(part_id_value)
+		_record_geometry_owner_section(part_id, section)
+		var claim: Dictionary = _geometry_owner_removal_claims.get(part_id, {"sections":{}})
+		claim.sections[section] = true
+		claim["authoritySourceId"] = String(old_members[part_id].get("authoritySourceId", ""))
+		_geometry_owner_removal_claims[part_id] = claim
+		known_parts[part_id] = true
+	# Indexed prior owner coverage survives ACK overwrite without a world scan.
+	for part_id: String in _geometry_owner_removal_parts_by_section.get(section, {}):
+		known_parts[part_id] = true
+	var old_ids: Array = known_parts.keys()
 	old_ids.sort()
 	var context := _context(_world_id)
-	var authority_serial := int(context.system.get("ordinary_visual_revision")) if not context.is_empty() else -1
 	for part_id: String in old_ids:
 		if current_members.has(part_id): continue
-		var prior_member: Dictionary = old_members.get(part_id, {})
-		var source_id := String(prior_member.get("sourceId", ""))
-		var authority_source_id := String(prior_member.get("authoritySourceId", ""))
-		if source_id.is_empty():
+		var live_row: Dictionary = _geometry_owner_live_rows.get(part_id, {})
+		var current_roster: Dictionary = _geometry_owner_rosters.get(part_id, {})
+		if _durable_geometry_removal_is_current(context, part_id):
+			var captured := _capture_explicit_geometry_removal(context, part_id)
+			if captured.get("status") != "ready": continue
+			current_roster = captured.roster
+		elif _current_live_recipe_visual(context, live_row, section).get("status") != "ready":
 			continue
-		var revision := _sha256(var_to_bytes([SCHEMA, _world_id, section, part_id,
-			String(prior_member.get("sourceRevision", "")), authority_serial, coverage_revision]))
-		var row := {"sourceId":source_id, "sourcePartId":part_id,
-			"authoritySourceId":authority_source_id, "sourceRevision":revision,
+		if not OwnerCompletion.validate(current_roster): continue
+		var claim: Dictionary = _geometry_owner_removal_claims.get(part_id, {"sections":{}})
+		claim.sections[section] = true
+		claim["authoritySourceId"] = String(live_row.get("authoritySourceId", ""))
+		claim["sourceRevision"] = String(current_roster.sourceRevision)
+		_geometry_owner_removal_claims[part_id] = claim
+		var row := {"sourceId":part_id, "sourcePartId":part_id,
+			"authoritySourceId":String(claim.authoritySourceId), "sourceRevision":String(current_roster.sourceRevision),
 			"sectionKey":section, "reason":"ordinary_generated_visual_removed"}
 		row.make_read_only()
 		removals.append(row)

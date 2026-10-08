@@ -83,7 +83,7 @@ func _run() -> void:
 			_actual_door_boxes(body, body.get_node("DoorPivot"), false, live, actual_boxes)
 			sweep_checks.append(_portcullis_sweep_check(part, actual_boxes, hierarchy))
 		parent.free()
-		live.published_nodes.clear()
+		live.clear_published_node_roster()
 		live.actual_batches.clear()
 	var payload := {"schema": "portcullis_publication_v1", "sourceSha256": source_sha, "publisherSha256": ORIGINAL_SHA, "fixtureDigest": fixture_digest, "rows": rows}
 	var checks := {"all_actual_and_varied_doors": complete and rows.size() == fixtures.size(), "source_unchanged": FileAccess.get_sha256(source) == source_sha,

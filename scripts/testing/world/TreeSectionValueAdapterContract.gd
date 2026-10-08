@@ -7,10 +7,12 @@ const Grid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const RemovedProps := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const EcologyAdapter := preload("res://scripts/world/EcologySectionValueAdapter.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 class TestAuthority extends Node:
 	var seed_text := "tree-section-adapter-contract"
 	var seed_hash := 19
+	var ecology_world_epoch: int = 1
 	var removed_props := {}
 	var removed_props_revision := 0
 	var tree_publication_queue: Object
@@ -18,12 +20,30 @@ class TestAuthority extends Node:
 	func detail_mesh(_chunk: Vector2i) -> Mesh: return BoxMesh.new()
 	func detail_material(_chunk: Vector2i) -> Material: return StandardMaterial3D.new()
 	func _ecology_chunk_source_revision(_chunk: Vector2i) -> String: return "fixture"
+	# This synthetic authority implements the current resolver binding surface.
+	# The tree-value checks do not admit source publications or catalog leases.
+	func acquire_ecology_catalog_artifact_lease() -> Dictionary: return {"status":"ready"}
+	func resolve_ecology_catalog_artifact() -> Dictionary: return {"status":"ready"}
+	func release_ecology_catalog_artifact_lease() -> bool: return true
+	func admit_ecology_source_publication() -> Dictionary: return {"status":"ready"}
+	func acquire_ecology_source_publication() -> Dictionary: return {"status":"ready"}
+	func resolve_ecology_source_publication() -> Dictionary: return {"status":"ready"}
+	func ecology_source_publication_is_current() -> bool: return true
+	func ecology_source_publication_local_is_current() -> bool: return true
+	func ecology_source_publication_record_is_current() -> bool: return true
+	func resolve_ecology_source_publication_section_band_slice() -> Dictionary: return {"status":"ready"}
+	func release_ecology_source_publication() -> bool: return true
 
 class TestSectionCoordinator extends RefCounted:
 	var installed_receipts: Dictionary = {}
 	func installed_section_receipt_is_current(section_key: Vector3i,
-			receipt: Dictionary) -> bool:
+				receipt: Dictionary) -> bool:
 		return installed_receipts.get(section_key, {}) == receipt
+	func installed_section_contains_source(section_key: Vector3i,
+			source_id: String, source_revision: String) -> bool:
+		var receipt: Dictionary = installed_receipts.get(section_key, {})
+		var revisions: Variant = receipt.get("sourceRevisions", {})
+		return revisions is Dictionary and String(revisions.get(source_id, "")) == source_revision
 
 var checks := {}
 
@@ -148,12 +168,18 @@ func run() -> void:
 	root.add_child(authority)
 	var queue := QueueScript.new()
 	root.add_child(queue)
+	authority.tree_publication_queue = queue
 	var prop_id := "tree-section-adapter-contract:0,0:0"
 	var body := StaticBody3D.new()
 	body.name = "TreeBody"
 	body.transform = Transform3D(Basis(Vector3.UP, 0.37), Vector3(100.0, 4.0, -30.0))
 	body.set_meta("prop_id", prop_id)
+	body.set_meta("static_ecology_source_id",
+		"%s:tree:%s" % [authority.seed_text, prop_id])
+	body.set_meta("tree_publication_owner", weakref(queue))
+	body.set_meta("tree_section_recipe_input_expected_generation", 0)
 	body.add_to_group("generated_props")
+	body.add_to_group("generated_tree_trunks")
 	var collider := CollisionShape3D.new()
 	collider.name = "TrunkCollision"
 	var cylinder := CylinderShape3D.new()
@@ -167,6 +193,7 @@ func run() -> void:
 		"renderLodTier":"near", "treeWorldPosition":body.global_position,
 		"visualHeight":8.0, "trunkRadius":0.4, "canopyRadius":3.2,
 		"canopyDensity":0.6, "geneticSeed":12345}
+	request = CertifiedRequestFixture.prepare_or_fail(request)
 	var built := _recipe_and_visual(body, queue, request)
 	var recipe: Dictionary = built.recipe
 	var wood: Node3D = built.visual.get_node("ProceduralTreeWood")
@@ -203,7 +230,9 @@ func run() -> void:
 	var partition: Dictionary = captured.get("partition", {})
 	var ecology := EcologyAdapter.new()
 	ecology.configure(world_id)
-	ecology.bind_main_authority(authority)
+	var authority_binding := ecology.bind_main_authority(authority)
+	check("synthetic_authority_binds_current_catalog_and_publication_resolver_contract",
+		authority_binding.get("status") == "ready")
 	var tree_candidate := {"propId":prop_id, "sourceId":"%s:tree:%s" % [authority.seed_text, prop_id],
 		"contentRevision":"tree-census-fixture-r1"}
 	var publication := {"record":Adapter._published_record(queue, body), "body":body}
@@ -360,29 +389,58 @@ func run() -> void:
 		and rejected_old_artifact.get("status") == "pending" \
 		and queue.prepared_section_value_record_for_body(body).get("artifactGeneration", 0) \
 			== prepared_record.get("artifactGeneration", -1))
-	body.remove_meta("tree_section_recipe_input_expected_generation")
+	body.set_meta("tree_section_recipe_input_expected_generation",
+		int(prepared_record.get("producerGeneration", 0)))
 	var accepted_visual_body := StaticBody3D.new()
+	var accepted_prop_id := prop_id + ":retained"
+	var accepted_source_id := "%s:tree:%s" % [authority.seed_text, accepted_prop_id]
+	var accepted_section := Vector3i(99, 0, 99)
+	var accepted_revision := "tree-retained-visual-contract-r1"
+	var accepted_receipt := {"status":"installed", "worldId":world_id,
+		"sectionKey":accepted_section, "generation":1,
+		"contentManifestDigest":"tree-retained-visual:%s" % accepted_section,
+		"sourceRevisions":{accepted_source_id:accepted_revision}}
+	accepted_receipt.make_read_only()
+	var fake_coordinator := TestSectionCoordinator.new()
+	fake_coordinator.installed_receipts[accepted_section] = accepted_receipt
+	authority.world_static_section_coordinator = fake_coordinator
+	queue.bind_presentation_coordinator(fake_coordinator)
+	accepted_visual_body.set_meta("prop_id", accepted_prop_id)
+	accepted_visual_body.set_meta("static_ecology_source_id", accepted_source_id)
+	accepted_visual_body.set_meta("tree_publication_owner", weakref(queue))
+	accepted_visual_body.add_to_group("generated_tree_trunks")
 	accepted_visual_body.set_meta("tree_visual_state", "published")
 	accepted_visual_body.set_meta("visual_source", "procedural_tree_recipe")
 	var accepted_visual := Node3D.new()
 	accepted_visual.name = "GeneratedTreeVisual"
 	accepted_visual_body.add_child(accepted_visual)
+	root.add_child(accepted_visual_body)
+	var accepted_request: Dictionary = request.duplicate(true)
+	accepted_request["treeId"] = accepted_prop_id
+	accepted_request["treeWorldPosition"] = accepted_visual_body.global_position
+	queue.remember_published_lod(accepted_visual_body, accepted_request, [], recipe,
+		true, "section", {"coordinatorId":fake_coordinator.get_instance_id(),
+			"worldId":world_id, "sourceId":accepted_source_id,
+			"sourceRevision":accepted_revision,
+			"sections":[accepted_section], "receipts":{accepted_section:accepted_receipt},
+			"providerBinding":{}})
 	queue._set_tree_preparation_state(accepted_visual_body, "section_compile_failed")
 	check("replacement_failure_preserves_last_accepted_per_tree_visual_state",
 		String(accepted_visual_body.get_meta("tree_visual_state", "")) == "published" \
 		and accepted_visual_body.get_node_or_null("GeneratedTreeVisual") == accepted_visual)
-	accepted_visual_body.free()
+	accepted_visual_body.queue_free()
 	var prepared_receipts := {}
 	for section_key: Vector3i in prepared_sections:
 		var receipt := {"status":"installed",
 			"sectionKey":section_key, "generation":1,
-			"contentManifestDigest":"tree-contract:%s" % section_key}
+			"worldId":world_id,
+			"contentManifestDigest":"tree-contract:%s" % section_key,
+			"sourceRevisions":{String(tree_candidate.sourceId):prepared_census_revision}}
 		receipt.make_read_only()
 		prepared_receipts[section_key] = receipt
-	var fake_coordinator := TestSectionCoordinator.new()
 	fake_coordinator.installed_receipts = prepared_receipts
-	authority.tree_publication_queue = queue
-	authority.world_static_section_coordinator = fake_coordinator
+	check("queue_binds_synthetic_current_section_coordinator",
+		queue.bind_presentation_coordinator(fake_coordinator))
 	ecology._latest_tree_candidate_by_source[String(tree_candidate.sourceId)] = tree_candidate
 	for section_key: Vector3i in prepared_sections:
 		ecology._latest_by_section[section_key] = {
@@ -394,19 +452,24 @@ func run() -> void:
 		section_owner_ack = ecology.acknowledge_section_install(section_key,
 			String(ecology._latest_coverage_by_section[section_key]),
 			prepared_receipts[section_key])
-	var section_owned_publication := {"record":queue.published_lod_records[0],
-		"body":body, "prepared":false}
-	var section_owned_capture := Adapter.capture_from_queue_record(queue, authority,
-		world_id, body, RemovedProps.capture(authority))
+	var tree_record_index := int(queue._published_record_index_by_body.get(
+		body.get_instance_id(), -1))
+	var section_owned_record := Adapter._published_record(queue, body)
+	var section_owned_members: Variant = section_owned_record.get("sectionValueMembers", null)
+	var exact_prepared_members_retained: bool = section_owned_members is Array \
+		and section_owned_members.is_read_only() \
+		and section_owned_members == prepared_members
+	var installed_tree_proof := queue.tree_publication_proof(body)
 	check("tree_visual_retires_only_after_all_section_receipts_and_reuses_owned_values",
 		section_owner_ack.get("status") == "acknowledged" \
 		and section_owner_ack.get("acknowledgedTreeCount", 0) == 1 \
 		and String(body.get_meta("tree_visual_state", "")) == "section_owned" \
-		and bool(queue.published_lod_records[0].get("sectionOwned", false)) \
-		and section_owned_capture.get("status") == "ready" \
-		and ecology._tree_census_source_revision(tree_candidate,
-			section_owned_publication) == ecology._tree_section_source_revision(
-				tree_candidate, section_owned_capture))
+		and tree_record_index >= 0 \
+		and bool(queue.published_lod_records[tree_record_index].get("sectionOwned", false)) \
+		and installed_tree_proof.get("status") == "ready" \
+		and bool(installed_tree_proof.get("installed", false)) \
+		and exact_prepared_members_retained \
+		and queue.prepared_section_value_record_for_body(body).is_empty())
 	var stale_recipe := recipe.duplicate(true)
 	stale_recipe["signature"] = "tree-v10-deadbeef"
 	var stale := _make_capture(queue, authority, body, stale_recipe, world_id)
@@ -419,15 +482,15 @@ func run() -> void:
 		and stale.get("bodyRecipeSignature") == String(recipe.get("signature", "")) \
 		and stale.get("queueTier") == stale.get("recipeTier") \
 		and stale.get("queueTier") == stale.get("bodyTier"))
-	var lod_record: Dictionary = queue.published_lod_records[0]
+	var lod_record: Dictionary = queue.published_lod_records[tree_record_index]
 	lod_record["rebuildPending"] = true
-	queue.published_lod_records[0] = lod_record
+	queue.published_lod_records[tree_record_index] = lod_record
 	var retiering := _make_capture(queue, authority, body, recipe, world_id)
 	check("old_tree_capture_waits_while_atomic_lod_replacement_is_pending",
 		retiering.get("status") == "pending" \
 		and retiering.get("reason") == "tree_lod_replacement_pending")
 	lod_record["rebuildPending"] = false
-	queue.published_lod_records[0] = lod_record
+	queue.published_lod_records[tree_record_index] = lod_record
 	authority.removed_props[prop_id] = true
 	authority.removed_props_revision += 1
 	var removed := _make_capture(queue, authority, body, recipe, world_id)
@@ -436,14 +499,16 @@ func run() -> void:
 		and removed.get("reason") == "tree_authoritative_tombstone")
 	authority.removed_props.erase(prop_id)
 	authority.removed_props_revision += 1
-	var stale_record: Dictionary = queue.published_lod_records[0].duplicate()
+	var stale_record: Dictionary = queue.published_lod_records[tree_record_index].duplicate()
 	stale_record.erase("sectionValueMembers")
-	queue.published_lod_records[0] = stale_record
+	queue.published_lod_records[tree_record_index] = stale_record
 	var proxy_capture := _make_capture(queue, authority, body, recipe, world_id)
 	check("missing_queue_geometry_values_do_not_become_visual_success",
 		proxy_capture.get("status") == "pending")
 	var report := {"schema":"tree-section-value-adapter-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
+		"sectionOwnerAckStatus":String(section_owner_ack.get("status", "")),
+		"sectionOwnerAckTreeCount":int(section_owner_ack.get("acknowledgedTreeCount", 0)),
 		"captureStatus":captured.get("status", "missing"),
 		"captureReason":captured.get("reason", ""),
 		"sourceId":captured.get("sourceId", ""),

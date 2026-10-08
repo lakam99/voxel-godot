@@ -199,7 +199,8 @@ func run() -> void:
 	var removal_candidate := {"sourceId":"forage-source", "propId":"durable-forage-id",
 		"kind":"realized_static_prop", "category":"forage", "renderStatus":"ready",
 		"renderMembers":[{"memberId":"mushroom_cap", "meshContentDigest":"a".repeat(64),
-			"transform":Transform3D.IDENTITY, "localBounds":AABB(Vector3.ZERO, Vector3.ONE),
+			"transform":Transform3D.IDENTITY, "meshBounds":AABB(Vector3.ZERO, Vector3.ONE),
+			"localBounds":AABB(Vector3.ZERO, Vector3.ONE),
 			"materialKey":"mushroomCap", "renderLayer":"opaque"}],
 		"provenance":{"sourceRevision":source_revision, "chunk":Vector2i.ZERO,
 			"creatorOutputComplete":true}}

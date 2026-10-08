@@ -24,6 +24,7 @@ const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublic
 const MasonryPublication := preload("res://scripts/buildings/BuildingMasonryPublication.gd")
 const RoofPublication := preload("res://scripts/buildings/BuildingRoofPublication.gd")
 const MasonryDescriptor := preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const WindowVisualRecipe := preload("res://scripts/buildings/BuildingWindowVisualRecipe.gd")
 const MasonryMaterialRequest := preload("res://scripts/buildings/BuildingMasonryMaterialRequest.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
@@ -42,7 +43,22 @@ const PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION := false
 
 var unit_box: BoxMesh
 var material_cache: Dictionary = {}
-var published_nodes: Array = []
+var _published_nodes: Array[Node] = []
+## Compatibility view. The returned array is a sealed copy, never the owner ledger.
+var published_nodes: Array:
+	get:
+		return published_node_roster_snapshot()
+var _published_node_instance_ids: Array[int] = []
+var _published_visual_roots_by_part_id: Dictionary = {}
+var _published_source_support_bounds: Dictionary = {}
+var _published_source_support_revision := 0
+var _published_section_visual_root_cache: Dictionary = {}
+var _published_node_roster_revision := 0
+var _published_node_roster_snapshot_cache: Array = []
+var _published_node_roster_snapshot_valid := false
+var _published_node_inventory_snapshot_cache: Dictionary = {}
+var _published_node_inventory_snapshot_valid := false
+var _published_node_tree_exit_callbacks: Dictionary = {}
 var published_part_count := 0
 var collision_count := 0
 var visual_batch_count := 0
@@ -56,13 +72,20 @@ var batch_static_parts := false
 var static_collision_body: StaticBody3D
 var static_part_records: Dictionary = {}
 var static_visual_batches: Dictionary = {}
+## Direct static meshes remain visible as legacy scene nodes until the shared
+## section install is acknowledged. These groups contribute immutable section
+## artifacts only; they do not create a competing per-source visual.
+var static_mesh_visual_batches: Dictionary = {}
 var static_visual_collecting := false
 var static_visual_part_transform := Transform3D.IDENTITY
 var static_visual_part_tier := "structural"
 var static_visual_owner_cell := Vector2i.ZERO
 var static_visual_render_chunk_key := Vector2i.ZERO
+const DoorSectionCapture = preload("res://scripts/buildings/BuildingDoorSectionCapture.gd")
+var _door_section_captures: Dictionary = {}
 var static_visual_source_part_id := ""
 var static_visual_source_revision := ""
+var _static_visual_presentation_mounts_by_part: Dictionary = {}
 var static_visual_transform_count := 0
 var static_batch_peak_instances := 0
 var incremental_progress_callback: Callable
@@ -110,6 +133,9 @@ var _prepared_static_records: Dictionary = {}
 var _prepared_static_bindings: Dictionary = {}
 var _static_section_transform_artifacts: Dictionary = {}
 var _static_section_transform_artifact_revisions: Dictionary = {}
+var _static_section_transform_artifact_invalidations: Dictionary = {}
+var _static_section_transform_artifact_watch_revisions: Dictionary = {}
+var _static_section_transform_resource_watchers_by_part: Dictionary = {}
 var _static_section_transform_artifact_diagnostics: Dictionary = {"preparedGroups":0,
 	"rejectedGroups":0,"lastRejectReason":"","rejectedBySource":{},
 	"rejectedSourceOverflow":0,"rejectedGroupSamples":[],"rejectedGroupSampleOverflow":0}
@@ -651,6 +677,8 @@ func clear_published() -> void:
 	_pending_publication_boundary = {}
 	_last_publication_boundary = {}
 	_source_part_boundaries = {}
+	_door_section_captures = {}
+	_static_visual_presentation_mounts_by_part = {}
 	_publication_retirement = []
 	if cancelled_static_flush!=null: _publication_retirement.append(cancelled_static_flush)
 	_static_record_cache={}
@@ -668,16 +696,16 @@ func clear_published() -> void:
 	_prepared_static_bindings={}
 	_static_section_transform_artifacts={}
 	_static_section_transform_artifact_revisions={}
+	_clear_static_section_transform_resource_watchers()
+	_static_section_transform_artifact_invalidations={}
+	_static_section_transform_artifact_watch_revisions={}
 	_static_section_transform_artifact_diagnostics={"preparedGroups":0,
 		"rejectedGroups":0,"lastRejectReason":"","rejectedBySource":{},
 		"rejectedSourceOverflow":0,"rejectedGroupSamples":[],"rejectedGroupSampleOverflow":0}
 	_finish_validated = false
 	_scene_finalized = false
 	_publication_stage_metrics = {}
-	for node in published_nodes:
-		if node != null and is_instance_valid(node):
-			node.queue_free()
-	published_nodes.clear()
+	clear_published_node_roster(true)
 	published_part_count = 0
 	collision_count = 0
 	visual_batch_count = 0
@@ -691,6 +719,7 @@ func clear_published() -> void:
 	static_collision_body = null
 	static_part_records.clear()
 	static_visual_batches.clear()
+	static_mesh_visual_batches.clear()
 	static_visual_collecting = false
 	static_visual_part_transform = Transform3D.IDENTITY
 	static_visual_part_tier = "structural"
@@ -698,6 +727,7 @@ func clear_published() -> void:
 	static_visual_render_chunk_key = Vector2i.ZERO
 	static_visual_source_part_id = ""
 	static_visual_source_revision = ""
+	_static_visual_presentation_mounts_by_part.clear()
 	static_visual_transform_count = 0
 	static_batch_peak_instances = 0
 	incremental_total_parts = 0
@@ -832,6 +862,7 @@ func _hydrate_physical_packet_jointed_artifacts(packet, blueprint) -> Dictionary
 func publish_part(part, parent: Node3D) -> StaticBody3D:
 	if not _paving_part_valid(part): return null
 	if not _masonry_part_valid(part): return null
+	_record_published_source_support(part, parent)
 	# Republishing an ID must not leave its previous boundary usable while a
 	# replacement visual/collider is still under construction.
 	var previous_boundary: Dictionary = _source_part_boundaries.get(String(part.id),{})
@@ -853,10 +884,14 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 	body.set_meta("building_material", part.material_id)
 	body.set_meta("building_semantic", part.semantic)
 	body.set_meta("building_part_record", part.snapshot())
+	var part_source_revision := PublicationPreparation.static_record_binding(part.snapshot())
+	body.set_meta("building_source_part_id", String(part.id))
+	body.set_meta("building_source_revision", part_source_revision)
+	body.set_meta("section_source_member_id", "building:" + String(part.id))
 	parent.add_child(body)
 	if String(part.kind) == "door":
 		configure_door_leaf(body, part)
-	published_nodes.append(body)
+	_register_published_node(body, String(part.id))
 	if part.collision_enabled:
 		var collision := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
@@ -879,6 +914,8 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		else: publish_practical_light(part, body)
 	if String(part.kind) == "door":
 		add_door_interaction_proxy(body, part)
+		_door_section_captures[String(part.id)] = DoorSectionCapture.capture(self, body, parent,
+			String(part.id), PublicationPreparation.static_record_binding(part.snapshot()))
 	var elapsed := Time.get_ticks_usec() - started
 	recipe_build_usec += elapsed
 	_record_publication_stage("part",elapsed,String(part.id))
@@ -961,7 +998,7 @@ func static_collision_batch(parent: Node3D) -> StaticBody3D:
 	static_collision_body.set_meta("building_part_kind", "batched_static")
 	static_collision_body.set_meta("building_source_blueprint", source_blueprint_id)
 	parent.add_child(static_collision_body)
-	published_nodes.append(static_collision_body)
+	_register_published_node(static_collision_body, "")
 	return static_collision_body
 
 
@@ -1026,9 +1063,85 @@ func publish_practical_light(part, parent: Node3D) -> void:
 	light.light_energy = float(part.recipe.get("lightEnergy", 1.5))
 	light.omni_range = float(part.recipe.get("lightRange", 5.0))
 	light.shadow_enabled = light.light_energy >= 1.70
-	if static_visual_collecting:
-		light.position = static_visual_part_transform.origin
-	parent.add_child(light)
+	var static_source := static_visual_collecting \
+		or (batch_static_parts and String(part.kind) != "door")
+	if not static_source:
+		light.position = Vector3.ZERO
+		parent.add_child(light)
+		return
+	# The source owner and mount stay in the producer tree. The section renderer
+	# records this exact mount as borrowed presentation; it never reparents or
+	# replaces the gameplay light.
+	var part_id := String(part.id)
+	var revision := PublicationPreparation.static_record_binding(part.snapshot())
+	var radius := light.omni_range
+	if part_id.is_empty() or revision.is_empty() or parent == null \
+			or _static_visual_presentation_mounts_by_part.has(part_id) \
+			or not is_finite(light.light_energy) or not is_finite(radius) or radius <= 0.0:
+		_paving_reject("practical_light_source_identity_or_spatial_invalid")
+		return
+	var site_id := publication_site_id if not publication_site_id.is_empty() else source_blueprint_id
+	if site_id.is_empty():
+		_paving_reject("practical_light_site_identity_unavailable")
+		return
+	var owner := Node3D.new()
+	owner.name = "PracticalLightOwner_%s" % part_id
+	owner.transform = static_visual_part_transform if static_visual_collecting \
+		else Transform3D(Basis.from_euler(part.rotation), part.position)
+	owner.set_meta("building_part_id", part_id)
+	owner.set_meta("building_source_part_id", part_id)
+	owner.set_meta("section_attachment_source_revision", revision)
+	owner.set_meta("section_attachment_publisher_instance_id", get_instance_id())
+	owner.set_meta("section_attachment_publication_epoch", _publication_epoch + 1)
+	parent.add_child(owner)
+	var mount := Node3D.new()
+	mount.name = "PracticalLightMount"
+	var presentation_member_id := "practical-light:%s:%s" % [site_id, part_id]
+	mount.set_meta("section_attachment_presentation_member_id", presentation_member_id)
+	owner.add_child(mount)
+	light.position = Vector3.ZERO
+	mount.add_child(light)
+	_register_published_node(owner, part_id)
+	var neutral := owner.global_transform
+	if not neutral.is_finite():
+		_paving_reject("practical_light_spatial_manifest_invalid")
+		return
+	var extent := Vector3.ONE * radius
+	var swept := AABB(light.global_position - extent, extent * 2.0)
+	var motion := {"kind":"static", "closedParentToBody":Transform3D.IDENTITY,
+		"raiseOffset":Vector3.ZERO, "swing":0.0}
+	motion.make_read_only()
+	var attachment_key := "building-practical-light:%s:%s" % [site_id, part_id]
+	var member_value := {"sourcePartId":part_id, "sourceRevision":revision,
+		"producerSourceRevision":revision, "presentationMemberId":presentation_member_id,
+		"attachmentKey":attachment_key, "ownershipKind":"borrowed_presentation",
+		"intendedVisible":true, "neutralParentToWorld":neutral,
+		"sweptWorldBounds":swept, "motion":motion}
+	member_value.make_read_only()
+	var empty_legacy_visuals: Array = []
+	empty_legacy_visuals.make_read_only()
+	var binding := {"mount":weakref(mount), "mountInstanceId":mount.get_instance_id(),
+		"parent":weakref(owner), "parentInstanceId":owner.get_instance_id(),
+		"body":weakref(owner), "bodyInstanceId":owner.get_instance_id(),
+		"mountLocalTransform":mount.transform, "bodyToWorld":owner.global_transform,
+		"neutralParentToWorld":neutral, "sweptWorldBounds":swept, "motion":motion,
+		"legacyVisuals":empty_legacy_visuals, "publisherInstanceId":get_instance_id(),
+		"publicationEpoch":_publication_epoch + 1, "sourcePartId":part_id,
+		"sourceRevision":revision, "producerSourceRevision":revision,
+		"presentationMemberId":presentation_member_id, "attachmentKey":attachment_key,
+		"ownershipKind":"borrowed_presentation", "intendedVisible":true,
+		"light":weakref(light), "lightInstanceId":light.get_instance_id(),
+		"lightEnergy":light.light_energy, "lightRange":radius,
+		"lightColor":light.light_color, "shadowEnabled":light.shadow_enabled}
+	binding.make_read_only()
+	var rows: Array[Dictionary] = [member_value]
+	rows.make_read_only()
+	var presentation_bindings: Dictionary = {attachment_key:binding}
+	presentation_bindings.make_read_only()
+	var presentation_capture := {"sourceRevision":revision,
+		"members":rows, "bindings":presentation_bindings}
+	presentation_capture.make_read_only()
+	_static_visual_presentation_mounts_by_part[part_id] = presentation_capture
 
 
 func publish_timber_wall(part, parent: Node3D) -> void:
@@ -1699,21 +1812,9 @@ func publish_window(part, parent: Node3D) -> void:
 	var size: Vector3 = part.size
 	var monumental := String(part.id).begins_with("castle_keep_") or String(part.id).begins_with("castle_gatehouse_")
 	var trim := material_for_id("stone_foundation" if monumental else "timber_beam", variation_for(part) - 0.02)
-	add_box_visual(parent, size, Vector3.ZERO, material_for(part), "WindowGlass")
-	if size.x < size.z:
-		add_box_visual(parent, Vector3(size.x * 1.62, size.y * 1.18, 0.14), Vector3(0.0, 0.0, -size.z * 0.58), trim, "WindowFrameNear")
-		add_box_visual(parent, Vector3(size.x * 1.62, size.y * 1.18, 0.14), Vector3(0.0, 0.0, size.z * 0.58), trim, "WindowFrameFar")
-		add_box_visual(parent, Vector3(size.x * 1.62, 0.15, size.z * 1.30), Vector3(0.0, size.y * 0.59, 0.0), trim, "WindowLintel")
-		add_box_visual(parent, Vector3(size.x * 1.82, 0.17, size.z * 1.36), Vector3(0.0, -size.y * 0.59, 0.0), trim, "WindowSill")
-		add_box_visual(parent, Vector3(size.x * 1.68, 0.075, size.z * 1.68), Vector3(0.0, 0.0, 0.0), trim, "WindowMullionHorizontal")
-		add_box_visual(parent, Vector3(size.x * 1.68, size.y * 1.05, 0.075), Vector3(0.0, 0.0, 0.0), trim, "WindowMullionVertical")
-	else:
-		add_box_visual(parent, Vector3(0.14, size.y * 1.18, size.z * 1.62), Vector3(-size.x * 0.58, 0.0, 0.0), trim, "WindowFrameNear")
-		add_box_visual(parent, Vector3(0.14, size.y * 1.18, size.z * 1.62), Vector3(size.x * 0.58, 0.0, 0.0), trim, "WindowFrameFar")
-		add_box_visual(parent, Vector3(size.x * 1.30, 0.15, size.z * 1.62), Vector3(0.0, size.y * 0.59, 0.0), trim, "WindowLintel")
-		add_box_visual(parent, Vector3(size.x * 1.36, 0.17, size.z * 1.82), Vector3(0.0, -size.y * 0.59, 0.0), trim, "WindowSill")
-		add_box_visual(parent, Vector3(size.x * 1.68, 0.075, size.z * 1.68), Vector3(0.0, 0.0, 0.0), trim, "WindowMullionHorizontal")
-		add_box_visual(parent, Vector3(0.075, size.y * 1.05, size.z * 1.68), Vector3(0.0, 0.0, 0.0), trim, "WindowMullionVertical")
+	var glass: Material = material_for(part)
+	for row: Dictionary in WindowVisualRecipe.boxes(size):
+		add_box_visual(parent, row.size, row.offset, trim if row.trim else glass, row.name)
 
 
 func publish_barrel(part, parent: Node3D) -> void:
@@ -1767,7 +1868,11 @@ func publish_cloth_pennant(part, parent: Node3D) -> void:
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform
 		apply_static_visual_render_policy(visual,static_visual_part_tier)
+		collect_static_mesh_visual(visual.mesh, visual.material_override,
+			static_visual_part_transform, visual)
 	parent.add_child(visual)
+	if static_visual_collecting:
+		_register_direct_static_mesh_visual(visual)
 	visual_batch_count += 1
 
 
@@ -1800,7 +1905,11 @@ func publish_irregular_ground_patch(part, parent: Node3D) -> void:
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform
 		apply_static_visual_render_policy(visual,static_visual_part_tier)
+		collect_static_mesh_visual(visual.mesh, visual.material_override,
+			static_visual_part_transform, visual)
 	parent.add_child(visual)
+	if static_visual_collecting:
+		_register_direct_static_mesh_visual(visual)
 	visual_batch_count += 1
 
 
@@ -1857,7 +1966,11 @@ func add_mesh_visual(parent: Node3D, mesh: Mesh, size: Vector3, position: Vector
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform * visual.transform
 		apply_static_visual_render_policy(visual,static_visual_part_tier)
+		collect_static_mesh_visual(visual.mesh, visual.material_override,
+			visual.transform, visual)
 	parent.add_child(visual)
+	if static_visual_collecting:
+		_register_direct_static_mesh_visual(visual)
 	visual_batch_count += 1
 
 
@@ -1907,7 +2020,9 @@ func add_mesh_batch(parent: Node3D, mesh: Mesh, transforms: Array, material: Mat
 	if transforms.is_empty() or mesh == null:
 		return null
 	var custom_data := custom_data_override if custom_data_override.size() == transforms.size() else build_batch_custom_data(transforms)
-	var upload := MeshBatchUpload.new(mesh,transforms,custom_data,material,node_name,parent,static_visual_part_transform,static_visual_collecting,static_visual_part_tier)
+	var upload := MeshBatchUpload.new(mesh,transforms,custom_data,material,node_name,
+		parent,static_visual_part_transform,static_visual_collecting,
+		static_visual_part_tier,static_visual_source_part_id)
 	while upload.state not in ["ready","failed"]: upload.advance(self)
 	if upload.state=="failed": _paving_reject(upload.reason)
 	return upload.result()
@@ -2018,6 +2133,402 @@ func collect_prepared_static_visual_segment(segment, material: Material) -> void
 	static_visual_batches[key] = group
 
 
+## Capture a generated mesh as immutable section transform input while leaving
+## its existing MeshInstance as the only visible presenter until section ACK.
+func collect_static_mesh_visual(mesh: Mesh, material: Material,
+		transform: Transform3D, _legacy_visual: MeshInstance3D) -> void:
+	if mesh == null or material == null or not transform.is_finite():
+		_paving_reject("static_mesh_visual_source_invalid")
+		return
+	var bounds := mesh.get_aabb()
+	if not bounds.position.is_finite() or not bounds.size.is_finite() \
+			or bounds.size.x < 0.0 or bounds.size.y < 0.0 or bounds.size.z < 0.0:
+		_paving_reject("static_mesh_visual_bounds_invalid")
+		return
+	# Section membership and renderer culling require a finite 3D support box.
+	# Expand only degenerate axes; the mesh vertices and fingerprinted geometry
+	# remain exact, and this epsilon is a conservative render bound, not collision.
+	const SUPPORT_EPSILON := 0.002
+	var support_min := bounds.position
+	var support_size := bounds.size
+	for axis in 3:
+		if support_size[axis] < SUPPORT_EPSILON:
+			support_min[axis] -= (SUPPORT_EPSILON - support_size[axis]) * 0.5
+			support_size[axis] = SUPPORT_EPSILON
+	mesh.custom_aabb = AABB(support_min, support_size)
+	var layer_policy := static_visual_layer_policy(material)
+	if layer_policy.get("status") != "ready":
+		_paving_reject("static_mesh_visual_layer_policy_unavailable")
+		return
+	var mesh_bounds: AABB = mesh.get_aabb()
+	if mesh_bounds.size.x <= 0.0 or mesh_bounds.size.y <= 0.0 or mesh_bounds.size.z <= 0.0:
+		_paving_reject("static_mesh_visual_support_bounds_invalid")
+		return
+	var material_key := stable_static_material_key(material)
+	if material_key.is_empty() or static_visual_source_part_id.is_empty() \
+			or static_visual_source_revision.is_empty():
+		_paving_reject("static_mesh_visual_source_identity_missing")
+		return
+	var key := _static_mesh_visual_batch_key(mesh, material, static_visual_part_tier,
+		static_visual_owner_cell, static_visual_source_part_id)
+	var group: Dictionary = static_mesh_visual_batches.get(key, {})
+	var render_layer := String(layer_policy.get("renderLayer", ""))
+	var sort_policy := String(layer_policy.get("transparencySortPolicy", ""))
+	if group.is_empty():
+		group = {"mesh":mesh,"material":material,"transforms":[],"customData":[],
+			"renderTier":static_visual_part_tier,"ownerCell":static_visual_owner_cell,
+			"renderChunkKey":static_visual_render_chunk_key,
+			"sourcePartId":static_visual_source_part_id,
+			"sourceRevision":static_visual_source_revision,"materialKey":material_key,
+			"renderLayer":render_layer,"transparencySortPolicy":sort_policy,
+			"meshSupportBounds":mesh.custom_aabb,"sectionArtifactOnly":true}
+	elif not is_same(group.get("mesh"), mesh) or not is_same(group.get("material"), material) \
+			or String(group.get("sourceRevision", "")) != static_visual_source_revision \
+			or String(group.get("materialKey", "")) != material_key \
+			or group.get("ownerCell") != static_visual_owner_cell \
+			or group.get("renderChunkKey") != static_visual_render_chunk_key \
+			or String(group.get("renderLayer", "")) != render_layer \
+			or String(group.get("transparencySortPolicy", "")) != sort_policy:
+		_paving_reject("static_mesh_visual_batch_identity_mismatch")
+		return
+	var transforms: Array = group.get("transforms", [])
+	var custom_data: Array = group.get("customData", [])
+	transforms.append(transform)
+	custom_data.append(Color(0.5, 0.5, 0.5, 1.0))
+	group["transforms"] = transforms
+	group["customData"] = custom_data
+	static_mesh_visual_batches[key] = group
+	static_visual_transform_count += 1
+
+
+func _register_direct_static_mesh_visual(visual: MeshInstance3D) -> void:
+	visual.set_meta("building_source_part_id", static_visual_source_part_id)
+	visual.set_meta("building_owner_cell", static_visual_owner_cell)
+	visual.set_meta("building_source_blueprint", source_blueprint_id)
+	visual.set_meta("building_part_id", static_visual_source_part_id)
+	visual.set_meta("building_source_revision", static_visual_source_revision)
+	visual.set_meta("section_source_member_id", "building:" + static_visual_source_part_id)
+	_register_published_node(visual, static_visual_source_part_id)
+
+
+func _register_published_node(node: Node, source_part_id: String) -> void:
+	if not is_instance_valid(node):
+		return
+	var node_id := node.get_instance_id()
+	if _published_node_instance_ids.has(node_id):
+		return
+	_published_nodes.append(node)
+	_published_node_instance_ids.append(node_id)
+	var callback := Callable(self, "_on_published_node_tree_exiting").bind(node_id)
+	if not node.tree_exiting.is_connected(callback):
+		node.tree_exiting.connect(callback)
+	_published_node_tree_exit_callbacks[node_id] = callback
+	_invalidate_published_node_roster()
+	if source_part_id.is_empty():
+		return
+	if not _published_visual_roots_by_part_id.has(source_part_id):
+		_published_visual_roots_by_part_id[source_part_id] = []
+	_published_visual_roots_by_part_id[source_part_id].append({
+		"root":weakref(node), "rootInstanceId":node.get_instance_id(),
+		"sourcePartId":source_part_id})
+
+
+func _record_published_source_support(part, parent: Node3D) -> void:
+	var size: Vector3 = part.size
+	var part_id := String(part.id)
+	if not size.is_finite() or size.x <= 0.0 or size.y <= 0.0 or size.z <= 0.0:
+		_published_source_support_bounds.erase(part_id)
+		_invalidate_published_source_support()
+		return
+	var local_transform := Transform3D(Basis.from_euler(part.rotation), part.position)
+	var bounds := local_transform * AABB(-size * 0.5, size)
+	if not bounds.position.is_finite() or not bounds.size.is_finite() \
+			or bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0:
+		_published_source_support_bounds.erase(part_id)
+		_invalidate_published_source_support()
+		return
+	# Recipe geometry may exceed the collision record. Keep the root eligible for
+	# adjacent section audits with a conservative visual margin.
+	_published_source_support_bounds[part_id] = {"bounds":bounds.grow(6.0),
+		"parent":weakref(parent), "parentInstanceId":parent.get_instance_id()}
+	_invalidate_published_source_support()
+
+
+func _invalidate_published_source_support() -> void:
+	_published_source_support_revision += 1
+	_published_section_visual_root_cache.clear()
+
+
+func published_source_support_revision() -> int:
+	return _published_source_support_revision
+
+
+func register_published_visual(node: Node, source_part_id: String) -> void:
+	if not is_instance_valid(node) or source_part_id.is_empty():
+		return
+	_register_published_node(node, source_part_id)
+
+
+func clear_published_node_roster(queue_nodes := false) -> void:
+	for node_id_value: Variant in _published_node_tree_exit_callbacks:
+		var node_value: Variant = instance_from_id(int(node_id_value))
+		var callback: Callable = _published_node_tree_exit_callbacks[node_id_value]
+		if is_instance_valid(node_value) and (node_value as Node).tree_exiting.is_connected(callback):
+			(node_value as Node).tree_exiting.disconnect(callback)
+	if queue_nodes:
+		for node in _published_nodes:
+			if is_instance_valid(node) and not node.is_queued_for_deletion():
+				node.queue_free()
+	_published_nodes.clear()
+	_published_node_instance_ids.clear()
+	_published_visual_roots_by_part_id.clear()
+	_published_source_support_bounds.clear()
+	_invalidate_published_source_support()
+	_published_node_tree_exit_callbacks.clear()
+	_invalidate_published_node_roster()
+
+
+func published_node_roster_revision() -> int:
+	return _published_node_roster_revision
+
+
+func published_node_roster_snapshot() -> Array:
+	if not _published_node_roster_snapshot_valid:
+		_published_node_roster_snapshot_cache = _published_nodes.duplicate()
+		_published_node_roster_snapshot_cache.make_read_only()
+		_published_node_roster_snapshot_valid = true
+	return _published_node_roster_snapshot_cache
+
+
+## Full owner identity snapshot. Source-part attribution is returned alongside
+## each root; collision-only roots retain an empty sourcePartId.
+func published_node_inventory_snapshot() -> Dictionary:
+	if _published_node_inventory_snapshot_valid:
+		return _published_node_inventory_snapshot_cache
+	if _published_nodes.size() != _published_node_instance_ids.size():
+		return {"status":"pending", "reason":"published_node_owner_ledger_size_changed",
+			"retryable":true, "publisherInstanceId":get_instance_id(),
+			"rosterRevision":_published_node_roster_revision}
+	var source_by_root: Dictionary = {}
+	for part_value: Variant in _published_visual_roots_by_part_id:
+		var part_id := String(part_value)
+		for entry_value: Variant in _published_visual_roots_by_part_id[part_id]:
+			if not entry_value is Dictionary:
+				return {"status":"pending", "reason":"published_visual_root_record_invalid",
+					"retryable":true, "sourcePartId":part_id}
+			var entry: Dictionary = entry_value
+			var root_id := int(entry.get("rootInstanceId", 0))
+			var root_ref: Variant = entry.get("root")
+			var root_value: Variant = root_ref.get_ref() if root_ref is WeakRef else null
+			if root_id <= 0 or not is_instance_valid(root_value) or not root_value is Node \
+					or (root_value as Node).get_instance_id() != root_id \
+					or source_by_root.has(root_id):
+				return {"status":"pending", "reason":"published_visual_root_identity_stale",
+					"retryable":true, "sourcePartId":part_id}
+			source_by_root[root_id] = part_id
+	var roots: Array[Dictionary] = []
+	var rostered_root_ids: Dictionary = {}
+	for index in range(_published_nodes.size()):
+		var root := _published_nodes[index]
+		var root_id := int(_published_node_instance_ids[index])
+		if not is_instance_valid(root) or root.get_instance_id() != root_id \
+				or root.is_queued_for_deletion():
+			return {"status":"pending", "reason":"published_node_owner_ledger_identity_changed",
+				"retryable":true, "publisherInstanceId":get_instance_id(),
+				"rosterRevision":_published_node_roster_revision, "rosterIndex":index}
+		rostered_root_ids[root_id] = true
+		var root_record := {"node":root, "nodeInstanceId":root_id,
+			"sourcePartId":String(source_by_root.get(root_id, ""))}
+		root_record.make_read_only()
+		roots.append(root_record)
+	for root_id_value: Variant in source_by_root:
+		if not rostered_root_ids.has(int(root_id_value)):
+			return {"status":"pending", "reason":"published_visual_root_missing_from_owner_roster",
+				"retryable":true, "rootInstanceId":int(root_id_value)}
+	roots.make_read_only()
+	var result := {"status":"ready", "publisherInstanceId":get_instance_id(),
+		"rosterRevision":_published_node_roster_revision, "roots":roots}
+	result.make_read_only()
+	_published_node_inventory_snapshot_cache = result
+	_published_node_inventory_snapshot_valid = true
+	return _published_node_inventory_snapshot_cache
+
+
+func _invalidate_published_node_roster() -> void:
+	_published_node_roster_revision += 1
+	_published_node_roster_snapshot_valid = false
+	_published_node_inventory_snapshot_valid = false
+	_published_node_roster_snapshot_cache = []
+	_published_node_inventory_snapshot_cache = {}
+
+
+func _on_published_node_tree_exiting(node_id: int) -> void:
+	for index in range(_published_node_instance_ids.size()):
+		if _published_node_instance_ids[index] == node_id:
+			_remove_published_node_at(index)
+			return
+
+
+func _remove_published_node_at(index: int) -> bool:
+	if index < 0 or index >= _published_nodes.size() \
+			or index >= _published_node_instance_ids.size():
+		return false
+	var node_id := int(_published_node_instance_ids[index])
+	var node_value: Variant = instance_from_id(node_id)
+	var callback_value: Variant = _published_node_tree_exit_callbacks.get(node_id)
+	if is_instance_valid(node_value) and callback_value is Callable \
+			and (node_value as Node).tree_exiting.is_connected(callback_value):
+		(node_value as Node).tree_exiting.disconnect(callback_value)
+	_published_node_tree_exit_callbacks.erase(node_id)
+	_published_nodes.remove_at(index)
+	_published_node_instance_ids.remove_at(index)
+	for part_id_value: Variant in _published_visual_roots_by_part_id.keys():
+		var part_id := String(part_id_value)
+		var retained: Array = []
+		for root_value: Variant in _published_visual_roots_by_part_id[part_id]:
+			if root_value is Dictionary and int(root_value.get("rootInstanceId", 0)) != node_id:
+				retained.append(root_value)
+		if retained.is_empty(): _published_visual_roots_by_part_id.erase(part_id)
+		else: _published_visual_roots_by_part_id[part_id] = retained
+	_invalidate_published_node_roster()
+	return true
+
+
+func remove_published_node(node: Node) -> bool:
+	if not is_instance_valid(node):
+		return false
+	for index in range(_published_nodes.size() - 1, -1, -1):
+		if _published_nodes[index] != node \
+				or _published_node_instance_ids[index] != node.get_instance_id():
+			continue
+		return _remove_published_node_at(index)
+	return false
+
+
+func remove_last_published_node() -> bool:
+	if _published_nodes.is_empty() or _published_node_instance_ids.size() != _published_nodes.size():
+		return false
+	var node_value: Variant = _published_nodes.back()
+	if not is_instance_valid(node_value) or not node_value is Node \
+			or (node_value as Node).get_instance_id() != _published_node_instance_ids.back():
+		return false
+	return _remove_published_node_at(_published_nodes.size() - 1)
+
+
+## Sealed owner ledger used for section-scoped legacy visual checks. The
+## renderer asks only for roots belonging to source parts in its current
+## section; collision-only batches are explicitly registered without a visual
+## source. Every returned root carries its stable instance identity.
+func capture_legacy_visual_roots_for_sources(source_part_ids: Array) -> Dictionary:
+	var inventory := published_node_inventory_snapshot()
+	if inventory.get("status") != "ready": return inventory
+	var roots: Array[Dictionary] = []
+	var seen_roots: Dictionary = {}
+	var requested_parts: Dictionary = {}
+	for value: Variant in source_part_ids:
+		if not value is String or String(value).is_empty():
+			return {"status":"failed", "reason":"invalid_legacy_visual_source_part_id"}
+		requested_parts[String(value)] = true
+	for part_id: String in requested_parts:
+		for root_value: Variant in _published_visual_roots_by_part_id.get(part_id, []):
+			if not root_value is Dictionary:
+				return {"status":"pending", "reason":"published_visual_root_record_invalid",
+					"retryable":true, "sourcePartId":part_id}
+			var root_record: Dictionary = root_value
+			var reference: Variant = root_record.get("root")
+			var node_value: Variant = reference.get_ref() if reference is WeakRef else null
+			if not is_instance_valid(node_value) or not node_value is Node:
+				return {"status":"pending", "reason":"published_visual_root_unavailable",
+					"retryable":true, "sourcePartId":part_id}
+			var node := node_value as Node
+			var root_id := int(root_record.get("rootInstanceId", 0))
+			if node.get_instance_id() != root_id or node.is_queued_for_deletion():
+				return {"status":"pending", "reason":"published_visual_root_identity_stale",
+					"retryable":true, "sourcePartId":part_id}
+			if seen_roots.has(root_id):
+				continue
+			seen_roots[root_id] = true
+			var captured_root := {"node":node, "nodeInstanceId":root_id,
+				"sourcePartId":part_id}
+			captured_root.make_read_only()
+			roots.append(captured_root)
+	roots.make_read_only()
+	var result := {"status":"ready", "publisherInstanceId":get_instance_id(),
+		"rosterRevision":inventory.get("rosterRevision", _published_node_roster_revision),
+		"roots":roots, "requestedSourcePartCount":requested_parts.size()}
+	result.make_read_only()
+	return result
+
+
+func capture_legacy_visual_roots_for_section(section_key: Vector3i,
+		required_source_part_ids: Array) -> Dictionary:
+	var inventory := published_node_inventory_snapshot()
+	if inventory.get("status") != "ready": return inventory
+	var normalized_parts: Array[String] = []
+	for value: Variant in required_source_part_ids:
+		if not value is String or String(value).is_empty():
+			return {"status":"failed", "reason":"invalid_legacy_visual_source_part_id"}
+		if String(value) not in normalized_parts:
+			normalized_parts.append(String(value))
+	normalized_parts.sort()
+	var query_key := var_to_str([section_key, normalized_parts,
+		int(inventory.get("rosterRevision", -1)), _published_source_support_revision])
+	var cached: Dictionary = _published_section_visual_root_cache.get(query_key, {})
+	if not cached.is_empty(): return cached
+	var selected: Dictionary = {}
+	for value: String in normalized_parts:
+		selected[value] = true
+	var support_transforms: Dictionary = {}
+	for part_id_value: Variant in _published_visual_roots_by_part_id:
+		var part_id := String(part_id_value)
+		var support_value: Variant = _published_source_support_bounds.get(part_id, null)
+		if not support_value is Dictionary:
+			return {"status":"pending", "reason":"published_visual_source_support_unavailable",
+				"retryable":true, "sourcePartId":part_id}
+		var support: Dictionary = support_value
+		var parent_ref: Variant = support.get("parent")
+		var parent_value: Variant = parent_ref.get_ref() if parent_ref is WeakRef else null
+		var local_bounds: Variant = support.get("bounds")
+		if not is_instance_valid(parent_value) or not parent_value is Node3D \
+				or (parent_value as Node3D).get_instance_id() != int(support.get("parentInstanceId", 0)) \
+				or not local_bounds is AABB or not local_bounds.position.is_finite() \
+				or not local_bounds.size.is_finite():
+			return {"status":"pending", "reason":"published_visual_source_support_owner_stale",
+				"retryable":true, "sourcePartId":part_id}
+		var world_bounds: AABB = (parent_value as Node3D).global_transform * local_bounds
+		if StaticRenderSectionGrid.keys_intersecting_bounds(world_bounds).has(section_key):
+			selected[part_id] = true
+		if selected.has(part_id):
+			var support_identity := {"parent":parent_ref,
+				"parentInstanceId":int(support.get("parentInstanceId", 0)),
+				"transform":(parent_value as Node3D).global_transform}
+			support_identity.make_read_only()
+			support_transforms[part_id] = support_identity
+	var selected_ids: Array[String] = []
+	for part_id_value: Variant in selected:
+		selected_ids.append(String(part_id_value))
+	selected_ids.sort()
+	var captured := capture_legacy_visual_roots_for_sources(selected_ids)
+	if captured.get("status") != "ready": return captured
+	var result: Dictionary = captured.duplicate()
+	result["sourcePartIds"] = selected_ids
+	result["publisherInstanceId"] = get_instance_id()
+	result["rosterRevision"] = inventory.get("rosterRevision", _published_node_roster_revision)
+	result["sectionKey"] = section_key
+	result["supportRevision"] = _published_source_support_revision
+	support_transforms.make_read_only()
+	result["supportTransformsByPart"] = support_transforms
+	result.make_read_only()
+	_published_section_visual_root_cache[query_key] = result
+	return result
+
+
+static func _static_mesh_visual_batch_key(mesh: Mesh, material: Material,
+		tier: String, owner_cell: Vector2i, source_part_id: String) -> String:
+	return "static-mesh|%d|%d|%s|%d,%d|%s" % [mesh.get_instance_id(),
+		material.get_instance_id(),tier,owner_cell.x,owner_cell.y,source_part_id]
+
+
 ## Validate and seal the transform artifacts before the publication boundary
 ## mutates any accepted metadata or packet expectation. The returned copy is
 ## committed atomically with that same boundary.
@@ -2041,7 +2552,9 @@ func prepare_static_section_transform_artifacts(artifacts_by_part: Dictionary,
 	var sealed_by_part: Dictionary = {}
 	for part_id: String in allowed_parts:
 		var group_values: Array = artifacts_by_part.get(part_id, [])
-		var revision := ""
+		var revision := String(boundary.get("sourceRevisions", {}).get(part_id, ""))
+		if revision.is_empty():
+			return {"status":"failed", "reason":"static_transform_artifact_source_revision_missing"}
 		var sealed_groups: Array[Dictionary] = []
 		var group_ids: Dictionary = {}
 		for group_value: Variant in group_values:
@@ -2049,7 +2562,6 @@ func prepare_static_section_transform_artifacts(artifacts_by_part: Dictionary,
 					or String(group_value.get("sourcePartId", "")) != part_id:
 				return {"status":"failed", "reason":"static_transform_artifact_group_invalid"}
 			var group: Dictionary = group_value
-			if revision.is_empty(): revision = String(group.get("sourceRevision", ""))
 			if revision != String(boundary.get("sourceRevisions", {}).get(part_id, "")):
 				return {"status":"failed", "reason":"static_transform_artifact_source_revision_mismatch"}
 			var segments: Variant = group.get("segments", null)
@@ -2123,14 +2635,71 @@ func _commit_static_section_transform_artifacts(prepared: Dictionary) -> void:
 	var artifacts_by_part: Dictionary = prepared.get("artifactsByPart", {})
 	for part_id_value: Variant in prepared.get("boundary", {}).get("sourcePartIds", []):
 		var part_id := String(part_id_value)
+		_clear_static_section_transform_resource_watchers(part_id)
+		_static_section_transform_artifact_invalidations.erase(part_id)
+		_static_section_transform_artifact_watch_revisions.erase(part_id)
 		var row: Dictionary = artifacts_by_part.get(part_id, {})
 		if row.is_empty() or not row.get("groups", []) is Array or row.groups.is_empty():
-			_static_section_transform_artifacts.erase(part_id)
-			_static_section_transform_artifact_revisions.erase(part_id)
+			var presentation_source: Dictionary = _static_visual_presentation_mounts_by_part.get(part_id, {})
+			var accepted_revision := String(row.get("sourceRevision", ""))
+			if not presentation_source.is_empty() \
+					and String(presentation_source.get("sourceRevision", "")) == accepted_revision:
+				var empty_groups: Array[Dictionary] = []
+				empty_groups.make_read_only()
+				_static_section_transform_artifacts[part_id] = empty_groups
+				_static_section_transform_artifact_revisions[part_id] = accepted_revision
+				_static_section_transform_artifact_watch_revisions[part_id] = accepted_revision
+			else:
+				_static_section_transform_artifacts.erase(part_id)
+				_static_section_transform_artifact_revisions.erase(part_id)
 		else:
 			_static_section_transform_artifacts[part_id] = row.groups
 			_static_section_transform_artifact_revisions[part_id] = String(row.sourceRevision)
+			_watch_static_section_transform_resources(part_id, String(row.sourceRevision), row.groups)
 			_static_section_transform_artifact_diagnostics.preparedGroups += row.groups.size()
+
+
+func _watch_static_section_transform_resources(part_id: String, revision: String,
+		groups: Array) -> void:
+	var seen: Dictionary = {}
+	var watchers: Array[Dictionary] = []
+	for group_value: Variant in groups:
+		if not group_value is Dictionary: continue
+		var resources: Variant = group_value.get("resourceBindings", null)
+		if not resources is Dictionary: continue
+		for key: String in ["mesh", "material"]:
+			var resource: Resource = resources.get(key) as Resource
+			if not is_instance_valid(resource): continue
+			var resource_id := resource.get_instance_id()
+			if seen.has(resource_id): continue
+			seen[resource_id] = true
+			var callback := Callable(self, "_on_static_section_transform_resource_changed").bind(part_id, revision)
+			if not resource.changed.is_connected(callback):
+				resource.changed.connect(callback, CONNECT_ONE_SHOT)
+			watchers.append({"resource":weakref(resource), "callback":callback})
+	_static_section_transform_resource_watchers_by_part[part_id] = watchers
+	_static_section_transform_artifact_watch_revisions[part_id] = revision
+
+
+func _clear_static_section_transform_resource_watchers(part_id := "") -> void:
+	var part_ids: Array = [part_id] if not String(part_id).is_empty() \
+		else _static_section_transform_resource_watchers_by_part.keys()
+	for part_value: Variant in part_ids:
+		var key := String(part_value)
+		for watcher: Dictionary in _static_section_transform_resource_watchers_by_part.get(key, []):
+			var reference: Variant = watcher.get("resource", null)
+			var resource: Variant = reference.get_ref() if reference is WeakRef else null
+			var callback: Variant = watcher.get("callback", Callable())
+			if is_instance_valid(resource) and callback is Callable \
+					and resource.changed.is_connected(callback):
+				resource.changed.disconnect(callback)
+		_static_section_transform_resource_watchers_by_part.erase(key)
+
+
+func _on_static_section_transform_resource_changed(part_id: String, revision: String) -> void:
+	if String(_static_section_transform_artifact_revisions.get(part_id, "")) != revision:
+		return
+	_static_section_transform_artifact_invalidations[part_id] = revision
 
 
 ## Bounded attribution for rejected transform-artifact groups. These counters
@@ -2171,17 +2740,25 @@ func capture_static_section_transform_artifacts(source_part_id: String,
 		return {"status":"pending", "reason":"static_transform_artifact_source_incomplete",
 			"sourcePartId":source_part_id, "artifactReason":rejections.get(source_part_id, rejections.get("*", "")), "retryable":true}
 	if source_boundary.get("sourceKinds", {}).get(source_part_id, "") == "door":
-		return {"status":"pending", "reason":"direct_door_visual_section_attachment_pending",
-			"sourcePartId":source_part_id, "retryable":true}
+		if not DoorSectionCapture.is_current(_door_section_captures.get(source_part_id, {})):
+			return {"status":"pending", "reason":"door_attachment_capture_stale",
+				"sourcePartId":source_part_id, "retryable":true}
 	var groups: Variant = _static_section_transform_artifacts.get(source_part_id, null)
 	var current_revision := String(_static_section_transform_artifact_revisions.get(source_part_id, ""))
-	if not groups is Array or not groups.is_read_only() or groups.is_empty():
+	if not groups is Array or not groups.is_read_only():
 		return {"status":"pending", "reason":"static_transform_artifact_roster_unavailable",
 			"sourcePartId":source_part_id, "retryable":true}
 	if current_revision != source_revision:
 		return {"status":"pending", "reason":"static_transform_artifact_revision_stale",
 			"sourcePartId":source_part_id, "currentRevision":current_revision,
 			"requestedRevision":source_revision, "retryable":true}
+	if String(_static_section_transform_artifact_invalidations.get(source_part_id, "")) == source_revision:
+		return {"status":"pending", "reason":"static_transform_artifact_resource_changed",
+			"sourcePartId":source_part_id, "retryable":true}
+	if String(_static_section_transform_artifact_watch_revisions.get(source_part_id, "")) != source_revision:
+		return {"status":"pending", "reason":"static_transform_artifact_resource_watch_unavailable",
+			"sourcePartId":source_part_id, "retryable":true}
+	var material_digests: Dictionary = {}
 	for group_value: Variant in groups:
 		if not group_value is Dictionary or not group_value.is_read_only() \
 				or String(group_value.get("sourcePartId", "")) != source_part_id \
@@ -2193,15 +2770,13 @@ func capture_static_section_transform_artifacts(source_part_id: String,
 				or not resources.get("material") is Material or not resources.get("mesh") is Mesh:
 			return {"status":"pending", "reason":"static_transform_material_resource_unavailable",
 				"sourcePartId":source_part_id, "retryable":true}
-		var live_material_identity: Dictionary = OrdinaryStructureGeometryAdapter._material_identity(
-			resources.get("material") as Material)
-		if String(live_material_identity.get("digest", "")) != String(group_value.get("materialContentDigest", "")):
-			return {"status":"pending", "reason":"static_transform_material_revision_stale",
-				"sourcePartId":source_part_id, "retryable":true}
-		var live_mesh_identity: Dictionary = StaticRenderMeshFingerprint.inspect(resources.get("mesh") as Mesh)
-		if live_mesh_identity.get("status") != "ready" \
-				or String(live_mesh_identity.get("contentDigest", "")) != String(group_value.get("meshContentDigest", "")):
-			return {"status":"pending", "reason":"static_transform_mesh_revision_stale",
+		var material := resources.get("material") as Material
+		var material_id := material.get_instance_id()
+		if not material_digests.has(material_id):
+			var material_identity: Dictionary = OrdinaryStructureGeometryAdapter._material_identity(material)
+			material_digests[material_id] = String(material_identity.get("digest", ""))
+		if String(material_digests[material_id]) != String(group_value.get("materialContentDigest", "")):
+			return {"status":"pending", "reason":"static_transform_artifact_resource_changed",
 				"sourcePartId":source_part_id, "retryable":true}
 		var source_parent: Node3D = _scene_parent.get_ref() as Node3D if _scene_parent != null else null
 		if not is_instance_valid(source_parent) or source_parent.is_queued_for_deletion() \
@@ -2209,9 +2784,131 @@ func capture_static_section_transform_artifacts(source_part_id: String,
 				or group_value.get("worldBounds") != source_parent.global_transform * (group_value.get("localBounds") as AABB):
 			return {"status":"pending", "reason":"static_transform_owner_transform_stale",
 				"sourcePartId":source_part_id, "retryable":true}
+	var presentation := _capture_practical_light_presentation(source_part_id,
+		source_revision, source_boundary)
+	if presentation.get("status") != "ready": return presentation
+	if groups.is_empty() and Array(presentation.get("members", [])).is_empty():
+		return {"status":"pending", "reason":"static_transform_artifact_roster_unavailable",
+			"sourcePartId":source_part_id, "retryable":true}
 	return {"status":"ready", "sourcePartId":source_part_id,
 		"sourceRevision":source_revision, "groups":groups,
+		"presentationMounts":presentation.get("members", []),
+		"presentationBindings":presentation.get("bindings", {}),
+		"presentationDigest":String(presentation.get("digest", "")),
 		"groupCount":groups.size()}
+
+
+## Freshness check for a previously captured immutable artifact roster.
+## Resource.changed is a fast invalidation signal, but ArrayMesh.clear_surfaces
+## does not emit it in Godot 4.6. Recheck mesh content as well as material
+## values so silent mutations cannot keep an old roster current.
+func static_section_transform_artifact_receipt_is_current(source_part_id: String,
+		source_revision: String, expected_groups: Variant) -> bool:
+	var groups: Variant = _static_section_transform_artifacts.get(source_part_id, null)
+	if not groups is Array or not groups.is_read_only() or not is_same(groups, expected_groups) \
+			or String(_static_section_transform_artifact_revisions.get(source_part_id, "")) != source_revision \
+			or String(_static_section_transform_artifact_invalidations.get(source_part_id, "")) == source_revision \
+			or String(_static_section_transform_artifact_watch_revisions.get(source_part_id, "")) != source_revision:
+		return false
+	var material_ids: Dictionary = {}
+	var mesh_digests: Dictionary = {}
+	for group_value: Variant in groups:
+		if not group_value is Dictionary: return false
+		var resources: Variant = group_value.get("resourceBindings", null)
+		if not resources is Dictionary or not resources.get("material") is Material \
+				or not resources.get("mesh") is Mesh: return false
+		var mesh := resources.get("mesh") as Mesh
+		var mesh_id := mesh.get_instance_id()
+		if not mesh_digests.has(mesh_id):
+			var mesh_identity: Dictionary = StaticRenderMeshFingerprint.inspect(mesh)
+			mesh_digests[mesh_id] = String(mesh_identity.get("contentDigest", "")) \
+				if mesh_identity.get("status") == "ready" else ""
+		if String(mesh_digests[mesh_id]).is_empty() \
+				or String(mesh_digests[mesh_id]) != String(group_value.get("meshContentDigest", "")):
+			return false
+		var material := resources.get("material") as Material
+		var material_id := material.get_instance_id()
+		if material_ids.has(material_id): continue
+		material_ids[material_id] = true
+		var identity: Dictionary = OrdinaryStructureGeometryAdapter._material_identity(material)
+		if String(identity.get("digest", "")) != String(group_value.get("materialContentDigest", "")):
+			return false
+	return true
+
+
+func _capture_practical_light_presentation(source_part_id: String,
+		source_revision: String, source_boundary: Dictionary) -> Dictionary:
+	var retained: Variant = _static_visual_presentation_mounts_by_part.get(source_part_id, null)
+	if retained == null:
+		var empty_members: Array[Dictionary] = []
+		empty_members.make_read_only()
+		var empty_bindings: Dictionary = {}
+		empty_bindings.make_read_only()
+		return {"status":"ready", "members":empty_members, "bindings":empty_bindings,
+			"digest":_static_presentation_digest(empty_members)}
+	if not retained is Dictionary or not retained.is_read_only() \
+			or String(retained.get("sourceRevision", "")) != source_revision \
+			or not retained.get("members") is Array or not retained.members.is_read_only() \
+			or not retained.get("bindings") is Dictionary or not retained.bindings.is_read_only():
+		return {"status":"pending", "reason":"practical_light_presentation_roster_stale", "retryable":true}
+	var members: Array = retained.members
+	var bindings: Dictionary = retained.bindings
+	if members.size() != 1 or bindings.size() != 1:
+		return {"status":"pending", "reason":"practical_light_presentation_roster_incomplete", "retryable":true}
+	var member: Dictionary = members[0]
+	var key := String(member.get("attachmentKey", ""))
+	var binding_value: Variant = bindings.get(key, null)
+	if key.is_empty() or not binding_value is Dictionary or not binding_value.is_read_only():
+		return {"status":"pending", "reason":"practical_light_presentation_binding_missing", "retryable":true}
+	var binding: Dictionary = binding_value
+	for field: String in ["parent", "body", "mount", "light"]:
+		if not binding.get(field) is WeakRef or not is_instance_valid(binding[field].get_ref()):
+			return {"status":"pending", "reason":"practical_light_presentation_owner_gone", "retryable":true}
+	var owner := binding.body.get_ref() as Node3D
+	var mount := binding.mount.get_ref() as Node3D
+	var light := binding.light.get_ref() as OmniLight3D
+	var parent := binding.parent.get_ref() as Node3D
+	var epoch := int(source_boundary.get("epoch", 0))
+	var scene_parent: Node3D = _scene_parent.get_ref() as Node3D if _scene_parent != null else null
+	if not is_instance_valid(owner) or not is_instance_valid(mount) \
+			or not is_instance_valid(light) or not is_instance_valid(parent) \
+			or owner != parent or mount.get_parent() != owner or light.get_parent() != mount \
+			or owner.is_queued_for_deletion() or mount.is_queued_for_deletion() \
+			or light.is_queued_for_deletion() or not owner.is_inside_tree() \
+			or not is_instance_valid(scene_parent) or owner.get_parent() != scene_parent \
+			or String(owner.get_meta("section_attachment_source_revision", "")) != source_revision \
+			or int(owner.get_meta("section_attachment_publication_epoch", -1)) != epoch \
+			or int(owner.get_meta("section_attachment_publisher_instance_id", 0)) != get_instance_id() \
+			or int(binding.get("publicationEpoch", -1)) != epoch \
+			or int(binding.get("publisherInstanceId", 0)) != get_instance_id() \
+			or int(binding.get("parentInstanceId", 0)) != owner.get_instance_id() \
+			or int(binding.get("bodyInstanceId", 0)) != owner.get_instance_id() \
+			or int(binding.get("mountInstanceId", 0)) != mount.get_instance_id() \
+			or int(binding.get("lightInstanceId", 0)) != light.get_instance_id() \
+			or mount.get_meta("section_attachment_presentation_member_id", "") != member.presentationMemberId \
+			or not owner.global_transform.is_equal_approx(binding.get("bodyToWorld", Transform3D.IDENTITY)) \
+			or not mount.transform.is_equal_approx(binding.get("mountLocalTransform", Transform3D.IDENTITY)) \
+			or not light.position.is_equal_approx(Vector3.ZERO) \
+			or not is_equal_approx(light.light_energy, float(binding.get("lightEnergy", NAN))) \
+			or not is_equal_approx(light.omni_range, float(binding.get("lightRange", NAN))) \
+			or light.light_color != binding.get("lightColor", Color.MAGENTA) \
+			or light.shadow_enabled != bool(binding.get("shadowEnabled", false)):
+		return {"status":"pending", "reason":"practical_light_presentation_source_stale", "retryable":true}
+	var current_bounds := AABB(light.global_position - Vector3.ONE * light.omni_range,
+		Vector3.ONE * light.omni_range * 2.0)
+	if current_bounds != member.sweptWorldBounds \
+			or owner.global_transform != member.neutralParentToWorld:
+		return {"status":"pending", "reason":"practical_light_presentation_spatial_stale", "retryable":true}
+	return {"status":"ready", "members":members, "bindings":bindings,
+		"digest":_static_presentation_digest(members)}
+
+
+static func _static_presentation_digest(members: Array) -> String:
+	var hash := HashingContext.new()
+	if hash.start(HashingContext.HASH_SHA256) != OK \
+			or hash.update(var_to_bytes(["building-practical-light-presentation/v1", members])) != OK:
+		return ""
+	return hash.finish().hex_encode()
 
 
 ## Main-thread publication identity, not a geometry-ready or collision receipt.
@@ -2583,13 +3280,14 @@ func flush_static_batches(parent: Node3D) -> void:
 
 func _begin_static_flush(parent: Node3D, notify_progress: bool, explicit_boundary := false) -> void:
 	if _static_flush!=null or parent==null: return
-	if static_visual_batches.is_empty() and not _static_metadata_dirty \
+	if static_visual_batches.is_empty() and static_mesh_visual_batches.is_empty() and not _static_metadata_dirty \
 			and _chunk_static_packet_receipts.is_empty() \
 			and (not explicit_boundary or _pending_publication_boundary.is_empty()): return
 	_ensure_publication_boundary()
 	# Completed direct-node records need no static upload/metadata copy. Their
 	# exact same source validation still precedes the one atomic receipt commit.
-	if static_visual_batches.is_empty() and not _static_metadata_dirty and _chunk_static_packet_receipts.is_empty():
+	if static_visual_batches.is_empty() and static_mesh_visual_batches.is_empty() \
+			and not _static_metadata_dirty and _chunk_static_packet_receipts.is_empty():
 		var boundary: Dictionary = _pending_publication_boundary
 		if not validate_static_flush_source():
 			_paving_reject("stale_static_flush_source")
@@ -2598,7 +3296,13 @@ func _begin_static_flush(parent: Node3D, notify_progress: bool, explicit_boundar
 		return
 	_static_flush = StaticBatchFlush.new()
 	_static_flush_notify = notify_progress
-	_static_flush.begin(static_visual_batches,static_part_records,parent,_pending_publication_boundary)
+	var flush_groups: Dictionary = static_visual_batches.duplicate(false)
+	for key: Variant in static_mesh_visual_batches:
+		if flush_groups.has(key):
+			_paving_reject("static_mesh_visual_batch_key_collision")
+			return
+		flush_groups[key] = static_mesh_visual_batches[key]
+	_static_flush.begin(flush_groups,static_part_records,parent,_pending_publication_boundary)
 
 
 ## A scene owner requests this boundary after a selected set of source parts.
@@ -2669,6 +3373,14 @@ func _publication_boundary_is_current(boundary: Dictionary) -> bool:
 func _commit_publication_boundary(boundary: Dictionary,
 		section_transform_artifacts: Dictionary = {}) -> bool:
 	if not _publication_boundary_is_current(boundary): return false
+	section_transform_artifacts = section_transform_artifacts.duplicate(false)
+	for part_id: String in boundary.get("sourcePartIds", []):
+		if boundary.get("sourceKinds", {}).get(part_id, "") != "door": continue
+		var capture: Dictionary = _door_section_captures.get(part_id, {})
+		if not DoorSectionCapture.is_current(capture):
+			record_static_section_transform_boundary_rejection(boundary, part_id, "door_attachment_capture_incomplete")
+			continue
+		section_transform_artifacts[part_id] = capture.groups
 	var prepared_transform_artifacts := prepare_static_section_transform_artifacts(
 		section_transform_artifacts, boundary)
 	if prepared_transform_artifacts.get("status") != "ready": return false
@@ -2681,6 +3393,14 @@ func _commit_publication_boundary(boundary: Dictionary,
 		else: _chunk_static_packet_expected[source_part_id]=pending
 		_chunk_static_packet_pending_expected.erase(source_part_id)
 	_commit_static_section_transform_artifacts(prepared_transform_artifacts)
+	for part_id: String in boundary.get("sourcePartIds", []):
+		var capture: Dictionary = _door_section_captures.get(part_id, {})
+		if capture.get("status") != "ready": continue
+		var body: Node3D = capture.body.get_ref() as Node3D
+		if is_instance_valid(body):
+			body.set_meta("section_attachment_source_revision", String(capture.revision))
+			body.set_meta("section_attachment_publisher_instance_id", get_instance_id())
+			body.set_meta("section_attachment_publication_epoch", int(boundary.epoch))
 	boundary.sourcePartIds.make_read_only()
 	boundary.sourceRevisions.make_read_only()
 	boundary.sourceKinds.make_read_only()
@@ -2899,7 +3619,7 @@ func resolve_masonry_material(request: Dictionary) -> Material:
 func summary() -> Dictionary:
 	var result: Dictionary = {
 		"publishedPartCount": published_part_count,
-		"publishedNodeCount": published_nodes.size(),
+		"publishedNodeCount": _published_nodes.size(),
 		"collisionPartCount": collision_count,
 		"visualBatchCount": visual_batch_count,
 		"batchedStaticParts": batch_static_parts,

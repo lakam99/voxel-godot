@@ -1,6 +1,50 @@
 # Chunk-owned world rendering migration goal
 
-Status: **Active; 1 of 7 stage exits is complete (Stage 0); Stages 1–5 are partial and Stage 6 has not started.** The latest tutorial-free Main gate failed readiness after 120 seconds: 61 of 64 ecology source captures were ready, three were still progressing, 55 of 56 tree preparation jobs were active, and no source manifest or native section install was accepted. The focused tree compiler gate now passes 25/25 checks for role output, cross-section support, stale-owner rejection, cancellation/replay, and work-slice invariance; it does not prove shared candidate installation or gameplay. Live visual/traversal, save/replay, collision/fluid/light parity, and performance exits remain open. The canonical charter has the exact reports, Minecraft 26.2 references, and ordered gates.
+Status: **Active; 1 of 7 stage exits is complete (Stage 0); Stages 1–5 are partial and Stage 6 has not started.** On 2026-10-08, r112 confirmed that Citadel section ACKs wait on whole-source geometry-owner closure: at its diagnostic stop, 9 section candidates were installed, 9 ACKs pending, and 0 acknowledged; a sampled source required 21 support sections and remained in `section_manifests` while the proof queue grew. The owned watchdog proved zero processes after the run-local diagnostic stop. A per-section ACK/source-visual-retirement split is now being implemented with an A/B contract, retaining legacy visuals until full support closure. Earlier r8 native installation and old-visual retirement evidence, the native tree preparation worker commit `8e3cd9b4`, initialized-Main gates, unload/replay, save/reload and performance acceptance remain open. See the [canonical charter](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md) for exact reports, Minecraft 26.2 references, current batch ownership and stage gates.
+
+Latest Main gate report and cleanup evidence:
+`artifacts/citadel-runtime-integration/main-section-cohabitation-gate-band-diagnostics-r2/`.
+
+**HEAD checkpoint — 2026-10-06, underground scan revisions:** the focused
+visible-world readiness runner passes 222/222 checks after the exposed-floor
+scan cursor was bound to terrain, fluid, and scene-overlay column revisions.
+Completed scans now revalidate against the same source identity before ecology
+publishes candidates. Negative-coordinate chunk boundaries are covered too.
+This repairs stale scan acceptance; it does not yet split underground family
+completeness into vertical section bands or establish a renderer-install stage
+exit. Report:
+`artifacts/citadel-runtime-integration/visible-world-readiness-underground-revision-r5/report.json`.
+
+**HEAD checkpoint — 2026-10-06, ecology section-band receipts:** sealed source
+families now project into exact full-3D section bounds, and the support index
+stores independent `(source chunk, family, section)` receipts. Missing/stale
+bands stay pending; pending responses expose only exact retained tombstones as
+retryable demands, with no current contributors, coverage certificate, or
+receipt acknowledgement. Synthetic producer fixture rows now include mesh-
+derived support proofs. Focused contracts pass: producer 64/64 at
+`artifacts/citadel-runtime-integration/ecology-producer-catalog-context-band-r6/report.json`,
+support index 121/121 at
+`artifacts/citadel-runtime-integration/ecology-world-support-index-band-r16/report.json`,
+and adapter 104/104 at
+`artifacts/citadel-runtime-integration/ecology-section-value-adapter-band-r15/report.json`.
+This is synthetic producer/index evidence only; the initialized-Main renderer
+install and visual/traversal gates remain open. Minecraft 26.2 confirms copied
+neighbor sections are compile context and the old section mesh remains until
+replacement uploads complete. Formal progress remains 1/7 stage exits.
+
+The current renderer audit traced production through complete provider census,
+shared candidate assembly, native compilation, staged packet install, frame
+draw acknowledgement, receipt validation, rollback, and prior-representation
+retirement. That path exists; current stage evidence still lacks a green
+initialized-Main run proving complete terrain + structure + ecology cohabitation
+followed by traversal, unload/replay, save/reload, and performance. Minecraft
+26.2 confirms neighboring copied sections are compile context while each target
+section owns its output. Vertical ecology completeness will therefore be keyed
+per target section band, derived from the sealed full source-family snapshot,
+and retained independently for adjacent Y sections. Progress remains 1/7 stage
+exits.
+
+**HEAD checkpoint — 2026-10-06, game HEAD `8254e3e9`:** progress remains 1/7 stage exits. New focused evidence includes a 28/28 tree recipe section compiler gate, 26/26 real-Main source-pass slicing parity, 14/14 ecology source-capture session checks, and 9/9 authoritative terrain snapshot checks. The headed whole-section native-install r3 gate did not assemble a candidate: the fixture bound `EcologySectionValueAdapter` to a fake `WorldRoot` without Main's `capture_ecology_source_domain`, so production census remained pending. Its tree recipe queue check passed; its four downstream candidate/install checks failed before renderer admission. Watchdog cleanup passed and proved zero owned processes. This is a fixture/source-authority integration gap, not evidence of renderer failure. Next proof: initialized `Main.tscn`, full certified ecology source closure, and the compiled tree contributor in the accepted native section manifest. See the canonical charter's 2026-10-06 HEAD checkpoint and report at `artifacts/citadel-runtime-integration/whole-section-candidate-native-install-20261006-r3/report.json`.
 
 **HEAD planner checkpoint — 2026-10-05:** separate leads own ecology contracts, tree geometry ownership, structure-provider coverage, and native/live acceptance audits. Work proceeds in parallel only across non-overlapping lanes; dependencies and stage promotion remain sequential. Focused green contracts and compile smoke are sub-gates, not stage exits; overall acceptance remains 1/7.
 
@@ -1068,3 +1112,35 @@ screenshots, but still stopped at 42.67 m on the generated-prop
 is continuity evidence, not generated-building candidate parity, receipt-based
 retirement, traversal acceptance, or performance acceptance. Stages remain
 partial; see the linked canonical charter record for commands and artifacts.
+
+**2026-10-06 HEAD checkpoint:** The whole-section native-install fixture now
+uses a real `Main.tscn` ecology authority, catalog leases, and production tree
+queue. Its r1/r2 attempts stopped at a concurrent ordinary-provider GDScript
+parse error before fixture assertions; r2 had authoritative zero owned process
+members but `cleanupPassed=false`, so it is no renderer evidence. Real-Main r3
+loaded the authority and ran 1,200 frames, but stayed at
+`ecology_section_capture_cohort_deferred` with zero source sessions,
+publications, jobs, or tree work; it never admitted a candidate. Its watchdog
+exited 1 with clean teardown and zero members. R4 then failed to load during a
+concurrent tree-compiler edit, so it is invalid. The next diagnostic captures
+the first pending cohort and service-opportunity state. The ordinary
+provider's new cross-section receipt gate passed all **42/42** checks in r7.
+One receipt retains the spanning live visual, both exact section receipts retire
+it, replay retains center-owned support, and collision owners remain. The r3
+run exposed four stale source-identity/coordinator expectations; the provider
+now separates renderer-member identity from authority identity and the same
+focused runner passes them all. Its r7 watchdog exited 0 with clean teardown
+and zero owned members. This synthetic gate leaves Stage 4 open. HEAD review
+found that an adjacent intersected section can still close with an explicit-empty
+receipt because the ordinary provider center-owns its mesh. The r7 contract
+proves receipt timing, not per-section geometry ownership or retention through
+center-section unload. That remains an open Stage 4 gap; partitioning and stream
+dependencies need tracing before changing the ownership policy. Minecraft
+26.2's section compiler lifecycle is the reference;
+our native tree dispatcher currently compiles foliage instance arrays. The
+next worker slice covers branch and foliage instance buffers from sealed
+whole-record recipes; the continuous bole stays in GDScript until tube,
+junction, normal and UV parity is established. Support proof, batching and
+Godot resource work remain on the owner thread, with exact buffer parity and
+cancel/stale checks required. Overall remains **1/7 stage exits complete**.
+Details and reports are in the [canonical charter](https://github.com/lakam99/voxel-godot-docs/blob/main/migrations/chunk-owned-rendering/section-owned-world-rendering-charter.md#2026-10-06-head-checkpoint--real-main-admission-and-cross-section-receipts).

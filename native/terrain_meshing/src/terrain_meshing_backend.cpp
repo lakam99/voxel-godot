@@ -15,6 +15,8 @@
 #include <godot_cpp/variant/variant.hpp>
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <utility>
 
 using namespace godot;
@@ -22,6 +24,7 @@ using namespace godot;
 namespace {
 const int CUBE_CORNER_COUNT = 8;
 const int TETRAHEDRON_COUNT = 6;
+const int SECTION_FLUID_SECTION_CELLS = 16;
 
 const std::array<Vector3i, CUBE_CORNER_COUNT> CUBE_CORNERS = {
 	Vector3i(0, 0, 0),
@@ -702,6 +705,81 @@ void add_colored_surface(Ref<ArrayMesh> &p_mesh, const PackedVector3Array &p_ver
 	p_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 }
 
+struct FluidSortGroup {
+	int32_t canonical_index = 0;
+	Vector3 centroid;
+	double distance_squared = 0.0;
+};
+
+Dictionary sort_one_fluid_surface(const PackedVector3Array &p_canonical_vertices,
+		const PackedVector3Array &p_canonical_normals,
+		const PackedColorArray &p_canonical_colors,
+		const Vector3 &p_camera_position_local) {
+	Dictionary result;
+	if (p_canonical_vertices.size() % 6 != 0
+			|| p_canonical_normals.size() != p_canonical_vertices.size()
+			|| p_canonical_colors.size() != p_canonical_vertices.size()) {
+		result["status"] = "failed";
+		result["reason"] = "section_fluid_face_group_arrays_incomplete";
+		return result;
+	}
+	std::vector<FluidSortGroup> groups;
+	groups.reserve(static_cast<size_t>(p_canonical_vertices.size() / 6));
+	for (int32_t first = 0; first < p_canonical_vertices.size(); first += 6) {
+		Vector3 centroid;
+		for (int32_t offset = first; offset < first + 6; ++offset) {
+			centroid += p_canonical_vertices[offset];
+		}
+		centroid /= 6.0;
+		FluidSortGroup group;
+		group.canonical_index = first / 6;
+		group.centroid = centroid;
+		group.distance_squared = centroid.distance_squared_to(p_camera_position_local);
+		groups.push_back(group);
+	}
+	std::stable_sort(groups.begin(), groups.end(), [](const FluidSortGroup &p_a, const FluidSortGroup &p_b) {
+		if (std::abs(p_a.distance_squared - p_b.distance_squared) <= 0.000001) {
+			return p_a.canonical_index < p_b.canonical_index;
+		}
+		return p_a.distance_squared > p_b.distance_squared;
+	});
+	PackedVector3Array sorted_vertices;
+	PackedVector3Array sorted_normals;
+	PackedColorArray sorted_colors;
+	Array face_groups;
+	sorted_vertices.resize(p_canonical_vertices.size());
+	sorted_normals.resize(p_canonical_normals.size());
+	sorted_colors.resize(p_canonical_colors.size());
+	int32_t output_offset = 0;
+	for (const FluidSortGroup &group : groups) {
+		const int32_t source_offset = group.canonical_index * 6;
+		for (int32_t index = 0; index < 6; ++index) {
+			sorted_vertices.set(output_offset + index, p_canonical_vertices[source_offset + index]);
+			sorted_normals.set(output_offset + index, p_canonical_normals[source_offset + index]);
+			sorted_colors.set(output_offset + index, p_canonical_colors[source_offset + index]);
+		}
+		Dictionary face_group;
+		String ordinal = String::num_int64(group.canonical_index);
+		while (ordinal.length() < 8) {
+			ordinal = String("0") + ordinal;
+		}
+		face_group["groupId"] = String("fluid-face:") + ordinal;
+		face_group["firstIndex"] = output_offset;
+		face_group["indexCount"] = 6;
+		face_group["centroid"] = group.centroid;
+		face_group.make_read_only();
+		face_groups.push_back(face_group);
+		output_offset += 6;
+	}
+	face_groups.make_read_only();
+	result["status"] = "ready";
+	result["vertices"] = sorted_vertices;
+	result["normals"] = sorted_normals;
+	result["colors"] = sorted_colors;
+	result["faceGroups"] = face_groups;
+	return result;
+}
+
 void append_oriented_triangle(
 	PackedVector3Array &p_vertices,
 	PackedVector3Array &p_normals,
@@ -882,6 +960,8 @@ void TerrainMeshingBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_chunk_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_surface_data_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_mesh_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_surface_data_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections);
+	ClassDB::bind_method(D_METHOD("build_section_fluid_surface_data_from_sections", "payload", "section_key", "camera_position_local"), &TerrainMeshingBackend::build_section_fluid_surface_data_from_sections);
+	ClassDB::bind_method(D_METHOD("sort_section_fluid_surface_data", "canonical_data", "camera_position_local"), &TerrainMeshingBackend::sort_section_fluid_surface_data);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh_from_sections", "payload"), &TerrainMeshingBackend::build_chunk_fluid_mesh_from_sections);
 	ClassDB::bind_method(D_METHOD("build_chunk_fluid_mesh", "main", "cx", "cz"), &TerrainMeshingBackend::build_chunk_fluid_mesh);
 	ClassDB::bind_method(D_METHOD("collision_shape_for_mesh", "mesh"), &TerrainMeshingBackend::collision_shape_for_mesh);
@@ -1292,6 +1372,146 @@ Dictionary TerrainMeshingBackend::build_chunk_fluid_surface_data_from_sections(c
 	result["fluidPayloadSignature"] = String(fluid_payload.get("signature", ""));
 	result["exactContract"] = exact_contract;
 	result["legacyExactContract"] = legacy_exact_contract;
+	return result;
+}
+
+Dictionary TerrainMeshingBackend::build_section_fluid_surface_data_from_sections(
+		const Dictionary &p_payload, const Vector3i &p_section_key,
+		const Vector3 &p_camera_position_local) {
+	if (!p_camera_position_local.is_finite()) {
+		return Dictionary();
+	}
+	Dictionary payload = p_payload;
+	Variant nested_payload_value = payload.get("fluidPayload", Variant());
+	if (nested_payload_value.get_type() == Variant::DICTIONARY) {
+		payload = Dictionary(nested_payload_value);
+	}
+	const int32_t section_origin_x = p_section_key.x * SECTION_FLUID_SECTION_CELLS;
+	const int32_t section_origin_y = p_section_key.y * SECTION_FLUID_SECTION_CELLS;
+	const int32_t section_origin_z = p_section_key.z * SECTION_FLUID_SECTION_CELLS;
+	const int32_t chunk_size = int32_t(payload.get("chunkSize", 0));
+	const int32_t start_x = int32_t(payload.get("startX", INT32_MIN));
+	const int32_t start_z = int32_t(payload.get("startZ", INT32_MIN));
+	const int32_t min_y = int32_t(payload.get("minY", INT32_MAX));
+	const int32_t max_y = int32_t(payload.get("maxY", INT32_MIN));
+	const double cell_size = double(payload.get("cellSize", 0.0));
+	const bool correct_section = chunk_size == SECTION_FLUID_SECTION_CELLS
+		&& start_x == section_origin_x && start_z == section_origin_z
+		&& min_y >= section_origin_y
+		&& max_y <= section_origin_y + SECTION_FLUID_SECTION_CELLS - 1
+		&& max_y >= min_y && cell_size > 0.0;
+	if (!correct_section || int32_t(payload.get("fluidStepCells", 0)) != 1
+			|| !bool(payload.get("boundsInclusive", false))) {
+		Dictionary rejected;
+		rejected["status"] = "failed";
+		rejected["reason"] = "section_fluid_payload_bounds_do_not_match_section";
+		return rejected;
+	}
+	bool owns_revision = false;
+	Variant revisions_value = payload.get("sectionRevisions", Variant());
+	if (revisions_value.get_type() == Variant::ARRAY) {
+		Array revisions = revisions_value;
+		for (int64_t index = 0; index < revisions.size(); ++index) {
+			Variant row_value = revisions[index];
+			if (row_value.get_type() == Variant::DICTIONARY) {
+				Dictionary row = row_value;
+				if (row.get("sectionKey", Variant()) == Variant(p_section_key)
+						&& int64_t(row.get("revision", -1)) >= 0) {
+					owns_revision = true;
+					break;
+				}
+			}
+		}
+	}
+	if (!owns_revision) {
+		Dictionary rejected;
+		rejected["status"] = "failed";
+		rejected["reason"] = "section_fluid_payload_revision_row_missing";
+		return rejected;
+	}
+	Dictionary canonical = build_chunk_fluid_surface_data_from_sections(payload);
+	if (bool(canonical.get("deferred", true))) {
+		canonical["status"] = "pending";
+		return canonical;
+	}
+	if (!bool(payload.get("hasFluid", false))) {
+		canonical["status"] = "empty";
+		canonical["sectionKey"] = p_section_key;
+		return canonical;
+	}
+	const double section_origin_y_meters = double(section_origin_y) * cell_size;
+	PackedVector3Array canonical_water_vertices = canonical.get("waterVertices", PackedVector3Array());
+	PackedVector3Array canonical_water_normals = canonical.get("waterNormals", PackedVector3Array());
+	PackedColorArray canonical_water_colors = canonical.get("waterColors", PackedColorArray());
+	PackedVector3Array canonical_lava_vertices = canonical.get("lavaVertices", PackedVector3Array());
+	PackedVector3Array canonical_lava_normals = canonical.get("lavaNormals", PackedVector3Array());
+	PackedColorArray canonical_lava_colors = canonical.get("lavaColors", PackedColorArray());
+	for (int64_t index = 0; index < canonical_water_vertices.size(); ++index) {
+		Vector3 vertex = canonical_water_vertices[index];
+		vertex.y -= section_origin_y_meters;
+		canonical_water_vertices.set(index, vertex);
+	}
+	for (int64_t index = 0; index < canonical_lava_vertices.size(); ++index) {
+		Vector3 vertex = canonical_lava_vertices[index];
+		vertex.y -= section_origin_y_meters;
+		canonical_lava_vertices.set(index, vertex);
+	}
+	Dictionary canonical_data;
+	canonical_data["status"] = "ready";
+	canonical_data["sectionKey"] = p_section_key;
+	canonical_data["cellSize"] = cell_size;
+	canonical_data["fluidPayloadRevision"] = int64_t(canonical.get("fluidPayloadRevision", -1));
+	canonical_data["fluidPayloadSignature"] = String(canonical.get("fluidPayloadSignature", ""));
+	canonical_data["volumeRevision"] = int64_t(payload.get("revision", -1));
+	canonical_data["sectionRevisions"] = revisions_value;
+	canonical_data["canonicalWaterVertices"] = canonical_water_vertices;
+	canonical_data["canonicalWaterNormals"] = canonical_water_normals;
+	canonical_data["canonicalWaterColors"] = canonical_water_colors;
+	canonical_data["canonicalLavaVertices"] = canonical_lava_vertices;
+	canonical_data["canonicalLavaNormals"] = canonical_lava_normals;
+	canonical_data["canonicalLavaColors"] = canonical_lava_colors;
+	return sort_section_fluid_surface_data(canonical_data, p_camera_position_local);
+}
+
+Dictionary TerrainMeshingBackend::sort_section_fluid_surface_data(
+		const Dictionary &p_canonical_data, const Vector3 &p_camera_position_local) {
+	if (String(p_canonical_data.get("status", "")) != "ready"
+			|| !p_camera_position_local.is_finite()
+			|| p_canonical_data.get("sectionKey", Variant()).get_type() != Variant::VECTOR3I
+			|| String(p_canonical_data.get("fluidPayloadSignature", "")).is_empty()) {
+		Dictionary rejected;
+		rejected["status"] = "failed";
+		rejected["reason"] = "invalid_canonical_section_fluid_data";
+		return rejected;
+	}
+	Dictionary water = sort_one_fluid_surface(
+		PackedVector3Array(p_canonical_data.get("canonicalWaterVertices", PackedVector3Array())),
+		PackedVector3Array(p_canonical_data.get("canonicalWaterNormals", PackedVector3Array())),
+		PackedColorArray(p_canonical_data.get("canonicalWaterColors", PackedColorArray())),
+		p_camera_position_local);
+	Dictionary lava = sort_one_fluid_surface(
+		PackedVector3Array(p_canonical_data.get("canonicalLavaVertices", PackedVector3Array())),
+		PackedVector3Array(p_canonical_data.get("canonicalLavaNormals", PackedVector3Array())),
+		PackedColorArray(p_canonical_data.get("canonicalLavaColors", PackedColorArray())),
+		p_camera_position_local);
+	if (String(water.get("status", "")) != "ready"
+			|| String(lava.get("status", "")) != "ready") {
+		Dictionary rejected;
+		rejected["status"] = "failed";
+		rejected["reason"] = "section_fluid_face_group_sort_failed";
+		return rejected;
+	}
+	Dictionary result = p_canonical_data.duplicate(false);
+	result["status"] = "ready";
+	result["waterVertices"] = water.get("vertices", PackedVector3Array());
+	result["waterNormals"] = water.get("normals", PackedVector3Array());
+	result["waterColors"] = water.get("colors", PackedColorArray());
+	result["waterFaceGroups"] = water.get("faceGroups", Array());
+	result["lavaVertices"] = lava.get("vertices", PackedVector3Array());
+	result["lavaNormals"] = lava.get("normals", PackedVector3Array());
+	result["lavaColors"] = lava.get("colors", PackedColorArray());
+	result["lavaFaceGroups"] = lava.get("faceGroups", Array());
+	result["sortCameraPositionLocal"] = p_camera_position_local;
 	return result;
 }
 

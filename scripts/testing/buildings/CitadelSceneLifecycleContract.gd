@@ -32,6 +32,13 @@ class Trees extends RefCounted:
 	var admission: WeakRef
 	var callback_status := ""
 	var callback_calls := 0
+	func tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+		if not is_instance_valid(body): return {"status":"failed", "reason":"synthetic_tree_owner_lost"}
+		var ready := body.get_meta("tree_visual_state", "") == "published" \
+			and body.get_node_or_null("GeneratedTreeVisual") != null
+		return {"status":"ready" if ready else "pending", "bodyInstanceId":body.get_instance_id(),
+			"sourcePrepared":ready, "installed":ready and include_installed}
+	func tree_source_is_durably_removed(_prop_id: String) -> bool: return false
 	func publish(parent: Node3D, id: String, position: Vector3, _biome: String, request: Dictionary, yaw: float) -> Dictionary:
 		calls += 1
 		var body := StaticBody3D.new()

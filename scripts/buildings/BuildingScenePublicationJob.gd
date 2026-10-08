@@ -41,6 +41,7 @@ var _binding: Dictionary = {}
 var _cpu: Dictionary = {} # Retained source AND detached publisher Resources.
 var _parent: WeakRef
 var _tree_receiver: WeakRef
+var _furnishing_section_owner: WeakRef
 var _tree_method: StringName
 var _tree_retire_receiver: WeakRef
 var _tree_retire_method: StringName
@@ -68,6 +69,7 @@ var _plan
 var _trees: Array = []
 var _tree_bodies: Array = []
 var _tree_visual_seen: Array[bool] = []
+var _tree_sources_prepared: Dictionary = {}
 var _tree_ids: Dictionary = {}
 var _building_cursor := 0
 var _furniture_cursor := 0
@@ -162,7 +164,7 @@ func begin(prepared, profile: Dictionary, binding: Dictionary, parent: Node3D, t
 	_groups = description.publication_groups
 	_cpu = {"prepared":prepared, "profile":profile, "binding":_binding,
 		"nodeMetadata":[], "treeBodies":_tree_bodies, "treeIds":_tree_ids,
-		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen,
+		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen, "treeSourcesPrepared":_tree_sources_prepared,
 		"treeRetirementClaims":_tree_retirement_claims, "treeClaimOrder":_tree_claim_order,
 		"spatialDescription":_spatial,"groupRequests":_group_requests,"groupReceipts":_group_receipts,
 		"memberWitnesses":_member_witnesses,"boundaryWitnesses":_boundary_witnesses,
@@ -199,7 +201,7 @@ func begin_prepared_base(base: Preparation.PreparedPublicationBase, profile: Dic
 	_base_packet_mode = true
 	_cpu = {"publicationBase":base,"profile":profile,"binding":_binding,
 		"nodeMetadata":[], "treeBodies":_tree_bodies, "treeIds":_tree_ids,
-		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen,
+		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen, "treeSourcesPrepared":_tree_sources_prepared,
 		"treeRetirementClaims":_tree_retirement_claims, "treeClaimOrder":_tree_claim_order,
 		"treeBySourceIndex":_tree_by_source_index,"skippedTreeIndices":_skipped_tree_indices,
 		"spatialDescription":_spatial,"groupRequests":_group_requests,"groupReceipts":_group_receipts,
@@ -373,9 +375,8 @@ func visual_receipt_installed(source_identity: String, source_revision: String,
 			_finish_physical_proof(proof)
 			return false
 		var body: Node3D = _tree_bodies[int(_tree_by_source_index[source_index])].get_ref() as Node3D
-		var visual: Node = body.get_node_or_null("GeneratedTreeVisual") if is_instance_valid(body) else null
-		var ready := _tree_body_valid(body) and String(body.get_meta("tree_visual_state","")) == "published" \
-			and _tree_source_pose_matches(body,source_index) and _first_visible_renderable(visual) != null
+		var ready := _tree_body_valid(body) and _tree_source_pose_matches(body,source_index) \
+			and bool(_tree_publication_proof(body).get("installed", false))
 		_finish_physical_proof(proof)
 		return ready
 	var live := _weak_nodes_live(witness.get("nodes",[]),proof)
@@ -387,7 +388,7 @@ func visual_receipt_installed(source_identity: String, source_revision: String,
 			and _plan.parts[int(witness.sourceIndex)] == witness.source \
 			and _furniture_geometry(witness.source) == witness.geometry \
 			and body.transform == Transform3D(Basis.from_euler(witness.source.rotation),witness.source.position) \
-			and _first_visible_renderable(body) != null
+			and _furnishing_visual_installed(member_id, body)
 	else:
 		var source = witness.get("source",null)
 		var part_id := member_id.trim_prefix("building:")
@@ -459,7 +460,8 @@ func status_count() -> Dictionary:
 		"buildingTotal":_blueprint.parts.size() if _blueprint != null else 0,
 		"furnitureParts":_furniture_cursor, "furnitureTotal":_plan.parts.size() if _plan != null else 0,
 		"treesRegistered":_registered_tree_ids.size(), "treesSkipped":_trees_skipped,
-		"treesTotal":_trees.size(), "treeVisualsComplete":_visuals_complete, "freedNodes":_freed_nodes,
+		"treesTotal":_trees.size(), "treeVisualsComplete":_visuals_complete,
+		"treeSourcesPrepared":_tree_sources_prepared.size(), "freedNodes":_freed_nodes,
 		"doorsRegistered":_door_registered_ids.size(), "doorClaims":_door_claims.size(), "doorsRetired":_doors_retired,
 		"physicalGroupsComplete":_group_receipts.size(), "physicalGroupsTotal":_groups.get("groups",{}).size(),
 		"retainedGroupRequests":_group_requests.size(), "packetForegroundGroups":_packet_foreground_groups.size(),
@@ -538,6 +540,7 @@ func take_retirement_payload() -> Dictionary:
 	_trees = []
 	_tree_bodies = []
 	_tree_visual_seen = []
+	_tree_sources_prepared = {}
 	_tree_ids = {}
 	_registered_tree_ids = {}
 	_tree_retirement_claims = {}
@@ -1694,14 +1697,48 @@ func _member_live(key: String) -> bool:
 	return live
 
 
+func bind_furnishing_section_owner(owner: Object) -> void:
+	_furnishing_section_owner = weakref(owner)
+
+
+func furnishing_section_publisher(member_id: String, expected_binding: Dictionary) -> Dictionary:
+	if not member_id.begins_with("furnishing:") or _cancelled or _binding != expected_binding \
+			or not _scene_owner_live() or not is_instance_valid(_furniture):
+		return {"status":"pending", "reason":"furnishing_scene_source_unavailable", "retryable":true}
+	var witness: Dictionary = _member_witnesses.get(member_id, {})
+	var reference: Variant = witness.get("body")
+	var body: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(body) or not body is StaticBody3D or body.get_parent() != _root \
+			or body.is_queued_for_deletion() or not body.is_inside_tree():
+		return {"status":"pending", "reason":"furnishing_scene_body_stale", "retryable":true}
+	var part_id := member_id.trim_prefix("furnishing:")
+	var source: Variant = witness.get("source")
+	if not is_instance_valid(source) or int(witness.get("sourceIndex", -1)) < 0 \
+			or int(witness.sourceIndex) >= _plan.parts.size() or _plan.parts[int(witness.sourceIndex)] != source \
+			or Preparation.static_record_binding(source.snapshot()) != witness.get("sourceRevision") \
+			or _furniture.source_part_publication_epoch(part_id) != witness.get("publicationEpoch"):
+		return {"status":"pending", "reason":"furnishing_scene_revision_stale", "retryable":true}
+	var identity: Dictionary = _furniture.committed_static_visual_source_identity(part_id)
+	if identity.get("status") != "ready" or identity.get("sourceRevision") != witness.sourceRevision \
+			or identity.get("publicationEpoch") != witness.publicationEpoch:
+		return {"status":"pending", "reason":"furnishing_scene_capture_stale", "retryable":true}
+	return {"status":"ready", "publisher":_furniture, "body":body, "jobInstanceId":get_instance_id()}
+
+
+func _furnishing_visual_installed(member_id: String, body: Node3D) -> bool:
+	if _furnishing_section_owner == null: return _first_visible_renderable(body) != null
+	var owner: Variant = _furnishing_section_owner.get_ref()
+	return is_instance_valid(owner) and bool(owner.call("furnishing_section_visual_installed",
+		String(_binding.get("siteId", "")), member_id, body))
+
+
 func _member_live_uncached(key: String, proof: Dictionary) -> bool:
 	if key.begins_with("tree:"):
 		var source_index: int = _groups.treeMembers[key].index
 		if _skipped_tree_indices.has(source_index): return true # Authoritative removed_prop callback receipt.
 		if not _tree_by_source_index.has(source_index): return false
 		var body: Node3D = _tree_bodies[int(_tree_by_source_index[source_index])].get_ref() as Node3D
-		return _tree_body_valid(body) and String(body.get_meta("tree_visual_state","")) == "published" \
-			and body.get_node_or_null("GeneratedTreeVisual") != null \
+		return _tree_body_valid(body) and bool(_tree_publication_proof(body, false).get("sourcePrepared", false)) \
 			and _tree_source_pose_matches(body,source_index) and _member_witnesses.has(key) \
 			and _tree_collision_matches_source(_member_witnesses[key].collisions,source_index) \
 			and _collisions_live(_member_witnesses[key].collisions,proof)
@@ -1710,6 +1747,7 @@ func _member_live_uncached(key: String, proof: Dictionary) -> bool:
 	if key.begins_with("furnishing:"):
 		var body: Node3D = witness.body.get_ref() as Node3D
 		return _door_body_valid(body) and body.get_parent() == _root and String(body.get_meta("furnishing_part_id","")) == key.trim_prefix("furnishing:") \
+			and furnishing_section_publisher(key, _binding).get("status") == "ready" \
 			and int(witness.sourceIndex)<_plan.parts.size() and _plan.parts[int(witness.sourceIndex)]==witness.source \
 			and body.transform == Transform3D(Basis.from_euler(witness.source.rotation),witness.source.position) \
 			and _furniture_geometry(witness.source) == witness.geometry and _collisions_live(witness.collisions,proof) \
@@ -1735,6 +1773,113 @@ func _member_live_uncached(key: String, proof: Dictionary) -> bool:
 		if not records.has(String(part.id)): return false
 	return true
 
+
+## Finite blueprint-tree membership is owned by this admitted job, just like
+## building member membership. Never discover these contributors by scanning
+## the world or by accepting a tree queue record without its admitted member.
+func capture_tree_section_source(member_id: String, expected_binding: Dictionary) -> Dictionary:
+	if _cancelled or _phase == "teardown" or expected_binding != _binding \
+			or not _groups.get("treeMembers", {}).has(member_id):
+		return {"status":"pending", "reason":"building_tree_member_binding_unavailable"}
+	var source_index := int(_groups.treeMembers[member_id].get("index", -1))
+	if source_index < 0 or source_index >= _trees.size() \
+			or _trees[source_index] != _groups.treeRecords[source_index]:
+		return {"status":"failed", "reason":"building_tree_source_record_changed"}
+	var record: Dictionary = _trees[source_index]
+	var prop_id := "site-tree:%d:%s:%d:%s" % [String(_binding.siteId).length(), _binding.siteId,
+		String(record.id).length(), record.id]
+	var removal_receiver: Variant = _tree_receiver.get_ref() if _tree_receiver != null else null
+	var durably_removed: bool = is_instance_valid(removal_receiver) \
+		and removal_receiver.has_method("tree_source_is_durably_removed") \
+		and bool(removal_receiver.call("tree_source_is_durably_removed", prop_id))
+	if _skipped_tree_indices.has(source_index) or durably_removed:
+		# Existing durable-removal receipt remains separate from empty geometry;
+		# the provider must explicitly admit this absent contributor.
+		return {"status":"absent", "reason":"removed_prop", "memberId":member_id,
+			"propId":prop_id, "binding":_binding}
+	var body_index := int(_tree_by_source_index.get(source_index, -1))
+	if body_index < 0 or body_index >= _tree_bodies.size():
+		return {"status":"pending", "reason":"building_tree_source_unpublished"}
+	var reference: Variant = _tree_bodies[body_index]
+	var body: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(body) or not body is StaticBody3D \
+			or not _tree_body_valid(body) or not _tree_source_pose_matches(body, source_index):
+		return {"status":"pending", "reason":"building_tree_source_owner_stale"}
+	var receiver: Variant = _tree_receiver.get_ref() if _tree_receiver != null else null
+	if not is_instance_valid(receiver) or not receiver.has_method("capture_tree_section_source"):
+		return {"status":"failed", "reason":"building_tree_capture_authority_missing"}
+	var captured: Dictionary = receiver.call("capture_tree_section_source", body)
+	if captured.get("status") != "ready": return captured
+	if _cancelled or _phase == "teardown" or expected_binding != _binding \
+			or not is_instance_valid(receiver) or _tree_receiver.get_ref() != receiver \
+			or not is_instance_valid(body) or not _tree_source_pose_matches(body, source_index) \
+			or int(captured.get("bodyInstanceId", 0)) != body.get_instance_id():
+		return {"status":"pending", "reason":"building_tree_capture_owner_changed"}
+	var alias := "citadel:%s:member:%s" % [String(_binding.siteId), member_id]
+	var result := {"status":"ready", "memberId":member_id, "sourceId":alias,
+		"binding":_binding, "sourceIndex":source_index,
+		"admittedTreeRecord":_trees[source_index], "jobInstanceId":get_instance_id(),
+		"producer":captured}
+	result.make_read_only()
+	return result
+
+## Compact accepted alias proof survives compiler cache eviction. It checks the
+## existing admitted member and body incarnation, not cached visual readiness.
+func tree_section_alias_is_current(alias_binding: Dictionary) -> bool:
+	if _cancelled or _phase == "teardown" or alias_binding.get("binding") != _binding \
+			or int(alias_binding.get("jobInstanceId", 0)) != get_instance_id(): return false
+	var member_id := String(alias_binding.get("memberId", ""))
+	if not _groups.get("treeMembers", {}).has(member_id): return false
+	var receiver: Variant = _tree_receiver.get_ref() if _tree_receiver != null else null
+	var alias_source_index := int(_groups.treeMembers[member_id].get("index", -1))
+	if alias_source_index < 0 or alias_source_index >= _trees.size(): return false
+	var record: Dictionary = _trees[alias_source_index]
+	var prop_id := "site-tree:%d:%s:%d:%s" % [String(_binding.siteId).length(), _binding.siteId,
+		String(record.id).length(), record.id]
+	if not is_instance_valid(receiver) or not receiver.has_method("tree_source_is_durably_removed") \
+			or bool(receiver.call("tree_source_is_durably_removed", prop_id)): return false
+	var source_index := int(_groups.treeMembers[member_id].get("index", -1))
+	if source_index < 0 or source_index >= _trees.size() or _skipped_tree_indices.has(source_index) \
+			or alias_binding.get("admittedTreeRecord") != _trees[source_index]: return false
+	var body_index := int(_tree_by_source_index.get(source_index, -1))
+	if body_index < 0 or body_index >= _tree_bodies.size(): return false
+	var reference: Variant = _tree_bodies[body_index]
+	var body: Variant = reference.get_ref() if reference is WeakRef else null
+	return is_instance_valid(body) and body is StaticBody3D and _tree_body_valid(body) \
+		and not String(alias_binding.get("producerSourceId", "")).is_empty() \
+		and body.get_instance_id() == alias_binding.get("bodyInstanceId") \
+		and _tree_source_pose_matches(body, source_index) \
+		and alias_binding.get("sourceId") == "citadel:%s:member:%s" % [String(_binding.siteId), member_id] \
+		and alias_binding.get("producerSourceId") == String(body.get_meta("static_ecology_source_id", ""))
+
+func tree_section_source_identity(body: Variant) -> Dictionary:
+	if not is_instance_valid(body) or not body is StaticBody3D: return {}
+	for source_index: int in _tree_by_source_index:
+		var body_index := int(_tree_by_source_index[source_index])
+		if source_index < 0 or source_index >= _trees.size() or body_index < 0 \
+				or body_index >= _tree_bodies.size() or not _groups.has("treeRecords"): return {}
+		var reference: Variant = _tree_bodies[body_index]
+		if not reference is WeakRef or reference.get_ref() != body: continue
+		if not _tree_source_pose_matches(body, source_index): return {}
+		var member_id := "tree:" + String(_trees[source_index].id)
+		var source_bounds: AABB = _groups.treeMembers[member_id].bounds
+		var queue_reference: Variant = body.get_meta("tree_publication_owner", null)
+		var queue: Variant = queue_reference.get_ref() if queue_reference is WeakRef else null
+		if is_instance_valid(queue) and queue.has_method("tree_section_recipe_input_record_for_body"):
+			var input: Dictionary = queue.call("tree_section_recipe_input_record_for_body", body)
+			var recipe_bounds: Variant = input.get("supportEnvelope", {}).get("worldBounds")
+			if recipe_bounds is AABB and recipe_bounds.position.is_finite() and recipe_bounds.size.is_finite():
+				source_bounds = source_bounds.merge(recipe_bounds)
+		return {"status":"ready", "sourceId":"citadel:%s:member:%s" % [_binding.siteId, member_id],
+			"bounds":source_bounds, "memberId":member_id}
+	return {}
+
+func _on_tree_section_source_exiting(reference: WeakRef) -> void:
+	var body: Variant = reference.get_ref()
+	var receiver: Variant = _tree_receiver.get_ref() if _tree_receiver != null else null
+	if is_instance_valid(body) and is_instance_valid(receiver) \
+			and receiver.has_method("invalidate_tree_section_source"):
+		receiver.call("invalidate_tree_section_source", body)
 
 func _tree_source_pose_matches(body: Node3D, source_index: int) -> bool:
 	var record: Dictionary = _groups.treeRecords[source_index]
@@ -1765,12 +1910,13 @@ func _check_transaction_tree_visual() -> bool:
 	var body: Node3D = _tree_bodies[body_index].get_ref() as Node3D
 	if not _tree_body_valid(body): return _fail("tree_body_lost_before_visual")
 	if not _tree_source_pose_matches(body,source_index): return _fail("tree_source_pose_changed")
-	var state: String = String(body.get_meta("tree_visual_state",""))
-	if state == "failed": return _fail("tree_visual_failed")
-	if state not in ["queued","recipe_cached","recipe_lod_derivation_queued","building","assembling","published"]: return _fail("tree_visual_invalid_state")
-	if state != "published": return false
-	if body.get_node_or_null("GeneratedTreeVisual") == null: return _fail("tree_visual_missing_node")
-	if not _tree_visual_seen[body_index]: _tree_visual_seen[body_index] = true; _visuals_complete += 1
+	var publication := _tree_publication_proof(body)
+	if publication.get("status") == "failed": return _fail(String(publication.get("reason", "tree_publication_failed")))
+	if not bool(publication.get("sourcePrepared", false)): return false
+	_tree_sources_prepared[source_index] = true
+	if bool(publication.get("installed", false)) and not _tree_visual_seen[body_index]:
+		_tree_visual_seen[body_index] = true
+		_visuals_complete += 1
 	var key: String = "tree:"+String(_trees[source_index].id)
 	_member_witnesses[key] = {"body":weakref(body),"collisions":_collision_witnesses(body)}
 	if not _tree_collision_matches_source(_member_witnesses[key].collisions,source_index): return _fail("tree_collision_source_mismatch")
@@ -1964,6 +2110,8 @@ func _step(remaining_usec: int) -> bool:
 			return _register_door()
 		"furniture_begin":
 			_furniture = FurniturePublisher.new()
+			_furniture.publication_site_id = String(_binding.get("siteId", ""))
+			_furniture.source_blueprint_id = String(_plan.id)
 			_cpu["furniturePublisher"] = _furniture
 			if _cancelled: return false
 			var begun: bool = _furniture.begin_publication(_plan, _root)
@@ -1985,14 +2133,14 @@ func _step(remaining_usec: int) -> bool:
 				if _cancelled: return false
 				if not _door_body_valid(body): return _fail("furniture_owner_lost")
 				_member_witnesses[key] = {"source":source,"sourceIndex":source_index,"geometry":_groups.memberSources[key].geometry,
-					"body":weakref(body),"collisions":_collision_witnesses(body),"nodes":[_node_witness(body)]}
+					"body":weakref(body),"collisions":_collision_witnesses(body),"nodes":[_node_witness(body)],
+					"publicationEpoch":_furniture.source_part_publication_epoch(String(source.id)),
+					"sourceRevision":Preparation.static_record_binding(source.snapshot())}
 				_furniture_cursor += 1
 				_transaction_furniture_cursor += 1
 		"furniture_finish":
 			if _furniture != null: _cpu["furnitureFinish"] = _furniture.finish_publication(_plan, _root)
 			if _cancelled: return false
-			_tree_receiver = null
-			_tree_method = &""
 			_phase = "tree_visuals"
 		"tree_registration":
 			return _register_tree()
@@ -2041,13 +2189,14 @@ func _packet_door_lifecycle_available() -> bool:
 
 
 func _register_door() -> bool:
-	if _door_cursor >= _building.published_nodes.size():
+	var building_roster: Array = _building.published_node_roster_snapshot()
+	if _door_cursor >= building_roster.size():
 		if _base_packet_mode:
 			_phase = ("furniture_begin" if _furniture == null else "furniture") if not _transaction.furnitureIndices.is_empty() else ("tree_registration" if not _transaction.treeIndices.is_empty() else "group_commit")
 		else:
 			_phase = "furniture_begin" if _furniture == null else "furniture"
 		return true
-	var body = _building.published_nodes[_door_cursor]
+	var body = building_roster[_door_cursor]
 	if not is_instance_valid(body): return _fail("published_door_scan_node_lost")
 	if String(body.get_meta("building_part_kind", "")) != "door":
 		_door_cursor += 1
@@ -2138,6 +2287,8 @@ func _register_tree() -> bool:
 			_tree_bodies.append(weakref(body))
 			_tree_visual_seen.append(false)
 			_tree_by_source_index[source_index] = _tree_bodies.size()-1
+			body.set_meta("building_tree_source_owner", weakref(self))
+			body.tree_exiting.connect(_on_tree_section_source_exiting.bind(weakref(body)))
 		_: return _fail(String(result.get("reason", "tree_registration_failed")))
 	_tree_ids[prop_id] = true
 	_tree_cursor += 1
@@ -2157,9 +2308,14 @@ func _check_tree_visual() -> bool:
 			for final_reference: WeakRef in _tree_bodies:
 				var final_body: Node = final_reference.get_ref() as Node
 				if not _tree_body_valid(final_body): return _fail("tree_body_lost_before_visual")
-				if String(final_body.get_meta("tree_visual_state", "")) != "published" \
-						or final_body.get_node_or_null("GeneratedTreeVisual") == null:
-					return _fail("tree_visual_lost_before_ready")
+				var final_proof := _tree_publication_proof(final_body)
+				if final_proof.get("status") == "failed": return _fail(String(final_proof.get("reason", "tree_publication_failed")))
+				if not bool(final_proof.get("installed", false)):
+					# A replacement or unload can invalidate an earlier frame's proof.
+					# Repeat the measured pass; preparation never substitutes for ACK.
+					_visuals_complete = 0
+					_tree_visual_seen.fill(false)
+					return false
 			_phase = "ready"
 			return true
 		return false
@@ -2167,14 +2323,9 @@ func _check_tree_visual() -> bool:
 	if reference != null:
 		var body: Node = reference.get_ref() as Node
 		if not _tree_body_valid(body): return _fail("tree_body_lost_before_visual")
-		var state := String(body.get_meta("tree_visual_state", ""))
-		if state == "failed": return _fail("tree_visual_failed")
-		# These are the queue's actual nonterminal states. A fallback visual or
-		# missing marker is not a queued procedural visual: fail, do not wait forever.
-		if state not in ["queued", "recipe_cached", "recipe_lod_derivation_queued", "building", "assembling", "published"]:
-			return _fail("tree_visual_invalid_state")
-		if state == "published":
-			if body.get_node_or_null("GeneratedTreeVisual") == null: return _fail("tree_visual_missing_node")
+		var publication := _tree_publication_proof(body)
+		if publication.get("status") == "failed": return _fail(String(publication.get("reason", "tree_publication_failed")))
+		if bool(publication.get("installed", false)):
 			if not _tree_visual_seen[_visual_cursor]:
 				_tree_visual_seen[_visual_cursor] = true
 				_visuals_complete += 1
@@ -2188,6 +2339,18 @@ func _check_tree_visual() -> bool:
 func _tree_body_valid(body: Node) -> bool:
 	return is_instance_valid(body) and not body.is_queued_for_deletion() \
 		and body.is_inside_tree() and _root.is_ancestor_of(body)
+
+func _tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+	var receiver: Variant = _tree_receiver.get_ref() if _tree_receiver != null else null
+	if not is_instance_valid(receiver) or not receiver.has_method("tree_publication_proof"):
+		return {"status":"failed", "reason":"tree_publication_proof_authority_unavailable"}
+	var result: Variant = receiver.call("tree_publication_proof", body, include_installed)
+	if not is_instance_valid(receiver) or _tree_receiver.get_ref() != receiver \
+			or not is_instance_valid(body) or not result is Dictionary:
+		return {"status":"failed", "reason":"tree_publication_proof_owner_changed"}
+	if int(result.get("bodyInstanceId", 0)) != body.get_instance_id() and result.get("status") != "failed":
+		return {"status":"failed", "reason":"tree_publication_proof_body_mismatch"}
+	return result
 
 
 func _teardown_step() -> bool:
@@ -2334,8 +2497,10 @@ func _detach_step() -> bool:
 		return false
 	# All nodes are already gone. Drain dangling Node slots incrementally; retain
 	# every CPU/resource field on the publishers, with no bulk clear_published().
-	if _building != null and not _building.published_nodes.is_empty():
-		_building.published_nodes.pop_back()
+	if _building != null and not _building.published_node_roster_snapshot().is_empty():
+		if not _building.remove_last_published_node():
+			_cleanup_reason = "building_published_node_roster_changed"
+			return false
 		return true
 	if _furniture != null and not _furniture.published_parts.is_empty():
 		_furniture.published_parts.pop_back()

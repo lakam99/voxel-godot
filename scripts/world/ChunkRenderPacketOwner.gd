@@ -75,16 +75,27 @@ static func resolve_existing_static_section_backend(owner_cell: Vector2i) -> Dic
 
 static func begin_static_section_install(candidate: Dictionary,
 		material_bindings: Dictionary, mesh_bindings: Dictionary,
-		frame_callback_coordinator: Object = null) -> Dictionary:
+		frame_callback_coordinator: Object = null, attachment_bindings: Dictionary = {}) -> Dictionary:
 	if not candidate.is_read_only() or not candidate.get("sectionKey") is Vector3i:
 		return {"status":"failed", "reason":"invalid_section_candidate_header"}
+	if attachment_bindings.is_empty() and candidate.get("schema") != "world-static-section-production-candidate/v1":
+		var snapshot: Variant = candidate.get("snapshot", {})
+		if snapshot is Dictionary:
+			var batches: Variant = snapshot.get("batches", {})
+			for batch: Variant in batches.values() if batches is Dictionary else []:
+				if batch is Dictionary and not String(batch.get("attachmentKey", "")).is_empty():
+					return {"status":"failed",
+						"reason":"attachment_replay_requires_current_production_binding",
+						"requiresAuthoritativeReassembly":true}
 	var owner_cell: Vector2i = SectionGrid.chunk_key_for_section(candidate.sectionKey)
 	var owner := resolve_current_static_section_backend(owner_cell)
 	if owner.get("status") != "ready":
 		return owner
 	var session = SectionInstallSession.new()
+	if attachment_bindings.is_empty() and candidate.get("schema") == "world-static-section-production-candidate/v1":
+		attachment_bindings = candidate.get("attachmentBindings", {})
 	var begun: Dictionary = session.begin(owner.backend, owner.chunk, candidate,
-		material_bindings, mesh_bindings, frame_callback_coordinator)
+		material_bindings, mesh_bindings, frame_callback_coordinator, attachment_bindings)
 	if begun.get("status") != "begun":
 		return begun
 	return {"status":"ready", "session":session,

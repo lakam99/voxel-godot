@@ -173,6 +173,8 @@ export async function phaseRun(c, { args, env = {}, timeout = 45, prefix = '', m
   let watcherError, stopped = false;
   let progressAcceptance = false;
   const progressReadDiagnostics = [];
+  let lastProgressFingerprint = '';
+  let lastProgressChangeAtMs = Date.now();
   let finalCheckpointAckPath = '';
   if (evidence && headedTest.completionHandshake === true) {
     finalCheckpointAckPath = evidence.metadata.finalCaptureAckPath;
@@ -241,6 +243,35 @@ export async function phaseRun(c, { args, env = {}, timeout = 45, prefix = '', m
         }
       }
       if (headedTest.progressPath && fs.existsSync(headedTest.progressPath)) {
+        const progressStat = fs.statSync(headedTest.progressPath);
+        const fingerprint = `${progressStat.size}:${progressStat.mtimeMs}`;
+        if (fingerprint !== lastProgressFingerprint) {
+          lastProgressFingerprint = fingerprint;
+          lastProgressChangeAtMs = Date.now();
+        } else if (!testTerminalObserved
+            && Number.isFinite(headedTest.staleProgressTimeoutMs)
+            && headedTest.staleProgressTimeoutMs > 0
+            && Date.now() - lastProgressChangeAtMs >= headedTest.staleProgressTimeoutMs) {
+          let phaseMarker = null;
+          if (headedTest.phaseMarkerPath && fs.existsSync(headedTest.phaseMarkerPath)) {
+            try { phaseMarker = read(headedTest.phaseMarkerPath); }
+            catch (error) { phaseMarker = { unreadable: error.message }; }
+          }
+          const stall = {
+            schema: 'headed-test-stale-progress/v1',
+            observedAtUtc: new Date().toISOString(),
+            idleMilliseconds: Date.now() - lastProgressChangeAtMs,
+            timeoutMilliseconds: headedTest.staleProgressTimeoutMs,
+            progressPath: headedTest.progressPath,
+            phaseMarkerPath: headedTest.phaseMarkerPath ?? '',
+            phaseMarker,
+          };
+          fs.writeFileSync(path.join(evidence?.metadata.outputDirectory ?? c.run,
+            'stale-progress.json'), JSON.stringify(stall, null, 2));
+          fs.writeFileSync(stopRequestPath, JSON.stringify(stall));
+          stopped = true;
+          return;
+        }
         const progress = readProgressSnapshot(headedTest.progressPath, progressReadDiagnostics);
         if (!progress) return;
         const checkpoint = classifyHeadedTestProgress(progress);

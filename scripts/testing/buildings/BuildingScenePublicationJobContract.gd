@@ -46,6 +46,37 @@ class SyntheticTrees extends RefCounted:
 	var cancel_target: WeakRef
 	var second_pending := false
 	var bodies: Array[WeakRef] = []
+	var durable_removed: Dictionary = {}
+	var proof_job: WeakRef
+	var proof_calls_after_furniture_finish := 0
+	# Explicit synthetic publisher proof; real native tree installation is covered
+	# by the finite provider/full31 fixture, not this orchestration fault fixture.
+	func tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+		var job: Variant = proof_job.get_ref() if proof_job != null else null
+		if is_instance_valid(job) and String(job.status().phase) == "tree_visuals":
+			proof_calls_after_furniture_finish += 1
+		if not is_instance_valid(body) or not body is StaticBody3D:
+			return {"status":"failed", "reason":"tree_publication_owner_lost"}
+		if not body.has_meta("tree_publication_owner"):
+			return {"status":"failed", "reason":"tree_publication_authority_missing"}
+		var owner_reference: Variant = body.get_meta("tree_publication_owner")
+		if not owner_reference is WeakRef or owner_reference.get_ref() != self:
+			return {"status":"failed", "reason":"tree_publication_authority_replaced"}
+		if not body.is_inside_tree() or body.is_queued_for_deletion() \
+				or bool(body.get_meta("tree_publication_cancelled", false)):
+			return {"status":"failed", "reason":"tree_publication_owner_inactive"}
+		var state := String(body.get_meta("tree_visual_state", ""))
+		if state not in ["queued", "published"]:
+			return {"status":"failed", "reason":"tree_publication_failed"}
+		var prepared := state == "published" and body.get_node_or_null("GeneratedTreeVisual") != null
+		var installed := include_installed and prepared
+		return {"status":"ready" if prepared or installed else "pending",
+			"reason":"" if prepared or installed else "tree_source_preparation_pending",
+			"bodyInstanceId":body.get_instance_id(), "propId":String(body.get_meta("prop_id", "")),
+			"sourcePrepared":prepared or installed, "installed":installed,
+			"preparedRevision":"synthetic", "representation":"synthetic" if installed else "",
+			"tier":"near" if installed else "", "recipeSignature":"synthetic"}
+	func tree_source_is_durably_removed(prop_id: String) -> bool: return durable_removed.has(prop_id)
 	func publish(parent: Node3D, id: String, position: Vector3, _biome: String, request: Dictionary, yaw: float) -> Dictionary:
 		calls += 1
 		if defer_once:
@@ -57,6 +88,7 @@ class SyntheticTrees extends RefCounted:
 		body.set_meta("prop_id", id)
 		var state := "queued" if second_pending and published == 1 else visual_state
 		body.set_meta("tree_visual_state", state)
+		body.set_meta("tree_publication_owner", weakref(self))
 		# Explicit synthetic tree geometry, derived from the declared request.
 		var collision: CollisionShape3D = CollisionShape3D.new()
 		var shape: CylinderShape3D = CylinderShape3D.new()
@@ -112,6 +144,7 @@ class FinishCanceller extends RefCounted:
 		if record.get("reason") == "complete": target.get_ref().cancel()
 
 var checks: Dictionary = {}
+var diagnostics: Dictionary = {}
 var worker = Worker.new()
 var parent: Node3D
 
@@ -120,6 +153,31 @@ func _initialize() -> void: call_deferred("_run")
 func check(label: String, value: bool) -> void:
 	checks[label] = value
 	if not value: print("SCENE JOB CONTRACT FAILURE ", label)
+
+func job_diagnostic(job: Variant, extra: Dictionary = {}) -> Dictionary:
+	var state: Dictionary = job.status() if is_instance_valid(job) else {}
+	var receiver_reference: Variant = job.get("_tree_receiver") if is_instance_valid(job) else null
+	var receiver: Variant = receiver_reference.get_ref() if receiver_reference is WeakRef else null
+	var receiver_valid := is_instance_valid(receiver)
+	var result := {
+		"status":String(state.get("status", "invalid")),
+		"phase":String(state.get("phase", "")),
+		"reason":String(state.get("reason", "")),
+		"sceneReady":bool(state.get("sceneReady", false)),
+		"buildingCursor":int(state.get("buildingCursor", -1)),
+		"treeCursor":int(state.get("treeCursor", -1)),
+		"treeVisualsComplete":int(state.get("treeVisualsComplete", -1)),
+		"treeVisualsRequired":int(state.get("treeVisualsRequired", -1)),
+		"spatialDependencies":state.get("spatialDependencies", {}),
+		"counts":state.get("counts", {}),
+		"treeProofReceiverWeakRefPresent":receiver_reference is WeakRef,
+		"treeProofReceiverTargetValid":receiver_valid,
+		"treeProofReceiverClass":String(receiver.get_class()) if receiver_valid else "",
+		"treeProofReceiverInstanceId":receiver.get_instance_id() if receiver_valid else 0,
+		"treeProofReceiverHasMethod":receiver_valid and receiver.has_method("tree_publication_proof"),
+	}
+	result.merge(extra, true)
+	return result
 
 func holder() -> Preparation.PreparedSource:
 	var blueprint = Blueprint.new("synthetic-publication", 1, "timber")
@@ -145,6 +203,7 @@ func frozen_profile() -> Dictionary:
 
 func start(job, trees, prepared = null, binding: Dictionary = Fixtures.BINDING) -> Dictionary:
 	if prepared == null: prepared = holder()
+	if trees is SyntheticTrees: trees.proof_job = weakref(job)
 	# Compile after each case's source edits. Preserve an explicitly compiled
 	# dense packet only in the separate source/artifact ownership control.
 	if not prepared._payload.has("spatialDependencies"):
@@ -355,6 +414,72 @@ func pending_cancellation_case(target: String) -> void:
 	for reference: WeakRef in watched.values(): released = released and reference.get_ref() == null
 	check(target + "_resources_released_after_worker_retirement", released)
 
+func finite_tree_alias_controls() -> void:
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	start(job, trees)
+	for turn in range(1000):
+		job.advance(4000)
+		if job.status().sceneReady or job.status().status == "failed": break
+	var live_body_count := 0
+	for body_ref: WeakRef in trees.bodies:
+		if body_ref.get_ref() != null: live_body_count += 1
+	var ready := bool(job.status().sceneReady) and not trees.bodies.is_empty()
+	diagnostics["synthetic_finite_tree_alias_fixture_ready"] = job_diagnostic(job, {
+		"treePublishCalls":trees.calls, "treePublishedCount":trees.published,
+		"treeBodyWeakRefCount":trees.bodies.size(), "treeBodyLiveCount":live_body_count,
+		"treeRetiredCount":trees.retired,
+		"syntheticTreesReceiverInstanceId":trees.get_instance_id()})
+	check("synthetic_finite_tree_alias_fixture_ready", ready)
+	if not ready:
+		await drain(job, "finite_tree_alias_setup_failed")
+		return
+	var body: Variant = trees.bodies[0].get_ref()
+	var source_index := int(job._tree_by_source_index.keys()[0])
+	var source_record: Dictionary = job._trees[source_index]
+	var member_id := "tree:" + String(source_record.id)
+	var prop_id := String(body.get_meta("prop_id", ""))
+	body.set_meta("static_ecology_source_id", "synthetic-seed:tree:" + prop_id)
+	var alias := {"jobInstanceId":job.get_instance_id(), "binding":job._binding,
+		"memberId":member_id, "admittedTreeRecord":source_record,
+		"bodyInstanceId":body.get_instance_id(),
+		"sourceId":"citadel:%s:member:%s" % [job._binding.siteId, member_id],
+		"producerSourceId":String(body.get_meta("static_ecology_source_id"))}
+	check("synthetic_finite_tree_alias_current_admitted_body", job.tree_section_alias_is_current(alias))
+	for field: String in ["sourceId", "producerSourceId", "bodyInstanceId", "jobInstanceId", "memberId", "admittedTreeRecord"]:
+		var changed := alias.duplicate()
+		changed[field] = -1 if field.ends_with("InstanceId") else ({} if field == "admittedTreeRecord" else "changed")
+		check("synthetic_finite_tree_alias_rejects_" + field, not job.tree_section_alias_is_current(changed))
+	trees.durable_removed[prop_id] = true
+	check("synthetic_finite_tree_alias_rejects_durable_removal", not job.tree_section_alias_is_current(alias))
+	var removed: Dictionary = job.capture_tree_section_source(member_id, job._binding)
+	check("synthetic_finite_tree_capture_reports_authoritative_absence", removed.get("status") == "absent" \
+		and removed.get("reason") == "removed_prop" and removed.get("propId") == prop_id)
+	trees.durable_removed.erase(prop_id)
+	job.cancel()
+	check("synthetic_finite_tree_alias_rejects_cancelled_job", not job.tree_section_alias_is_current(alias))
+	await drain(job, "finite_tree_alias")
+
+func tree_proof_receiver_lifecycle_control() -> void:
+	var trees := SyntheticTrees.new()
+	var receiver_reference: WeakRef = weakref(trees)
+	var job := Job.new()
+	start(job, trees)
+	for index in range(1000):
+		job.advance(4000)
+		if job.status().sceneReady or job.status().status == "failed": break
+	var installed_receiver: Variant = job._tree_receiver.get_ref() if job._tree_receiver is WeakRef else null
+	check("tree_proof_receiver_callable_after_furniture_finish",
+		job.status().sceneReady and trees.proof_calls_after_furniture_finish > 0
+		and is_instance_valid(installed_receiver) and installed_receiver == trees
+		and installed_receiver.has_method("tree_publication_proof"))
+	job.cancel()
+	await drain(job, "tree_proof_receiver_lifecycle")
+	installed_receiver = null
+	trees = null
+	await process_frame
+	check("tree_proof_receiver_collectible_after_retirement", receiver_reference.get_ref() == null)
+
 func pending_completion_control() -> void:
 	var trees := SyntheticTrees.new()
 	var job = Job.new()
@@ -364,6 +489,13 @@ func pending_completion_control() -> void:
 		job.advance(2500)
 		if job._building != null and job._building._pending_paving != null: pending_observed = true
 		if job.status().status in ["ready", "failed"]: break
+	diagnostics["pending_success_observed_and_completed"] = job_diagnostic(job, {
+		"pendingSeen":pending_observed,
+		"pendingPavingPresent":job._building != null and job._building._pending_paving != null,
+		"publishedPartCount":job._building.published_part_count if job._building != null else -1,
+		"incrementalPublishedParts":job._building.incremental_published_parts if job._building != null else -1,
+		"collisionCount":job._building.collision_count if job._building != null else -1,
+		"treePublishCalls":trees.calls})
 	check("pending_success_observed_and_completed", pending_observed and job.status().sceneReady)
 	check("pending_success_cursor_exact", job.status().buildingCursor == 2 and job._building.published_part_count == 2 and job._building.incremental_published_parts == 2)
 	check("pending_success_collision_exact_once", job._building.collision_count == 2 and collision_count_for(job, "pending-paving") == 1 and collision_count_for(job, "after-pending") == 1)
@@ -422,6 +554,13 @@ func masonry_completion_control() -> void:
 		job.advance(2500)
 		if job._building!=null and job._building._pending_masonry!=null: pending_seen=true
 		if job.status().status in ["ready","failed"]: break
+	diagnostics["masonry_success_pending_and_complete"] = job_diagnostic(job, {
+		"pendingSeen":pending_seen,
+		"pendingMasonryPresent":job._building!=null and job._building._pending_masonry!=null,
+		"publishedPartCount":job._building.published_part_count if job._building!=null else -1,
+		"incrementalPublishedParts":job._building.incremental_published_parts if job._building!=null else -1,
+		"collisionCount":job._building.collision_count if job._building!=null else -1,
+		"treePublishCalls":trees.calls})
 	check("masonry_success_pending_and_complete",pending_seen and job.status().sceneReady)
 	check("masonry_success_exact_cursor",job.status().buildingCursor==2 and job._building.incremental_published_parts==2)
 	check("masonry_success_single_collision",collision_count_for(job,"pending-masonry")==1 and job._building.collision_count==2)
@@ -461,6 +600,13 @@ func roof_lifecycle_controls() -> void:
 		job.advance(2500)
 		if job._building!=null and job._building._pending_roof!=null: pending_seen=true
 		if job.status().status in ["ready","failed"]: break
+	diagnostics["roof_success_pending_and_complete"] = job_diagnostic(job, {
+		"pendingSeen":pending_seen,
+		"pendingRoofPresent":job._building!=null and job._building._pending_roof!=null,
+		"publishedPartCount":job._building.published_part_count if job._building!=null else -1,
+		"incrementalPublishedParts":job._building.incremental_published_parts if job._building!=null else -1,
+		"collisionCount":job._building.collision_count if job._building!=null else -1,
+		"treePublishCalls":trees.calls})
 	check("roof_success_pending_and_complete",pending_seen and job.status().sceneReady)
 	check("roof_success_exact_cursor",job.status().buildingCursor==2 and job._building.incremental_published_parts==2)
 	check("roof_success_single_collision",collision_count_for(job,"pending-roof")==1 and job._building.collision_count==2)
@@ -591,6 +737,13 @@ func prepared_masonry_controls() -> void:
 	for index in range(10000):
 		job.advance(2500)
 		if job.status().status in ["ready","failed"]: break
+	diagnostics["prepared_masonry_complete"] = job_diagnostic(job, {
+		"pendingMasonryPresent":job._building!=null and job._building._pending_masonry!=null,
+		"preparedMasonryPresent":job._building!=null and job._building._prepared_masonry!=null,
+		"publishedPartCount":job._building.published_part_count if job._building!=null else -1,
+		"incrementalPublishedParts":job._building.incremental_published_parts if job._building!=null else -1,
+		"collisionCount":job._building.collision_count if job._building!=null else -1,
+		"treePublishCalls":trees.calls})
 	check("prepared_masonry_complete",job.status().sceneReady and job.status().buildingCursor==2)
 	check("prepared_masonry_no_main_descriptor",not job._building.publication_timing().has("masonry_publish_geometry") and job._building.publication_timing().get("prepared_masonry_lookup",{}).get("calls",0)==1)
 	check("prepared_masonry_complete_collision_light",job._building.collision_count==2 and job.own_node_root().find_children("*","OmniLight3D",true,false).size()==1)
@@ -771,6 +924,13 @@ func _run() -> void:
 		job.advance(4000)
 		if job.status().sceneReady: break
 	check("deferred_tree_retained_and_completed", job.status().sceneReady and trees.calls == 3 and trees.published == 2)
+	var live_body_count := 0
+	for body_ref: WeakRef in trees.bodies:
+		if body_ref.get_ref() != null: live_body_count += 1
+	diagnostics["deferred_tree_retained_and_completed"] = job_diagnostic(job, {
+		"treePublishCalls":trees.calls, "treePublishedCount":trees.published,
+		"treeBodyWeakRefCount":trees.bodies.size(), "treeBodyLiveCount":live_body_count,
+		"treeRetiredCount":trees.retired})
 	check("scene_not_gameplay_ready", not job.status().gameplayReady)
 	check("both_tree_visuals_required", job.status().treeVisualsComplete == 2)
 	job.cancel()
@@ -827,6 +987,8 @@ func _run() -> void:
 	masonry_hook_controls()
 	await prepared_history_lifecycle_controls()
 	await prepared_masonry_controls()
+	await finite_tree_alias_controls()
+	await tree_proof_receiver_lifecycle_control()
 	worker.request_shutdown()
 	var deadline := Time.get_ticks_msec() + 5000
 	while not worker.poll().shutdownComplete and Time.get_ticks_msec() < deadline: await process_frame
@@ -837,6 +999,7 @@ func _run() -> void:
 	for key: String in checks:
 		if not checks[key]: failures.append(key)
 	var report := {"evidence":"synthetic scene orchestration; no live gameplay", "checks":checks,
+		"diagnostics":diagnostics,
 		"checkCount":checks.size(), "failureCount":failures.size(), "failures":failures}
 	var output := OS.get_environment("BUILDING_SCENE_PUBLICATION_JOB_OUTPUT")
 	if not output.is_empty():
@@ -1685,6 +1848,16 @@ func packet_publisher_incremental_session_control() -> void:
 		if later_boundary.status!="pending_budget": break
 	check("packet_session_later_boundary_keeps_prior_epoch",later_boundary.status=="ready" and publisher.source_part_publication_epoch(first_id)==first_epoch \
 		and publisher.source_part_publication_epoch(String(scene.blueprint.parts[later_index].id))>first_epoch)
+	var second_id := String(scene.blueprint.parts[later_index].id)
+	diagnostics["packet_session_later_boundary_keeps_prior_epoch"] = {
+		"laterBoundaryStatus":String(later_boundary.get("status", "")),
+		"laterBoundaryReason":String(later_boundary.get("reason", "")),
+		"laterBoundary":later_boundary.duplicate(true),
+		"firstPartId":first_id, "secondPartId":second_id,
+		"firstEpochAtFirstBoundary":first_epoch,
+		"firstEpochAfterLaterBoundary":publisher.source_part_publication_epoch(first_id),
+		"secondEpochAfterLaterBoundary":publisher.source_part_publication_epoch(second_id),
+		"publicationStatus":publisher.publication_status()}
 	publisher.clear_published()
 	root.free()
 
@@ -1723,13 +1896,33 @@ func spatial_dependency_ownership() -> void:
 		job.advance(4000)
 		if job.status().sceneReady: break
 	var artifact: Dictionary = job.navigation_tile_artifact("0,0",Fixtures.BINDING)
+	var nav_tiles: Dictionary = job._spatial.navigation_tiles if job._spatial != null else {}
+	var nav_tile: Dictionary = nav_tiles.get("tiles", {}).get("0,0", {})
+	var artifact_tile: Variant = artifact.get("tile")
+	var artifact_surface_count: int = artifact_tile.get("surfaces", []).size() if artifact_tile is Dictionary else 0
+	var live_root_before_reparent: Node3D = job.own_node_root()
+	diagnostics["navigation_live_owner_ready"] = job_diagnostic(job, {
+		"navigationArtifactStatus":String(artifact.get("status", "")),
+		"navigationArtifactReason":String(artifact.get("reason", "")),
+		"navigationArtifactSurfaceCount":artifact_surface_count,
+		"navigationTileReady":bool(nav_tiles.get("ready", false)),
+		"navigationTileSetReason":String(nav_tiles.get("reason", "")),
+		"navigationTileCount":nav_tiles.get("tiles", {}).size(),
+		"navigationTileSurfaceCount":nav_tile.get("surfaces", []).size(),
+		"navigationSampleCount":int(nav_tiles.get("sampleCount", 0)),
+		"navigationProducerCount":nav_tiles.get("producerCount", -1),
+		"navigationLiveSceneOwnerPresent":live_root_before_reparent != null,
+		"navigationLiveSceneOwnerParent":String(live_root_before_reparent.get_parent().name) if live_root_before_reparent != null and live_root_before_reparent.get_parent() != null else ""})
 	check("navigation_live_owner_ready",artifact.status=="ready" and not artifact.get("tile",{}).get("surfaces",[]).is_empty())
 	check("navigation_stale_binding_pending",job.navigation_tile_artifact("0,0",stale).status=="pending")
 	var other := Node3D.new()
 	root.add_child(other)
-	job.own_node_root().reparent(other,true)
-	check("navigation_same_transform_wrong_parent_rejected",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="pending")
-	job.own_node_root().reparent(parent,true)
+	var live_root: Node3D = live_root_before_reparent
+	check("navigation_scene_owner_present", live_root != null)
+	if live_root != null:
+		live_root.reparent(other,true)
+		check("navigation_same_transform_wrong_parent_rejected",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="pending")
+		live_root.reparent(parent,true)
 	other.free()
 	job.cancel()
 	check("spatial_cancel_revokes_description",job.source_dependency_requirements(bounds,Fixtures.BINDING).status=="pending")

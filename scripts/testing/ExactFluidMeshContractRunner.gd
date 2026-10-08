@@ -21,7 +21,9 @@ func run() -> void:
 	var service = TerrainMeshingServiceScript.new()
 	service.setup(null)
 	backend = service.backend
-	if backend == null or not backend.has_method("build_chunk_fluid_mesh_from_sections"):
+	if backend == null or not backend.has_method("build_chunk_fluid_mesh_from_sections") \
+			or not backend.has_method("build_section_fluid_surface_data_from_sections") \
+			or not backend.has_method("sort_section_fluid_surface_data"):
 		results.append({
 			"name": "native_backend_ready",
 			"passed": false,
@@ -135,6 +137,7 @@ func run() -> void:
 			"revision": 0
 		})
 	)
+	run_section_fluid_case()
 	finish()
 
 func cell_state(cell: Vector3i, fluid := "", solid := false) -> Dictionary:
@@ -148,8 +151,8 @@ func exact_payload_for_cells(cells: Array, options: Dictionary) -> Dictionary:
 	var start_x := int(options.get("startX", 0))
 	var start_z := int(options.get("startZ", 0))
 	var chunk_size := int(options.get("chunkSize", 2))
-	var min_y := 2
-	var max_y := 2
+	var min_y := int(options.get("minY", 2))
+	var max_y := int(options.get("maxY", min_y))
 	var min_cell := Vector3i(start_x - 1, min_y - 1, start_z - 1)
 	var max_cell := Vector3i(start_x + chunk_size, max_y + 1, start_z + chunk_size)
 	var sections_by_key := {}
@@ -190,8 +193,129 @@ func exact_payload_for_cells(cells: Array, options: Dictionary) -> Dictionary:
 		"signature": "exact-fluid-mesh-contract",
 		"hasFluid": fluid_cell_count > 0,
 		"fluidCellCount": fluid_cell_count,
-		"sections": sections
+		"sections": sections,
+		"sectionRevisions": options.get("sectionRevisions", [{"sectionKey":Vector3i.ZERO, "revision":1}]),
+		"fluidPayloadRevision": int(options.get("fluidRevision", options.get("revision", 1))),
+		"fluidPayloadSignature": "exact-fluid-payload-contract"
 	}
+
+func run_section_fluid_case() -> void:
+	var section_key := Vector3i.ZERO
+	var payload := exact_payload_for_cells([
+		cell_state(Vector3i(0, 3, 0), "water"),
+		cell_state(Vector3i(1, 3, 0), "water"),
+		cell_state(Vector3i(2, 3, 0), "lava")
+	], {"chunkSize":SECTION_SIZE, "minY":0, "maxY":SECTION_SIZE - 1,
+		"startX":0, "startZ":0, "revision":41,
+		"sectionRevisions":[{"sectionKey":section_key, "revision":41}]})
+	var initial: Dictionary = backend.call("build_section_fluid_surface_data_from_sections",
+		payload, section_key, Vector3(0.0, 4.0, 0.0))
+	var failures: Array[String] = []
+	if String(initial.get("status", "")) != "ready":
+		failures.append("section payload did not build: %s" % String(initial.get("reason", "")))
+	else:
+		_validate_section_fluid_surface(initial, "water", failures)
+		_validate_section_fluid_surface(initial, "lava", failures)
+		var canonical := initial.duplicate(false)
+		for key in ["waterVertices", "waterNormals", "waterColors", "waterFaceGroups",
+				"lavaVertices", "lavaNormals", "lavaColors", "lavaFaceGroups",
+				"sortCameraPositionLocal"]:
+			canonical.erase(key)
+		canonical["status"] = "ready"
+		var resorted: Dictionary = backend.call("sort_section_fluid_surface_data",
+			canonical, Vector3(40.0, 4.0, 0.0))
+		if String(resorted.get("status", "")) != "ready":
+			failures.append("canonical section payload could not be re-sorted")
+		else:
+			_validate_section_fluid_surface(resorted, "water", failures)
+			_validate_section_fluid_surface(resorted, "lava", failures)
+			if resorted.get("sortCameraPositionLocal") != Vector3(40.0, 4.0, 0.0):
+				failures.append("resort did not bind its camera position")
+	results.append({"name":"section_local_translucent_face_groups_sort_and_resort",
+		"passed":failures.is_empty(), "failures":failures,
+		"waterFaceCount":(initial.get("waterFaceGroups", []) as Array).size(),
+		"lavaFaceCount":(initial.get("lavaFaceGroups", []) as Array).size()})
+	run_section_boundary_case()
+
+
+func _validate_section_fluid_surface(data: Dictionary, fluid_kind: String,
+		failures: Array[String]) -> void:
+	var vertices_value: Variant = data.get("%sVertices" % fluid_kind)
+	var groups_value: Variant = data.get("%sFaceGroups" % fluid_kind)
+	if not vertices_value is PackedVector3Array or not groups_value is Array:
+		failures.append("%s sorted geometry or group manifest missing" % fluid_kind)
+		return
+	var vertices: PackedVector3Array = vertices_value
+	var groups: Array = groups_value
+	if vertices.size() != groups.size() * 6:
+		failures.append("%s face groups do not cover the vertex array" % fluid_kind)
+		return
+	var prior_distance := INF
+	var camera_position: Vector3 = data.get("sortCameraPositionLocal", Vector3.ZERO)
+	for group_index in range(groups.size()):
+		var group: Dictionary = groups[group_index]
+		if String(group.get("groupId", "")).is_empty() \
+				or int(group.get("firstIndex", -1)) != group_index * 6 \
+				or int(group.get("indexCount", -1)) != 6:
+			failures.append("%s group range invalid at %d" % [fluid_kind, group_index])
+			return
+		var centroid := Vector3.ZERO
+		for vertex_index in range(group_index * 6, group_index * 6 + 6):
+			centroid += vertices[vertex_index]
+		centroid /= 6.0
+		if centroid.distance_squared_to(group.get("centroid", Vector3.INF)) > 0.000001:
+			failures.append("%s descriptor centroid differs from mesh arrays" % fluid_kind)
+			return
+		var distance := centroid.distance_squared_to(camera_position)
+		if distance > prior_distance + 0.000001:
+			failures.append("%s face groups are not far-to-near" % fluid_kind)
+			return
+		prior_distance = distance
+
+
+func run_section_boundary_case() -> void:
+	var west_key := Vector3i.ZERO
+	var east_key := Vector3i(1, 0, 0)
+	var cells := [cell_state(Vector3i(15, 3, 4), "water"),
+		cell_state(Vector3i(16, 3, 4), "water")]
+	var revisions := [{"sectionKey":west_key, "revision":51},
+		{"sectionKey":east_key, "revision":51}]
+	var west_payload := exact_payload_for_cells(cells, {"chunkSize":SECTION_SIZE,
+		"minY":0, "maxY":SECTION_SIZE - 1, "startX":0, "startZ":0,
+		"revision":51, "sectionRevisions":revisions})
+	var east_payload := exact_payload_for_cells(cells, {"chunkSize":SECTION_SIZE,
+		"minY":0, "maxY":SECTION_SIZE - 1, "startX":SECTION_SIZE, "startZ":0,
+		"revision":51, "sectionRevisions":revisions})
+	var camera := Vector3(18.0, 5.0, 5.0)
+	var west: Dictionary = backend.call("build_section_fluid_surface_data_from_sections",
+		west_payload, west_key, camera)
+	var east: Dictionary = backend.call("build_section_fluid_surface_data_from_sections",
+		east_payload, east_key, camera - Vector3(SECTION_SIZE * CELL_SIZE, 0.0, 0.0))
+	var repeated: Dictionary = backend.call("build_section_fluid_surface_data_from_sections",
+		west_payload, west_key, camera)
+	var failures: Array[String] = []
+	if west.get("status") != "ready" or east.get("status") != "ready":
+		failures.append("adjacent exact section payload did not build")
+	else:
+		var west_count := (west.get("waterFaceGroups", []) as Array).size()
+		var east_count := (east.get("waterFaceGroups", []) as Array).size()
+		if west_count != 5 or east_count != 5 or west_count + east_count != 10:
+			failures.append("shared section face duplicated or missing: %d + %d" % [west_count, east_count])
+		for result in [west, east]:
+			var vertices: PackedVector3Array = result.get("waterVertices", PackedVector3Array())
+			for vertex in vertices:
+				if vertex.x < -EPSILON or vertex.x > SECTION_SIZE * CELL_SIZE + EPSILON:
+					failures.append("section-local x escaped the owning section")
+					break
+		if repeated.get("waterVertices") != west.get("waterVertices") \
+				or repeated.get("waterFaceGroups") != west.get("waterFaceGroups"):
+			failures.append("same source revisions and POV did not produce deterministic geometry")
+	results.append({"name":"adjacent_section_fluid_faces_partition_without_seam_duplication",
+		"passed":failures.is_empty(), "failures":failures,
+		"westFaceCount":(west.get("waterFaceGroups", []) as Array).size(),
+		"eastFaceCount":(east.get("waterFaceGroups", []) as Array).size(),
+		"deterministicRepeat":repeated.get("waterVertices") == west.get("waterVertices")})
+
 
 func ensure_exact_section(sections_by_key: Dictionary, cell: Vector3i) -> void:
 	var section_key := Vector3i(

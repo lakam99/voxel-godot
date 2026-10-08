@@ -340,7 +340,7 @@ func teleport_to(value: String) -> bool:
             readiness = StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
         else:
             readiness = normalized_startup_result(
-                await runtime.wait_for_spawn_presentation(destination,INITIAL_READINESS_TIMEOUT_SECONDS),
+                await runtime.wait_for_spawn_presentation(destination),
                 "invalid_streaming_destination_presentation_result")
     if not startup_result_is_ready(readiness) or shutdown_requested:
         release_streaming_destination(operation_owner)
@@ -368,7 +368,7 @@ func teleport_to(value: String) -> bool:
     var clearance := GeneratedStructurePlayerClearanceScript.inspect(operation_player)
     var runtime = get("voxel_terrain_runtime")
     var target_presentation := normalized_startup_result(
-        await runtime.wait_for_spawn_presentation(destination,INITIAL_READINESS_TIMEOUT_SECONDS),
+        await runtime.wait_for_spawn_presentation(destination),
         "invalid_streaming_destination_presentation_result") if is_instance_valid(runtime) \
         else StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
     final_state = streaming_destination_readiness(destination,operation_owner,request_id,operation_seed)

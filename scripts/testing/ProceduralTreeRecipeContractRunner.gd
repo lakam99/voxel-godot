@@ -1,6 +1,7 @@
 extends SceneTree
 
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 func _initialize() -> void:
 	call_deferred("run_contract")
@@ -24,11 +25,9 @@ func run_contract() -> void:
 			"ageYears": 240.0,
 			"growthStage": 0.78,
 			"geneticSeed": 18731 + index * 7919,
-			"visualHeight": 68.0,
-			"trunkRadius": 5.2,
-			"canopyRadius": 28.0,
 			"canopyDensity": 0.82
 		}
+		spec = CertifiedRequestFixture.prepare_or_fail(spec)
 		var recipe: Dictionary = tree_service.build_recipe(spec)
 		recipes.append(recipe)
 		signatures[String(recipe.get("signature", ""))] = true
@@ -46,11 +45,9 @@ func run_contract() -> void:
 		"ageYears": 240.0,
 		"growthStage": 0.78,
 		"geneticSeed": 18731,
-		"visualHeight": 68.0,
-		"trunkRadius": 5.2,
-		"canopyRadius": 28.0,
 		"canopyDensity": 0.82
 	}
+	repeat_spec = CertifiedRequestFixture.prepare_or_fail(repeat_spec)
 	var repeated: Dictionary = tree_service.build_recipe(repeat_spec)
 	var deterministic := not recipes.is_empty() and String(recipes[0].get("signature", "")) == String(repeated.get("signature", ""))
 	var bounded := true

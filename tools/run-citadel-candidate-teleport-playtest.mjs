@@ -232,6 +232,15 @@ export function validateMenuJourneyEvidence(report, continueSave = null) {
     const interaction = stage(name)?.interaction;
     requireEvidence(interaction?.passed === true && interaction.desiredOpen === desiredOpen && interaction.actualOpen === desiredOpen,
       `Door interaction sequence did not prove ${name}.`);
+    const attachment = interaction?.nativeAttachment;
+    requireEvidence(attachment?.passed === true && attachment.before?.passed === true
+      && attachment.firstMotion?.passed === true && attachment.after?.passed === true
+      && attachment.beforeCapture === true && attachment.firstDrawCapture === true
+      && JSON.stringify(attachment.before.identity) === JSON.stringify(attachment.after.identity)
+      && JSON.stringify(attachment.before.collisionIds) === JSON.stringify(attachment.after.collisionIds),
+    `Native attachment identity, first-motion draw, or collision preservation missing for ${name}.`);
+    requireEvidence(attachment.before.motionKind === (name === 'gate_open' ? 'raise' : 'swing'),
+      `Door motion kind was not the expected production swing/raise path for ${name}.`);
   }
   const ordered = indices(['gate_open', 'gate_cross', 'return_gate_cross', 'home_open', 'home_entry', 'home_exit', 'home_close',
     'gate_stair_door_open', 'gate_stair_base', 'gate_stair_landing_00', 'gate_stair_exit_00']);

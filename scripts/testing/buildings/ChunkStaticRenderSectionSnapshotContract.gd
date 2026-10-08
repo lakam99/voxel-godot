@@ -29,6 +29,21 @@ func _run() -> void:
 	inputs.make_read_only()
 	var assembled: Dictionary = Snapshot.assemble(key, inputs)
 	var snapshot: Dictionary = assembled.get("snapshot", {})
+	if assembled.get("status") != "ready" or snapshot.is_empty():
+		var failure := {"schema":"chunk-static-render-section-snapshot-contract/v1",
+			"checks":{"assembly_ready":false}, "passed":false,
+			"assemblyStatus":assembled.get("status", "missing"),
+			"assemblyReason":assembled.get("reason", "snapshot_missing"),
+			"evidence":"pure immutable snapshot contract; assembly failure diagnostic"}
+		var failure_report_path := OS.get_environment("CHUNK_STATIC_RENDER_SECTION_SNAPSHOT_REPORT")
+		if not failure_report_path.is_empty():
+			var failure_file := FileAccess.open(failure_report_path, FileAccess.WRITE)
+			if failure_file != null:
+				failure_file.store_string(JSON.stringify(failure, "\t"))
+				failure_file.close()
+		print("CHUNK STATIC RENDER SECTION SNAPSHOT ", JSON.stringify(failure))
+		quit(1)
+		return
 	checks["valid_snapshot"] = assembled.get("status") == "ready" \
 		and snapshot.get("schema") == "chunk-static-render-section-snapshot/v3" \
 		and snapshot.get("instanceAttributeLayout") == Attributes.LAYOUT_SCHEMA \
@@ -84,7 +99,8 @@ func _run() -> void:
 	checks["wrong_section_key_rejected"] = _rejects_wrong_section_key()
 	checks["wrong_coordinate_frame_rejected"] = _rejects_wrong_coordinate_frame()
 	checks["non_finite_instance_rejected"] = _rejects_non_finite_instance()
-	checks["duplicate_contributor_rejected"] = _rejects_duplicate_contributor()
+	checks["same_source_distinct_parts_are_preserved"] = _accepts_distinct_source_parts()
+	checks["duplicate_contributor_identity_rejected"] = _rejects_duplicate_contributor()
 	checks["mutable_contributor_list_rejected"] = _rejects_mutable_input()
 	checks["incompatible_policy_stays_separate"] = _separates_shadow_policy()
 	checks["render_layer_and_pipeline_revision_stay_separate"] = _separates_render_layer_policy()
@@ -199,7 +215,7 @@ func _batch_key(material: String, tier: String, mesh_key: String, shadows: bool,
 		shadows, visibility, fade, mesh_local_bounds.position.x,
 		mesh_local_bounds.position.y, mesh_local_bounds.position.z,
 		mesh_local_bounds.size.x, mesh_local_bounds.size.y,
-		mesh_local_bounds.size.z]).sha256_text()
+		mesh_local_bounds.size.z, true]).sha256_text()
 
 
 func _negative_section_owner_contract() -> bool:
@@ -403,7 +419,7 @@ func _rejects_non_finite_instance() -> bool:
 		and result.get("reason") == "non_finite_segment_buffer"
 
 
-func _rejects_duplicate_contributor() -> bool:
+func _accepts_distinct_source_parts() -> bool:
 	var contributor := _contributor("duplicate", "part-a", "r1", [
 		_batch("stone", "structural", "unit-box", true, 240.0, 18.0,
 			[_segment("one", AABB(Vector3(1, 1, 1), Vector3.ONE), 1, 0.7)])])
@@ -413,7 +429,22 @@ func _rejects_duplicate_contributor() -> bool:
 	var values: Array = [contributor, other]
 	values.make_read_only()
 	var result := Snapshot.assemble(Vector3i.ZERO, values)
-	return result.get("status") == "failed" and result.get("reason") == "duplicate_contributor_source_id"
+	return result.get("status") == "ready" \
+		and result.get("snapshot", {}).get("contributorCount", 0) == 2
+
+
+func _rejects_duplicate_contributor() -> bool:
+	var contributor := _contributor("duplicate", "part-a", "r1", [
+		_batch("stone", "structural", "unit-box", true, 240.0, 18.0,
+			[_segment("one", AABB(Vector3(1, 1, 1), Vector3.ONE), 1, 0.7)])])
+	var duplicate := _contributor("duplicate", "part-a", "r2", [
+		_batch("wood", "structural", "unit-box", true, 240.0, 18.0,
+			[_segment("two", AABB(Vector3(2, 1, 1), Vector3.ONE), 1, 0.8)])])
+	var values: Array = [contributor, duplicate]
+	values.make_read_only()
+	var result := Snapshot.assemble(Vector3i.ZERO, values)
+	return result.get("status") == "failed" \
+		and result.get("reason") == "duplicate_contributor_source_identity"
 
 
 func _rejects_mutable_input() -> bool:

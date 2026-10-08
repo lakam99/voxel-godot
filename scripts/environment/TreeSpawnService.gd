@@ -10,6 +10,7 @@ const ConiferGrammar := preload("res://scripts/environment/tree_grammars/Mathema
 const SavannaGrammar := preload("res://scripts/environment/tree_grammars/MathematicalTreePocSavannaRecipeBuilder.gd")
 const BushyOakGrammar := preload("res://scripts/environment/tree_grammars/MathematicalTreePocBushyOakRecipeBuilder.gd")
 const VisualFactory := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
+const TreeRequestAdmissionScript := preload("res://scripts/environment/TreeRequestAdmission.gd")
 
 # One publication is intentionally allowed per frame.  These caps keep that
 # work below the visible-hitch threshold while each foliage anchor still
@@ -96,6 +97,9 @@ func build_recipe_for_worker(request: Dictionary) -> Dictionary:
 
 func recipe_cache_key(request: Dictionary) -> String:
 	var normalized := normalize_request(request)
+	return recipe_cache_key_from_normalized(normalized)
+
+func recipe_cache_key_from_normalized(normalized: Dictionary) -> String:
 	return request_key(normalized) if not normalized.is_empty() else ""
 
 func recipe_identity_key(request: Dictionary) -> String:
@@ -128,6 +132,9 @@ func derive_recipe_for_lod(source_recipe: Dictionary, request: Dictionary) -> Di
 
 func lod_policy_for_request(request: Dictionary) -> Dictionary:
 	var normalized := normalize_request(request)
+	return lod_policy_for_normalized_request(normalized)
+
+func lod_policy_for_normalized_request(normalized: Dictionary) -> Dictionary:
 	if normalized.is_empty():
 		return {}
 	var visibility_range := maxf(32.0, float((normalized.get("biomeParameters", {}) as Dictionary).get("visibilityRange", 440.0)))
@@ -144,6 +151,13 @@ func lod_policy_for_request(request: Dictionary) -> Dictionary:
 
 func lod_tier_for_distance(request: Dictionary, distance: float, current_tier := "") -> String:
 	var policy := lod_policy_for_request(request)
+	return lod_tier_for_distance_with_policy(policy, distance, current_tier)
+
+func lod_tier_for_distance_normalized(normalized: Dictionary, distance: float, current_tier := "") -> String:
+	return lod_tier_for_distance_with_policy(
+		lod_policy_for_normalized_request(normalized), distance, current_tier)
+
+func lod_tier_for_distance_with_policy(policy: Dictionary, distance: float, current_tier := "") -> String:
 	if policy.is_empty():
 		return "near"
 	var normalized_current := normalize_lod_tier(current_tier)
@@ -177,6 +191,12 @@ func cache_metrics() -> Dictionary:
 	}
 
 func normalize_request(request: Dictionary) -> Dictionary:
+	var presentation := String(request.get("presentation", "runtime"))
+	var admission: Dictionary = {}
+	if presentation != "review":
+		admission = TreeRequestAdmissionScript.validate_request(request)
+		if String(admission.get("status", "")) != "ready":
+			return {}
 	var tree_id := String(request.get("treeId", "")).strip_edges()
 	var world_seed := String(request.get("worldSeed", "")).strip_edges()
 	var biome := String(request.get("biome", "forest")).strip_edges().to_lower()
@@ -218,7 +238,10 @@ func normalize_request(request: Dictionary) -> Dictionary:
 		"canopyDensity": canopy_density,
 		"renderLodTier": normalize_lod_tier(String(request.get("renderLodTier", "near"))),
 		"biomeParameters": biome_parameters,
-		"presentation": String(request.get("presentation", "runtime")),
+		"presentation": presentation,
+		"treeAdmissionCertificate": admission.get("certificate", {}).duplicate(true) if admission.get("certificate", {}) is Dictionary else {},
+		"treeProducerCatalogRevision": String(admission.get("profileCatalogRevision", "")),
+		"treeProducerEnvelopeDigest": String(admission.get("requestEnvelopeDigest", "")),
 		"worldPosition": request.get("worldPosition", Vector3.ZERO) as Vector3,
 		"worldRotationY": float(request.get("worldRotationY", 0.0)),
 		# The ecological sampler's seed is a required genetic channel. Use a
@@ -403,33 +426,35 @@ func adapt_grammar_recipe(raw: Dictionary, request: Dictionary) -> Dictionary:
 	var vertical_scale := float(request.get("visualHeight", source_height)) / source_height
 	var radius_scale := float(request.get("trunkRadius", source_radius)) / source_radius
 	var horizontal_scale := float(request.get("canopyRadius", source_canopy)) / source_canopy
+	# Deep-copy the source graph once so nested recipe metadata stays detached,
+	# then transform its already-owned branch and foliage dictionaries in place.
+	# Previously each element was deep-copied here and the full raw graph was
+	# deep-copied again below before those arrays were immediately replaced.
+	var recipe: Dictionary = raw.duplicate(true)
 	var branches: Array[Dictionary] = []
-	var raw_branches: Array = raw.get("branches", [])
+	var raw_branches: Array = recipe.get("branches", [])
 	for source_value in raw_branches:
 		if not (source_value is Dictionary):
 			continue
-		var source: Dictionary = source_value
-		var branch := source.duplicate(true)
-		branch["start"] = scale_position(source.get("start", Vector3.ZERO), horizontal_scale, vertical_scale)
-		branch["end"] = scale_position(source.get("end", Vector3.UP), horizontal_scale, vertical_scale)
-		branch["radiusStart"] = maxf(0.018, float(source.get("radiusStart", 0.04)) * radius_scale)
-		branch["radiusEnd"] = maxf(0.012, float(source.get("radiusEnd", 0.02)) * radius_scale)
+		var branch: Dictionary = source_value
+		branch["start"] = scale_position(branch.get("start", Vector3.ZERO), horizontal_scale, vertical_scale)
+		branch["end"] = scale_position(branch.get("end", Vector3.UP), horizontal_scale, vertical_scale)
+		branch["radiusStart"] = maxf(0.018, float(branch.get("radiusStart", 0.04)) * radius_scale)
+		branch["radiusEnd"] = maxf(0.012, float(branch.get("radiusEnd", 0.02)) * radius_scale)
 		var wind_response := float((request.get("biomeParameters", {}) as Dictionary).get("windResponse", 1.0))
 		branch["windWeight"] = clampf(maxf((branch["start"] as Vector3).y, (branch["end"] as Vector3).y) / maxf(1.0, float(request.get("visualHeight", 1.0))) * wind_response, 0.0, 1.0)
 		branches.append(branch)
 	var foliage: Array[Dictionary] = []
-	for source_value in raw.get("foliage", []):
+	for source_value in recipe.get("foliage", []):
 		if not (source_value is Dictionary):
 			continue
-		var source: Dictionary = source_value
-		var anchor := source.duplicate(true)
-		anchor["position"] = scale_position(source.get("position", Vector3.ZERO), horizontal_scale, vertical_scale)
-		var source_scale: Vector3 = source.get("scale", Vector3.ONE)
+		var anchor: Dictionary = source_value
+		anchor["position"] = scale_position(anchor.get("position", Vector3.ZERO), horizontal_scale, vertical_scale)
+		var source_scale: Vector3 = anchor.get("scale", Vector3.ONE)
 		anchor["scale"] = Vector3(source_scale.x * horizontal_scale, source_scale.y * vertical_scale, source_scale.z * horizontal_scale)
 		var foliage_wind_response := float((request.get("biomeParameters", {}) as Dictionary).get("windResponse", 1.0))
 		anchor["windWeight"] = clampf((anchor["position"] as Vector3).y / maxf(1.0, float(request.get("visualHeight", 1.0))) * foliage_wind_response, 0.20, 1.0)
 		foliage.append(anchor)
-	var recipe := raw.duplicate(true)
 	recipe["version"] = RECIPE_VERSION
 	recipe["treeId"] = String(request.get("treeId", ""))
 	recipe["biome"] = String(request.get("biome", "forest"))
@@ -444,6 +469,9 @@ func adapt_grammar_recipe(raw: Dictionary, request: Dictionary) -> Dictionary:
 	recipe["canopyRadius"] = float(request.get("canopyRadius", source_canopy))
 	recipe["canopyDensity"] = float(request.get("canopyDensity", 0.78))
 	recipe["biomeParameters"] = (request.get("biomeParameters", {}) as Dictionary).duplicate(true)
+	recipe["treeAdmissionCertificate"] = (request.get("treeAdmissionCertificate", {}) as Dictionary).duplicate(true)
+	recipe["treeProducerCatalogRevision"] = String(request.get("treeProducerCatalogRevision", ""))
+	recipe["treeProducerEnvelopeDigest"] = String(request.get("treeProducerEnvelopeDigest", ""))
 	recipe["renderPolicy"] = render_policy(request)
 	recipe["branches"] = branches
 	var root_buttress_footprints: Array[Dictionary] = []
@@ -497,8 +525,17 @@ func render_recipe(canonical: Dictionary, request: Dictionary) -> Dictionary:
 	# while discarding its parent, leaving precisely the floating cylinders that
 	# prompted this migration. Reduce only through a closure that retains every
 	# selected segment's route back to the base wood.
-	recipe["branches"] = graph_preserving_reduce(canonical.get("branches", []), branch_budget)
-	recipe["foliage"] = support_aware_foliage_reduce(canonical.get("foliage", []), foliage_budget)
+	# canonical is a cached immutable recipe. Its deep clone above owns every
+	# nested value, so only run reducers when the clone actually exceeds its
+	# target. This avoids a second full deep-copy on the common within-budget
+	# path and prevents a downshift result from aliasing cached branch/anchor
+	# dictionaries selected from canonical.
+	var recipe_branches: Array = recipe.get("branches", [])
+	if recipe_branches.size() > branch_budget:
+		recipe["branches"] = graph_preserving_reduce(recipe_branches, branch_budget)
+	var recipe_foliage: Array = recipe.get("foliage", [])
+	if recipe_foliage.size() > foliage_budget:
+		recipe["foliage"] = support_aware_foliage_reduce(recipe_foliage, foliage_budget)
 	recipe["branchCount"] = (recipe["branches"] as Array).size()
 	recipe["foliageClusterCount"] = (recipe["foliage"] as Array).size()
 	recipe["renderLod"] = {"tier": lod_tier, "branchBudget": branch_budget, "foliageBudget": foliage_budget, "impostor": false}
@@ -693,7 +730,7 @@ func request_key(request: Dictionary) -> String:
 
 func recipe_identity_key_from_normalized(request: Dictionary) -> String:
 	var biome_parameters: Dictionary = request.get("biomeParameters", {})
-	return "%s:%s:%s:%s:%s:%s:%0.5f:%0.3f:%0.3f:%0.3f:%0.3f:%d:%s" % [request.get("presentation", "runtime"), request.get("worldSeed", ""), request.get("treeId", ""), request.get("biome", ""), request.get("architecture", ""), request.get("speciesGrammar", ""), request.get("maturity", 0.0), request.get("visualHeight", 0.0), request.get("trunkRadius", 0.0), request.get("canopyRadius", 0.0), request.get("canopyDensity", 0.78), request.get("geneticSeed", 0), biome_parameter_key(biome_parameters)]
+	return "%s:%s:%s:%s:%s:%s:%0.5f:%0.3f:%0.3f:%0.3f:%0.3f:%d:%s:%s" % [request.get("presentation", "runtime"), request.get("worldSeed", ""), request.get("treeId", ""), request.get("biome", ""), request.get("architecture", ""), request.get("speciesGrammar", ""), request.get("maturity", 0.0), request.get("visualHeight", 0.0), request.get("trunkRadius", 0.0), request.get("canopyRadius", 0.0), request.get("canopyDensity", 0.78), request.get("geneticSeed", 0), biome_parameter_key(biome_parameters), request.get("treeProducerEnvelopeDigest", "")]
 
 func runtime_recipe_signature(recipe: Dictionary, request: Dictionary) -> String:
 	return "tree-v%d-%08x" % [RECIPE_VERSION, stable_hash("%s:%s:%s" % [request_key(request), recipe.get("topologySignature", ""), int(recipe.get("branchCount", 0))])]

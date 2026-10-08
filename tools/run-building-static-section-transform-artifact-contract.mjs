@@ -8,6 +8,11 @@ cli(async () => {
   const files = [
     'scripts/testing/buildings/BuildingStaticSectionTransformArtifactContract.gd',
     'scripts/buildings/BuildingPartPublisher.gd',
+    'scripts/buildings/BuildingWindowVisualRecipe.gd',
+    'scripts/buildings/BuildingWindowVisualRecipe.gd.uid',
+    'scripts/buildings/BuildingDoorSectionCapture.gd',
+    'scripts/buildings/BuildingDoorSectionCapture.gd.uid',
+    'scripts/buildings/BuildingDoorGeometry.gd',
     'scripts/buildings/BuildingStaticBatchFlush.gd',
     'scripts/buildings/BuildingBlueprint.gd',
     'scripts/buildings/ConstructionMaterialCatalog.gd',
@@ -30,11 +35,22 @@ cli(async () => {
   await phaseRun(c, {
     args: ['--headless', '--script', 'res://scripts/testing/buildings/BuildingStaticSectionTransformArtifactContract.gd'],
     env: { BUILDING_STATIC_SECTION_TRANSFORM_ARTIFACT_REPORT: path.join(c.run, 'report.json') },
-    timeout: 60,
+    timeout: process.env.BUILDING_MASONRY_SUPPORT_DIAGNOSTIC === '1' ? 180 : 60,
     logPolicy: { emptyStderr: false }
   });
   stable(c.project, sourceHashes);
   const report = read(path.join(c.run, 'report.json'));
+  for (const motion of ['swing', 'raise']) {
+    for (const check of ['complete_capture', 'complete_moving_and_fixed_roster',
+      'pose_preserves_neutral_geometry_identity', 'collision_and_body_preserved',
+      'unknown_child_keeps_capture_pending', 'moved_body_invalidates_capture',
+      'complete_bundle_uses_body_anchor', 'outside_declared_motion_keeps_capture_pending',
+      'visibility_policy_sealed_for_every_batch', 'mixed_batch_visibility_preserved',
+      'visibility_changes_source_content_identity', 'loading_parent_does_not_rewrite_source_visibility']) {
+      demand(report.checks?.[`real_${motion}_producer_${check}`] === true,
+        `Door producer contract failed: ${motion}/${check}`);
+    }
+  }
   demand(report.evidence === 'synthetic_building_static_section_transform_artifact_contract' && report.passed === true
     && report.checks?.publication_boundary_completes_with_artifact === true
     && report.checks?.prepared_segment_source_also_commits_a_section_artifact === true
@@ -42,6 +58,9 @@ cli(async () => {
     && report.checks?.invalid_artifact_commit_preserves_prior_accepted_revision === true
     && report.checks?.artifact_binds_exact_source_revision_and_owners === true
     && report.checks?.artifact_segments_are_readonly_and_exact === true
+    && report.checks?.artifact_watch_receipt_accepts_exact_immutable_roster === true
+    && report.checks?.artifact_watch_receipt_rejects_replaced_roster_reference === true
+    && report.checks?.artifact_watch_receipt_revokes_on_material_change === true
     && report.checks?.legacy_multimesh_remains_the_only_visible_source_visual === true
     && report.checks?.real_resumable_publish_part_batch_admitted === true
     && report.checks?.real_resumable_prepared_geometry_job_advanced_under_source_context === true

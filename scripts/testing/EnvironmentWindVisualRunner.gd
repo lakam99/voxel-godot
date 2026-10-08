@@ -4,13 +4,14 @@ const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalo
 const WindSystemScript := preload("res://scripts/environment/EnvironmentWindSystem.gd")
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 const CAPTURE_SIZE := Vector2i(1280, 720)
 const TREE_SPECS := [
-    {"treeId": "wind-broadleaf", "position": Vector3(-8.4, 0.0, 1.8), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.92, "visualHeight": 22.0, "trunkRadius": 1.35, "canopyRadius": 10.4, "canopyDensity": 0.90},
-    {"treeId": "wind-broadleaf-young", "position": Vector3(4.0, 0.0, 2.6), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.78, "visualHeight": 17.0, "trunkRadius": 0.78, "canopyRadius": 7.4, "canopyDensity": 0.82},
-    {"treeId": "wind-conifer", "position": Vector3(-1.5, 0.0, 10.2), "biome": "taiga", "architecture": "conifer", "speciesGrammar": "norway_spruce", "growthStage": 0.84, "visualHeight": 23.0, "trunkRadius": 0.66, "canopyRadius": 6.6, "canopyDensity": 0.88},
-    {"treeId": "wind-savanna", "position": Vector3(10.6, 0.0, -4.8), "biome": "savanna", "architecture": "savanna", "speciesGrammar": "umbrella_thorn", "growthStage": 0.86, "visualHeight": 16.0, "trunkRadius": 0.84, "canopyRadius": 9.1, "canopyDensity": 0.84}
+    {"treeId": "wind-broadleaf", "position": Vector3(-8.4, 0.0, 1.8), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.92, "canopyDensity": 0.90},
+    {"treeId": "wind-broadleaf-young", "position": Vector3(4.0, 0.0, 2.6), "biome": "forest", "architecture": "broadleaf", "speciesGrammar": "bushy_oak", "growthStage": 0.78, "canopyDensity": 0.82},
+    {"treeId": "wind-conifer", "position": Vector3(-1.5, 0.0, 10.2), "biome": "taiga", "architecture": "conifer", "speciesGrammar": "norway_spruce", "growthStage": 0.84, "canopyDensity": 0.88},
+    {"treeId": "wind-savanna", "position": Vector3(10.6, 0.0, -4.8), "biome": "savanna", "architecture": "savanna", "speciesGrammar": "umbrella_thorn", "growthStage": 0.86, "canopyDensity": 0.84}
 ]
 
 var report_path := ""
@@ -160,6 +161,7 @@ func setup_trees() -> bool:
         request["worldSeed"] = "wind-visual-world"
         request["presentation"] = "runtime"
         request.erase("position")
+        request = CertifiedRequestFixture.prepare_or_fail(request)
         var tree: Node3D = tree_service.spawn_tree(request)
         if tree == null:
             all_ready = false

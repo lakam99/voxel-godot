@@ -583,6 +583,19 @@ func begin_exposed_underground_floor_scan(chunk_key: Vector2i, chunk_size := 0) 
 		return terrain_volume_service.begin_exposed_underground_floor_scan(chunk_key, size)
 	return {}
 
+func exposed_underground_floor_scan_source_revision(chunk_key: Vector2i,
+		chunk_size := 0) -> String:
+	if terrain_volume_service != null and terrain_volume_service.has_method(
+			"exposed_underground_floor_scan_source_revision"):
+		var size := int(chunk_size)
+		if size <= 0 and main != null:
+			size = int(main.CHUNK_SIZE)
+		if size <= 0:
+			size = TerrainVolumeServiceScript.SECTION_SIZE
+		return terrain_volume_service.exposed_underground_floor_scan_source_revision(
+			chunk_key, size)
+	return ""
+
 func advance_exposed_underground_floor_scan(state: Dictionary, sample_budget := 128, time_budget_ms := -1.0, budget_start_usec := 0) -> Dictionary:
 	if terrain_volume_service != null and terrain_volume_service.has_method("advance_exposed_underground_floor_scan"):
 		return terrain_volume_service.advance_exposed_underground_floor_scan(state, sample_budget, time_budget_ms, budget_start_usec)

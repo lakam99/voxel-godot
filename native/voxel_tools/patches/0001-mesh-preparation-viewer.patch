@@ -1,5 +1,5 @@
 diff --git a/engine/voxel_engine.cpp b/engine/voxel_engine.cpp
-index 38c7920..e1152e1 100644
+index 38c79208..e1152e17 100644
 --- a/engine/voxel_engine.cpp
 +++ b/engine/voxel_engine.cpp
 @@ -209,6 +209,16 @@ bool VoxelEngine::is_viewer_requiring_visuals(ViewerID viewer_id) const {
@@ -20,7 +20,7 @@ index 38c7920..e1152e1 100644
  	Viewer &viewer = _world.viewers.get(viewer_id);
  	viewer.require_collisions = enabled;
 diff --git a/engine/voxel_engine.h b/engine/voxel_engine.h
-index 8f8dae7..15eb32e 100644
+index 8f8dae74..15eb32e2 100644
 --- a/engine/voxel_engine.h
 +++ b/engine/voxel_engine.h
 @@ -142,6 +142,7 @@ public:
@@ -41,10 +41,10 @@ index 8f8dae7..15eb32e 100644
  	bool is_viewer_requiring_collisions(ViewerID viewer_id) const;
  	void set_viewer_requires_data_block_notifications(ViewerID viewer_id, bool enabled);
 diff --git a/terrain/fixed_lod/voxel_mesh_block_vt.h b/terrain/fixed_lod/voxel_mesh_block_vt.h
-index 815d80b..b5d4e07 100644
+index 815d80b5..a759c18b 100644
 --- a/terrain/fixed_lod/voxel_mesh_block_vt.h
 +++ b/terrain/fixed_lod/voxel_mesh_block_vt.h
-@@ -20,7 +20,10 @@ public:
+@@ -20,7 +20,16 @@ public:
  	zylann::godot::DirectMeshInstance shadow_occluder;
  
  	RefCount mesh_viewers;
@@ -52,14 +52,29 @@ index 815d80b..b5d4e07 100644
 +	RefCount render_viewers;
  	RefCount collision_viewers;
 +	uint32_t visual_upload_count = 0;
++	// Identifies this exact mesh-block owner. A recreated block receives a new
++	// generation so receipts from the retired block cannot hide its visual.
++	int64_t owner_generation = 0;
++	int64_t render_coverage_revision = 0;
++	bool render_coverage_complete = false;
++	Array render_coverage_claims;
  
  	// True if this block is in the update list of `VoxelTerrain`, so multiple edits done before it processes will not
  	// add it multiple times
 diff --git a/terrain/fixed_lod/voxel_terrain.cpp b/terrain/fixed_lod/voxel_terrain.cpp
-index 7592db2..e1b97e1 100644
+index 7592db27..f9bb9fa2 100644
 --- a/terrain/fixed_lod/voxel_terrain.cpp
 +++ b/terrain/fixed_lod/voxel_terrain.cpp
-@@ -460,8 +460,8 @@ void VoxelTerrain::try_schedule_mesh_update(VoxelMeshBlockVT &mesh_block) {
+@@ -34,6 +34,8 @@
+ #include "../voxel_save_completion_tracker.h"
+ #include "voxel_terrain_multiplayer_synchronizer.h"
+ 
++#include <limits>
++
+ #ifdef TOOLS_ENABLED
+ #include "../../meshers/transvoxel/voxel_mesher_transvoxel.h"
+ #endif
+@@ -460,8 +462,8 @@ void VoxelTerrain::try_schedule_mesh_update(VoxelMeshBlockVT &mesh_block) {
  	}
  }
  
@@ -70,7 +85,19 @@ index 7592db2..e1b97e1 100644
  		// Why even call the function?
  		return;
  	}
-@@ -476,9 +476,16 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
+@@ -470,15 +472,28 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
+ 
+ 	if (block == nullptr) {
+ 		// Create if not found
++		ERR_FAIL_COND_MSG(_next_mesh_block_owner_generation <= 0,
++				"VoxelTerrain mesh-block owner generation exhausted");
+ 		block = ZN_NEW(VoxelMeshBlockVT(bpos, get_mesh_block_size()));
++		block->owner_generation = _next_mesh_block_owner_generation;
++		_next_mesh_block_owner_generation = _next_mesh_block_owner_generation == std::numeric_limits<int64_t>::max()
++				? 0
++				: _next_mesh_block_owner_generation + 1;
+ 		block->set_world(get_world_3d());
+ 		_mesh_map.set_block(bpos, block);
  	}
  	CRASH_COND(block == nullptr);
  
@@ -82,12 +109,12 @@ index 7592db2..e1b97e1 100644
 +	if (render_flag) {
 +		block->render_viewers.add();
 +		// A prepared mesh can be displayed immediately, without another worker task.
-+		block->set_visible(true);
++		block->set_visible(!block->render_coverage_complete);
 +	}
  	if (collision_flag) {
  		block->collision_viewers.add();
  	}
-@@ -486,27 +493,32 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
+@@ -486,27 +501,32 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
  	// This is needed in case a viewer wants to view meshes in places data blocks are already present.
  	// Before that, meshes were updated only when a data block was loaded or modified,
  	// so changing block size or viewer flags did not make meshes appear.
@@ -128,7 +155,7 @@ index 7592db2..e1b97e1 100644
  		}
  	}
  
-@@ -691,6 +703,22 @@ Array VoxelTerrain::get_mesh_block_surface(Vector3i block_pos) const {
+@@ -691,6 +711,246 @@ Array VoxelTerrain::get_mesh_block_surface(Vector3i block_pos) const {
  	return Array();
  }
  
@@ -144,14 +171,238 @@ index 7592db2..e1b97e1 100644
 +		state["has_mesh"] = block->has_mesh();
 +		state["is_visible"] = block->is_visible();
 +		state["visual_upload_count"] = block->visual_upload_count;
++		state["terrain_instance_id"] = get_instance_id();
++		state["owner_generation"] = block->owner_generation;
++		state["render_coverage_revision"] = block->render_coverage_revision;
++		state["render_coverage_complete"] = block->render_coverage_complete;
++		state["render_coverage_claims"] = block->render_coverage_claims;
 +	}
 +	return state;
++}
++
++Dictionary VoxelTerrain::_validate_mesh_block_render_coverage_claims(Vector3i block_pos, String world_id,
++		Array claims) const {
++	static constexpr int SECTION_SIZE_CELLS = 16;
++	static constexpr int MAX_COVERAGE_CLAIMS = 64;
++	Dictionary result;
++	result["status"] = "failed";
++	if (world_id.is_empty()) {
++		result["reason"] = "render_coverage_world_id_empty";
++		return result;
++	}
++	if (get_mesh_block_size() != SECTION_SIZE_CELLS) {
++		result["reason"] = "render_coverage_mesh_block_size_mismatch";
++		result["expectedBlockSize"] = SECTION_SIZE_CELLS;
++		result["actualBlockSize"] = get_mesh_block_size();
++		return result;
++	}
++	if (claims.size() > MAX_COVERAGE_CLAIMS) {
++		result["reason"] = "render_coverage_claim_limit_exceeded";
++		return result;
++	}
++
++	const int64_t block_min[3] = {
++		static_cast<int64_t>(block_pos.x) * SECTION_SIZE_CELLS,
++		static_cast<int64_t>(block_pos.y) * SECTION_SIZE_CELLS,
++		static_cast<int64_t>(block_pos.z) * SECTION_SIZE_CELLS
++	};
++	StdVector<uint8_t> covered(SECTION_SIZE_CELLS * SECTION_SIZE_CELLS * SECTION_SIZE_CELLS, 0);
++	Array normalized_claims;
++	Array owner_ids;
++	Array section_keys;
++
++	for (int64_t i = 0; i < claims.size(); ++i) {
++		const Variant claim_value = claims[i];
++		if (claim_value.get_type() != Variant::DICTIONARY) {
++			result["reason"] = "render_coverage_claim_not_dictionary";
++			return result;
++		}
++		const Dictionary claim = claim_value;
++		const String claim_world_id = String(claim.get("worldId", String()));
++		const String slot_owner_id = String(claim.get("slotOwnerId", String()));
++		const String source_revision = String(claim.get("sourceRevision", String()));
++		const String receipt_digest = String(claim.get("receiptDigest", String()));
++		const int64_t section_generation = int64_t(claim.get("sectionGeneration", int64_t(0)));
++		const Variant section_key_value = claim.get("sectionKey", Variant());
++		if (claim_world_id != world_id || slot_owner_id.is_empty() || source_revision.is_empty() ||
++				receipt_digest.is_empty() || section_generation <= 0 ||
++				section_key_value.get_type() != Variant::VECTOR3I) {
++			result["reason"] = "render_coverage_claim_identity_invalid";
++			return result;
++		}
++		const Vector3i section_key = section_key_value;
++		if (owner_ids.has(slot_owner_id) || section_keys.has(section_key)) {
++			result["reason"] = "render_coverage_claim_duplicate_owner_or_section";
++			return result;
++		}
++		owner_ids.append(slot_owner_id);
++		section_keys.append(section_key);
++
++		const int64_t section_min[3] = {
++			static_cast<int64_t>(section_key.x) * SECTION_SIZE_CELLS,
++			static_cast<int64_t>(section_key.y) * SECTION_SIZE_CELLS,
++			static_cast<int64_t>(section_key.z) * SECTION_SIZE_CELLS
++		};
++		int64_t low[3];
++		int64_t high[3];
++		const int64_t block_max[3] = {
++			block_min[0] + SECTION_SIZE_CELLS,
++			block_min[1] + SECTION_SIZE_CELLS,
++			block_min[2] + SECTION_SIZE_CELLS
++		};
++		bool intersects = true;
++		for (int axis = 0; axis < 3; ++axis) {
++			low[axis] = MAX(block_min[axis], section_min[axis]);
++			high[axis] = MIN(block_max[axis], section_min[axis] + SECTION_SIZE_CELLS);
++			if (low[axis] >= high[axis]) intersects = false;
++		}
++		if (!intersects) {
++			result["reason"] = "render_coverage_section_outside_mesh_block";
++			return result;
++		}
++		for (int64_t z = low[2]; z < high[2]; ++z) {
++			for (int64_t y = low[1]; y < high[1]; ++y) {
++				for (int64_t x = low[0]; x < high[0]; ++x) {
++					const size_t index = static_cast<size_t>(
++							((z - block_min[2]) * SECTION_SIZE_CELLS + (y - block_min[1])) *
++							SECTION_SIZE_CELLS + (x - block_min[0]));
++					covered[index] = 1;
++				}
++			}
++		}
++		Dictionary normalized_claim = claim.duplicate(true);
++		normalized_claim.make_read_only();
++		normalized_claims.append(normalized_claim);
++	}
++
++	bool coverage_complete = true;
++	for (const uint8_t cell_covered : covered) {
++		if (cell_covered == 0) {
++			coverage_complete = false;
++			break;
++		}
++	}
++	normalized_claims.make_read_only();
++	result["status"] = "ready";
++	result["coverageComplete"] = coverage_complete;
++	result["claims"] = normalized_claims;
++	return result;
++}
++
++Dictionary VoxelTerrain::_b_replace_mesh_block_render_coverage(Vector3i block_pos, int64_t terrain_instance_id,
++		int64_t owner_generation,
++		int64_t expected_coverage_revision, String world_id, Array claims) {
++	Dictionary result;
++	result["status"] = "failed";
++	VoxelMeshBlockVT *block = _mesh_map.get_block(block_pos);
++	if (block == nullptr) {
++		result["status"] = "pending";
++		result["reason"] = "render_coverage_mesh_block_not_present";
++		return result;
++	}
++	if (terrain_instance_id <= 0 || static_cast<int64_t>(get_instance_id()) != terrain_instance_id) {
++		result["reason"] = "render_coverage_terrain_instance_stale";
++		return result;
++	}
++	if (owner_generation <= 0 || block->owner_generation != owner_generation) {
++		result["reason"] = "render_coverage_mesh_block_generation_stale";
++		result["currentOwnerGeneration"] = block->owner_generation;
++		return result;
++	}
++	if (expected_coverage_revision < 0 || block->render_coverage_revision != expected_coverage_revision) {
++		result["reason"] = "render_coverage_revision_stale";
++		result["currentCoverageRevision"] = block->render_coverage_revision;
++		return result;
++	}
++	if (block->render_coverage_revision == std::numeric_limits<int64_t>::max()) {
++		result["reason"] = "render_coverage_revision_exhausted";
++		return result;
++	}
++	const Dictionary validation = _validate_mesh_block_render_coverage_claims(block_pos, world_id, claims);
++	if (String(validation.get("status", String())) != "ready") return validation;
++
++	block->render_coverage_claims = validation["claims"];
++	block->render_coverage_complete = bool(validation["coverageComplete"]);
++	++block->render_coverage_revision;
++	block->set_visible(block->render_viewers.get() > 0 && !block->render_coverage_complete);
++	result["status"] = "ready";
++	result["coverageComplete"] = block->render_coverage_complete;
++	result["renderSuppressed"] = block->render_coverage_complete;
++	result["ownerGeneration"] = block->owner_generation;
++	result["coverageRevision"] = block->render_coverage_revision;
++	result["claimCount"] = block->render_coverage_claims.size();
++	return result;
++}
++
++Dictionary VoxelTerrain::_b_remove_mesh_block_render_coverage_claim(Vector3i block_pos, int64_t terrain_instance_id,
++		int64_t owner_generation,
++		int64_t expected_coverage_revision, String world_id, String slot_owner_id,
++		int64_t section_generation, Vector3i section_key, String source_revision, String receipt_digest) {
++	Dictionary result;
++	result["status"] = "failed";
++	VoxelMeshBlockVT *block = _mesh_map.get_block(block_pos);
++	if (block == nullptr) {
++		result["status"] = "pending";
++		result["reason"] = "render_coverage_mesh_block_not_present";
++		return result;
++	}
++	if (terrain_instance_id <= 0 || static_cast<int64_t>(get_instance_id()) != terrain_instance_id) {
++		result["reason"] = "render_coverage_terrain_instance_stale";
++		return result;
++	}
++	if (owner_generation <= 0 || block->owner_generation != owner_generation) {
++		result["reason"] = "render_coverage_mesh_block_generation_stale";
++		return result;
++	}
++	if (expected_coverage_revision < 0 || block->render_coverage_revision != expected_coverage_revision) {
++		result["reason"] = "render_coverage_revision_stale";
++		result["currentCoverageRevision"] = block->render_coverage_revision;
++		return result;
++	}
++	if (block->render_coverage_revision == std::numeric_limits<int64_t>::max()) {
++		result["reason"] = "render_coverage_revision_exhausted";
++		return result;
++	}
++	Array remaining_claims;
++	bool removed = false;
++	for (int64_t i = 0; i < block->render_coverage_claims.size(); ++i) {
++		const Dictionary claim = block->render_coverage_claims[i];
++		const bool matches = String(claim.get("worldId", String())) == world_id &&
++				String(claim.get("slotOwnerId", String())) == slot_owner_id &&
++				int64_t(claim.get("sectionGeneration", int64_t(0))) == section_generation &&
++				claim.get("sectionKey", Vector3i()) == section_key &&
++				String(claim.get("sourceRevision", String())) == source_revision &&
++				String(claim.get("receiptDigest", String())) == receipt_digest;
++		if (matches) {
++			removed = true;
++		} else {
++			remaining_claims.append(claim);
++		}
++	}
++	if (!removed) {
++		result["reason"] = "render_coverage_exact_claim_not_current";
++		return result;
++	}
++	const Dictionary validation = _validate_mesh_block_render_coverage_claims(block_pos, world_id, remaining_claims);
++	if (String(validation.get("status", String())) != "ready") return validation;
++	block->render_coverage_claims = validation["claims"];
++	block->render_coverage_complete = bool(validation["coverageComplete"]);
++	++block->render_coverage_revision;
++	block->set_visible(block->render_viewers.get() > 0 && !block->render_coverage_complete);
++	result["status"] = "ready";
++	result["removed"] = true;
++	result["coverageComplete"] = block->render_coverage_complete;
++	result["renderSuppressed"] = block->render_coverage_complete;
++	result["ownerGeneration"] = block->owner_generation;
++	result["coverageRevision"] = block->render_coverage_revision;
++	result["claimCount"] = block->render_coverage_claims.size();
++	return result;
 +}
 +
  Dictionary VoxelTerrain::_b_get_statistics() const {
  	Dictionary d;
  
-@@ -1377,8 +1405,11 @@ void VoxelTerrain::process_viewers() {
+@@ -1377,8 +1637,11 @@ void VoxelTerrain::process_viewers() {
  
  				state.local_position_voxels = math::floor_to_int(local_position);
  				state.requires_collisions = VoxelEngine::get_singleton().is_viewer_requiring_collisions(viewer_id);
@@ -164,7 +415,7 @@ index 7592db2..e1b97e1 100644
  
  				// Update data and mesh view boxes
  
-@@ -1476,7 +1507,8 @@ void VoxelTerrain::process_viewers() {
+@@ -1476,7 +1739,8 @@ void VoxelTerrain::process_viewers() {
  					prev_mesh_box.difference(new_mesh_box, [this, &viewer](Box3i out_of_range_box) {
  						out_of_range_box.for_each_cell([this, &viewer](Vector3i bpos) {
  							unview_mesh_block(
@@ -174,7 +425,7 @@ index 7592db2..e1b97e1 100644
  							);
  						});
  					});
-@@ -1485,7 +1517,8 @@ void VoxelTerrain::process_viewers() {
+@@ -1485,7 +1749,8 @@ void VoxelTerrain::process_viewers() {
  					new_mesh_box.difference(prev_mesh_box, [this, &viewer](Box3i box_to_load) {
  						box_to_load.for_each_cell([this, &viewer](Vector3i bpos) {
  							// Load or update block
@@ -184,7 +435,7 @@ index 7592db2..e1b97e1 100644
  						});
  					});
  				}
-@@ -1497,29 +1530,40 @@ void VoxelTerrain::process_viewers() {
+@@ -1497,29 +1762,40 @@ void VoxelTerrain::process_viewers() {
  					const Box3i box = new_mesh_box.clipped(prev_mesh_box);
  					if (viewer.state.requires_collisions) {
  						box.for_each_cell([this](Vector3i bpos) { //
@@ -235,7 +486,7 @@ index 7592db2..e1b97e1 100644
  			}
  		}
  	}
-@@ -2013,6 +2057,9 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+@@ -2013,6 +2289,9 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
  		return;
  	}
  
@@ -245,7 +496,7 @@ index 7592db2..e1b97e1 100644
  	Ref<ArrayMesh> mesh;
  	Ref<Mesh> shadow_occluder_mesh;
  	StdVector<uint16_t> material_indices;
-@@ -2086,10 +2133,12 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+@@ -2086,10 +2365,12 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
  			shadow_occluder_mode
  #endif
  	);
@@ -258,37 +509,51 @@ index 7592db2..e1b97e1 100644
  
  	const bool gen_collisions = _generate_collisions && block->collision_viewers.get() > 0;
  	if (gen_collisions) {
-@@ -2113,7 +2162,7 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
+@@ -2113,7 +2394,7 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
  		block->set_collision_mask(_collision_mask);
  	}
  
 -	block->set_visible(block->mesh_viewers.get() > 0);
-+	block->set_visible(block->render_viewers.get() > 0);
++	block->set_visible(block->render_viewers.get() > 0 && !block->render_coverage_complete);
  	block->set_collision_enabled(gen_collisions);
  	block->set_parent_visible(is_visible());
  	block->set_parent_transform(get_global_transform());
-@@ -2501,6 +2550,8 @@ void VoxelTerrain::_bind_methods() {
+@@ -2501,6 +2782,15 @@ void VoxelTerrain::_bind_methods() {
  	ClassDB::bind_method(D_METHOD("set_mesh_block_size", "size"), &Self::set_mesh_block_size);
  
  	ClassDB::bind_method(D_METHOD("get_statistics"), &Self::_b_get_statistics);
 +	ClassDB::bind_method(D_METHOD("get_mesh_block_viewer_state", "block_position"),
 +			&Self::get_mesh_block_viewer_state);
++	ClassDB::bind_method(D_METHOD("replace_mesh_block_render_coverage", "block_position", "terrain_instance_id",
++			"owner_generation", "expected_coverage_revision", "world_id", "claims"),
++			&Self::_b_replace_mesh_block_render_coverage);
++	ClassDB::bind_method(D_METHOD("remove_mesh_block_render_coverage_claim", "block_position", "terrain_instance_id",
++			"owner_generation", "expected_coverage_revision", "world_id", "slot_owner_id", "section_generation",
++			"section_key", "source_revision", "receipt_digest"),
++			&Self::_b_remove_mesh_block_render_coverage_claim);
  	ClassDB::bind_method(D_METHOD("get_voxel_tool"), &Self::get_voxel_tool);
  
  	ClassDB::bind_method(D_METHOD("save_modified_blocks"), &Self::_b_save_modified_blocks);
 diff --git a/terrain/fixed_lod/voxel_terrain.h b/terrain/fixed_lod/voxel_terrain.h
-index 769aee1..28726f1 100644
+index 769aee1c..c544f495 100644
 --- a/terrain/fixed_lod/voxel_terrain.h
 +++ b/terrain/fixed_lod/voxel_terrain.h
-@@ -177,6 +177,7 @@ public:
+@@ -177,6 +177,14 @@ public:
  #endif
  	void get_meshed_block_positions(StdVector<Vector3i> &out_positions) const;
  	Array get_mesh_block_surface(Vector3i block_pos) const;
 +	Dictionary get_mesh_block_viewer_state(Vector3i block_pos) const;
++	Dictionary _b_replace_mesh_block_render_coverage(Vector3i block_pos, int64_t terrain_instance_id,
++			int64_t owner_generation,
++			int64_t expected_coverage_revision, String world_id, Array claims);
++	Dictionary _b_remove_mesh_block_render_coverage_claim(Vector3i block_pos, int64_t terrain_instance_id,
++			int64_t owner_generation,
++			int64_t expected_coverage_revision, String world_id, String slot_owner_id,
++			int64_t section_generation, Vector3i section_key, String source_revision, String receipt_digest);
  
  	VolumeID get_volume_id() const override {
  		return _volume_id;
-@@ -229,9 +230,9 @@ private:
+@@ -229,9 +237,9 @@ private:
  	void clear_mesh_map();
  
  	// void view_data_block(Vector3i bpos, uint32_t viewer_id, bool require_notification);
@@ -300,7 +565,16 @@ index 769aee1..28726f1 100644
  	// void unload_data_block(Vector3i bpos);
  	void unload_mesh_block(Vector3i bpos);
  	// void make_data_block_dirty(Vector3i bpos);
-@@ -300,6 +301,7 @@ private:
+@@ -283,6 +291,8 @@ private:
+ 	AABB _b_get_bounds() const;
+ 	bool _b_try_set_block_data(Vector3i position, Ref<godot::VoxelBuffer> voxel_data);
+ 	Dictionary _b_get_statistics() const;
++	Dictionary _validate_mesh_block_render_coverage_claims(Vector3i block_pos, String world_id,
++			Array claims) const;
+ 	PackedInt32Array _b_get_viewer_network_peer_ids_in_area(Vector3i area_origin, Vector3i area_size) const;
+ 	void _b_rpc_receive_block(PackedByteArray data);
+ 	void _b_rpc_receive_area(PackedByteArray data);
+@@ -300,6 +310,7 @@ private:
  			int vertical_view_distance_voxels = 0;
  			bool requires_collisions = false;
  			bool requires_meshes = false;
@@ -308,8 +582,16 @@ index 769aee1..28726f1 100644
  		};
  		ViewerID id;
  		State state;
+@@ -314,6 +325,7 @@ private:
+ 	// Mesh storage
+ 	VoxelMeshMap<VoxelMeshBlockVT> _mesh_map;
+ 	uint32_t _mesh_block_size_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
++	int64_t _next_mesh_block_owner_generation = 1;
+ 
+ 	unsigned int _max_view_distance_voxels = 128;
+ 
 diff --git a/terrain/voxel_viewer.cpp b/terrain/voxel_viewer.cpp
-index c2a0897..fa4b367 100644
+index c2a08979..fa4b367b 100644
 --- a/terrain/voxel_viewer.cpp
 +++ b/terrain/voxel_viewer.cpp
 @@ -44,6 +44,17 @@ bool VoxelViewer::is_requiring_visuals() const {
@@ -356,7 +638,7 @@ index c2a0897..fa4b367 100644
  			PropertyInfo(Variant::BOOL, "requires_collisions"), "set_requires_collisions", "is_requiring_collisions"
  	);
 diff --git a/terrain/voxel_viewer.h b/terrain/voxel_viewer.h
-index 10138da..4a11458 100644
+index 10138da1..4a11458a 100644
 --- a/terrain/voxel_viewer.h
 +++ b/terrain/voxel_viewer.h
 @@ -26,6 +26,8 @@ public:

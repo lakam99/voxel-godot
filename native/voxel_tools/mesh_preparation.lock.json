@@ -5,7 +5,7 @@
     "tag": "v1.6x",
     "commit": "595f52ee4e23203a865eeb981f115909f7aa92f4",
     "patch": "patches/0001-mesh-preparation-viewer.patch",
-    "patchSha256": "59583f5b1ed505f88092701f9a25ea65b67a637589d0cef78bf8e615bbe50b49"
+    "patchSha256": "c40e146c2d5f4fdea9c34b77498af29e2fa835b77c118eb932b96eac5da768e3"
   },
   "godotCpp": {
     "tag": "godot-4.5-stable",

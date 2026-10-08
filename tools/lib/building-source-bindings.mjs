@@ -7,6 +7,7 @@ import { demand, sha, stable, watchdogSources } from './building-runner.mjs';
 export const structuralRunnerSources = [
   'tools/run-citadel-structural-composer-two-phase-contract.mjs',
   'tools/lib/building-runner.mjs',
+  'tools/lib/headed-test-evidence.mjs',
   'tools/lib/building-special.mjs',
   'tools/lib/building-special-sources.mjs',
   'tools/lib/building-source-bindings.mjs',

@@ -130,7 +130,7 @@ func run() -> void:
 		check(str(budget)+"_owned_retirement",not publisher._publication_retirement.is_empty())
 		metrics[str(budget)]={"turns":turns,"maxAtomicUsec":max_atomic,"maxSliceUsec":max_slice}
 		parent.free()
-		publisher.published_nodes=[]; publisher.static_collision_body=null
+		publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	var parent:=Node3D.new()
 	root.add_child(parent)
 	var publisher:=Publisher.new()
@@ -361,7 +361,7 @@ func publication_boundary_rejections() -> void:
 		check(mode+"_boundary_not_acknowledged",outcome.status=="failed" and publisher.source_part_publication_epoch("support")==0 \
 			and publisher._publication_epoch==0 and metadata_unchanged)
 		parent.free()
-		publisher.published_nodes=[]
+		publisher.clear_published_node_roster()
 		publisher.static_collision_body=null
 	var parent: Node3D = Node3D.new()
 	root.add_child(parent)
@@ -375,7 +375,7 @@ func publication_boundary_rejections() -> void:
 	check("direct_stale_boundary_not_acknowledged",outcome.status=="failed" and outcome.reason=="stale_static_flush_source" \
 		and publisher.source_part_publication_epoch("door")==0 and publisher._publication_epoch==0 and not publisher.has_pending_static_flush())
 	parent.free()
-	publisher.published_nodes=[]
+	publisher.clear_published_node_roster()
 
 func publication_boundary_pending_part() -> void:
 	var parent: Node3D = Node3D.new()
@@ -395,7 +395,7 @@ func publication_boundary_pending_part() -> void:
 	check("completed_part_commits_at_boundary",next==1 and complete.status=="ready" \
 		and complete.committedSourcePartIds==["paving"] and publisher.source_part_publication_epoch("paving")>0)
 	parent.free()
-	publisher.published_nodes=[]
+	publisher.clear_published_node_roster()
 	publisher.static_collision_body=null
 
 func drain_metadata(publisher, parent: Node3D) -> bool:
@@ -486,7 +486,7 @@ func metadata_cache_controls() -> void:
 	publisher.source_valid=false
 	var rejected: Dictionary = publisher.advance_static_flush(parent,1)
 	check("cache_rejection_does_not_publish_staged_entries",rejected.status=="failed" and is_same(accepted_cache,publisher._static_record_cache) and publisher._static_record_cache_stats.copies==accepted_copies and is_same(resource_second,body.get_meta("building_part_records")))
-	parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	publisher.clear_published()
 	check("cache_reset_isolated",publisher._static_record_cache.is_empty() and publisher._static_record_cache_stats.copies==0 and publisher._static_record_cache_stats.hits==0)
 	check("metadata_cache_controls_completed",true)
@@ -515,7 +515,7 @@ func metadata_capture_controls() -> void:
 			result=publisher.advance_static_flush(parent,1)
 			if result.status!="pending_budget": break
 		check("cache_capture_"+mode+"_rejects",result.status=="failed" and publisher._static_record_cache.is_empty() and is_same(old,body.get_meta("building_part_records")))
-		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+		parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	check("metadata_capture_controls_completed",true)
 
 func metadata_selected_controls() -> void:
@@ -542,7 +542,7 @@ func metadata_selected_controls() -> void:
 			outcome=publisher.advance_static_flush(parent,1)
 			if outcome.status!="pending_budget": break
 		check(str(reuse)+"_selected_mutation_rejected",outcome.status=="failed" and outcome.reason=="metadata_source_changed_during_copy" and is_same(old,body.get_meta("building_part_records")) and is_same(cache,publisher._static_record_cache))
-		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+		parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	check("metadata_selected_controls_completed",true)
 
 func prepared_metadata_controls() -> void:
@@ -575,7 +575,7 @@ func prepared_metadata_controls() -> void:
 			else:
 				check("prepared_immutable_record_reused",outcome.status=="ready" and is_same(body.get_meta("building_part_records").post,compiled.staticRecords.post))
 				check("prepared_no_main_copy",publisher._static_record_cache_stats.copies==0 and publisher._static_record_cache_stats.preparedHits==1)
-		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+		parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	check("prepared_metadata_controls_completed",true)
 
 func metadata_graph_controls() -> void:
@@ -607,7 +607,7 @@ func metadata_graph_controls() -> void:
 			if result.status!="pending_budget": break
 		check(mode+"_malformed_graph_rejected",result.status=="failed" and result.reason=="unsupported_metadata_graph" and publisher._static_record_cache.is_empty() and is_same(old,body.get_meta("building_part_records")))
 		graph.clear()
-		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+		parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	check("metadata_graph_controls_completed",true)
 
 func failed_preparation_ownership() -> void:
@@ -648,7 +648,7 @@ func stale_and_pending_controls() -> void:
 	publisher.source_valid=false
 	var rejected: Dictionary = publisher.advance_static_flush(parent,1)
 	check("stale_flush_rejects_before_replacement",rejected.status=="failed" and body.get_meta("building_part_records")==old)
-	parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	parent.free(); publisher.clear_published_node_roster(); publisher.static_collision_body=null
 	parent=Node3D.new(); root.add_child(parent)
 	var legacy:=Publisher.new()
 	var blueprint:=Blueprint.new("pending",1,"timber")
@@ -682,7 +682,7 @@ func stale_and_pending_controls() -> void:
 					if current.publication_status().status=="failed": break
 		check(mode+"_pending_change_rejected",current.publication_status().status=="failed" and current.incremental_published_parts==0)
 		parent.free(); other_parent.free()
-		current.published_nodes=[]; current.static_collision_body=null
+		current.clear_published_node_roster(); current.static_collision_body=null
 	check("stale_and_pending_controls_completed",true)
 
 func original_submission_parity() -> void:
@@ -723,7 +723,7 @@ func original_submission_parity() -> void:
 		if not changed.is_empty(): changed[-1][2]=Color.WHITE
 		check(str(collecting)+"_altered_submission_rejected",var_to_bytes(expected)!=var_to_bytes(changed))
 		parent.free()
-		old.published_nodes=[]; current.published_nodes=[]
+		old.clear_published_node_roster(); current.clear_published_node_roster()
 	for collecting: bool in [false,true]:
 		var old_parent:=Node3D.new(); root.add_child(old_parent)
 		var new_parent:=Node3D.new(); root.add_child(new_parent)
@@ -750,7 +750,7 @@ func original_submission_parity() -> void:
 		check(str(collecting)+"_paving_tiny_budget_completes",current._pending_paving.state=="ready" and turns>1)
 		check(str(collecting)+"_paving_old_new_submission",not expected.is_empty() and var_to_bytes(expected)==var_to_bytes(actual))
 		old_parent.free(); new_parent.free()
-		old.published_nodes=[]; current.published_nodes=[]
+		old.clear_published_node_roster(); current.clear_published_node_roster()
 	masonry_submission_parity(original)
 	prepared_packet_submission_parity(original)
 	check("old_new_submission_completed",true)
@@ -779,7 +779,7 @@ func masonry_submission_parity(original: GDScript) -> void:
 			check(label+"_masonry_pending_complete",current._pending_masonry.state=="ready" and turns>1)
 			check(label+"_masonry_cpu_submissions_exact",var_to_bytes(masonry_facts(old,old_parent))==var_to_bytes(masonry_facts(current,new_parent)))
 			old_parent.free(); new_parent.free()
-			old.published_nodes=[]; current.published_nodes=[]
+			old.clear_published_node_roster(); current.clear_published_node_roster()
 	check("masonry_submission_controls_completed",true)
 
 func masonry_facts(publisher, parent: Node3D) -> Dictionary:
@@ -848,4 +848,4 @@ func prepared_packet_submission_parity(original: GDScript) -> void:
 				actual.append([node.multimesh.submissions[index*2][2],node.multimesh.submissions[index*2+1][2]])
 	check("mixed_packet_buffer_decodes_exact",var_to_bytes(actual)==var_to_bytes(expected))
 	old_parent.free(); new_parent.free()
-	old.published_nodes=[]; current.published_nodes=[]
+	old.clear_published_node_roster(); current.clear_published_node_roster()

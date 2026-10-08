@@ -61,6 +61,36 @@ class ScanMain extends "res://scripts/Main.gd":
 	func hash01(_text: String) -> float:
 		return 0.0
 
+class CountingUndergroundScanVolume extends "res://scripts/TerrainVolumeService.gd":
+	var state_queries := 0
+
+	func cell_size() -> float:
+		return 1.0
+
+	func world_top_cell_y() -> int:
+		return 3
+
+	func world_bottom_cell_y() -> int:
+		return -4
+
+	func reference_surface_y_for_cell(_cell: Vector3i) -> float:
+		return 2.0
+
+	func generated_underground_floor_source_proven_empty(_key: Vector2i,
+			_chunk_size: int) -> bool:
+		return false
+
+	func get_cell_state(cell: Vector3i) -> Dictionary:
+		state_queries += 1
+		if cell.y == -1:
+			return {"solid":true, "biome":"underground_air", "fluid":"",
+				"material":"stone"}
+		if cell.y == 0:
+			return {"solid":false, "biome":"underground_air", "fluid":"",
+				"material":"air"}
+		return {"solid":false, "biome":"plains", "fluid":"",
+			"material":"air"}
+
 class HorizonMainFixture extends Node:
 	var chunks := {}
 	var chunk_root: Node3D
@@ -269,6 +299,7 @@ func run() -> void:
 	await test_installed_renderable_leaf_receipt_revalidation()
 	await test_bounded_overlap_transfer_revalidates_receipts()
 	test_candidate_accounting_and_explicit_failure()
+	test_pending_tree_candidate_diagnostics_are_kind_filtered_and_value_only()
 	write_report()
 	quit(0 if _passed else 1)
 
@@ -798,6 +829,35 @@ func test_surface_prop_source_completes_before_underground_scan() -> void:
 
 
 func test_underground_floor_scan_revision_restart() -> void:
+	var parity_volume := CountingUndergroundScanVolume.new()
+	var expected_floor_cells: Array[Vector3i] = []
+	var direct_query_count := 0
+	for y in range(parity_volume.world_top_cell_y(),
+			parity_volume.world_bottom_cell_y(), -1):
+		if parity_volume.underground_air_floor_cell_is_spawnable(Vector3i(0, y, 0)):
+			expected_floor_cells.append(Vector3i(0, y - 1, 0))
+			break
+	direct_query_count = parity_volume.state_queries
+	parity_volume.state_queries = 0
+	var parity_state: Dictionary = parity_volume.begin_exposed_underground_floor_scan(
+		Vector2i.ZERO, 1)
+	var parity_cells: Array[Vector3i] = []
+	var parity_result: Dictionary = {}
+	while not bool(parity_state.get("complete", false)):
+		parity_result = parity_volume.advance_exposed_underground_floor_scan(
+			parity_state, 1, 100.0)
+		parity_state = parity_result.get("state", {})
+		for cell_value: Variant in parity_result.get("newCandidates", []):
+			if cell_value is Vector3i:
+				parity_cells.append(cell_value)
+	_check("incremental_floor_scan_reuses_vertical_samples_without_changing_candidate",
+		parity_cells == expected_floor_cells
+		and bool(parity_result.get("complete", false))
+		and parity_volume.state_queries < direct_query_count,
+		{"expected":expected_floor_cells, "actual":parity_cells,
+			"directStateQueries":direct_query_count,
+			"cachedStateQueries":parity_volume.state_queries,
+			"finalScanState":parity_state})
 	var volume = TerrainVolumeServiceScript.new()
 	var scan: Dictionary = volume.begin_exposed_underground_floor_scan(Vector2i.ZERO, 28)
 	scan["columnIndex"] = 20
@@ -806,7 +866,7 @@ func test_underground_floor_scan_revision_restart() -> void:
 	var unrelated: Dictionary = volume.advance_exposed_underground_floor_scan(scan, 1)
 	_check("unrelated_volume_edit_keeps_underground_floor_scan_cursor",
 		not bool(unrelated.get("restarted", true))
-		and int(unrelated.state.get("revision", -1)) == 0
+		and str(unrelated.state.get("revision", "")) == "underground-floor-scan-v2:0:0:0"
 		and int(unrelated.state.get("columnIndex", -1)) == 20,
 		{"restarted": unrelated.get("restarted"), "state": unrelated.get("state", {})})
 	volume.revision += 1
@@ -814,9 +874,47 @@ func test_underground_floor_scan_revision_restart() -> void:
 	var restarted: Dictionary = volume.advance_exposed_underground_floor_scan(unrelated.state, 1)
 	_check("volume_floor_scan_exposes_source_revision_restart",
 		bool(restarted.get("restarted", false))
-		and int(restarted.state.get("revision", -1)) == volume.chunk_revision(Vector2i.ZERO, 28)
+		and str(restarted.state.get("revision", "")).begins_with("underground-floor-scan-v2:")
 		and int(restarted.state.get("columnIndex", -1)) == 0,
 		{"restarted": restarted.get("restarted"), "state": restarted.get("state", {})})
+	var overlay_scan: Dictionary = volume.begin_exposed_underground_floor_scan(Vector2i.ZERO, 28)
+	overlay_scan["columnIndex"] = 20
+	volume.set_scene_block_overlay(Vector3i(2, -6, 2),
+		{"solid":false, "biome":"underground_air", "fluid":""}, "scan_revision_contract")
+	var overlay_restart: Dictionary = volume.advance_exposed_underground_floor_scan(
+		overlay_scan, 1)
+	_check("scene_overlay_mutation_restarts_floor_scan",
+		bool(overlay_restart.get("restarted", false))
+		and int(overlay_restart.state.get("columnIndex", -1)) == 0,
+		{"restarted":overlay_restart.get("restarted"),
+			"revision":overlay_restart.state.get("revision", "")})
+	var fluid_scan: Dictionary = volume.begin_exposed_underground_floor_scan(Vector2i.ZERO, 28)
+	fluid_scan["columnIndex"] = 20
+	volume.mark_fluid_section_changed(Vector3i(3, -6, 3), false)
+	var fluid_restart: Dictionary = volume.advance_exposed_underground_floor_scan(fluid_scan, 1)
+	_check("fluid_mutation_restarts_floor_scan",
+		bool(fluid_restart.get("restarted", false))
+		and int(fluid_restart.state.get("columnIndex", -1)) == 0,
+		{"restarted":fluid_restart.get("restarted"),
+			"revision":fluid_restart.state.get("revision", "")})
+	var negative_volume = TerrainVolumeServiceScript.new()
+	var negative_scan: Dictionary = negative_volume.begin_exposed_underground_floor_scan(
+		Vector2i(-1, -1), 28)
+	negative_volume.set_scene_block_overlay(Vector3i(-27, -6, -27),
+		{"solid":false, "biome":"underground_air", "fluid":""}, "negative_scan_contract")
+	var negative_restart: Dictionary = negative_volume.advance_exposed_underground_floor_scan(
+		negative_scan, 1)
+	var negative_outside_scan: Dictionary = negative_volume.begin_exposed_underground_floor_scan(
+		Vector2i(-1, -1), 28)
+	negative_volume.set_scene_block_overlay(Vector3i(-40, -6, -40),
+		{"solid":false, "biome":"underground_air", "fluid":""}, "negative_scan_contract")
+	var negative_outside: Dictionary = negative_volume.advance_exposed_underground_floor_scan(
+		negative_outside_scan, 1)
+	_check("negative_chunk_bounds_admit_only_overlapping_overlay_revisions",
+		bool(negative_restart.get("restarted", false))
+		and not bool(negative_outside.get("restarted", true)),
+		{"insideRestarted":negative_restart.get("restarted"),
+			"outsideRestarted":negative_outside.get("restarted")})
 	var completed_main = ScanMain.new()
 	var completed_source := CompletedUndergroundScanFixture.new()
 	completed_main.world_generation_system = completed_source
@@ -2330,6 +2428,79 @@ func test_candidate_accounting_and_explicit_failure() -> void:
 		and int(failed.byKind.props.failed) == 1)
 	_check("failure_diagnostics_are_source_scoped",
 		failed.failures.size() == 1 and failed.failures[0].sourceId == "source:props")
+
+
+func test_pending_tree_candidate_diagnostics_are_kind_filtered_and_value_only() -> void:
+	var book = VisualReadinessScript.new()
+	var request_id := 302
+	var revision := int(book.begin_view(request_id, "diag-seed", "world-3",
+		BOUNDS, NEAR_BOUNDS, VIEW_CENTER, VIEW_RADIUS).viewRevision)
+	var tree_source := "chunk-props:diag-seed:2,-1:trees_foliage"
+	var props_source := "chunk-props:diag-seed:2,-1:props"
+	book.expect_source(tree_source, "trees_foliage", "identity:props", "rev:1", BOUNDS, revision)
+	book.expect_source(props_source, "props", "identity:props", "rev:1", BOUNDS, revision)
+	book.describe_candidate(tree_source, "tree:stable-id", "horizon", {
+		"positionXZ": Vector2(3.0, 1.0), "sourceCandidateRenderable": true,
+		"sourceCandidateTreeVisualState": "published",
+		"sourceCandidateTreeLodTier": "horizon"})
+	var publisher := ReceiptPublisher.new()
+	var receipt: Dictionary = book.accept_publisher_receipt(tree_source, "tree:stable-id",
+		"tree-native-mesh:stable-id", "horizon", "identity:props", "rev:1",
+		revision, publisher, "visual_receipt_is_current")
+	_check("tree_diagnostic_fixture_receipt_accepted", receipt.status == "ready", receipt)
+	publisher.installed = false
+	book.describe_candidate(tree_source, "tree:failed-id", "near", {
+		"positionXZ": Vector2(0.0, 0.0), "sourceCandidateRenderable": false,
+		"sourceCandidateTreeVisualState": "failed",
+		"sourceCandidateTreeLodTier": "none"})
+	book.fail_candidate(tree_source, "tree:failed-id", "recipe_build_rejected")
+	book.describe_candidate(props_source, "rock:pending-id", "near",
+		{"positionXZ": Vector2(1.0, 0.0), "sourceCandidateRenderable": true})
+	var rows: Array[Dictionary] = book.pending_candidate_diagnostics(request_id,
+		"diag-seed", "world-3", revision, BOUNDS, 16, "trees_foliage")
+	var stable_row: Dictionary = {}
+	var failed_row: Dictionary = {}
+	for row: Dictionary in rows:
+		if String(row.get("candidateId", "")) == "tree:stable-id": stable_row = row
+		if String(row.get("candidateId", "")) == "tree:failed-id": failed_row = row
+	_check("tree_diagnostics_filter_excludes_pending_non_tree_candidates",
+		rows.size() == 2 and stable_row.size() > 0 and failed_row.size() > 0 \
+		and rows.all(func(row: Dictionary): return String(row.get("kind", "")) == "trees_foliage"))
+	var limited_rows: Array[Dictionary] = book.pending_candidate_diagnostics(request_id,
+		"diag-seed", "world-3", revision, BOUNDS, 1, "trees_foliage")
+	_check("tree_diagnostic_limit_applies_to_filtered_rows",
+		limited_rows.size() == 1 and limited_rows[0].kind == "trees_foliage")
+	var stable_receipt: Dictionary = stable_row.get("receipt", {})
+	_check("tree_diagnostic_receipt_exposes_scalar_revision_and_publisher_identity",
+		stable_row.get("requiredTier") == "horizon" \
+		and stable_receipt.get("tier") == "horizon" \
+		and stable_receipt.get("representationId") == "tree-native-mesh:stable-id" \
+		and stable_receipt.get("sourceIdentity") == "identity:props" \
+		and stable_receipt.get("sourceRevision") == "rev:1" \
+		and stable_receipt.get("worldRevision") == "world-3" \
+		and int(stable_receipt.get("viewRevision", -1)) == revision \
+		and int(stable_receipt.get("publisherInstanceId", 0)) == publisher.get_instance_id() \
+		and stable_receipt.get("validatorMethod") == "visual_receipt_is_current" \
+		and not bool(stable_receipt.get("current", true)) \
+		and not bool(stable_receipt.get("missing", true)), stable_row)
+	_check("tree_diagnostic_candidate_failure_reason_is_preserved",
+		bool(failed_row.get("candidateFailed", false)) \
+		and String(failed_row.get("candidateFailureReason", "")) == "recipe_build_rejected" \
+		and bool(failed_row.get("receipt", {}).get("missing", false)), failed_row)
+	_check("tree_pending_diagnostics_are_value_only",
+		_diagnostic_payload_is_value_only(rows), {"rowCount": rows.size()})
+
+
+func _diagnostic_payload_is_value_only(value: Variant) -> bool:
+	if value is Dictionary:
+		for key: Variant in (value as Dictionary).keys():
+			if not _diagnostic_payload_is_value_only((value as Dictionary)[key]): return false
+		return true
+	if value is Array:
+		for item: Variant in value:
+			if not _diagnostic_payload_is_value_only(item): return false
+		return true
+	return not (value is Object)
 
 
 func _declare_sources(book, revision: int, bounds: Rect2i, skip_kind := "") -> void:

@@ -17,6 +17,15 @@ class RegistryFixture extends RefCounted:
 	var defer_doors: bool = false
 	var defer_tree_visual: bool = false
 	var skip_tree: bool = false
+	func tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+		if not is_instance_valid(body): return {"status":"failed", "reason":"synthetic_tree_owner_lost"}
+		var reference: Variant = trees.get(String(body.get_meta("prop_id", "")))
+		var ready := reference is WeakRef and reference.get_ref() == body \
+			and body.get_meta("tree_visual_state", "") == "published" \
+			and body.get_node_or_null("GeneratedTreeVisual") != null
+		return {"status":"ready" if ready else "pending", "bodyInstanceId":body.get_instance_id(),
+			"sourcePrepared":ready, "installed":ready and include_installed}
+	func tree_source_is_durably_removed(_prop_id: String) -> bool: return skip_tree
 	func register_door(body: StaticBody3D) -> Dictionary:
 		if defer_doors: return {"status":"pending_budget","sideEffects":false}
 		var id: String = String(body.get_meta("door_portal_id",""))

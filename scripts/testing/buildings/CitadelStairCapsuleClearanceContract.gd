@@ -96,5 +96,5 @@ func _run() -> void:
 		"scope":"Generated keep stair and published collision with player-sized capsule; no streaming, route, NPC, or traversal acceptance."},"\t"))
 	file.close()
 	world.free()
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	quit(0 if passed else 1)

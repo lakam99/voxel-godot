@@ -31,7 +31,6 @@ const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarker
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
-const INITIAL_READINESS_TIMEOUT_SECONDS := 120.0
 const MAX_STARTUP_PENDING_TREE_VISUAL_ROWS := 4096
 const MAX_STARTUP_TREE_QUEUE_DIAGNOSTIC_RECORDS := 512
 const STARTUP_PROP_QUEUE_TOTAL_BUDGET_MS := 1.6
@@ -41,7 +40,6 @@ const STARTUP_PROP_REQUIRED_FULL_BUDGET_MS := 4.8
 # interrupted by a cooperative frame budget.
 const STARTUP_PROP_SLICE_HEADROOM_MS := 2.8
 const StartupChunkPropPriorityScript := preload("res://scripts/world/ChunkPropSpawnPriority.gd")
-const FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS := 180.0
 const VOXEL_SHUTDOWN_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 const STREAMING_FORECAST_SECONDS := 1.5
@@ -838,9 +836,8 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
         floori(center.z) - radius_int), Vector2i.ONE * (radius_int * 2 + 1))
     startup_prop_priority_chunk_keys = visible_prop_chunk_keys_for_bounds(
         view_bounds, center, radius_cells)
-    var started_usec := Time.get_ticks_usec()
     var state: Dictionary = {}
-    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS:
+    while true:
         if shutdown_requested:
             return StartupReadinessResultScript.failed("startup_cancelled")
         state = normalized_startup_result(
@@ -862,13 +859,9 @@ func wait_for_final_voxel_view_distance() -> Dictionary:
             call("process_streaming_structure_work")
             advance_startup_prop_sources()
         await startup_loading_yield("Drawing nearby terrain", "terrain_view_expansion", "pending", state.get("metrics", {}))
-    return StartupReadinessResultScript.failed(
-        "final_terrain_expansion_timeout",
-        {},
-        [],
-        state.get("metrics", {}).merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true)
-    )
-
+    # GDScript requires a return after `while true`; every reachable path above
+    # returns ready, cancellation, or an authoritative failure.
+    return StartupReadinessResultScript.failed("unreachable_final_terrain_expansion_exit")
 func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
     if not is_instance_valid(runtime) or player == null or not is_instance_valid(player) \
             or not runtime.has_method("visible_mesh_world_revision"):
@@ -912,9 +905,8 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
         world_revision, int(view_result.viewRevision), view_bounds, near_bounds, center, radius_cells)
     if begin_result.get("status") == "failed":
         return StartupReadinessResultScript.failed("initial_visible_terrain_manifest_rejected", {}, [], begin_result)
-    var started_usec := Time.get_ticks_usec()
     var state: Dictionary = {"status": "pending", "reason": "initial_visible_terrain_meshes_pending"}
-    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS:
+    while true:
         if shutdown_requested:
             return StartupReadinessResultScript.failed("startup_cancelled")
         advance_visible_world_prop_manifest()
@@ -930,9 +922,9 @@ func wait_for_initial_terrain_mesh_coverage(runtime: Object) -> Dictionary:
             call("process_streaming_structure_work")
             advance_startup_prop_sources()
         await startup_loading_yield("Finishing visible terrain", "visible_terrain_meshes", "pending", state)
-    return StartupReadinessResultScript.failed("initial_visible_terrain_mesh_coverage_timeout", {}, [],
-        state.merged({"timeoutSeconds": FINAL_TERRAIN_EXPANSION_TIMEOUT_SECONDS}, true))
-
+    # GDScript requires a return after `while true`; every reachable path above
+    # returns ready, cancellation, or an authoritative failure.
+    return StartupReadinessResultScript.failed("unreachable_visible_terrain_manifest_exit", {}, [], state)
 func visible_prop_chunk_keys_for_bounds(bounds: Rect2i, center: Vector3,
         radius_cells: float) -> Array[Vector2i]:
     return VisibleWorldDemandControllerScript._ranked_chunk_keys(bounds,
@@ -1377,7 +1369,6 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
             queue_chunk_load(key)
     last_center_chunk = center
     var total := urgent_keys.size()
-    var started_usec := Time.get_ticks_usec()
     while count_loaded_chunks(urgent_keys) < total:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         # The ordinary player-view streamer may prune a distant scenario/NPC
@@ -1408,12 +1399,6 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
         process_pending_chunk_loads(center)
         startup_chunk_loading_diagnostics = {"loadedChunkCount":count_loaded_chunks(urgent_keys),
             "requiredChunkCount":total,"missing":missing_rows,"pendingChunkLoads":pending_chunk_loads.size()}
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-            return StartupReadinessResultScript.failed("initial_gameplay_chunk_loading_timeout", {}, [], {
-                "loadedChunkCount": count_loaded_chunks(urgent_keys),
-                "requiredChunkCount": total,
-                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS
-            })
     startup_chunk_loading_diagnostics = {"loadedChunkCount":total,"requiredChunkCount":total,
         "missing":[],"pendingChunkLoads":pending_chunk_loads.size()}
     var collision_result := normalized_startup_result(
@@ -1849,6 +1834,8 @@ func navigation_terrain_publication_readiness(bounds: Rect2i) -> Dictionary:
     return runtime.region_publication_readiness(bounds)
 
 func reset_streaming_region_demand() -> void:
+    if is_instance_valid(ecology_static_section_provider):
+        ecology_static_section_provider.reset_source_domain_captures()
     horizon_ecology_source.clear()
     streaming_active = false
     streaming_actor_physical_demand_diagnostics = {"actorCount":0,"ownerCount":0,"groups":[]}
@@ -1886,18 +1873,17 @@ func wait_for_initial_terrain_presentation() -> Dictionary:
     if not is_instance_valid(runtime) or player == null:
         return StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
     return normalized_startup_result(
-        await runtime.wait_for_spawn_presentation(player.global_position, INITIAL_READINESS_TIMEOUT_SECONDS),
+        await runtime.wait_for_spawn_presentation(player.global_position),
         "invalid_terrain_presentation_result"
     )
 
 func wait_for_initial_region_readiness() -> Dictionary:
     if not streaming_active or not streaming_request_bounds.has("player") or not streaming_request_foreground_bounds.has("player"):
         return StartupReadinessResultScript.failed("initial_region_demand_missing")
-    var started := Time.get_ticks_msec()
     var state: Dictionary = {}
     var final_readiness_request_id := -1
     var final_readiness_bounds := Rect2i()
-    while float(Time.get_ticks_msec()-started)/1000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+    while true:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if not apply_streaming_region_demand():
             return StartupReadinessResultScript.failed(streaming_demand_error)
@@ -1940,6 +1926,11 @@ func wait_for_initial_region_readiness() -> Dictionary:
             "startupRequiredFullExtraSlices":startup_prop_required_full_extra_slices,
             "startupPropQueueMaxUsec":startup_prop_queue_max_usec,
             "terrainRetainedReason":get("voxel_terrain_runtime").retained_activation_reason}
+        if int(streaming_requests.get("player", -1)) == final_readiness_request_id \
+                and final_readiness_bounds.has_area():
+            progress["pendingTreeVisualDiagnostics"] = \
+                startup_pending_tree_visual_diagnostics(final_readiness_request_id,
+                    final_readiness_bounds)
         for domain in state.get("domains",{}):
             var owner: Dictionary = state.domains[domain]
             progress.domains[domain] = {"status":owner.get("status"),"reason":owner.get("reason"),
@@ -1952,11 +1943,9 @@ func wait_for_initial_region_readiness() -> Dictionary:
                 "pendingCount":owner.get("pendingCount",0),
                 "byKind":owner.get("byKind",{})}
         await startup_loading_yield("Preparing nearby world", "initial_region", "pending", progress)
-    state["pendingVisualTreeCandidates"] = startup_pending_tree_visual_diagnostics(
-        final_readiness_request_id, final_readiness_bounds)
-    return StartupReadinessResultScript.failed("initial_region_readiness_timeout", {}, state.get("missing",[]), state)
-
-
+    # GDScript requires a return after `while true`; the readiness loop only
+    # exits through ready, cancellation, or an authoritative dependency error.
+    return StartupReadinessResultScript.failed("unreachable_initial_region_exit", {}, state.get("missing",[]), state)
 ## Startup telemetry only: takes a bounded snapshot of pending tree-foliage
 ## candidates and joins live tree publication work without changing readiness.
 func startup_pending_tree_visual_diagnostics(request_id: int, bounds: Rect2i) -> Dictionary:
@@ -2319,10 +2308,10 @@ func wait_for_initial_visible_world_readiness() -> Dictionary:
         var candidates := int(state.get("candidateCount", 0))
         var represented := int(state.get("representedCount", 0))
         var pending := int(state.get("pendingCount", 0))
-        var loading_message := "Scanning 360° view · %d/%d prop sources" % [
+        var loading_message := "Scanning 360Â° view Â· %d/%d prop sources" % [
             int(progress.startupPropSourcesComplete), int(progress.startupPropSourcesExpected)]
         if candidates > 0:
-            loading_message = "Preparing 360° view · %d/%d visuals ready · %d waiting" % [
+            loading_message = "Preparing 360Â° view Â· %d/%d visuals ready Â· %d waiting" % [
                 represented, candidates, pending]
         await startup_loading_yield(loading_message, "visible_world", "pending", progress)
     return StartupReadinessResultScript.failed("startup_cancelled", {}, [], state)
@@ -2348,9 +2337,8 @@ func submit_initial_structure_visual_readiness() -> Dictionary:
 func wait_for_initial_region_physical_readiness() -> Dictionary:
     if not streaming_active or not streaming_request_bounds.has("player") or not streaming_request_foreground_bounds.has("player"):
         return StartupReadinessResultScript.failed("initial_region_demand_missing")
-    var started := Time.get_ticks_msec()
     var state: Dictionary = {}
-    while float(Time.get_ticks_msec()-started)/1000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+    while true:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if not apply_streaming_region_demand():
             return StartupReadinessResultScript.failed(streaming_demand_error)
@@ -2378,8 +2366,9 @@ func wait_for_initial_region_physical_readiness() -> Dictionary:
                 "missingItems":owner.get("missing",[]).size(),
                 "unresolvedCrossings":owner.get("unresolvedCrossingIds",[]).size()}
         await startup_loading_yield("Preparing nearby terrain and structures", "initial_region_physical", "pending", progress)
-    return StartupReadinessResultScript.failed("initial_region_physical_readiness_timeout", {}, state.get("missing",[]), state)
-
+    # GDScript requires a return after `while true`; the readiness loop only
+    # exits through ready, cancellation, or an authoritative dependency error.
+    return StartupReadinessResultScript.failed("unreachable_initial_region_physical_exit", {}, state.get("missing",[]), state)
 func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
     if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("gameplay_chunks_published"):
@@ -2391,7 +2380,6 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
         # terrain coverage must include those same endpoints long enough to
         # apply their authoritative town edits before snapshot publication.
         runtime.call("configure_startup_collision_bounds", chunk_keys, initial_navigation_terrain_chunk_keys())
-    var started_usec := Time.get_ticks_usec()
     while true:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if runtime.has_method("secondary_viewer_admission_failure"):
@@ -2410,23 +2398,12 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
             "publishedChunkCount": published,
             "requiredChunkCount": chunk_keys.size()
         })
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-            var diagnostics := {}
-            if runtime.has_method("gameplay_publication_diagnostics"):
-                diagnostics = runtime.call("gameplay_publication_diagnostics", chunk_keys)
-            return StartupReadinessResultScript.failed("voxel_collision_publication_timeout", {}, [], {
-                "publishedChunkCount": published,
-                "requiredChunkCount": chunk_keys.size(),
-                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
-                "diagnostics": diagnostics
-            })
     var diagnostics := {}
     if runtime.has_method("gameplay_publication_diagnostics"):
         diagnostics = runtime.call("gameplay_publication_diagnostics", chunk_keys)
     return StartupReadinessResultScript.ready({}, {
         "publishedChunkCount": chunk_keys.size(),
         "requiredChunkCount": chunk_keys.size(),
-        "publicationElapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0,
         "diagnostics": diagnostics
     })
 
@@ -2439,7 +2416,6 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
         if runtime.has_method("collision_mesh_ready_for_body_position") else "collision_proof_for_world_position"
     if not runtime.has_method(proof_method):
         return StartupReadinessResultScript.failed("missing_player_collision_proof_authority")
-    var started_usec := Time.get_ticks_usec()
     var footprint_radius := 0.35
     var acknowledged_scene_ids: Array = []
     while true:
@@ -2466,8 +2442,6 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
                 proof["reason"] = publication.reason
             elif publication.get("required",false):
                 if publication.sceneInstanceIds != acknowledged_scene_ids:
-                    if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-                        return StartupReadinessResultScript.failed("player_collision_publication_timeout", {}, [], {"timeoutSeconds":INITIAL_READINESS_TIMEOUT_SECONDS,"lastProof":proof})
                     await get_tree().physics_frame
                     await startup_loading_yield("Checking landmark collision at player spawn")
                     acknowledged_scene_ids = publication.sceneInstanceIds.duplicate()
@@ -2488,15 +2462,9 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
             "proofMethod": proof_method,
             "proofReason": String(proof.get("reason", "pending"))
         })
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-            return StartupReadinessResultScript.failed("player_collision_publication_timeout", {}, [], {
-                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
-                "lastProof": proof
-            })
-    return StartupReadinessResultScript.failed("player_collision_publication_loop_ended")
-
-
-
+    # GDScript requires a return after `while true`; every reachable path above
+    # returns collision proof, cancellation, or an authoritative failure.
+    return StartupReadinessResultScript.failed("unreachable_player_collision_exit")
 func count_loaded_chunks(keys: Array[Vector2i]) -> int:
     var count := 0
     for key in keys:
@@ -2521,7 +2489,6 @@ func drain_initial_navigation_changes_staged() -> Dictionary:
         return StartupReadinessResultScript.failed("missing_navigation_change_readiness_query")
     var iterations := 0
     var processed_event_count := 0
-    var started_usec := Time.get_ticks_usec()
     while true:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         var pending := int(autonomy.call("pending_navigation_change_count"))
@@ -2534,14 +2501,6 @@ func drain_initial_navigation_changes_staged() -> Dictionary:
             }
             await startup_loading_yield("Navigation changes ready", "navigation_changes", "ready", metrics)
             return StartupReadinessResultScript.ready({}, metrics)
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-            return StartupReadinessResultScript.failed("navigation_change_drain_timeout", {}, [], {
-                "registeredNpcCount": entries.size(),
-                "iterationCount": iterations,
-                "processedEventCount": processed_event_count,
-                "remainingEventCount": pending,
-                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS
-            })
         await startup_loading_yield("Preparing navigation changes %d" % pending, "navigation_changes", "pending", {
             "registeredNpcCount": entries.size(),
             "iterationCount": iterations,
@@ -2552,8 +2511,9 @@ func drain_initial_navigation_changes_staged() -> Dictionary:
         if processed_value is Array:
             processed_event_count += (processed_value as Array).size()
         iterations += 1
-    return StartupReadinessResultScript.failed("navigation_change_drain_loop_ended")
-
+    # GDScript requires a return after `while true`; the loop exits only after
+    # the pending change count reaches zero or explicit cancellation.
+    return StartupReadinessResultScript.failed("unreachable_navigation_change_drain_exit")
 func prime_initial_navigation_snapshot_staged() -> Dictionary:
     if npc_system == null:
         return StartupReadinessResultScript.failed("missing_npc_system_for_navigation_snapshot")
@@ -2580,12 +2540,11 @@ func prime_initial_navigation_snapshot_staged() -> Dictionary:
         return StartupReadinessResultScript.failed("initial_navigation_snapshot_empty", {}, [], {
             "registeredNpcCount": entries.size()
         })
-    var tile_wait_started_usec := Time.get_ticks_usec()
     var tile_result := normalized_startup_result(
         await prime_initial_navigation_tiles_staged(navigation_world, entries),
         "invalid_navigation_tile_readiness_result"
     )
-    while tile_result.get("status") == "pending" and float(Time.get_ticks_usec()-tile_wait_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+    while tile_result.get("status") == "pending":
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         await startup_loading_yield("Waiting for current navigation revisions", "navigation_tiles", "pending", tile_result.get("metrics", {}))
         tile_result = normalized_startup_result(await prime_initial_navigation_tiles_staged(navigation_world, entries), "invalid_navigation_tile_readiness_result")
@@ -2697,7 +2656,6 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
         })
     var published := 0
     var tile_timings: Array[Dictionary] = []
-    var publication_started_usec := Time.get_ticks_usec()
     for tile_key_value in keys:
         if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
             break
@@ -2708,7 +2666,7 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
             "tileKey": tile_key
         })
         var publish_result: Dictionary = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
-        while String(publish_result.get("status", "")) == "pending" and float(Time.get_ticks_usec()-publication_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+        while String(publish_result.get("status", "")) == "pending":
             if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
             await startup_loading_yield("Waiting for navigation publication", "navigation_tiles", "pending", {"tileKey": tile_key, "publication": publish_result})
             publish_result = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
@@ -2760,7 +2718,6 @@ func wait_for_initial_navigation_map_readiness() -> Dictionary:
     var navmesh_world = route_delegate.get("navmesh_world")
     if navmesh_world == null or not navmesh_world.has_method("navigation_map_readiness"):
         return StartupReadinessResultScript.failed("missing_navigation_map_readiness_authority")
-    var started_usec := Time.get_ticks_usec()
     while true:
         if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if navmesh_world.has_method("sync_navigation_map_if_dirty"):
@@ -2775,13 +2732,10 @@ func wait_for_initial_navigation_map_readiness() -> Dictionary:
         var reason := String(readiness.get("reason", "navigation_map_pending"))
         if reason in ["navmesh_backend_disabled", "missing_navigation_map", "missing_navmesh_regions"]:
             return StartupReadinessResultScript.failed(reason, {}, [], readiness)
-        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
-            var timeout_metrics := readiness.duplicate(true)
-            timeout_metrics["timeoutSeconds"] = INITIAL_READINESS_TIMEOUT_SECONDS
-            return StartupReadinessResultScript.failed("navigation_map_readiness_timeout", {}, [], timeout_metrics)
         await startup_loading_yield("Waiting for navigation map", "navigation_map", "pending", readiness)
-    return StartupReadinessResultScript.failed("navigation_map_readiness_loop_ended")
-
+    # GDScript requires a return after `while true`; every reachable path above
+    # returns ready, cancellation, or an authoritative backend failure.
+    return StartupReadinessResultScript.failed("unreachable_navigation_map_readiness_exit")
 func playtest_progress(label: String) -> void:
     var path: String = OS.get_environment("VOXEL_PLAYTEST_PROGRESS")
     if path == "":
@@ -3272,6 +3226,15 @@ func setup_game_systems() -> void:
                     "capture_static_section_sources")
                 if ecology_registration.get("status") != "ready":
                     push_error("Ecology section provider registration failed: %s" % ecology_registration)
+    # Source-domain capture may request asynchronous tree recipe preparation
+    # before any resident chunk spawns a tree. Initialize the existing queue
+    # with the world providers instead of relying on first visual publication.
+    if has_method("ensure_tree_publication_queue"):
+        var source_tree_queue: Variant = call("ensure_tree_publication_queue")
+        if not is_instance_valid(source_tree_queue) \
+                or not source_tree_queue.has_method("request_ecology_tree_source_compile") \
+                or not source_tree_queue.has_method("poll_ecology_tree_source_compile"):
+            push_error("Ecology source capture tree queue setup failed")
     utility_system = UtilityBlockSystemScript.new()
     utility_system.setup(inventory_system)
     equipment_system = EquipmentSystemScript.new(ItemCatalogScript.ITEMS, inventory_system)
@@ -3859,10 +3822,10 @@ func quiesce_runtime_world_for_loading(message: String) -> Dictionary:
 ## is held by authoritative collision/readiness. This presentation is shared by
 ## ordinary traversal and explicit relocation; it does not claim that the
 ## startup/runtime world-reset lifecycle owns the pending work.
-func show_streaming_loading_overlay(message := "Preparing nearby world…", owner := "runtime_streaming") -> void:
+func show_streaming_loading_overlay(message := "Preparing nearby worldâ€¦", owner := "runtime_streaming") -> void:
     var next_message := String(message).strip_edges()
     if next_message.is_empty():
-        next_message = "Preparing nearby world…"
+        next_message = "Preparing nearby worldâ€¦"
     var owner_key := String(owner).strip_edges()
     if owner_key.is_empty(): owner_key = "runtime_streaming"
     streaming_loading_overlay_serial += 1
@@ -3918,9 +3881,8 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
     var visual_view_intent := player_streaming_view_intent(position)
     if not world_streaming.set_request_view_intent(request_id, visual_view_intent):
         return StartupReadinessResultScript.failed(world_streaming.last_rejection)
-    var started := Time.get_ticks_msec()
     var state: Dictionary = {}
-    while float(Time.get_ticks_msec()-started)/1000.0<INITIAL_READINESS_TIMEOUT_SECONDS:
+    while true:
         if shutdown_requested or seed_text != expected_seed or int(streaming_requests.get(owner,0)) != request_id:
             return StartupReadinessResultScript.failed("startup_cancelled")
         if not apply_streaming_region_demand():
@@ -3944,9 +3906,8 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
         if state.get("status") == "ready" and streaming_source_handoff_complete():
             if runtime == null or not is_instance_valid(runtime):
                 return StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
-            var remaining_seconds := maxf(0.1,INITIAL_READINESS_TIMEOUT_SECONDS-float(Time.get_ticks_msec()-started)/1000.0)
             var presentation := normalized_startup_result(
-                await runtime.wait_for_spawn_presentation(position,remaining_seconds),
+                await runtime.wait_for_spawn_presentation(position),
                 "invalid_streaming_destination_presentation_result")
             if not startup_result_is_ready(presentation): return presentation
             var final_state := streaming_destination_readiness(position,owner,request_id,expected_seed)
@@ -3958,12 +3919,13 @@ func prepare_streaming_destination_staged(position: Vector3, owner := "runtime_r
             })
         if state.get("status") == "failed":
             return StartupReadinessResultScript.failed("streaming_destination_dependency_failed",{},state.get("missing",[]),state)
-        await startup_loading_yield("Preparing destination…","streaming_destination","pending",{
+        await startup_loading_yield("Preparing destinationâ€¦","streaming_destination","pending",{
             "owner":owner,"position":position,"reason":state.get("reason",""),"missing":state.get("missing",[]),
             "visualDemand": visual_progress
         })
-    return StartupReadinessResultScript.failed("streaming_destination_timeout",{},state.get("missing",[]),state)
-
+    # GDScript requires a return after `while true`; every reachable path above
+    # returns ready, request cancellation, or an authoritative dependency error.
+    return StartupReadinessResultScript.failed("unreachable_streaming_destination_exit",{},state.get("missing",[]),state)
 func streaming_destination_readiness(position: Vector3, owner: String, request_id: int, expected_seed := "") -> Dictionary:
     if shutdown_requested or not expected_seed.is_empty() and seed_text != expected_seed:
         return {"status":"failed","reason":"startup_cancelled"}
@@ -4002,13 +3964,15 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
     # without joining a live worker inside SaveSystem.load(). No owner has been
     # replaced yet, so a missing/wrong-seed slot can safely leave play intact.
     await startup_loading_yield("Reading saved world", "save_restore", "pending")
-    var save_wait_started := Time.get_ticks_msec()
     while save_system != null and save_system.has_async_save_pending():
-        if shutdown_requested or Time.get_ticks_msec() - save_wait_started >= 30000:
-            await stop_startup_loading(StartupReadinessResultScript.failed("runtime_load_save_drain_cancelled_or_timed_out"))
+        if shutdown_requested:
+            await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
             return false
         save_system.poll_async_save(false)
-        await startup_loading_yield("Waiting for pending save", "save_restore", "pending")
+        var save_state: Dictionary = save_system.stats() if save_system.has_method("stats") else {
+            "asyncPending": true
+        }
+        await startup_loading_yield("Waiting for pending save", "save_restore", "pending", save_state)
     if shutdown_requested:
         await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
         return false
@@ -4425,7 +4389,8 @@ func _graceful_quit_deferred(exit_code: int) -> void:
     var section_presentation_drain: Dictionary = await drain_section_presentations_before_teardown()
     if not section_presentation_drain.get("drained", false):
         return
-    await wait_for_terrain_workers_before_quit()
+    var terrain_drain: bool = await wait_for_terrain_workers_before_quit()
+    if not terrain_drain: return
     # Streamed structures retire their shared door/resource bindings while the
     # NPC registry still exists. Only then release the navigation owner/map.
     await wait_for_npc_navigation_before_quit()
@@ -4434,15 +4399,15 @@ func _graceful_quit_deferred(exit_code: int) -> void:
 func retire_generated_scenes_before_world_reset() -> bool:
     if shutdown_requested: return false
     reset_streaming_region_demand()
-    var deadline := Time.get_ticks_msec() + 30000
     var autonomy = npc_system.get("autonomy_system") if is_instance_valid(npc_system) else null
     var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
     if navigation != null:
         navigation.begin_publication_reset()
         while true:
-            if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
-            if not navigation.advance_publication().get("busy",true): break
-            await startup_loading_yield("Clearing previous navigation")
+            if shutdown_requested: return false
+            var navigation_state: Dictionary = navigation.advance_publication()
+            if not bool(navigation_state.get("busy", true)): break
+            await startup_loading_yield("Clearing previous navigation", "world_reset", "pending", navigation_state)
     var section_drain: Dictionary
     if structure_system == null:
         var navigation_ready: bool = navigation == null or navigation.finish_publication_reset()
@@ -4450,21 +4415,40 @@ func retire_generated_scenes_before_world_reset() -> bool:
         section_drain = await drain_section_presentations_before_teardown()
         if not section_drain.get("drained", false): return false
         if not clear_static_section_render_owners(): return false
+        if not await _reset_ecology_world_epoch_for_world_reset(): return false
         return true
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
-    deadline = Time.get_ticks_msec() + 30000
     while not publication.world_reset_ready():
-        if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
+        if shutdown_requested: return false
         # startup_loading_yield already advances this queue once per frame.
-        await startup_loading_yield("Clearing previous landmarks")
+        var publication_state: Dictionary = publication.stats() if publication.has_method("stats") else {}
+        await startup_loading_yield("Clearing previous landmarks", "world_reset", "pending", publication_state)
     var reset_ready: bool = not shutdown_requested \
         and (navigation == null or navigation.finish_publication_reset())
     if not reset_ready: return false
     section_drain = await drain_section_presentations_before_teardown()
     if not section_drain.get("drained", false): return false
     if not clear_static_section_render_owners(): return false
+    if not await _reset_ecology_world_epoch_for_world_reset(): return false
     return reset_ready
+
+func _reset_ecology_world_epoch_for_world_reset() -> bool:
+    if not has_method("advance_ecology_world_epoch_after_reset"):
+        return false
+    while not shutdown_requested:
+        var result_value: Variant = call("advance_ecology_world_epoch_after_reset")
+        if not result_value is Dictionary:
+            return false
+        var result: Dictionary = result_value
+        var status := String(result.get("status", ""))
+        if status == "ready":
+            return true
+        if status != "pending" or not bool(result.get("retryable", false)):
+            return false
+        await startup_loading_yield("Retiring ecology source captures", "world_reset",
+            "pending", result)
+    return false
 
 func drain_section_presentations_before_teardown() -> Dictionary:
     # Keep a strong world-lifetime reference while the coordinator rolls back
@@ -4472,6 +4456,10 @@ func drain_section_presentations_before_teardown() -> Dictionary:
     var coordinator: Variant = world_static_section_coordinator
     if coordinator == null or not is_instance_valid(coordinator):
         return {"status":"ready", "drained":true, "pendingCallbackCount":0}
+    var compile_drain: Dictionary = coordinator.drain_section_compiles()
+    if compile_drain.get("status") != "drained":
+        return {"status":"section_compile_drain_failed", "drained":false,
+            "compileDrain":compile_drain}
     var result: Dictionary = await coordinator.drain_pending_frame_presentations()
     if not result.get("drained", false):
         push_error("Static section presentation drain failed; retaining world owners: %s" % result)
@@ -4508,8 +4496,12 @@ func wait_for_npc_navigation_before_quit() -> void:
         await get_tree().physics_frame
         await startup_loading_yield("Stopping NPC navigation")
 
-func wait_for_terrain_workers_before_quit() -> void:
+func wait_for_terrain_workers_before_quit() -> bool:
     reset_streaming_region_demand()
+    var source_sessions: Dictionary = await drain_ecology_source_sessions_before_quit()
+    if String(source_sessions.get("status", "")) != "ready":
+        push_error("Ecology source sessions did not drain before quit: %s" % source_sessions)
+        return false
     if structure_system != null:
         var admission = structure_system.citadel_terrain_admission
         var publication = structure_system.citadel_publication
@@ -4535,7 +4527,7 @@ func wait_for_terrain_workers_before_quit() -> void:
             if pending_voxel_tasks > 0:
                 push_warning("Voxel terrain shutdown task drain timed out with %d tasks pending" % pending_voxel_tasks)
     if terrain_meshing_service == null or not terrain_meshing_service.has_method("clear_jobs"):
-        return
+        return true
     await startup_loading_yield("Stopping terrain jobs")
     terrain_meshing_service.call("clear_jobs", false)
     var guard := 0
@@ -4553,6 +4545,47 @@ func wait_for_terrain_workers_before_quit() -> void:
     # been used to drain the workers.  No native mesh payload may outlive the
     # scene tree or its GDExtension backend during process shutdown.
     terrain_meshing_service.call("clear_jobs", true)
+    return true
+
+func drain_ecology_source_sessions_before_quit() -> Dictionary:
+    if not has_method("reset_ecology_source_capture_sessions"):
+        return {"status":"failed", "reason":"ecology_source_session_reset_unavailable"}
+    var sessions: Dictionary = {}
+    while true:
+        var sessions_value: Variant = call("reset_ecology_source_capture_sessions")
+        if not sessions_value is Dictionary:
+            return {"status":"failed", "reason":"ecology_source_session_reset_result_invalid"}
+        sessions = sessions_value
+        var session_status := String(sessions.get("status", ""))
+        if session_status == "failed":
+            return sessions
+        if session_status == "ready":
+            break
+        if session_status != "pending" or not bool(sessions.get("retryable", false)):
+            return {"status":"failed", "reason":"ecology_source_session_reset_not_retryable",
+                "sessionResult":sessions}
+        await startup_loading_yield("Retiring ecology source capture values",
+            "source_capture_retirement", "pending", sessions)
+    var source_tree_queue: Object = get("tree_publication_queue") as Object
+    if not is_instance_valid(source_tree_queue) or not source_tree_queue.has_method(
+            "reset_ecology_source_compilers"):
+        return {"status":"ready", "sessionResult":sessions}
+    while true:
+        var queue_value: Variant = source_tree_queue.call(
+            "reset_ecology_source_compilers")
+        if not queue_value is Dictionary:
+            return {"status":"failed", "reason":"ecology_source_queue_reset_result_invalid"}
+        var queue_reset: Dictionary = queue_value
+        var queue_status := String(queue_reset.get("status", ""))
+        if queue_status == "ready":
+            return {"status":"ready", "sessionResult":sessions,
+                "queueResult":queue_reset}
+        if queue_status != "pending" or not bool(queue_reset.get("retryable", false)):
+            return {"status":"failed", "reason":"ecology_source_queue_reset_not_retryable",
+                "queueResult":queue_reset}
+        await startup_loading_yield("Retiring ecology compiler values",
+            "source_capture_retirement", "pending", queue_reset)
+    return {"status":"failed", "reason":"ecology_source_queue_reset_loop_exited"}
 
 func _notification(what: int) -> void:
     if what == NOTIFICATION_WM_CLOSE_REQUEST:

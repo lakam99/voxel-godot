@@ -6,6 +6,7 @@ extends SceneTree
 ## actual source of a future hitch.
 
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 const SAMPLE_COUNT := 12
 
@@ -109,19 +110,16 @@ func request_for(index: int) -> Dictionary:
 		architecture = "savanna"
 		grammar = "umbrella_thorn"
 		biome = "savanna"
-	return {
+	return CertifiedRequestFixture.prepare_or_fail({
 		"treeId": "performance-tree-%02d" % index,
 		"worldSeed": "tree-performance-world",
 		"biome": biome,
 		"architecture": architecture,
 		"speciesGrammar": grammar,
 		"growthStage": 0.84,
-		"visualHeight": 22.0,
-		"trunkRadius": 1.0,
-		"canopyRadius": 9.0,
 		"canopyDensity": 0.84,
 		"presentation": "runtime"
-	}
+	})
 
 func typed_branches(recipe: Dictionary) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []

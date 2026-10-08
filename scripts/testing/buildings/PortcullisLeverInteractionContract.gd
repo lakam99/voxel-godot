@@ -39,7 +39,7 @@ func _run() -> void:
 	var normal: StaticBody3D=publisher.publish_part(ordinary,world)
 	checks.ordinary_proxy_unchanged=normal.get_node("DoorInteraction").get_child_count()==1
 	world.free()
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	var passed := not checks.values().has(false)
 	var file := FileAccess.open(OS.get_environment("PORTCULLIS_LEVER_REPORT"),FileAccess.WRITE)
 	if file==null: quit(2); return

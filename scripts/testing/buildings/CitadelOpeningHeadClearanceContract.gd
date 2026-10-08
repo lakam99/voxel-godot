@@ -182,7 +182,7 @@ func _render_envelopes(publisher, b, part) -> Array:
 		for pose: Transform3D in group.transforms: rows.append({"bounds": _source_box_bounds(pose, Vector3.ONE), "name": "actual_box"})
 	rows.append_array(_node_envelopes(parent, Transform3D.IDENTITY, publisher))
 	parent.free()
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	publisher.captured_mesh_batches.clear()
 	publisher.static_visual_batches.clear()
 	if publisher._publication_failed() or rows.is_empty(): _stop_reason = "incomplete_neighbour_publication:" + part.id
@@ -340,7 +340,7 @@ func _door_sweep(part) -> Dictionary:
 	if String(part.recipe.get("doorPresentation", "door")) == "door":
 		valid = valid and pivot != null and pivot.position == DoorGeometry.describe(part.size).pivotPosition
 	parent.free()
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	return {"ready": valid, "rows": rows}
 
 func _outward_sweep_box(bounds: Array) -> AABB:

@@ -70,7 +70,7 @@ func _run() -> void:
 		_float_payload_changes_digest(inputs, compat, impacted, built)
 	checks["digest_rejects_non_string_dictionary_keys_and_unsupported_values"] = \
 		Builder._snapshot_digest({"bad-key":{1:"value"}}, "world-test-a", 41, Vector3i.ZERO).is_empty() \
-		and Builder._snapshot_digest({"unsupported":Transform3D.IDENTITY},
+		and Builder._snapshot_digest({"unsupported":RefCounted.new()},
 			"world-test-a", 41, Vector3i.ZERO).is_empty()
 	checks["tiny_vector3_and_bounds_changes_alter_digest"] = \
 		_tiny_vector_or_bounds_change_alters_digest()
@@ -85,6 +85,37 @@ func _run() -> void:
 		_rejects_omitted_source_manifest(partition_result, compat, impacted)
 	checks["mismatched_partition_counts_are_rejected"] = \
 		_rejects_mismatched_counts(partition_result, compat, impacted)
+	var shared_source_part_inputs: Array = _inputs([
+		_input("part-a", "source-shared", "rev-shared", Vector3(2.0, 2.0, 2.0), wood.batchKey),
+		_input("part-b", "source-shared", "rev-shared", Vector3(2.0, 2.0, 2.0), wood.batchKey)])
+	var shared_source_partition: Dictionary = Partitioner.partition(shared_source_part_inputs)
+	var shared_source_result: Dictionary = shared_source_partition.get("result", {})
+	var shared_source_impacts: Array[Vector3i] = [Vector3i.ZERO]
+	shared_source_impacts.make_read_only()
+	var shared_source_build: Dictionary = Builder.build_replacements(shared_source_result,
+		compat, shared_source_impacts, 43, "world-shared-parts")
+	var shared_source_replacement: Dictionary = _replacement_for(
+		shared_source_build.get("replacements", []), Vector3i.ZERO)
+	var shared_source_snapshot: Dictionary = shared_source_replacement.get("snapshot", {})
+	var shared_source_parts: Array[String] = []
+	for row_value: Variant in shared_source_snapshot.get("manifest", []):
+		if row_value is Dictionary:
+			shared_source_parts.append(String(row_value.get("sourcePartId", "")))
+	shared_source_parts.sort()
+	var shared_source_evidence: Dictionary = {
+		"partitionStatus":String(shared_source_partition.get("status", "missing")),
+		"partitionReason":String(shared_source_partition.get("reason", "")),
+		"declaredBatchCount":int(shared_source_result.get("batchCount", -1)),
+		"outputCount":int(shared_source_result.get("outputs", []).size()),
+		"buildStatus":String(shared_source_build.get("status", "missing")),
+		"buildReason":String(shared_source_build.get("reason", "")),
+		"snapshotContributorCount":int(shared_source_snapshot.get("contributorCount", -1)),
+		"snapshotBatchCount":int(shared_source_snapshot.get("batchCount", -1)),
+		"snapshotPartIds":shared_source_parts}
+	checks["same_source_revision_and_batch_keep_distinct_parts"] = \
+		_shared_source_parts_are_counted(shared_source_result, shared_source_build)
+	checks["same_source_parts_reject_forged_batch_total"] = \
+		_rejects_forged_shared_source_batch_total(shared_source_result, compat)
 	checks["mutable_impact_list_is_rejected"] = \
 		Builder.build_replacements(partition_result, compat, [Vector3i.ZERO], 41, "world-test-a") \
 			.get("reason") == "mutable_impacted_section_keys"
@@ -93,9 +124,49 @@ func _run() -> void:
 			.get("reason") == "invalid_candidate_generation" \
 		and Builder.build_replacements(partition_result, compat, impacted, 41, " ") \
 			.get("reason") == "invalid_world_identity"
+	var fluid_descriptor := _translucent_descriptor(Vector3i.ZERO, 999)
+	var fluid_compat := _translucent_compatibility(fluid_descriptor)
+	var fluid_compat_map: Dictionary = {fluid_compat.batchKey:fluid_compat}
+	fluid_compat_map.make_read_only()
+	var fluid_input := _input("terrain", "terrain-water", "exact-fluid-rev-7",
+		Vector3(2.0, 2.0, 2.0), fluid_compat.batchKey).duplicate(false)
+	fluid_input["meshLocalBounds"] = fluid_compat.meshLocalBounds
+	fluid_input.make_read_only()
+	var fluid_inputs := _inputs([fluid_input])
+	var fluid_partition: Dictionary = Partitioner.partition(fluid_inputs)
+	var fluid_result: Dictionary = fluid_partition.get("result", {})
+	var fluid_impacts: Array[Vector3i] = [Vector3i.ZERO]
+	fluid_impacts.make_read_only()
+	var fluid_gen_71: Dictionary = Builder.build_replacements(fluid_result,
+		fluid_compat_map, fluid_impacts, 71, "world-fluid")
+	var fluid_gen_72: Dictionary = Builder.build_replacements(fluid_result,
+		fluid_compat_map, fluid_impacts, 72, "world-fluid")
+	var descriptor_71 := _translucent_replacement_descriptor(fluid_gen_71)
+	var descriptor_72 := _translucent_replacement_descriptor(fluid_gen_72)
+	checks["candidate_builder_replaces_stale_descriptor_generation_and_binds_digest"] = \
+		fluid_partition.get("status") == "ready" and fluid_gen_71.get("status") == "ready" \
+		and descriptor_71.get("sectionGeneration") == 71 \
+		and descriptor_71.get("sectionGeneration") != fluid_descriptor.sectionGeneration \
+		and descriptor_71.get("meshContentDigest") == fluid_compat.meshContentDigest \
+		and _replacement_digest(fluid_gen_71.replacements, Vector3i.ZERO) \
+			!= _replacement_digest(fluid_gen_72.replacements, Vector3i.ZERO)
+	checks["same_fluid_source_replacement_gets_new_candidate_descriptor_generation"] = \
+		fluid_gen_72.get("status") == "ready" \
+		and descriptor_72.get("sectionGeneration") == 72 \
+		and descriptor_71.get("sectionGeneration") != descriptor_72.get("sectionGeneration") \
+		and _same_fluid_source_identity(fluid_gen_71, fluid_gen_72)
+	var wrong_section_descriptor := _translucent_descriptor(Vector3i(1, 0, 0), 999)
+	var wrong_section_compat := _translucent_compatibility(wrong_section_descriptor)
+	var wrong_section_map: Dictionary = {wrong_section_compat.batchKey:wrong_section_compat}
+	wrong_section_map.make_read_only()
+	checks["descriptor_section_mismatch_rejected_before_replacement"] = \
+		Builder.build_replacements(fluid_result, wrong_section_map, fluid_impacts,
+			71, "world-fluid").get("reason") == \
+			"translucent_sort_descriptor_identity_invalid"
 
 	var report := {"schema":"prepared-static-section-snapshot-builder-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
+		"sharedSourcePartEvidence":shared_source_evidence,
 		"initialBuildStatus":built.get("status", "missing"),
 		"initialBuildReason":built.get("reason", ""),
 		"evidence":"pure immutable adapter contract for committed section outputs, compatibility manifests, explicit per-layer counts/empty layers, empty replacements and deterministic digests; no publisher installation, upload acknowledgement, or live gameplay acceptance"}
@@ -116,18 +187,84 @@ func _compatibility(material: String, tier: String, mesh: String) -> Dictionary:
 	var canonical := JSON.stringify([Attributes.LAYOUT_SCHEMA, material, tier, mesh,
 		MESH_DIGEST, "building-static-v1", "opaque", "none", true, 240.0, 18.0,
 		bounds.position.x, bounds.position.y, bounds.position.z,
-		bounds.size.x, bounds.size.y, bounds.size.z])
+		bounds.size.x, bounds.size.y, bounds.size.z, true])
 	var key := "section-batch:" + canonical.sha256_text()
 	var value := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
 		"materialKey":material, "renderTier":tier,
 		"meshResourceKey":mesh, "meshKey":mesh_key, "meshContentDigest":MESH_DIGEST,
 		"meshLocalBounds":bounds,
 		"pipelineRevision":"building-static-v1", "renderLayer":"opaque",
-		"translucentSortPolicy":"none", "castShadows":true,
+		"translucentSortPolicy":"none", "castShadows":true, "intendedVisible":true,
 		"visibilityRangeEnd":240.0, "fadeMargin":18.0,
 		"batchKey":key, "compatibilityKey":key}
 	value.make_read_only()
 	return value
+
+
+func _translucent_descriptor(section_key: Vector3i, generation: int) -> Dictionary:
+	var face_group := {"groupId":"fluid-face:0", "firstIndex":0,
+		"indexCount":6, "centroid":Vector3(0.5, 0.5, 0.5)}
+	face_group.make_read_only()
+	var groups: Array[Dictionary] = [face_group]
+	groups.make_read_only()
+	var surface := {"surfaceIndex":0, "faceGroups":groups}
+	surface.make_read_only()
+	var surfaces: Array[Dictionary] = [surface]
+	surfaces.make_read_only()
+	var descriptor := {"schema":"section-translucent-face-groups/v1",
+		"sectionKey":section_key, "sectionGeneration":generation,
+		"povRevision":5, "cameraPosition":Vector3(1.0, 2.0, 3.0),
+		"meshContentDigest":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		"surfaces":surfaces}
+	descriptor.make_read_only()
+	return descriptor
+
+
+func _translucent_compatibility(descriptor: Dictionary) -> Dictionary:
+	var bounds := AABB(Vector3.ZERO, Vector3.ONE)
+	var digest := String(descriptor.meshContentDigest)
+	var mesh_resource := "terrain-fluid-water"
+	var pipeline := "exact-fluid-cell-surface:v1"
+	var sort_policy := "camera_depth"
+	var mesh_key := "%s|pipeline=%s|layer=translucent|sort=%s" % [
+		mesh_resource, pipeline, sort_policy]
+	var result := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+		"materialKey":"production-fluid:water", "renderTier":"terrain-fluid",
+		"meshResourceKey":mesh_resource, "meshContentDigest":digest,
+		"meshKey":mesh_key, "pipelineRevision":pipeline,
+		"renderLayer":"translucent", "translucentSortPolicy":sort_policy,
+		"translucentSortDescriptor":descriptor, "meshLocalBounds":bounds,
+		"castShadows":false, "visibilityRangeEnd":100000.0, "fadeMargin":0.0}
+	var batch_key := Builder.batch_compatibility_key(result)
+	result["batchKey"] = batch_key
+	result["compatibilityKey"] = batch_key
+	result.make_read_only()
+	return result
+
+
+func _translucent_replacement_descriptor(result: Dictionary) -> Dictionary:
+	var replacement := _replacement_for(result.get("replacements", []), Vector3i.ZERO)
+	if replacement.is_empty():
+		return {}
+	var batches: Dictionary = replacement.snapshot.get("batches", {})
+	for batch_value: Variant in batches.values():
+		if batch_value is Dictionary and (batch_value as Dictionary).has("translucentSortDescriptor"):
+			return batch_value.get("translucentSortDescriptor", {})
+	return {}
+
+
+func _same_fluid_source_identity(a: Dictionary, b: Dictionary) -> bool:
+	var first := _replacement_for(a.get("replacements", []), Vector3i.ZERO)
+	var second := _replacement_for(b.get("replacements", []), Vector3i.ZERO)
+	if first.is_empty() or second.is_empty():
+		return false
+	var first_manifest: Array = first.snapshot.get("manifest", [])
+	var second_manifest: Array = second.snapshot.get("manifest", [])
+	return first_manifest.size() == 1 and second_manifest.size() == 1 \
+		and first_manifest[0].sourceId == "terrain-water" \
+		and second_manifest[0].sourceId == "terrain-water" \
+		and first_manifest[0].sourceRevision == "exact-fluid-rev-7" \
+		and second_manifest[0].sourceRevision == "exact-fluid-rev-7"
 
 
 func _input(part_id: String, source_id: String, revision: String,
@@ -295,6 +432,45 @@ func _rejects_mismatched_counts(partition_result: Dictionary, compat: Dictionary
 	candidate["outputInstanceCount"] = int(candidate.outputInstanceCount) + 1
 	candidate.make_read_only()
 	return Builder.build_replacements(candidate, compat, impacts, 41, "world-test-a").get("status") == "failed"
+
+
+func _shared_source_parts_are_counted(partition_result: Dictionary,
+		built_result: Dictionary) -> bool:
+	if String(partition_result.get("schema", "")) != "chunk-static-render-section-instance-partition/v3" \
+			or int(partition_result.get("batchCount", -1)) != 2 \
+			or built_result.get("status") != "ready":
+		return false
+	var replacement: Dictionary = _replacement_for(built_result.get("replacements", []), Vector3i.ZERO)
+	if replacement.is_empty():
+		return false
+	var snapshot: Dictionary = replacement.get("snapshot", {})
+	if int(snapshot.get("contributorCount", -1)) != 2 \
+			or int(snapshot.get("batchGroupCount", -1)) != 1 \
+			or int(snapshot.get("batchCount", -1)) != 1:
+		return false
+	var part_ids: Array[String] = []
+	for row_value: Variant in snapshot.get("manifest", []):
+		if not row_value is Dictionary:
+			return false
+		part_ids.append(String(row_value.get("sourcePartId", "")))
+	part_ids.sort()
+	return part_ids == ["part-a", "part-b"]
+
+
+func _rejects_forged_shared_source_batch_total(partition_result: Dictionary,
+		compat: Dictionary) -> bool:
+	if String(partition_result.get("schema", "")) != "chunk-static-render-section-instance-partition/v3" \
+			or int(partition_result.get("batchCount", -1)) != 2:
+		return false
+	var forged: Dictionary = partition_result.duplicate(false)
+	forged["batchCount"] = 1
+	forged.make_read_only()
+	var impacts: Array[Vector3i] = [Vector3i.ZERO]
+	impacts.make_read_only()
+	var rejected: Dictionary = Builder.build_replacements(forged, compat, impacts,
+		43, "world-shared-parts")
+	return rejected.get("status") == "failed" \
+		and rejected.get("reason") == "partition_section_or_batch_total_mismatch:1/1:2/1"
 
 
 func _float_payload_changes_digest(inputs: Array, compat: Dictionary,

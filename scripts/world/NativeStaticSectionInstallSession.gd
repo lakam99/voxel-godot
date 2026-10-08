@@ -10,6 +10,7 @@ const Grid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
 const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+const PresentationMembers = preload("res://scripts/world/StaticSectionPresentationMembers.gd")
 const SNAPSHOT_ENVELOPE_SCHEMA := "prepared-static-section-snapshot-envelope/v1"
 
 
@@ -26,7 +27,7 @@ static func resolve_current_world_callback_coordinator() -> Object:
 		if String(property.get("name", "")) != "world_static_section_coordinator":
 			continue
 		var coordinator: Variant = tree.current_scene.get("world_static_section_coordinator")
-		if coordinator is Object and is_instance_valid(coordinator) \
+		if is_instance_valid(coordinator) and coordinator is Object \
 				and coordinator.has_method("register_pending_frame_presentation") \
 				and coordinator.has_method("cancel_pending_frame_presentation"):
 			return coordinator
@@ -57,15 +58,52 @@ var _previous_generation := 0
 var _frame_callback_requested := false
 var _frame_drawn := false
 var _frame_callback_coordinator_ref: WeakRef
+var _attachment_bindings: Dictionary = {}
+var _attachment_identity: Dictionary = {}
+var _presentation_attachment_roots: Array = []
+# Preserve the generic Array encoding used by the sealed manifest digest.
+var _presentation_manifest: Array = []
+var _presentation_manifest_digest := ""
+var _presentation_bindings: Dictionary = {}
+var _presentation_binding_identity: Dictionary = {}
+var _last_append_step_wall_usec := 0
+var _max_append_step_wall_usec := 0
+var _last_append_buffer_float_count := 0
+var _max_append_buffer_float_count := 0
+var _last_append_mesh_surface_bytes := -1
+var _max_append_mesh_surface_bytes := -1
+var _last_upload_call_wall_usec := 0
+var _max_upload_call_wall_usec := 0
+var _last_upload_cursor := -1
+var _last_upload_processed_units := -1
+var _last_upload_expected_batches := -1
 
 
 func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		material_bindings: Dictionary, mesh_bindings: Dictionary,
-		frame_callback_coordinator: Object = null) -> Dictionary:
+		frame_callback_coordinator: Object = null, attachment_bindings: Dictionary = {}) -> Dictionary:
 	if state != "idle":
 		return _failed("section_install_session_already_started")
 	_batches.clear()
 	_layer_manifest.clear()
+	_last_append_step_wall_usec = 0
+	_max_append_step_wall_usec = 0
+	_last_append_buffer_float_count = 0
+	_max_append_buffer_float_count = 0
+	_last_append_mesh_surface_bytes = -1
+	_max_append_mesh_surface_bytes = -1
+	_last_upload_call_wall_usec = 0
+	_max_upload_call_wall_usec = 0
+	_last_upload_cursor = -1
+	_last_upload_processed_units = -1
+	_last_upload_expected_batches = -1
+	_attachment_bindings.clear()
+	_attachment_identity.clear()
+	_presentation_attachment_roots.clear()
+	_presentation_manifest.clear()
+	_presentation_manifest_digest = ""
+	_presentation_bindings.clear()
+	_presentation_binding_identity.clear()
 	if not is_instance_valid(backend) or not is_instance_valid(chunk) \
 			or not backend.is_inside_tree() or backend.get_parent() != chunk:
 		return _failed("section_install_owner_unavailable")
@@ -96,7 +134,9 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 			"censusDigest":String(submitted_candidate.get("censusDigest", "")),
 			"sourceRevisions":submitted_candidate.get("sourceRevisions", {}),
 			"removalRevisions":submitted_candidate.get("removalRevisions", {}),
-			"providerCoverage":submitted_candidate.get("providerCoverage", [])}
+			"providerCoverage":submitted_candidate.get("providerCoverage", []),
+			"supportCoverageIdentities":submitted_candidate.get(
+				"supportCoverageIdentities", [])}
 		candidate = envelope_value
 	if String(candidate.get("schema", "")) != SNAPSHOT_ENVELOPE_SCHEMA:
 		return _failed("mutable_or_invalid_section_candidate")
@@ -151,9 +191,38 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		if not batch_value is Dictionary or not batch_value.is_read_only():
 			return _failed("mutable_or_invalid_section_batch")
 		var batch: Dictionary = batch_value
+		var attachment_key := String(batch.get("attachmentKey", ""))
+		if not attachment_key.is_empty():
+			var binding_value: Variant = attachment_bindings.get(attachment_key)
+			if not binding_value is Dictionary or not batch.get("neutralParentToWorld") is Transform3D \
+					or not batch.get("sweptWorldBounds") is AABB:
+				return _failed("section_attachment_binding_missing")
+			var binding: Dictionary = binding_value
+			if not batch.get("producerSourceRevision") is String \
+					or String(batch.producerSourceRevision).is_empty() \
+					or binding.get("producerSourceRevision") != batch.producerSourceRevision:
+				return _failed("section_attachment_producer_revision_mismatch")
+			if binding.get("neutralParentToWorld") != batch.get("neutralParentToWorld") \
+					or binding.get("motion") != batch.get("motion"):
+				return _failed("section_attachment_neutral_transform_mismatch")
+			if not _attachment_bindings.has(attachment_key):
+				_attachment_bindings[attachment_key] = binding
+				_attachment_identity[attachment_key] = {
+					"parentInstanceId":binding.get("parentInstanceId"),
+					"bodyInstanceId":binding.get("bodyInstanceId"),
+					"sourceRevision":binding.get("sourceRevision"),
+					"producerSourceRevision":binding.get("producerSourceRevision"),
+					"publisherInstanceId":binding.get("publisherInstanceId"),
+					"publicationEpoch":binding.get("publicationEpoch"),
+					"bodyToWorld":binding.get("bodyToWorld"),
+					"neutralParentToWorld":binding.get("neutralParentToWorld"), "motion":binding.get("motion"),
+					"legacyVisuals":binding.get("legacyVisuals")}
 		if String(batch.get("instanceAttributeLayout", "")) != Attributes.LAYOUT_SCHEMA:
 			return _failed("section_batch_instance_attribute_layout_mismatch")
 		var render_layer := String(batch.get("renderLayer", ""))
+		var intended_visible_value: Variant = batch.get("intendedVisible", null)
+		if not intended_visible_value is bool:
+			return _failed("section_batch_intended_visibility_missing")
 		var sort_policy := String(batch.get("transparencySortPolicy", ""))
 		var segments_value: Variant = batch.get("segments")
 		if not layer_counts.has(render_layer):
@@ -209,7 +278,8 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 			counts.batchCount = int(counts.batchCount) + 1
 			counts.instanceCount = int(counts.instanceCount) + count_value
 			_batches.append({"batchKey":batch_key, "batch":batch,
-				"segment":segment, "mesh":mesh, "material":material})
+				"segment":segment, "mesh":mesh, "material":material,
+				"meshSurfaceBytes":int(mesh_identity.get("cpuArrayBytes", -1))})
 	var seen_layers: Dictionary = {}
 	if render_layers_value.size() != layer_counts.size():
 		return _failed("section_render_layer_manifest_count_mismatch")
@@ -233,6 +303,12 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 	if expected_instances != int(snapshot.get("instanceCount", -1)) \
 			or _batches.size() != int(snapshot.get("segmentCount", -1)):
 		return _failed("section_candidate_content_count_mismatch")
+	var attachment_manifest_result := _build_presentation_manifest(snapshot, attachment_bindings)
+	if attachment_manifest_result.get("status") != "ready":
+		return _failed(String(attachment_manifest_result.get("reason",
+			"section_presentation_manifest_invalid")))
+	_presentation_manifest = attachment_manifest_result.members
+	_presentation_manifest_digest = String(attachment_manifest_result.digest)
 	_candidate = candidate
 	_backend_ref = weakref(backend)
 	_chunk_ref = weakref(chunk)
@@ -254,14 +330,353 @@ func begin(backend: Node, chunk: Node3D, candidate: Dictionary,
 		_batches.size(), expected_instances, _layer_manifest)
 	if begun.get("status") not in ["ready_to_append", "ready_to_commit"]:
 		return _failed(String(begun.get("reason", "native_section_candidate_begin_failed")))
+	var declared: Dictionary = backend.call("declare_attachment_manifest", _source_id,
+		_generation, _presentation_manifest, _presentation_manifest_digest)
+	if declared.get("status") != "manifest_declared" \
+			or int(declared.get("memberCount", -1)) != _presentation_manifest.size() \
+			or String(declared.get("manifestDigest", "")) != _presentation_manifest_digest:
+		return _fail(String(declared.get("reason", "section_attachment_manifest_declaration_failed")))
+	if not _attachments_current():
+		return _fail("section_attachment_binding_stale")
+	for attachment_key: String in _attachment_bindings:
+		var binding: Dictionary = _attachment_bindings[attachment_key]
+		var legacy_visuals: Array = []
+		for reference: WeakRef in binding.get("legacyVisuals", []):
+			legacy_visuals.append(reference.get_ref())
+		var registered: Dictionary = backend.call("register_packet_attachment", _source_id,
+			_generation, attachment_key, binding.parent.get_ref(), binding.body.get_ref(),
+			binding.neutralParentToWorld, binding.motion, legacy_visuals)
+		if registered.get("status") != "registered":
+			return _fail(String(registered.get("reason", "section_attachment_registration_failed")))
+	for attachment_key: String in _presentation_bindings:
+		var binding: Dictionary = _presentation_bindings[attachment_key]
+		var legacy_visuals: Array = []
+		for reference: WeakRef in binding.get("legacyVisuals", []):
+			legacy_visuals.append(reference.get_ref())
+		var registered: Dictionary = backend.call("register_borrowed_presentation",
+			_source_id, _generation, attachment_key, String(binding.sourceId),
+			String(binding.sourcePartId), String(binding.presentationMemberId),
+			binding.mount.get_ref(), binding.parent.get_ref(), binding.body.get_ref(),
+			binding.neutralParentToWorld, binding.mountLocalTransform, binding.motion,
+			bool(binding.intendedVisible), legacy_visuals)
+		if registered.get("status") != "registered_borrowed":
+			return _fail(String(registered.get("reason", "borrowed_presentation_registration_failed")))
 	state = "append" if not _batches.is_empty() else "upload"
 	return {"status":"begun", "sectionKey":section_key, "generation":_generation,
 		"batchCount":_batches.size(), "instanceCount":expected_instances}
 
 
+func _build_presentation_manifest(snapshot: Dictionary,
+		attachment_bindings: Dictionary) -> Dictionary:
+	var rows_by_key: Dictionary = {}
+	var borrowed_keys: Dictionary = {}
+	var borrowed_values: Variant = snapshot.get("presentationMembers", null)
+	if not borrowed_values is Array or not borrowed_values.is_read_only():
+		return _failed("section_presentation_member_manifest_missing")
+	for value: Variant in borrowed_values:
+		if not value is Dictionary or not value.is_read_only():
+			return _failed("section_presentation_member_manifest_invalid")
+		var member: Dictionary = value
+		var key := String(member.get("attachmentKey", ""))
+		if key.is_empty() or rows_by_key.has(key):
+			return _failed("section_presentation_member_identity_duplicate")
+		var validation := PresentationMembers.validate(member, String(member.get("sourceId", "")),
+			String(member.get("sourcePartId", "")), String(member.get("sourceRevision", "")))
+		if validation.get("status") != "ready":
+			return validation
+		var binding_value: Variant = attachment_bindings.get(key)
+		if not binding_value is Dictionary:
+			return _failed("borrowed_presentation_binding_missing")
+		var binding: Dictionary = binding_value
+		var binding_status := _validate_borrowed_presentation_binding(binding, member)
+		if binding_status.get("status") != "ready": return binding_status
+		rows_by_key[key] = _canonical_presentation_row(member)
+		borrowed_keys[key] = true
+		_presentation_bindings[key] = binding
+		_presentation_binding_identity[key] = {
+			"mountInstanceId":binding.mount.get_ref().get_instance_id(),
+			"parentInstanceId":binding.parent.get_ref().get_instance_id(),
+			"bodyInstanceId":binding.body.get_ref().get_instance_id(),
+			"sourceId":String(binding.sourceId), "sourcePartId":String(binding.sourcePartId),
+			"sourceRevision":String(binding.sourceRevision),
+			"producerSourceRevision":String(binding.producerSourceRevision),
+			"presentationMemberId":String(binding.presentationMemberId),
+			"attachmentKey":String(binding.attachmentKey),
+			"ownershipKind":String(binding.ownershipKind),
+			"publisherInstanceId":int(binding.publisherInstanceId),
+			"publicationEpoch":int(binding.publicationEpoch),
+			"bodyToWorld":binding.bodyToWorld,
+			"mountLocalTransform":binding.mountLocalTransform,
+			"neutralParentToWorld":binding.neutralParentToWorld,
+			"sweptWorldBounds":binding.sweptWorldBounds,
+			"motion":binding.motion, "intendedVisible":bool(binding.intendedVisible)}
+	# Geometry anchors remain native-owned roots. Their immutable member rows are
+	# derived from the candidate's sealed source manifest, never from live Nodes.
+	var batches_value: Variant = snapshot.get("batches", null)
+	var source_manifest_value: Variant = snapshot.get("manifest", null)
+	if not batches_value is Dictionary or not source_manifest_value is Array \
+			or not source_manifest_value.is_read_only():
+		return _failed("section_geometry_attachment_manifest_unavailable")
+	for batch_key_value: Variant in batches_value:
+		if not batch_key_value is String: return _failed("section_geometry_attachment_batch_key_invalid")
+		var batch: Variant = batches_value[batch_key_value]
+		if not batch is Dictionary or not batch.is_read_only():
+			return _failed("section_geometry_attachment_batch_invalid")
+		var key := String(batch.get("attachmentKey", ""))
+		if key.is_empty(): continue
+		if borrowed_keys.has(key):
+			return _failed("geometry_and_borrowed_attachment_key_collision")
+		var source_identity: Dictionary = {}
+		for manifest_value: Variant in source_manifest_value:
+			if not manifest_value is Dictionary or not manifest_value.is_read_only():
+				return _failed("section_geometry_source_manifest_invalid")
+			var source_row: Dictionary = manifest_value
+			var row_batch_keys: Variant = source_row.get("batchKeys", null)
+			if not row_batch_keys is Array or not row_batch_keys.is_read_only():
+				return _failed("section_geometry_source_batch_keys_invalid")
+			if row_batch_keys.has(String(batch_key_value)):
+				var identity := {"sourceId":String(source_row.get("sourceId", "")),
+					"sourcePartId":String(source_row.get("sourcePartId", "")),
+					"sourceRevision":String(source_row.get("sourceRevision", ""))}
+				if identity.sourceId.is_empty() or identity.sourcePartId.is_empty() \
+						or identity.sourceRevision.is_empty():
+					return _failed("section_geometry_source_identity_invalid")
+				if not source_identity.is_empty() and source_identity != identity:
+					return _failed("section_geometry_attachment_has_multiple_source_owners")
+				source_identity = identity
+		if source_identity.is_empty():
+			return _failed("section_geometry_attachment_source_owner_missing")
+		var neutral: Variant = batch.get("neutralParentToWorld", null)
+		var swept: Variant = batch.get("sweptWorldBounds", null)
+		var motion: Variant = batch.get("motion", null)
+		if not neutral is Transform3D or not swept is AABB or not motion is Dictionary \
+				or not motion.is_read_only():
+			return _failed("section_geometry_attachment_spatial_contract_missing")
+		var row := {"schema":PresentationMembers.SCHEMA,
+			"sourceId":source_identity.sourceId,
+			"sourcePartId":source_identity.sourcePartId,
+			"sourceRevision":source_identity.sourceRevision,
+			"producerSourceRevision":String(batch.producerSourceRevision),
+			"attachmentKey":key,
+			"presentationMemberId":"geometry:" + key,
+			# Attachment activation is independent of each batch's original local
+			# visibility. The latter is sealed on the batch and applied below.
+			"ownershipKind":"backend_owned_geometry", "intendedVisible":true,
+			"neutralParentToWorld":neutral, "sweptWorldBounds":swept, "motion":motion}
+		row.make_read_only()
+		row = _canonical_presentation_row(row)
+		if rows_by_key.has(key):
+			if rows_by_key[key] != row:
+				return _failed("section_geometry_attachment_identity_conflict")
+		else:
+			rows_by_key[key] = row
+		if not attachment_bindings.get(key) is Dictionary \
+				or not _attachment_bindings.has(key):
+			return _failed("section_geometry_attachment_binding_missing")
+		var geometry_binding: Dictionary = _attachment_bindings[key]
+		if geometry_binding.get("sourceRevision") != source_identity.sourceRevision \
+				or geometry_binding.get("producerSourceRevision") != row.producerSourceRevision:
+			return _failed("section_geometry_attachment_binding_revision_mismatch")
+	var keys: Array[String] = []
+	for key_value: Variant in rows_by_key: keys.append(String(key_value))
+	keys.sort()
+	if keys.size() > PresentationMembers.MAX_MEMBERS:
+		return _failed("section_presentation_member_capacity")
+	var rows: Array = []
+	var member_ids: Dictionary = {}
+	for key: String in keys: rows.append(rows_by_key[key])
+	for row_value: Variant in rows:
+		var row: Dictionary = row_value
+		var member_id := String(row.get("presentationMemberId", ""))
+		if member_id.is_empty() or member_ids.has(member_id):
+			return _failed("section_presentation_member_identity_duplicate")
+		member_ids[member_id] = true
+	rows.make_read_only()
+	var hashing := HashingContext.new()
+	if hashing.start(HashingContext.HASH_SHA256) != OK \
+			or hashing.update(var_to_bytes(rows)) != OK:
+		return _failed("section_presentation_manifest_hash_failed")
+	return {"status":"ready", "members":rows, "digest":hashing.finish().hex_encode()}
+
+
+func _canonical_presentation_row(value: Dictionary) -> Dictionary:
+	# Keep insertion order identical to the native canonical manifest serializer.
+	var source_motion: Dictionary = value.motion
+	var motion := {"kind":String(source_motion.kind),
+		"closedParentToBody":source_motion.closedParentToBody,
+		"raiseOffset":source_motion.raiseOffset, "swing":float(source_motion.swing)}
+	motion.make_read_only()
+	var row := {"schema":String(value.schema), "sourceId":String(value.sourceId),
+		"sourcePartId":String(value.sourcePartId), "sourceRevision":String(value.sourceRevision),
+		"producerSourceRevision":String(value.producerSourceRevision),
+		"attachmentKey":String(value.attachmentKey),
+		"presentationMemberId":String(value.presentationMemberId),
+		"ownershipKind":String(value.ownershipKind), "intendedVisible":bool(value.intendedVisible),
+		"neutralParentToWorld":value.neutralParentToWorld,
+		"sweptWorldBounds":value.sweptWorldBounds, "motion":motion}
+	row.make_read_only()
+	return row
+
+
+func _attachment_receipts_match_manifest(receipts_value: Variant,
+		visible_claim: bool) -> bool:
+	if not receipts_value is Array or receipts_value.size() != _presentation_manifest.size():
+		return false
+	var expected_by_key: Dictionary = {}
+	for member: Dictionary in _presentation_manifest:
+		expected_by_key[String(member.attachmentKey)] = member
+	var seen: Dictionary = {}
+	var seen_roots: Dictionary = {}
+	for receipt_value: Variant in receipts_value:
+		if not receipt_value is Dictionary: return false
+		var receipt: Dictionary = receipt_value
+		var key := String(receipt.get("attachmentKey", ""))
+		if key.is_empty() or seen.has(key) or not expected_by_key.has(key): return false
+		seen[key] = true
+		var expected: Dictionary = expected_by_key[key]
+		var motion: Dictionary = expected.motion
+		if String(receipt.get("memberSourceId", "")) != String(expected.sourceId) \
+				or String(receipt.get("sourcePartId", "")) != String(expected.sourcePartId) \
+				or String(receipt.get("sourceRevision", "")) != String(expected.sourceRevision) \
+				or String(receipt.get("producerSourceRevision", "")) != String(expected.producerSourceRevision) \
+				or String(receipt.get("presentationMemberId", "")) != String(expected.presentationMemberId) \
+				or String(receipt.get("ownershipKind", "")) != String(expected.ownershipKind) \
+				or bool(receipt.get("intendedVisible", false)) != bool(expected.intendedVisible) \
+				or bool(receipt.get("activeClaim", false)) != (visible_claim and bool(expected.intendedVisible)) \
+				or bool(receipt.get("rootVisible", false)) != (visible_claim and bool(expected.intendedVisible)) \
+				or receipt.get("neutralParentToWorld") != expected.neutralParentToWorld \
+				or receipt.get("sweptWorldBounds") != expected.sweptWorldBounds \
+				or int(receipt.get("rootInstanceId", 0)) <= 0 \
+				or int(receipt.get("parentInstanceId", 0)) <= 0 \
+				or int(receipt.get("bodyInstanceId", 0)) <= 0 \
+				or String(receipt.get("motionKind", "")) != String(motion.kind) \
+				or receipt.get("closedParentToBody") != motion.closedParentToBody \
+				or receipt.get("raiseOffset") != motion.raiseOffset \
+				or not is_equal_approx(float(receipt.get("swing", INF)), float(motion.swing)):
+			return false
+		var root_id := int(receipt.get("rootInstanceId", 0))
+		if seen_roots.has(root_id): return false
+		seen_roots[root_id] = true
+		var binding: Dictionary = _presentation_bindings.get(key, _attachment_bindings.get(key, {}))
+		if binding.is_empty() or not binding.get("parent") is WeakRef \
+				or not binding.get("body") is WeakRef:
+			return false
+		var parent: Object = binding.parent.get_ref()
+		var body: Object = binding.body.get_ref()
+		if not is_instance_valid(parent) or not is_instance_valid(body) \
+				or int(receipt.get("parentInstanceId", 0)) != parent.get_instance_id() \
+				or int(receipt.get("bodyInstanceId", 0)) != body.get_instance_id() \
+				or int(receipt.get("publisherInstanceId", 0)) != int(binding.get("publisherInstanceId", 0)) \
+				or int(receipt.get("publicationEpoch", -1)) != int(binding.get("publicationEpoch", -1)):
+			return false
+		if String(expected.ownershipKind) == "borrowed_presentation":
+			if not binding.get("mount") is WeakRef \
+					or not is_instance_valid(binding.mount.get_ref()) \
+					or root_id != binding.mount.get_ref().get_instance_id(): return false
+		var receipt_legacy: Variant = receipt.get("legacyVisuals", null)
+		var expected_legacy: Variant = binding.get("legacyVisuals", null)
+		if not receipt_legacy is Array or not expected_legacy is Array \
+				or receipt_legacy.size() != expected_legacy.size(): return false
+		var legacy_ids: Dictionary = {}
+		for reference: Variant in expected_legacy:
+			if not reference is WeakRef or not is_instance_valid(reference.get_ref()): return false
+			legacy_ids[reference.get_ref().get_instance_id()] = true
+		for legacy_value: Variant in receipt_legacy:
+			if not legacy_value is Dictionary: return false
+			var legacy_receipt: Dictionary = legacy_value
+			var visual_id := int(legacy_receipt.get("visualInstanceId", 0))
+			if not legacy_ids.has(visual_id) or not bool(legacy_receipt.get("hidden", false)):
+				return false
+			legacy_ids.erase(visual_id)
+		if not legacy_ids.is_empty(): return false
+	return seen.size() == expected_by_key.size()
+
+
+func _validate_borrowed_presentation_binding(binding: Dictionary, member: Dictionary) -> Dictionary:
+	if not binding.is_read_only():
+		return _failed("borrowed_presentation_binding_mutable")
+	for field: String in ["sourceId", "sourcePartId", "sourceRevision", "producerSourceRevision",
+			"presentationMemberId", "attachmentKey", "ownershipKind"]:
+		if not binding.get(field) is String or String(binding[field]).is_empty():
+			return _failed("borrowed_presentation_binding_identity_invalid:" + field)
+	if not binding.get("intendedVisible") is bool \
+			or not binding.get("publisherInstanceId") is int \
+			or not binding.get("publicationEpoch") is int \
+			or not binding.get("neutralParentToWorld") is Transform3D \
+			or not binding.get("sweptWorldBounds") is AABB \
+			or not binding.get("motion") is Dictionary \
+			or not binding.motion.is_read_only() \
+			or not binding.get("legacyVisuals") is Array \
+			or not binding.legacyVisuals.is_read_only():
+		return _failed("borrowed_presentation_binding_shape_invalid")
+	for field: String in ["parent", "body", "mount"]:
+		if not binding.get(field) is WeakRef or not is_instance_valid(binding[field].get_ref()) \
+				or not binding[field].get_ref() is Node3D:
+			return _failed("borrowed_presentation_owner_binding_invalid:" + field)
+	var parent: Node3D = binding.parent.get_ref()
+	var body: Node3D = binding.body.get_ref()
+	var mount: Node3D = binding.mount.get_ref()
+	var legacy: Variant = binding.get("legacyVisuals", null)
+	if parent.is_queued_for_deletion() or body.is_queued_for_deletion() \
+			or mount.is_queued_for_deletion() or not parent.is_inside_tree() \
+			or not body.is_inside_tree() or not mount.is_inside_tree() \
+			or mount.get_parent() != parent or (parent != body and not body.is_ancestor_of(parent)):
+		return _failed("borrowed_presentation_owner_binding_stale")
+	if not binding.get("mountLocalTransform") is Transform3D \
+			or not binding.get("bodyToWorld") is Transform3D \
+			or binding.get("neutralParentToWorld") != member.neutralParentToWorld \
+			or binding.get("motion") != member.motion \
+			or String(binding.get("sourceId", "")) != String(member.sourceId) \
+			or String(binding.get("sourcePartId", "")) != String(member.sourcePartId) \
+			or String(binding.get("sourceRevision", "")) != String(member.sourceRevision) \
+			or String(binding.get("producerSourceRevision", "")) != String(member.producerSourceRevision) \
+			or String(binding.get("presentationMemberId", "")) != String(member.presentationMemberId) \
+			or String(binding.get("attachmentKey", "")) != String(member.attachmentKey) \
+			or String(binding.get("ownershipKind", "")) != String(member.ownershipKind) \
+			or binding.get("sweptWorldBounds") != member.sweptWorldBounds \
+			or bool(binding.get("intendedVisible", false)) != bool(member.intendedVisible):
+		return _failed("borrowed_presentation_binding_identity_mismatch")
+	if not binding.get("mountLocalTransform").is_finite() \
+			or not binding.get("bodyToWorld").is_finite() \
+			or is_zero_approx(binding.mountLocalTransform.basis.determinant()) \
+			or is_zero_approx(binding.bodyToWorld.basis.determinant()) \
+			or not mount.transform.is_equal_approx(binding.mountLocalTransform) \
+			or String(mount.get_meta("section_attachment_presentation_member_id", "")) != String(member.presentationMemberId) \
+			or not binding.bodyToWorld.is_equal_approx(body.global_transform) \
+			or int(binding.get("publisherInstanceId", 0)) == 0 \
+			or int(binding.get("publicationEpoch", -1)) < 0 \
+			or String(body.get_meta("section_attachment_source_revision", "")) != String(member.producerSourceRevision) \
+			or int(body.get_meta("section_attachment_publisher_instance_id", 0)) != int(binding.publisherInstanceId) \
+			or int(body.get_meta("section_attachment_publication_epoch", -1)) != int(binding.publicationEpoch):
+		return _failed("borrowed_presentation_source_boundary_stale")
+	# A light-only source has no legacy geometry to suppress. Its exact empty
+	# roster is still part of the binding and checked against the native receipt.
+	if not legacy is Array or not legacy.is_read_only():
+		return _failed("borrowed_presentation_legacy_visual_manifest_missing")
+	for reference: Variant in legacy:
+		if not reference is WeakRef or not is_instance_valid(reference.get_ref()) \
+				or not reference.get_ref() is GeometryInstance3D \
+				or reference.get_ref().is_queued_for_deletion() \
+				or not body.is_ancestor_of(reference.get_ref()):
+			return _failed("borrowed_presentation_legacy_visual_manifest_invalid")
+	return {"status":"ready"}
+
+
 func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = -1) -> Dictionary:
 	if state in ["idle", "installed", "failed", "cancelled"]:
 		return {"status":state, "reason":reason}
+	if state == "awaiting_frame":
+		var cancellation := _settle_presentation_cancellation()
+		if cancellation.get("status") == "cancelled":
+			var cancelled_failure := _failed("section_presentation_cancelled")
+			cancelled_failure["requiresAuthoritativeReassembly"] = true
+			cancelled_failure["ownershipCleanup"] = cancellation
+			return cancelled_failure
+		if cancellation.get("status") != "not_applicable": return cancellation
+	if not _attachments_current():
+		if state == "awaiting_frame":
+			return _rollback_then_fail(_presentation_token, "section_attachment_binding_stale")
+		return _fail("section_attachment_binding_stale")
 	if state == "awaiting_frame":
 		if _current_backend() == null or _current_chunk() == null:
 			var rollback := rollback_presentation()
@@ -300,18 +715,39 @@ func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = 
 		var policy := {"castShadows":batch.get("castShadows", true),
 			"visibilityRangeEnd":batch.get("visibilityRangeEnd", 0.0),
 			"fadeMargin":batch.get("fadeMargin", 0.0)}
-		var appended: Dictionary = backend.call("append_batch_in_layer", _source_id,
+		var append_arguments: Array = [_source_id,
 			_generation, batch_id, entry.mesh, mesh_content_digest, entry.material,
 			PackedFloat32Array(segment.buffer), segment.bounds,
 			String(batch.get("renderTier", "structural")),
 			bool(policy.castShadows), float(policy.visibilityRangeEnd), float(policy.fadeMargin),
-			String(batch.get("renderLayer", "")))
+			String(batch.get("renderLayer", ""))]
+		var append_method := "append_batch_in_layer"
+		if not String(batch.get("attachmentKey", "")).is_empty():
+			append_method = "append_batch_in_attachment"
+			append_arguments.append(String(batch.attachmentKey))
+		append_arguments.append(bool(batch.intendedVisible))
+		var append_buffer_float_count := int(segment.buffer.size())
+		var append_mesh_surface_bytes := int(entry.get("meshSurfaceBytes", -1))
+		var append_started_usec := Time.get_ticks_usec()
+		var appended: Dictionary = backend.callv(append_method, append_arguments)
+		_last_append_step_wall_usec = maxi(0, Time.get_ticks_usec() - append_started_usec)
+		_max_append_step_wall_usec = maxi(_max_append_step_wall_usec,
+			_last_append_step_wall_usec)
+		_last_append_buffer_float_count = append_buffer_float_count
+		_max_append_buffer_float_count = maxi(_max_append_buffer_float_count,
+			append_buffer_float_count)
+		_last_append_mesh_surface_bytes = append_mesh_surface_bytes
+		if append_mesh_surface_bytes >= 0:
+			_max_append_mesh_surface_bytes = maxi(_max_append_mesh_surface_bytes,
+				append_mesh_surface_bytes)
 		if appended.get("status") == "backpressure":
-			return {"status":"pending", "reason":appended.get("reason", "backpressure")}
+			var backpressure := {"status":"pending",
+				"reason":appended.get("reason", "backpressure")}
+			backpressure["appendTelemetry"] = append_telemetry()
+			return backpressure
 		if appended.get("status") != "accepted":
 			var failure := _fail(String(appended.get("reason", "native_section_candidate_append_failed")))
 			var bounds: AABB = segment.bounds
-			var append_buffer := PackedFloat32Array(segment.buffer)
 			var mesh := entry.mesh as Mesh
 			failure["nativeAppend"] = {"sourceId":_source_id,
 				"batchId":batch_id, "batchKey":String(entry.get("batchKey", "")),
@@ -320,7 +756,9 @@ func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = 
 				"meshSurfaceCount":mesh.get_surface_count() if is_instance_valid(mesh) else -1,
 				"materialClass":entry.material.get_class() if is_instance_valid(entry.material) else "null",
 				"meshContentDigestLength":mesh_content_digest.length(),
-				"bufferFloatCount":append_buffer.size(),
+				"bufferFloatCount":append_buffer_float_count,
+				"meshSurfacePayloadBytes":append_mesh_surface_bytes,
+				"appendStepWallUsec":_last_append_step_wall_usec,
 				"floatsPerInstance":Attributes.FLOATS_PER_INSTANCE,
 				"renderLayer":String(batch.get("renderLayer", "")),
 				"renderTier":String(batch.get("renderTier", "structural")),
@@ -331,17 +769,30 @@ func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = 
 			return failure
 		_batch_index += 1
 		units += 1
-		return {"status":"pending", "stage":"append", "completedBatches":_batch_index}
+		var append_pending := {"status":"pending", "stage":"append",
+			"completedBatches":_batch_index}
+		append_pending["appendTelemetry"] = append_telemetry()
+		return append_pending
 	if state == "upload":
+		var upload_started_usec := Time.get_ticks_usec()
 		var advanced: Dictionary = backend.call("advance_packet", _source_id, _generation, max_upload_units)
+		_last_upload_call_wall_usec = maxi(0, Time.get_ticks_usec() - upload_started_usec)
+		_max_upload_call_wall_usec = maxi(_max_upload_call_wall_usec,
+			_last_upload_call_wall_usec)
+		_last_upload_cursor = int(advanced.get("uploadCursor",
+			advanced.get("uploadedBatches", -1)))
+		_last_upload_processed_units = int(advanced.get("units", -1))
+		_last_upload_expected_batches = int(advanced.get("expectedBatches", _batches.size()))
 		if advanced.get("status") == "pending":
-			return {"status":"pending", "reason":advanced.get("reason", "upload_pending")}
+			return _with_install_telemetry({"status":"pending",
+				"reason":advanced.get("reason", "upload_pending")})
 		if advanced.get("status") == "failed":
-			return _fail(String(advanced.get("reason", "native_section_candidate_upload_failed")))
+			return _with_install_telemetry(_fail(String(advanced.get("reason",
+				"native_section_candidate_upload_failed"))))
 		if advanced.get("status") != "ready_to_commit":
-			return _fail("native_section_candidate_upload_unacknowledged")
+			return _with_install_telemetry(_fail("native_section_candidate_upload_unacknowledged"))
 		state = "commit"
-		return {"status":"pending", "stage":state}
+		return _with_install_telemetry({"status":"pending", "stage":state})
 	if state == "commit":
 		var committed: Dictionary = backend.call("commit_packet", _source_id, _generation, true)
 		if committed.get("status") == "backpressure":
@@ -353,8 +804,14 @@ func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = 
 				or String(committed.get("packetDigest", "")) \
 					!= String(_candidate.contentManifestDigest):
 			return _fail(String(committed.get("reason", "native_section_candidate_receipt_rejected")))
+		if not bool(committed.get("attachmentManifestDeclared", false)) \
+				or String(committed.get("attachmentManifestDigest", "")) != _presentation_manifest_digest \
+				or int(committed.get("attachmentManifestCount", -1)) != _presentation_manifest.size() \
+				or not _attachment_receipts_match_manifest(committed.get("attachmentRoots", []), true):
+			return _fail("native_section_attachment_manifest_receipt_mismatch")
 		_presentation_token = String(committed.get("token", ""))
 		_presentation_root_id = int(committed.get("rootInstanceId", 0))
+		_presentation_attachment_roots = committed.get("attachmentRoots", []).duplicate(true)
 		_previous_root_id = int(committed.get("previousRootInstanceId", 0))
 		_previous_generation = int(committed.get("previousGeneration", 0))
 		state = "awaiting_frame"
@@ -376,18 +833,54 @@ func advance(max_upload_units: int = 1, current_translucent_pov_revision: int = 
 	return _fail("invalid_section_install_state")
 
 
+func append_telemetry() -> Dictionary:
+	return {"lastAppendStepWallUsec":_last_append_step_wall_usec,
+		"maxAppendStepWallUsec":_max_append_step_wall_usec,
+		"lastAppendBufferFloatCount":_last_append_buffer_float_count,
+		"maxAppendBufferFloatCount":_max_append_buffer_float_count,
+		"lastAppendMeshSurfaceBytes":_last_append_mesh_surface_bytes,
+		"maxAppendMeshSurfaceBytes":_max_append_mesh_surface_bytes,
+		"lastUploadAdvanceWallUsec":_last_upload_call_wall_usec,
+		"maxUploadAdvanceWallUsec":_max_upload_call_wall_usec,
+		"lastUploadCursor":_last_upload_cursor,
+		"lastUploadProcessedUnits":_last_upload_processed_units,
+		"lastUploadExpectedBatches":_last_upload_expected_batches,
+		"installBatchCount":_batches.size()}
+
+
+func _with_install_telemetry(result: Dictionary) -> Dictionary:
+	result["appendTelemetry"] = append_telemetry()
+	return result
+
+
 func finalize_presentation(token: String) -> Dictionary:
-	if state != "awaiting_frame" or token.is_empty() or token != _presentation_token:
-		return _failed("section_presentation_token_mismatch")
+	if state != "awaiting_frame":
+		return {"status":"failed","reason":"section_presentation_not_pending"}
+	if token.is_empty() or token != _presentation_token:
+		return _rollback_failed_step("section_presentation_token_mismatch", {})
+	var cancellation := _settle_presentation_cancellation()
+	if cancellation.get("status") == "cancelled":
+		var cancelled_failure := _failed("section_presentation_cancelled")
+		cancelled_failure["requiresAuthoritativeReassembly"] = true
+		cancelled_failure["ownershipCleanup"] = cancellation
+		return cancelled_failure
+	if cancellation.get("status") != "not_applicable": return cancellation
 	if not _frame_drawn:
 		return {"status":"pending_presentation", "reason":"section_frame_not_drawn",
 			"presentationToken":_presentation_token}
+	if not _attachments_current():
+		return _rollback_then_fail(token, "section_attachment_binding_stale")
 	var backend := _current_backend()
 	var chunk := _current_chunk()
 	if backend == null or chunk == null:
 		return _rollback_then_fail(token, "section_install_owner_replaced")
 	var pending: Dictionary = backend.call("pending_presentation_snapshot", _source_id)
+	if pending.get("attachmentRoots", []) != _presentation_attachment_roots:
+		return _rollback_then_fail(token, "section_attachment_root_set_replaced")
 	if pending.get("status") != "pending_presentation" \
+			or not bool(pending.get("attachmentManifestDeclared", false)) \
+			or String(pending.get("attachmentManifestDigest", "")) != _presentation_manifest_digest \
+			or int(pending.get("attachmentManifestCount", -1)) != _presentation_manifest.size() \
 			or String(pending.get("token", "")) != token \
 			or int(pending.get("generation", 0)) != _generation \
 			or String(pending.get("sourceRevision", "")) != _source_revision \
@@ -399,9 +892,14 @@ func finalize_presentation(token: String) -> Dictionary:
 		return _rollback_then_fail(token, "section_pending_presentation_identity_stale")
 	var finalized: Dictionary = backend.call("finalize_presentation", _source_id,
 		_generation, token)
+	var installed_snapshot: Dictionary = backend.call("installed_snapshot", _source_id)
 	if finalized.get("status") != "ready" \
 			or not backend.call("receipt_installed", _source_id, _generation,
-				_source_revision, String(_candidate.contentManifestDigest)):
+				_source_revision, String(_candidate.contentManifestDigest)) \
+			or not bool(installed_snapshot.get("attachmentManifestDeclared", false)) \
+			or String(installed_snapshot.get("attachmentManifestDigest", "")) != _presentation_manifest_digest \
+			or int(installed_snapshot.get("attachmentManifestCount", -1)) != _presentation_manifest.size() \
+			or not _attachment_receipts_match_manifest(installed_snapshot.get("attachmentRoots", []), true):
 			return _rollback_then_fail(token,
 			String(finalized.get("reason", "section_presentation_finalize_failed")))
 	state = "installed"
@@ -451,7 +949,11 @@ func _rollback_then_fail(token: String, failure_reason: String) -> Dictionary:
 	var rolled_back := rollback_presentation(token)
 	if rolled_back.get("status") != "cancelled":
 		return _rollback_failed_step(failure_reason, rolled_back)
-	return _failed(failure_reason)
+	var failed := _failed(failure_reason)
+	failed["ownershipCleanup"] = rolled_back
+	if bool(rolled_back.get("requiresAuthoritativeReassembly", false)):
+		failed["requiresAuthoritativeReassembly"] = true
+	return failed
 
 
 func _rollback_failed_step(failure_reason: String, rollback: Dictionary) -> Dictionary:
@@ -472,6 +974,8 @@ func rollback_presentation(token := "") -> Dictionary:
 	if backend == null:
 		return {"status":"rollback_failed", "reason":"section_install_rollback_backend_unavailable",
 			"presentationToken":_presentation_token, "retryable":true}
+	var cancellation := _settle_presentation_cancellation(true)
+	if cancellation.get("status") != "not_applicable": return cancellation
 	var rolled_back: Dictionary = backend.call("rollback_presentation", _source_id,
 		_generation, _presentation_token)
 	if rolled_back.get("status") != "rolled_back":
@@ -482,6 +986,29 @@ func rollback_presentation(token := "") -> Dictionary:
 	_tombstone_frame_drawn_callback()
 	return {"status":"cancelled", "sectionKey":_candidate.get("sectionKey"),
 		"generation":_generation, "rollback":rolled_back}
+
+
+func _settle_presentation_cancellation(withdrawal_requested := false) -> Dictionary:
+	var backend := _bound_backend_for_rollback()
+	if backend == null:
+		return _rollback_failed_step("section_presentation_cancellation_backend_unavailable", {})
+	var owner_loss: Dictionary = backend.call("settle_presentation_cancellation", _source_id,
+		_generation, _presentation_token, withdrawal_requested)
+	if owner_loss.get("status") == "cancelled":
+		if not bool(owner_loss.get("ownershipReleased", false)) \
+				or not bool(owner_loss.get("candidateQuiesced", false)) \
+				or owner_loss.get("sourceId") != _source_id \
+				or owner_loss.get("generation") != _generation \
+				or owner_loss.get("presentationToken") != _presentation_token:
+			return _rollback_failed_step("section_presentation_cancellation_proof_invalid", owner_loss)
+		state = "cancelled"
+		_tombstone_frame_drawn_callback()
+		return {"status":"cancelled", "sectionKey":_candidate.get("sectionKey"),
+			"generation":_generation, "cancellationSettlement":owner_loss,
+			"requiresAuthoritativeReassembly":true}
+	if owner_loss.get("status") != "not_applicable":
+		return _rollback_failed_step("section_presentation_cancellation_unsettled", owner_loss)
+	return owner_loss
 
 
 func _bound_backend_for_rollback() -> Node:
@@ -497,11 +1024,23 @@ func _bound_backend_for_rollback() -> Node:
 func cancel() -> Dictionary:
 	if state == "awaiting_frame":
 		return rollback_presentation()
-	var backend := _current_backend()
-	if backend != null and _generation > 0 and not _source_id.is_empty():
-		backend.call("abort_packet", _source_id, _generation)
+	var aborted := _abort_owned_packet()
+	if aborted.get("status") != "cancelled":
+		return aborted
 	state = "cancelled"
 	return {"status":"cancelled", "sectionKey":_candidate.get("sectionKey")}
+
+
+func _abort_owned_packet() -> Dictionary:
+	if _generation <= 0 or _source_id.is_empty():
+		return {"status":"cancelled"}
+	var backend := _bound_backend_for_rollback()
+	if backend == null:
+		return _rollback_failed_step(reason, {"reason":"section_install_abort_backend_unavailable"})
+	var aborted: Dictionary = backend.call("abort_packet", _source_id, _generation)
+	if aborted.get("status") not in ["aborted", "missing", "rolled_back"]:
+		return _rollback_failed_step(reason, aborted)
+	return {"status":"cancelled", "nativeAbort":aborted}
 
 
 func _pending_receipt(backend: Node, chunk: Node3D) -> Dictionary:
@@ -514,13 +1053,18 @@ func _pending_receipt(backend: Node, chunk: Node3D) -> Dictionary:
 		"presentationToken":_presentation_token,
 		"presentationRootInstanceId":_presentation_root_id,
 		"previousRootInstanceId":_previous_root_id,
-		"previousGeneration":_previous_generation}
+		"previousGeneration":_previous_generation,
+		"presentationManifestDigest":_presentation_manifest_digest,
+		"presentationMemberCount":_presentation_manifest.size(),
+		"attachmentRoots":_presentation_attachment_roots.duplicate(true)}
 	if not _production_metadata.is_empty():
 		receipt["candidateSchema"] = "world-static-section-production-candidate/v1"
 		receipt["censusDigest"] = String(_production_metadata.get("censusDigest", ""))
 		receipt["sourceRevisions"] = _production_metadata.get("sourceRevisions", {})
 		receipt["removalRevisions"] = _production_metadata.get("removalRevisions", {})
 		receipt["providerCoverage"] = _production_metadata.get("providerCoverage", [])
+		receipt["supportCoverageIdentities"] = _production_metadata.get(
+			"supportCoverageIdentities", [])
 	receipt.make_read_only()
 	return receipt
 
@@ -532,7 +1076,10 @@ func _receipt(backend: Node, chunk: Node3D) -> Dictionary:
 		"sourceRevision":_source_revision,
 		"ownerCell":_owner_cell, "backendInstanceId":backend.get_instance_id(),
 		"chunkInstanceId":chunk.get_instance_id(),
-		"sourceCaptureChunkKeys":_candidate.snapshot.streamChunkDependencies.duplicate()}
+		"sourceCaptureChunkKeys":_candidate.snapshot.streamChunkDependencies.duplicate(),
+		"presentationManifestDigest":_presentation_manifest_digest,
+		"presentationMemberCount":_presentation_manifest.size(),
+		"attachmentRoots":_presentation_attachment_roots.duplicate(true)}
 	if _translucent_pov_revision > 0:
 		receipt["translucentPovRevision"] = _translucent_pov_revision
 	if not _production_metadata.is_empty():
@@ -541,6 +1088,8 @@ func _receipt(backend: Node, chunk: Node3D) -> Dictionary:
 		receipt["sourceRevisions"] = _production_metadata.get("sourceRevisions", {})
 		receipt["removalRevisions"] = _production_metadata.get("removalRevisions", {})
 		receipt["providerCoverage"] = _production_metadata.get("providerCoverage", [])
+		receipt["supportCoverageIdentities"] = _production_metadata.get(
+			"supportCoverageIdentities", [])
 	receipt.make_read_only()
 	return receipt
 
@@ -636,6 +1185,91 @@ func _validate_translucent_sort_descriptor(batch: Dictionary, mesh_value: Varian
 	return {"status":"ready", "povRevision":int(pov_revision)}
 
 
+func _attachments_current() -> bool:
+	for attachment_key: String in _attachment_bindings:
+		var binding: Dictionary = _attachment_bindings[attachment_key]
+		var identity: Dictionary = _attachment_identity[attachment_key]
+		if not binding.is_read_only() or not identity.get("bodyToWorld") is Transform3D:
+			return false
+		for identity_key: String in identity:
+			if binding.get(identity_key) != identity[identity_key]:
+				return false
+		if not binding.get("parent") is WeakRef or not binding.get("body") is WeakRef:
+			return false
+		var legacy: Variant = binding.get("legacyVisuals")
+		if not legacy is Array or not legacy.is_read_only() or legacy.is_empty(): return false
+		for reference: Variant in legacy:
+			if not reference is WeakRef or not is_instance_valid(reference.get_ref()) \
+					or not reference.get_ref() is GeometryInstance3D \
+					or reference.get_ref().is_queued_for_deletion(): return false
+		var parent: Node3D = binding.parent.get_ref() as Node3D
+		var body: Node3D = binding.body.get_ref() as Node3D
+		if not is_instance_valid(parent) or not is_instance_valid(body) \
+				or parent.is_queued_for_deletion() or body.is_queued_for_deletion() \
+				or not parent.is_inside_tree() or not body.is_inside_tree() \
+				or parent.get_instance_id() != int(identity.get("parentInstanceId", 0)) \
+				or body.get_instance_id() != int(identity.get("bodyInstanceId", 0)) \
+				or (parent != body and not body.is_ancestor_of(parent)):
+			return false
+		if not body.global_transform.is_equal_approx(identity.bodyToWorld):
+			return false
+		if String(body.get_meta("section_attachment_source_revision", "")) != String(identity.get("producerSourceRevision", "")) \
+				or int(body.get_meta("section_attachment_publisher_instance_id", 0)) != int(identity.get("publisherInstanceId", -1)) \
+				or int(body.get_meta("section_attachment_publication_epoch", -1)) != int(identity.get("publicationEpoch", -2)):
+			return false
+	for attachment_key: String in _presentation_bindings:
+		var binding: Dictionary = _presentation_bindings[attachment_key]
+		var identity: Dictionary = _presentation_binding_identity.get(attachment_key, {})
+		if not binding.is_read_only() or not binding.get("motion") is Dictionary \
+				or not binding.motion.is_read_only(): return false
+		var parent_ref: Variant = binding.get("parent", null)
+		var body_ref: Variant = binding.get("body", null)
+		var mount_ref: Variant = binding.get("mount", null)
+		if not parent_ref is WeakRef or not body_ref is WeakRef or not mount_ref is WeakRef:
+			return false
+		var parent: Node3D = parent_ref.get_ref() as Node3D
+		var body: Node3D = body_ref.get_ref() as Node3D
+		var mount: Node3D = mount_ref.get_ref() as Node3D
+		if not is_instance_valid(parent) or not is_instance_valid(body) \
+				or not is_instance_valid(mount) or parent.is_queued_for_deletion() \
+				or body.is_queued_for_deletion() or mount.is_queued_for_deletion() \
+				or not parent.is_inside_tree() or not body.is_inside_tree() \
+				or not mount.is_inside_tree() or mount.get_parent() != parent \
+				or (parent != body and not body.is_ancestor_of(parent)) \
+				or parent.get_instance_id() != int(identity.get("parentInstanceId", 0)) \
+				or body.get_instance_id() != int(identity.get("bodyInstanceId", 0)) \
+				or mount.get_instance_id() != int(identity.get("mountInstanceId", 0)) \
+				or String(binding.get("sourceId", "")) != String(identity.get("sourceId", "")) \
+				or String(binding.get("sourcePartId", "")) != String(identity.get("sourcePartId", "")) \
+				or String(binding.get("sourceRevision", "")) != String(identity.get("sourceRevision", "")) \
+				or String(binding.get("producerSourceRevision", "")) != String(identity.get("producerSourceRevision", "")) \
+				or String(binding.get("presentationMemberId", "")) != String(identity.get("presentationMemberId", "")) \
+				or String(binding.get("attachmentKey", "")) != String(identity.get("attachmentKey", "")) \
+				or String(binding.get("ownershipKind", "")) != String(identity.get("ownershipKind", "")) \
+				or int(binding.get("publisherInstanceId", 0)) != int(identity.get("publisherInstanceId", -1)) \
+				or int(binding.get("publicationEpoch", -1)) != int(identity.get("publicationEpoch", -2)) \
+				or binding.get("bodyToWorld") != identity.get("bodyToWorld") \
+				or binding.get("mountLocalTransform") != identity.get("mountLocalTransform") \
+				or binding.get("neutralParentToWorld") != identity.get("neutralParentToWorld") \
+				or binding.get("sweptWorldBounds") != identity.get("sweptWorldBounds") \
+				or binding.get("motion") != identity.get("motion") \
+				or binding.get("intendedVisible") != identity.get("intendedVisible") \
+				or not body.global_transform.is_equal_approx(identity.get("bodyToWorld", Transform3D())) \
+				or not mount.transform.is_equal_approx(identity.get("mountLocalTransform", Transform3D.IDENTITY)) \
+				or String(body.get_meta("section_attachment_source_revision", "")) != String(identity.get("producerSourceRevision", "")) \
+				or int(body.get_meta("section_attachment_publisher_instance_id", 0)) != int(identity.get("publisherInstanceId", -1)) \
+				or int(body.get_meta("section_attachment_publication_epoch", -1)) != int(identity.get("publicationEpoch", -2)):
+			return false
+		var legacy: Variant = binding.get("legacyVisuals", null)
+		if not legacy is Array or not legacy.is_read_only(): return false
+		for reference: Variant in legacy:
+			if not reference is WeakRef or not is_instance_valid(reference.get_ref()) \
+					or not reference.get_ref() is GeometryInstance3D \
+					or reference.get_ref().is_queued_for_deletion() \
+					or not body.is_ancestor_of(reference.get_ref()): return false
+	return true
+
+
 func _current_backend() -> Node:
 	if _backend_ref == null:
 		return null
@@ -669,14 +1303,28 @@ func _current_chunk() -> Node3D:
 
 func _fail(value: String) -> Dictionary:
 	reason = value
-	var backend := _current_backend()
-	if backend != null and _generation > 0 and not _source_id.is_empty():
-		backend.call("abort_packet", _source_id, _generation)
-	state = "failed"
-	return {"status":"failed", "reason":reason}
+	if state == "awaiting_frame":
+		return _rollback_then_fail(_presentation_token, value)
+	var aborted := _abort_owned_packet()
+	if aborted.get("status") != "cancelled":
+		return aborted
+	var failed := _failed(value)
+	var proof: Dictionary = aborted.get("nativeAbort", {})
+	if bool(proof.get("requiresAuthoritativeReassembly", false)) \
+			and bool(proof.get("ownershipReleased", false)) \
+			and bool(proof.get("candidateQuiesced", false)) \
+			and proof.get("sourceId") == _source_id and proof.get("generation") == _generation:
+		failed["requiresAuthoritativeReassembly"] = true
+		failed["ownershipCleanup"] = aborted
+	return failed
 
 
 func _failed(value: String) -> Dictionary:
 	reason = value
 	state = "failed"
-	return {"status":"failed", "reason":reason}
+	var result := {"status":"failed", "reason":reason}
+	if value in ["section_attachment_binding_stale", "attachment_binding_stale",
+			"attachment_source_boundary_missing", "attachment_root_set_stale",
+			"pending_attachment_root_set_stale"]:
+		result["requiresAuthoritativeReassembly"] = true
+	return result

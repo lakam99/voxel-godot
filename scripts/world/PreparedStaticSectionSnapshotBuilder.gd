@@ -13,7 +13,9 @@ const SCHEMA := "prepared-static-section-snapshot-envelope/v1"
 
 static func build_replacements(partition_result: Dictionary, compatibility_by_key: Dictionary,
 		impacted_section_keys: Array, candidate_generation: int, world_id: String,
-		explicit_empty_contributors_by_section: Dictionary = {}) -> Dictionary:
+		explicit_empty_contributors_by_section: Dictionary = {},
+		support_ranges_by_section: Dictionary = {}, defer_compile: bool = false,
+		presentation_contributors_by_section: Dictionary = {}) -> Dictionary:
 	if not partition_result.is_read_only():
 		return _failed("mutable_partition_result")
 	if not compatibility_by_key.is_read_only():
@@ -77,6 +79,8 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 					!= "chunk-static-render-section-instance-partition/v3":
 			return _failed("partition_output_segment_identity_mismatch")
 		var source_ranges: Variant = segment.get("sourceRanges")
+		if segment.get("compoundAnchor") != compatibility.get("compoundAnchor"):
+			return _failed("compound_anchor_compatibility_mismatch")
 		if not source_ranges is Array or not source_ranges.is_read_only():
 			return _failed("invalid_partition_source_ranges")
 		for range_value: Variant in source_ranges:
@@ -91,11 +95,14 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 		if not output_groups.has(section_key):
 			output_groups[section_key] = {}
 		var section_groups: Dictionary = output_groups[section_key]
-		if not section_groups.has(source_id):
-			section_groups[source_id] = {"sourceId":source_id,
+		var source_identity_key := _source_part_identity_key(source_id, source_part_id)
+		if source_identity_key.is_empty():
+			return _failed("partition_output_source_identity_key_invalid")
+		if not section_groups.has(source_identity_key):
+			section_groups[source_identity_key] = {"sourceId":source_id,
 				"sourcePartId":source_part_id, "sourceRevision":source_revision,
 				"ownerCell":owner_cell_value, "batches":{}}
-		var contributor_group: Dictionary = section_groups[source_id]
+		var contributor_group: Dictionary = section_groups[source_identity_key]
 		if contributor_group.sourcePartId != source_part_id \
 				or contributor_group.sourceRevision != source_revision \
 				or contributor_group.ownerCell != owner_cell_value:
@@ -115,10 +122,17 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 	var replacements: Array[Dictionary] = []
 	for section_key: Vector3i in ordered_keys:
 		var contributors := _contributors_for_section(section_key,
-			output_groups.get(section_key, {}))
+			output_groups.get(section_key, {}), candidate_generation,
+		support_ranges_by_section.get(section_key, {}))
 		if contributors.get("status") != "ready":
 			return contributors
 		var complete_contributors: Array[Dictionary] = contributors.contributors.duplicate()
+		var presentation_values: Variant = presentation_contributors_by_section.get(section_key, null)
+		if presentation_values != null:
+			var merged_presentations := _merge_presentation_contributors(section_key,
+				complete_contributors, presentation_values)
+			if merged_presentations.get("status") != "ready": return merged_presentations
+			complete_contributors = merged_presentations.contributors
 		var explicit_empty_value: Variant = explicit_empty_contributors_by_section.get(section_key, [])
 		if not explicit_empty_value is Array:
 			return _failed("explicit_empty_section_manifest_mutable_or_missing")
@@ -128,7 +142,9 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 			explicit_empty_value.make_read_only()
 		var seen_contributors: Dictionary = {}
 		for contributor_value: Variant in complete_contributors:
-			seen_contributors[String(contributor_value.get("sourcePartId", ""))] = true
+			seen_contributors[_source_part_identity_key(
+				String(contributor_value.get("sourceId", "")),
+				String(contributor_value.get("sourcePartId", "")))] = true
 		for empty_value: Variant in explicit_empty_value:
 			if not empty_value is Dictionary or not empty_value.is_read_only():
 				return _failed("explicit_empty_section_contributor_mutable_or_invalid")
@@ -139,24 +155,36 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 			var owner_cell_value: Variant = empty.get("ownerCell")
 			if source_id.is_empty() or source_part_id.is_empty() or source_revision.is_empty() \
 					or empty.get("sectionKey") != section_key or not owner_cell_value is Vector2i \
-					or seen_contributors.has(source_part_id):
+					or seen_contributors.has(_source_part_identity_key(source_id, source_part_id)):
 				return _failed("explicit_empty_section_manifest_identity_invalid")
-			seen_contributors[source_part_id] = true
+			seen_contributors[_source_part_identity_key(source_id, source_part_id)] = true
 			var empty_batches: Array = []
 			empty_batches.make_read_only()
+			var empty_support_ranges: Array = []
+			empty_support_ranges.make_read_only()
 			var explicit_contributor := {"instanceAttributeLayout":Snapshot.INSTANCE_ATTRIBUTE_LAYOUT,
 				"sourceId":source_id, "sourcePartId":source_part_id,
 				"sourceRevision":source_revision, "ownerCell":owner_cell_value,
 				"sectionKey":section_key, "bufferSpace":"section_local",
+				"contributorKind":"explicit_empty", "supportRanges":empty_support_ranges,
 				"batches":empty_batches}
 			explicit_contributor.make_read_only()
 			complete_contributors.append(explicit_contributor)
 		complete_contributors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			return String(a.get("sourceId", "")) < String(b.get("sourceId", "")))
+			return _source_part_identity_key(String(a.get("sourceId", "")),
+				String(a.get("sourcePartId", ""))) < _source_part_identity_key(
+				String(b.get("sourceId", "")), String(b.get("sourcePartId", ""))))
 		complete_contributors.make_read_only()
-		var assembled: Dictionary = Snapshot.assemble(section_key, complete_contributors)
+		var assembled: Dictionary = Snapshot.prepare_compile(section_key, complete_contributors) \
+			if defer_compile else Snapshot.assemble(section_key, complete_contributors)
 		if assembled.get("status") != "ready":
 			return _failed("section_snapshot_assembly_failed:" + String(assembled.get("reason", "unknown")))
+		if defer_compile:
+			var prepared := {"worldId":world_id, "generation":candidate_generation,
+				"sectionKey":section_key, "preparation":assembled.preparation}
+			prepared.make_read_only()
+			replacements.append(prepared)
+			continue
 		var snapshot: Dictionary = assembled.snapshot
 		var digest := _snapshot_digest(snapshot, world_id, candidate_generation, section_key)
 		if digest.is_empty():
@@ -172,6 +200,74 @@ static func build_replacements(partition_result: Dictionary, compatibility_by_ke
 		"replacements":replacements}
 	result.make_read_only()
 	return result
+
+
+static func _merge_presentation_contributors(section_key: Vector3i,
+		contributors: Array[Dictionary], presentation_values: Variant) -> Dictionary:
+	if not presentation_values is Array or not presentation_values.is_read_only():
+		return _failed("mutable_or_invalid_presentation_contributors")
+	var by_identity: Dictionary = {}
+	for contributor: Dictionary in contributors:
+		by_identity[_source_part_identity_key(contributor.sourceId,
+			contributor.sourcePartId)] = contributor
+	var seen: Dictionary = {}
+	for value: Variant in presentation_values:
+		if not value is Dictionary or not value.is_read_only():
+			return _failed("mutable_or_invalid_presentation_contributor")
+		var source: Dictionary = value
+		for field: String in ["sourceId", "sourcePartId", "sourceRevision"]:
+			if not source.get(field) is String or String(source[field]).strip_edges().is_empty():
+				return _failed("invalid_presentation_contributor_identity")
+		var key := _source_part_identity_key(String(source.get("sourceId", "")),
+			String(source.get("sourcePartId", "")))
+		var members: Variant = source.get("presentationMembers", null)
+		if key.is_empty() or seen.has(key) or source.get("sectionKey") != section_key \
+				or not source.get("ownerCell") is Vector2i \
+				or not source.get("sourceRevision") is String \
+				or String(source.sourceRevision).is_empty() \
+				or not members is Array or not members.is_read_only() or members.is_empty():
+			return _failed("invalid_presentation_contributor_identity")
+		seen[key] = true
+		var result: Dictionary
+		if by_identity.has(key):
+			var existing: Dictionary = by_identity[key]
+			if existing.sourceRevision != source.sourceRevision \
+					or existing.ownerCell != source.ownerCell \
+					or existing.get("contributorKind") == "explicit_empty":
+				return _failed("conflicting_presentation_contributor_identity")
+			result = existing.duplicate(false)
+			if result.batches.is_empty(): result["contributorKind"] = "presentation"
+		else:
+			var empty_batches: Array = []
+			var empty_support: Array = []
+			empty_batches.make_read_only()
+			empty_support.make_read_only()
+			result = {"instanceAttributeLayout":Snapshot.INSTANCE_ATTRIBUTE_LAYOUT,
+				"sourceId":source.sourceId, "sourcePartId":source.sourcePartId,
+				"sourceRevision":source.sourceRevision, "ownerCell":source.ownerCell,
+				"sectionKey":section_key, "bufferSpace":"section_local",
+				"contributorKind":"presentation", "supportRanges":empty_support,
+				"batches":empty_batches}
+		result["presentationMembers"] = members
+		result.make_read_only()
+		by_identity[key] = result
+	var output: Array[Dictionary] = []
+	for key: String in by_identity: output.append(by_identity[key])
+	return {"status":"ready", "contributors":output}
+
+
+static func finalize_replacement(prepared: Dictionary, compiled_groups: Dictionary) -> Dictionary:
+	var assembled := Snapshot.finalize_compile(prepared.preparation, compiled_groups)
+	if assembled.get("status") != "ready": return assembled
+	var snapshot: Dictionary = assembled.snapshot
+	var digest := _snapshot_digest(snapshot, String(prepared.worldId),
+		int(prepared.generation), Vector3i(prepared.sectionKey))
+	if digest.is_empty(): return _failed("section_snapshot_digest_failed")
+	var envelope := {"schema":SCHEMA, "worldId":String(prepared.worldId),
+		"generation":int(prepared.generation), "sectionKey":prepared.sectionKey,
+		"contentManifestDigest":digest, "snapshot":snapshot}
+	envelope.make_read_only()
+	return {"status":"ready", "replacement":envelope}
 
 
 static func _validate_partition_result(value: Dictionary) -> Dictionary:
@@ -240,8 +336,8 @@ static func _validate_partition_result(value: Dictionary) -> Dictionary:
 					!= "chunk-static-render-section-instance-partition/v3":
 			return _failed("partition_output_segment_identity_mismatch")
 		output_sections[section_key] = true
-		output_batches["%s\n%s\n%s\n%s" % [section_key, batch_key,
-			source_id, source_revision]] = true
+		output_batches["%s\n%s\n%s\n%s\n%s" % [section_key, batch_key,
+			source_id, source_part_id, source_revision]] = true
 		observed_output_instances += instance_count
 		for output_offset in range(instance_count):
 			var range_value: Variant = ranges_value[output_offset]
@@ -274,8 +370,7 @@ static func _validate_partition_result(value: Dictionary) -> Dictionary:
 			output_sections.size(), section_count, output_batches.size(), batch_count])
 
 	var manifest_mappings: Dictionary = {}
-	var manifest_source_ids: Dictionary = {}
-	var manifest_part_ids: Dictionary = {}
+	var manifest_source_part_identities: Dictionary = {}
 	var observed_manifest_instances := 0
 	for manifest_entry_value: Variant in manifest_value:
 		if not manifest_entry_value is Dictionary or not manifest_entry_value.is_read_only():
@@ -290,11 +385,11 @@ static func _validate_partition_result(value: Dictionary) -> Dictionary:
 		if source_id.is_empty() or source_part_id.is_empty() or source_revision.is_empty() \
 				or not owner_cell_value is Vector2i or not count is int or count < 1 \
 				or not instances_value is Array or not instances_value.is_read_only() \
-				or instances_value.size() != count or manifest_source_ids.has(source_id) \
-				or manifest_part_ids.has(source_part_id):
+				or instances_value.size() != count \
+				or manifest_source_part_identities.has(
+					_source_part_identity_key(source_id, source_part_id)):
 			return _failed("invalid_partition_source_manifest_identity")
-		manifest_source_ids[source_id] = true
-		manifest_part_ids[source_part_id] = true
+		manifest_source_part_identities[_source_part_identity_key(source_id, source_part_id)] = true
 		observed_manifest_instances += count
 		for instance_value: Variant in instances_value:
 			if not instance_value is Dictionary or not instance_value.is_read_only():
@@ -335,18 +430,45 @@ static func _validate_partition_result(value: Dictionary) -> Dictionary:
 
 static func _source_instance_key(source_id: String, source_part_id: String,
 		source_revision: String, source_segment_id: String, source_instance: int) -> String:
-	return "%s\n%s\n%s\n%s\n%d" % [source_id, source_part_id,
-		source_revision, source_segment_id, source_instance]
+	return "section-instance:" + var_to_bytes([source_id, source_part_id,
+		source_revision, source_segment_id, source_instance]).hex_encode()
 
 
-static func _contributors_for_section(section_key: Vector3i, source_groups: Dictionary) -> Dictionary:
+static func _source_part_identity_key(source_id: String, source_part_id: String) -> String:
+	if source_id.is_empty() or source_part_id.is_empty(): return ""
+	return "section-part:" + var_to_bytes([source_id, source_part_id]).hex_encode()
+
+
+static func _contributors_for_section(section_key: Vector3i, source_groups: Dictionary,
+		candidate_generation: int, support_ranges_by_source: Variant = {}) -> Dictionary:
+	if not support_ranges_by_source is Dictionary:
+		return {"status":"failed", "reason":"support_range_source_map_invalid"}
+	var normalized_support: Dictionary = {}
+	for source_id_value: Variant in support_ranges_by_source:
+		var identity_key := String(source_id_value)
+		var rows_value: Variant = support_ranges_by_source[source_id_value]
+		if identity_key.is_empty() or not rows_value is Array or not rows_value.is_read_only():
+			return {"status":"failed", "reason":"support_range_source_entry_invalid"}
+		normalized_support[identity_key] = rows_value
 	var source_ids: Array[String] = []
 	for source_id_value: Variant in source_groups:
 		source_ids.append(String(source_id_value))
+	for source_id_value: Variant in normalized_support:
+		if not source_groups.has(source_id_value):
+			source_ids.append(String(source_id_value))
 	source_ids.sort()
 	var contributors: Array[Dictionary] = []
-	for source_id: String in source_ids:
-		var source_group: Dictionary = source_groups[source_id]
+	for identity_key: String in source_ids:
+		var source_group: Dictionary = source_groups.get(identity_key, {})
+		var support_ranges: Array = normalized_support.get(identity_key, [])
+		if source_group.is_empty():
+			if support_ranges.is_empty():
+				return {"status":"failed", "reason":"support_only_source_has_no_ranges"}
+			var first_support: Dictionary = support_ranges[0]
+			source_group = {"sourceId":String(first_support.get("sourceId", "")),
+				"sourcePartId":String(first_support.get("sourcePartId", "")),
+				"sourceRevision":String(first_support.get("sourceRevision", "")),
+				"ownerCell":first_support.get("ownerCell", Vector2i.ZERO), "batches":{}}
 		var batch_groups: Dictionary = source_group.batches
 		var batch_keys: Array[String] = []
 		for key_value: Variant in batch_groups:
@@ -373,19 +495,49 @@ static func _contributors_for_section(section_key: Vector3i, source_groups: Dict
 				"transparencySortPolicy":String(compatibility.translucentSortPolicy),
 				"meshLocalBounds":compatibility.meshLocalBounds,
 				"castShadows":compatibility.castShadows,
+				"intendedVisible":compatibility.get("intendedVisible", true),
 				"visibilityRangeEnd":compatibility.visibilityRangeEnd,
 				"fadeMargin":compatibility.fadeMargin,
 				"segments":readonly_segments}
+			if compatibility.has("compoundAnchor"):
+				batch["compoundAnchor"] = compatibility.compoundAnchor
+				batch["ownershipPolicy"] = "compound_attachment_anchor/v1"
+			if not String(compatibility.get("attachmentKey", "")).is_empty():
+				for field: String in ["attachmentKey", "producerSourceRevision", "neutralParentToWorld", "sweptWorldBounds", "motion"]:
+					batch[field] = compatibility[field]
+			if compatibility.has("translucentSortDescriptor"):
+				var descriptor_value: Variant = compatibility.get("translucentSortDescriptor")
+				if not descriptor_value is Dictionary or not descriptor_value.is_read_only():
+					return {"status":"failed", "reason":"translucent_sort_descriptor_mutable_or_missing"}
+				var descriptor: Dictionary = descriptor_value.duplicate(false)
+				if descriptor.get("sectionKey") != section_key \
+						or String(descriptor.get("meshContentDigest", "")) \
+						!= String(compatibility.get("meshContentDigest", "")) \
+						or int(descriptor.get("povRevision", -1)) <= 0 \
+						or not descriptor.get("cameraPosition") is Vector3 \
+						or not descriptor.get("surfaces") is Array \
+						or not descriptor.surfaces.is_read_only():
+					return {"status":"failed", "reason":"translucent_sort_descriptor_identity_invalid"}
+				# This is candidate identity, not fluid source/content identity. The
+				# finalized descriptor is included in the assembled snapshot digest.
+				descriptor["sectionGeneration"] = candidate_generation
+				descriptor.make_read_only()
+				batch["translucentSortDescriptor"] = descriptor
 			batch.make_read_only()
 			batches.append(batch)
 		batches.make_read_only()
+		var support_copy: Array = support_ranges.duplicate()
+		support_copy.make_read_only()
+		var contributor_kind := "support_only" if batches.is_empty() \
+			and not support_copy.is_empty() else "geometry"
 		var contributor := {"instanceAttributeLayout":Snapshot.INSTANCE_ATTRIBUTE_LAYOUT,
-			"sourceId":source_id,
+			"sourceId":String(source_group.sourceId),
 			"sourcePartId":String(source_group.sourcePartId),
 			"sourceRevision":String(source_group.sourceRevision),
 			"ownerCell":Vector2i(source_group.ownerCell),
 			"sectionKey":section_key, "bufferSpace":"section_local",
-			"batches":batches}
+			"contributorKind":contributor_kind,
+			"supportRanges":support_copy, "batches":batches}
 		contributor.make_read_only()
 		contributors.append(contributor)
 	contributors.make_read_only()
@@ -416,7 +568,8 @@ static func batch_compatibility_key(value: Dictionary) -> String:
 	var cast_shadows: Variant = value.get("castShadows")
 	var visibility_end: Variant = value.get("visibilityRangeEnd")
 	var fade_margin: Variant = value.get("fadeMargin")
-	if instance_attribute_layout != Snapshot.INSTANCE_ATTRIBUTE_LAYOUT \
+	var intended_visible: Variant = value.get("intendedVisible", true)
+	if not intended_visible is bool or instance_attribute_layout != Snapshot.INSTANCE_ATTRIBUTE_LAYOUT \
 			or material_key.is_empty() or render_tier.is_empty() or mesh_resource_key.is_empty() \
 			or mesh_content_digest.length() != 64 \
 			or not mesh_content_digest.is_valid_hex_number(false) \
@@ -431,11 +584,29 @@ static func batch_compatibility_key(value: Dictionary) -> String:
 			or visibility_end < 0.0 or fade_margin < 0.0:
 		return ""
 	var mesh_bounds: AABB = mesh_bounds_value
-	var canonical := JSON.stringify([instance_attribute_layout, material_key, render_tier,
+	var canonical_fields: Array = [instance_attribute_layout, material_key, render_tier,
 		mesh_resource_key, mesh_content_digest, pipeline_revision, render_layer, sort_policy,
 		cast_shadows, visibility_end, fade_margin, mesh_bounds.position.x, mesh_bounds.position.y,
 		mesh_bounds.position.z, mesh_bounds.size.x, mesh_bounds.size.y,
-		mesh_bounds.size.z])
+		mesh_bounds.size.z]
+	canonical_fields.append(intended_visible)
+	var attachment_key := String(value.get("attachmentKey", ""))
+	if not attachment_key.is_empty():
+		var producer_revision: Variant = value.get("producerSourceRevision")
+		if not producer_revision is String or String(producer_revision).is_empty(): return ""
+		var neutral: Variant = value.get("neutralParentToWorld")
+		var swept: Variant = value.get("sweptWorldBounds")
+		var motion: Variant = value.get("motion")
+		if not neutral is Transform3D or not neutral.is_finite() \
+				or absf(neutral.basis.determinant()) < 0.000001 \
+				or not swept is AABB or not _valid_bounds(swept) \
+				or not Snapshot.valid_attachment_motion(motion): return ""
+		canonical_fields.append([attachment_key, producer_revision, var_to_bytes(neutral).hex_encode(), var_to_bytes(swept).hex_encode(),var_to_bytes(motion).hex_encode()])
+	if not Snapshot.valid_geometry_ownership_descriptor(value): return ""
+	if value.has("compoundAnchor"):
+		if not Snapshot.valid_compound_anchor(value.compoundAnchor): return ""
+		canonical_fields.append(var_to_bytes(value.compoundAnchor).hex_encode())
+	var canonical := JSON.stringify(canonical_fields)
 	return "section-batch:" + canonical.sha256_text()
 
 
@@ -505,6 +676,15 @@ static func _canonical_value(value: Variant) -> Dictionary:
 		if position.get("status") != "ready" or size.get("status") != "ready":
 			return {"status":"failed", "reason":"invalid_aabb_digest_value"}
 		return {"status":"ready", "value":["AABB", position.value, size.value]}
+	if value is Transform3D:
+		if not value.is_finite():
+			return {"status":"failed", "reason":"nonfinite_transform3d_digest_value"}
+		var components: Array = []
+		for vector: Vector3 in [value.basis.x,value.basis.y,value.basis.z,value.origin]:
+			var canonical_vector := _canonical_value(vector)
+			if canonical_vector.get("status") != "ready": return canonical_vector
+			components.append(canonical_vector.value)
+		return {"status":"ready", "value":["Transform3D",components]}
 	if value is float:
 		return {"status":"ready", "value":["float64_variant_bytes", var_to_bytes(value).hex_encode()]}
 	if value is String or value is bool or value is int or value == null:

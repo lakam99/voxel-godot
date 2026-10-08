@@ -15,8 +15,28 @@ const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.g
 const SectionGrid = preload("res://scripts/world/StaticRenderSectionGrid.gd")
 const SectionGeometryAdapter = preload("res://scripts/world/CitadelSectionGeometryAdapter.gd")
 const SectionSnapshotBuilder = preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
+const SectionPacketOwner = preload("res://scripts/world/ChunkRenderPacketOwner.gd")
+const SectionInstallSession = preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
+const OwnerCompletion = preload("res://scripts/world/StaticGeometryOwnerCompletion.gd")
+const OwnerSectionSlice = preload("res://scripts/world/StaticGeometryOwnerSectionSlice.gd")
+const LegacyVisualIndex = preload("res://scripts/world/CitadelLegacySectionVisualIndex.gd")
+const SourceRoster = preload("res://scripts/world/StaticSectionSourceRoster.gd")
+const TreeVisualPolicy = preload("res://scripts/world/EcologyProducerDomain.gd")
 const MAX_REGIONS := 16
 const MAX_RETAINED_BOUNDS := 64
+const MAX_OWNER_SECTION_SLICE_CACHE := 512
+const MAX_OWNER_SECTION_SLICE_JOBS := 512
+const MAX_SECTION_CONTRIBUTION_CAPTURE_JOBS := 32
+const SECTION_CONTRIBUTION_CAPTURE_IDLE_FRAMES := 120
+const MAX_CITADEL_CENSUS_MEMBER_AUTHORITIES_PER_ADVANCE := 8
+const CITADEL_CENSUS_MEMBER_AUTHORITY_ADVANCE_BUDGET_USEC := 2000
+const MAX_CITADEL_CENSUS_CAPTURE_JOBS := 64
+const CITADEL_CENSUS_CAPTURE_IDLE_FRAMES := 120
+const MAX_RETAINED_TRANSFORM_ARTIFACT_CAPTURES := 2048
+const OWNER_SECTION_SLICE_ADVANCE_BUDGET_USEC := 250
+const MAX_PENDING_SECTION_SOURCE_RETIREMENTS := 512
+const MAX_SECTION_SOURCE_RETIREMENTS_PER_ADVANCE := 2
+const SECTION_SOURCE_RETIREMENT_ADVANCE_BUDGET_USEC := 500
 const MAX_DISCOVERY_CHUNKS := 256
 const DISCOVERY_CHUNK_SIZE := 28
 const PREPARATION_TIMEOUT_USEC := 60000000
@@ -69,6 +89,70 @@ const SOURCE_PREFETCH_LOOKAHEAD_METERS := 15.4 * (57.0 + 12.0) + 180.0
 const SOURCE_PREFETCH_LATERAL_METERS := float(SitePreparation.MAX_INFLUENCE_RADIUS_CELLS) * SitePreparation.CELL + 180.0
 
 var _admission
+var _owner_snapshot_serial := 0
+var _owner_snapshot_token := 0
+var _owner_snapshot_owner: WeakRef
+var _owner_snapshot_generation := -1
+var _owner_snapshot_values: Dictionary = {}
+var _source_capture_phase_observer := Callable()
+var _source_capture_active_section := Vector3i.ZERO
+
+
+func set_source_capture_phase_observer(observer: Callable) -> void:
+	_source_capture_phase_observer = observer
+
+
+func _emit_source_capture_phase(phase: String, details: Dictionary = {}) -> void:
+	if _source_capture_phase_observer.is_valid():
+		var observed := details.duplicate(false)
+		observed["sectionKey"] = _source_capture_active_section
+		_source_capture_phase_observer.call("citadel_census:%s" % phase, observed)
+
+func begin_owner_expectation_snapshot(owner: Object) -> Dictionary:
+	if not is_instance_valid(owner) or _owner_snapshot_token != 0:
+		return {"status":"failed", "reason":"owner_expectation_snapshot_scope_busy"}
+	_owner_snapshot_serial += 1
+	_owner_snapshot_token = _owner_snapshot_serial
+	_owner_snapshot_owner = weakref(owner)
+	_owner_snapshot_generation = _generation
+	_owner_snapshot_values = {}
+	return {"status":"ready", "token":_owner_snapshot_token}
+
+func end_owner_expectation_snapshot(owner: Object, token: int) -> Dictionary:
+	if token != _owner_snapshot_token or token == 0 or _owner_snapshot_owner == null \
+			or _owner_snapshot_owner.get_ref() != owner:
+		return {"status":"failed", "reason":"owner_expectation_snapshot_scope_mismatch"}
+	_owner_snapshot_token = 0
+	_owner_snapshot_owner = null
+	_owner_snapshot_values.clear()
+	return {"status":"released"}
+
+func _owner_snapshot_active() -> bool:
+	return _owner_snapshot_token != 0 and _owner_snapshot_owner != null \
+		and is_instance_valid(_owner_snapshot_owner.get_ref()) and _owner_snapshot_generation == _generation
+
+func _owner_snapshot_bucket(kind: String) -> Dictionary:
+	if not _owner_snapshot_active(): return {}
+	if not _owner_snapshot_values.has(kind): _owner_snapshot_values[kind] = {}
+	return _owner_snapshot_values[kind]
+
+func _capture_owner_source_snapshot(publisher: Object, part_id: String, revision: String) -> Dictionary:
+	if not _owner_snapshot_active():
+		return publisher.capture_committed_static_visual_source(part_id, revision)
+	var values := _owner_snapshot_bucket("sourceCapture")
+	var key := var_to_str([publisher.get_instance_id(), part_id, revision])
+	if values.has(key): return values[key]
+	_emit_source_capture_phase("publisher_artifact_capture", {"sourcePartId":part_id})
+	var result: Dictionary = publisher.capture_committed_static_visual_source(part_id, revision)
+	_emit_source_capture_phase("publisher_artifact_capture_complete", {"sourcePartId":part_id,
+		"status":String(result.get("status", ""))})
+	if result.get("status") == "ready":
+		var sealed := result.duplicate(false)
+		sealed.make_read_only()
+		values[key] = sealed
+		return sealed
+	return result
+
 var _worker = Worker.new()
 var _generation := 0
 var _seed := ""
@@ -128,6 +212,369 @@ var _door_method: StringName
 var _door_retire_receiver: WeakRef
 var _door_retire_method: StringName
 var _scenes: Dictionary = {}
+var _section_install_acknowledgements: Dictionary = {}
+## Section installation ACKs are independent of source-wide legacy retirement.
+## Keep a bounded, deduplicated retry obligation until every support receipt and
+## the exact producer owner are current, then retire only the source visual.
+var _pending_section_source_retirements: Dictionary = {}
+var _pending_section_source_retirement_queue: Array[String] = []
+var _section_source_retirement_serial: int = 0
+var _section_ack_phase_diagnostics: Dictionary = {}
+var _section_ack_currentness_scope: Dictionary = {}
+var _geometry_completion_owner: WeakRef
+var _geometry_owner_rosters: Dictionary = {}
+var _geometry_owner_prior_rosters: Dictionary = {}
+var _geometry_owner_section_slice_cache: Dictionary = {}
+var _geometry_owner_section_slice_cache_order: Array[String] = []
+var _geometry_owner_section_slice_jobs: Array[Dictionary] = []
+var _geometry_owner_section_slice_job_keys: Dictionary = {}
+var _geometry_owner_capture_proofs: Dictionary = {}
+var _geometry_owner_removal_sections: Dictionary = {}
+var _geometry_owner_removal_bounds: Dictionary = {}
+## Per-section immutable producer captures retained between scheduler turns.
+## Partial rows stay private here until the whole contribution is revalidated.
+var _section_contribution_capture_jobs: Dictionary = {}
+var _section_source_census_capture_jobs: Dictionary = {}
+var _active_source_census_capture_key := ""
+var _active_source_census_member_work := 0
+var _active_source_census_started_usec := 0
+var _retained_transform_artifact_captures: Dictionary = {}
+var _legacy_visual_section_index := LegacyVisualIndex.new()
+
+
+func bind_geometry_completion_owner(owner: Object) -> void:
+	_geometry_completion_owner = weakref(owner)
+
+
+func geometry_owner_expectation(source_id: String, part_id: String, revision: String) -> Dictionary:
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if part_id != source_id or roster.get("sourceRevision") != revision: return {}
+	return roster if _geometry_owner_roster_is_current(source_id, roster, {}).get("status") == "ready" else {}
+
+
+## The full roster remains the logical producer and legacy-retirement authority.
+## Residency consumers ask for the immutable slice owned by one section so a
+## nearby section does not inherit every distant member of the same building.
+func geometry_owner_section_expectation(source_id: String, part_id: String,
+		revision: String, section_key: Vector3i) -> Dictionary:
+	if _owner_snapshot_active():
+		var values := _owner_snapshot_bucket("geometryOwnerSectionSlice")
+		var cache_key := var_to_str([source_id, part_id, revision, section_key])
+		if values.has(cache_key): return values[cache_key]
+		var captured := _capture_geometry_owner_section_expectation(
+			source_id, part_id, revision, section_key)
+		if captured.get("status") == "ready":
+			captured.make_read_only()
+			values[cache_key] = captured
+		return captured
+	return _capture_geometry_owner_section_expectation(source_id, part_id, revision, section_key)
+
+
+func _capture_geometry_owner_section_expectation(source_id: String, part_id: String,
+		revision: String, section_key: Vector3i) -> Dictionary:
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if part_id != source_id or String(roster.get("sourceRevision", "")) != revision:
+		return {"status":"pending", "reason":"geometry_owner_parent_roster_unavailable",
+			"retryable":true}
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	var current_parent: bool = _geometry_owner_section_parent_receipt_is_current(source_id, roster) \
+		if Array(proof.get("presentationMembers", [])).is_empty() else \
+		_geometry_owner_roster_is_current(source_id, roster, {}).get("status") == "ready"
+	if not current_parent:
+		return {"status":"pending", "reason":"geometry_owner_parent_roster_unavailable",
+			"retryable":true}
+	var current_slice_result := _owner_section_slice_for_validated_roster(source_id,
+		roster, section_key)
+	if current_slice_result.get("status") != "ready": return current_slice_result
+	var current_slice: Dictionary = current_slice_result.get("slice", {})
+	if current_slice.is_empty() or not _owner_section_slice_cache_owns(source_id, roster,
+		section_key, current_slice):
+		return {"status":"pending", "reason":"geometry_owner_section_slice_unavailable",
+			"retryable":true}
+	var prior_slices: Array[Dictionary] = []
+	for prior_value: Variant in _geometry_owner_prior_rosters.get(source_id, []):
+		if not prior_value is Dictionary or not _owner_roster_envelope_is_trusted(prior_value) \
+				or prior_value.get("worldId") != roster.get("worldId") \
+				or prior_value.get("sourceId") != source_id \
+				or prior_value.get("sourcePartId") != part_id \
+				or section_key not in OwnerCompletion.owner_sections(prior_value):
+			continue
+		var prior_slice_result := _owner_section_slice_for_validated_roster(source_id,
+			prior_value, section_key)
+		if prior_slice_result.get("status") != "ready":
+			return {"status":"pending", "reason":"geometry_owner_prior_section_slice_unavailable",
+				"retryable":true}
+		var prior_slice: Dictionary = prior_slice_result.get("slice", {})
+		if not _owner_section_slice_cache_owns(source_id, prior_value, section_key, prior_slice):
+			return {"status":"pending", "reason":"geometry_owner_prior_section_slice_invalid",
+				"retryable":true}
+		prior_slices.append(prior_slice)
+	prior_slices.make_read_only()
+	var result := {"status":"ready", "slice":current_slice,
+		"parentRoster":roster, "priorSlices":prior_slices}
+	result.make_read_only()
+	return result
+
+
+## Section queries use the immutable receipt admitted with the full roster.
+## The publisher boundary and live scene owner are still checked on every query;
+## full source recapture, census and roster hashing remain at admission and at
+## asynchronous acceptance/installation boundaries.
+func _geometry_owner_section_parent_receipt_is_current(source_id: String,
+		roster: Dictionary) -> bool:
+	if not _owner_roster_envelope_is_trusted(roster) \
+			or String(roster.get("sourceId", "")) != source_id:
+		return false
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	if proof.is_empty() or proof.get("kind") == "tree" \
+			or String(proof.get("sourceRevision", "")) != String(roster.get("sourceRevision", "")):
+		return false
+	var reference: Variant = proof.get("publisher")
+	var publisher: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(publisher) \
+			or publisher.get_instance_id() != int(proof.get("publisherId", 0)):
+		return false
+	var identity: Dictionary = publisher.committed_static_visual_source_identity(
+		String(proof.get("partId", "")))
+	if identity.get("status") != "ready" or identity != proof.get("visualSourceReceipt", {}) \
+			or String(identity.get("sourceRevision", "")) != String(proof.get("memberBinding", "")):
+		return false
+	if not publisher.has_method("static_section_transform_artifact_receipt_is_current") \
+			or not publisher.static_section_transform_artifact_receipt_is_current(
+			String(proof.get("partId", "")), String(proof.get("memberBinding", "")),
+			proof.get("artifactGroups", [])):
+		return false
+	var current := _current_transform_artifact_publisher_for_member(
+		String(proof.get("siteId", "")), _proof_transform_member(proof))
+	return current.get("status") == "ready" and current.get("publisher") == publisher \
+		and current.get("binding") == proof.get("binding") \
+		and current.get("sourceToWorld") == proof.get("sourceToWorld") \
+		and current.get("sceneJobInstanceId", 0) == proof.get("sceneJobInstanceId", 0)
+
+
+func _owner_roster_envelope_is_trusted(roster: Dictionary) -> bool:
+	return roster.is_read_only() and roster.get("schema") == OwnerCompletion.SCHEMA \
+		and roster.get("members") is Array and roster.members.is_read_only() \
+		and String(roster.get("digest", "")).length() == 64 \
+		and not String(roster.get("worldId", "")).is_empty() \
+		and not String(roster.get("sourceId", "")).is_empty() \
+		and not String(roster.get("sourceRevision", "")).is_empty()
+
+
+func _owner_section_slice_cache_owns(source_id: String, roster: Dictionary,
+		section_key: Vector3i, slice: Dictionary) -> bool:
+	var cache_key := var_to_str([source_id, roster.get("digest", ""), section_key])
+	return is_same(_geometry_owner_section_slice_cache.get(cache_key), slice) \
+		and slice.is_read_only() and slice.get("schema") == OwnerSectionSlice.SCHEMA \
+		and slice.get("parentRosterDigest") == roster.get("digest") \
+		and slice.get("worldId") == roster.get("worldId") \
+		and slice.get("sourceId") == roster.get("sourceId") \
+		and slice.get("sourcePartId") == roster.get("sourcePartId") \
+		and slice.get("sourceRevision") == roster.get("sourceRevision") \
+		and slice.get("sourceIncarnation") == roster.get("sourceIncarnation") \
+		and slice.get("ownerSection") == section_key
+
+
+func _owner_section_slice_for_validated_roster(source_id: String, roster: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	var cache_key := var_to_str([source_id, roster.get("digest", ""), section_key])
+	var cached: Dictionary = _geometry_owner_section_slice_cache.get(cache_key, {})
+	if not cached.is_empty() and _owner_section_slice_cache_owns(source_id, roster,
+		section_key, cached):
+		return {"status":"ready", "slice":cached, "cacheHit":true}
+	_geometry_owner_section_slice_cache.erase(cache_key)
+	if not _geometry_owner_section_slice_job_keys.has(cache_key):
+		if _geometry_owner_section_slice_jobs.size() >= MAX_OWNER_SECTION_SLICE_JOBS:
+			return {"status":"pending", "reason":"owner_section_slice_queue_backpressure",
+				"retryable":true}
+		var collected: Array[Dictionary] = []
+		_geometry_owner_section_slice_jobs.append({"cacheKey":cache_key,
+			"sourceId":source_id, "roster":roster, "section":section_key,
+			"cursor":0, "members":collected})
+		_geometry_owner_section_slice_job_keys[cache_key] = true
+	return {"status":"pending", "reason":"owner_section_slice_preparation_pending",
+		"retryable":true}
+
+
+func _store_geometry_owner_section_slice(cache_key: String, slice: Dictionary) -> void:
+	var stale_order_index := _geometry_owner_section_slice_cache_order.find(cache_key)
+	while stale_order_index >= 0:
+		_geometry_owner_section_slice_cache_order.remove_at(stale_order_index)
+		stale_order_index = _geometry_owner_section_slice_cache_order.find(cache_key)
+	while _geometry_owner_section_slice_cache_order.size() >= MAX_OWNER_SECTION_SLICE_CACHE:
+		var evicted_key: String = _geometry_owner_section_slice_cache_order.pop_front()
+		_geometry_owner_section_slice_cache.erase(evicted_key)
+	_geometry_owner_section_slice_cache[cache_key] = slice
+	_geometry_owner_section_slice_cache_order.append(cache_key)
+
+
+func _owner_section_slice_roster_is_retained(source_id: String, roster: Dictionary) -> bool:
+	if _geometry_owner_rosters.get(source_id, {}).get("digest") == roster.get("digest"):
+		return true
+	for prior_value: Variant in _geometry_owner_prior_rosters.get(source_id, []):
+		if prior_value is Dictionary and prior_value.get("digest") == roster.get("digest"):
+			return true
+	return false
+
+
+func _advance_owner_section_slice_jobs(budget_usec: int) -> void:
+	if budget_usec < 1 or _geometry_owner_section_slice_jobs.is_empty():
+		return
+	var started := Time.get_ticks_usec()
+	var examined := 0
+	while not _geometry_owner_section_slice_jobs.is_empty() \
+			and Time.get_ticks_usec() - started < budget_usec:
+		var job: Dictionary = _geometry_owner_section_slice_jobs[0]
+		var cache_key := String(job.get("cacheKey", ""))
+		var source_id := String(job.get("sourceId", ""))
+		var roster: Dictionary = job.get("roster", {})
+		if cache_key.is_empty() or roster.is_empty() \
+				or not _owner_section_slice_roster_is_retained(source_id, roster):
+			_geometry_owner_section_slice_jobs.pop_front()
+			_geometry_owner_section_slice_job_keys.erase(cache_key)
+			continue
+		var members: Array[Dictionary] = job.get("members", [])
+		var cursor := int(job.get("cursor", 0))
+		var roster_members: Array = roster.get("members", [])
+		while cursor < roster_members.size() and Time.get_ticks_usec() - started < budget_usec:
+			var value: Variant = roster_members[cursor]
+			if not value is Dictionary:
+				cursor = roster_members.size()
+				break
+			var member: Dictionary = value
+			if member.get("geometryOwnerSection") == job.get("section"):
+				members.append(member)
+			cursor += 1
+			examined += 1
+		job["cursor"] = cursor
+		job["members"] = members
+		if cursor >= roster_members.size():
+			var sealed: Dictionary = OwnerSectionSlice.seal_validated_section_members(
+				roster, job.get("section"), members)
+			if sealed.get("status") == "ready":
+				var slice: Dictionary = sealed.get("slice", {})
+				if OwnerSectionSlice.validate_cached_slice_for_parent(roster, slice):
+					_store_geometry_owner_section_slice(cache_key, slice)
+			_geometry_owner_section_slice_jobs.pop_front()
+			_geometry_owner_section_slice_job_keys.erase(cache_key)
+			continue
+		# Rotate partially scanned requests so one very large roster cannot block
+		# new candidates that are needed for the currently visible section set.
+		_geometry_owner_section_slice_jobs.pop_front()
+		_geometry_owner_section_slice_jobs.append(job)
+		if examined == 0:
+			break
+		break
+
+
+func geometry_owner_prior_expectations(source_id: String, part_id: String, revision: String) -> Array:
+	if geometry_owner_expectation(source_id, part_id, revision).is_empty(): return []
+	return _geometry_owner_prior_rosters.get(source_id, []).duplicate()
+
+func presentation_owner_expectation(source_id: String, part_id: String, revision: String) -> Dictionary:
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	if part_id != source_id or proof.get("sourceRevision") != revision: return {}
+	var reference: Variant = proof.get("publisher")
+	var publisher: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(publisher): return {}
+	var current := _current_transform_artifact_publisher_for_member(String(proof.get("siteId", "")), _proof_transform_member(proof))
+	if current.get("status") != "ready" or current.get("publisher") != publisher or current.get("binding") != proof.get("binding") \
+			or current.get("sceneJobInstanceId", 0) != proof.get("sceneJobInstanceId", 0):
+		return {}
+	var geometry_roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if bool(geometry_roster.get("explicitRemoval", false)):
+		if _geometry_owner_roster_is_current(source_id, geometry_roster, {}).get("status") != "ready": return {}
+	else:
+		var plan = _publication_plan_for_binding(current.binding)
+		if plan == null or String(plan.output_signature) != String(proof.get("planSignature", "")): return {}
+		var capture: Dictionary = _capture_owner_source_snapshot(publisher, String(proof.partId), String(proof.memberBinding))
+		if capture.get("status") != "ready" or _geometry_capture_identity(capture) != proof.get("captureIdentity"): return {}
+	var value := {"worldId":proof.worldId, "sourceId":source_id, "sourcePartId":part_id,
+		"sourceRevision":revision, "members":proof.get("presentationMembers", []),
+		"priorMembers":proof.get("priorPresentationMembers", [])}
+	value.make_read_only()
+	return value
+
+
+func _retain_geometry_owner_roster(source_id: String, roster: Dictionary, proof: Dictionary) -> void:
+	var previous: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	var previous_proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	# Section captures can independently seal the same complete owner roster.
+	# Keep the retained immutable object when the trusted seal has the same full
+	# identity and digest; coordinator proof sessions intentionally bind to that
+	# exact object. Changed owner/revision/member content gets a new seal and
+	# invalidates the old session as before.
+	if _same_geometry_owner_roster_seal(previous, roster):
+		roster = previous
+	var prior_presentations: Array = previous_proof.get("priorPresentationMembers", []).duplicate()
+	for member: Dictionary in previous_proof.get("presentationMembers", []):
+		if member not in proof.get("presentationMembers", []) and member not in prior_presentations:
+			prior_presentations.append(member)
+	proof["priorPresentationMembers"] = prior_presentations
+	if not previous.is_empty() and previous != roster:
+		var history: Array = _geometry_owner_prior_rosters.get(source_id, [])
+		if previous not in history: history.append(previous)
+		_geometry_owner_prior_rosters[source_id] = history
+	_geometry_owner_rosters[source_id] = roster
+	_geometry_owner_capture_proofs[source_id] = proof
+	var artifact_capture: Dictionary = proof.get("artifactCapture", {})
+	if artifact_capture.get("status") == "ready":
+		var publisher_id := int(proof.get("publisherId", 0))
+		var part_id := String(proof.get("partId", ""))
+		var member_binding := String(proof.get("memberBinding", ""))
+		if publisher_id != 0 and not part_id.is_empty() and not member_binding.is_empty():
+			var cache_key := _transform_artifact_capture_cache_key(publisher_id,
+				int(proof.get("sceneJobInstanceId", 0)), part_id, member_binding)
+			_retained_transform_artifact_captures[cache_key] = {
+				"publisher":proof.get("publisher"), "publisherId":publisher_id,
+				"sceneJobInstanceId":int(proof.get("sceneJobInstanceId", 0)),
+				"partId":part_id, "memberId":String(proof.get("memberId", "")),
+				"binding":proof.get("binding", {}), "memberBinding":member_binding,
+				"sourceToWorld":proof.get("sourceToWorld"),
+				"visualSourceReceipt":proof.get("visualSourceReceipt", {}),
+				"capture":artifact_capture,
+				"lastUseFrame":Engine.get_process_frames()}
+		while _retained_transform_artifact_captures.size() > MAX_RETAINED_TRANSFORM_ARTIFACT_CAPTURES:
+			var oldest_key: Variant = null
+			var oldest_frame := Engine.get_process_frames()
+			for key_value: Variant in _retained_transform_artifact_captures:
+				var row: Dictionary = _retained_transform_artifact_captures[key_value]
+				if oldest_key == null or int(row.get("lastUseFrame", -1)) < oldest_frame:
+					oldest_key = key_value
+					oldest_frame = int(row.get("lastUseFrame", -1))
+			if oldest_key == null: break
+			_retained_transform_artifact_captures.erase(oldest_key)
+	var coverage_bounds: Array = proof.get("supportBounds", []).duplicate()
+	for member: Dictionary in proof.get("presentationMembers", []) + prior_presentations:
+		for section: Vector3i in SectionGrid.keys_intersecting_bounds(member.sweptWorldBounds):
+			if not _geometry_owner_removal_sections.has(section): _geometry_owner_removal_sections[section] = {}
+			_geometry_owner_removal_sections[section][source_id] = true
+			if not _geometry_owner_removal_bounds.has(source_id): _geometry_owner_removal_bounds[source_id] = {}
+			if not _geometry_owner_removal_bounds[source_id].has(section): _geometry_owner_removal_bounds[source_id][section] = []
+	for member: Dictionary in roster.get("members", []):
+		if member.worldBounds not in coverage_bounds: coverage_bounds.append(member.worldBounds)
+	for bounds: AABB in coverage_bounds:
+		for section: Vector3i in SectionGrid.keys_intersecting_bounds(bounds):
+			if not _geometry_owner_removal_sections.has(section): _geometry_owner_removal_sections[section] = {}
+			_geometry_owner_removal_sections[section][source_id] = true
+			if not _geometry_owner_removal_bounds.has(source_id): _geometry_owner_removal_bounds[source_id] = {}
+			var bounds_by_section: Dictionary = _geometry_owner_removal_bounds[source_id]
+			if not bounds_by_section.has(section): bounds_by_section[section] = []
+			if bounds not in bounds_by_section[section]: bounds_by_section[section].append(bounds)
+
+
+static func _same_geometry_owner_roster_seal(left: Dictionary, right: Dictionary) -> bool:
+	if left.is_empty() or right.is_empty() or not left.is_read_only() or not right.is_read_only():
+		return false
+	for key: String in ["schema", "worldId", "sourceId", "sourcePartId", "sourceRevision",
+			"sourceIncarnation", "explicitRemoval", "digest"]:
+		if left.get(key) != right.get(key): return false
+	var digest := String(left.get("digest", ""))
+	return digest.length() == 64 and digest.is_valid_hex_number(false) \
+		and left.get("members") is Array and right.get("members") is Array \
+		and left.members.is_read_only() and right.members.is_read_only()
+
+
 var _retiring_scenes: Array = []
 var _pending_scene_disposals: Dictionary = {}
 var _submitted_scene_disposals: Dictionary = {}
@@ -242,6 +689,7 @@ func _scene_callbacks_ready() -> bool:
 
 func configure(admission) -> void:
 	_configuration_serial+=1
+	_legacy_visual_section_index.clear()
 	# Configuration changes terrain identity, not permission to replace old
 	# gameplay owners. Only an explicit post-registry-reset completion opens it.
 	_world_reset_release_requested=false
@@ -271,6 +719,23 @@ func configure(admission) -> void:
 	_scene_unit_metrics = {}
 	_scene_max_step_usec = 0
 	_admission = admission
+	_section_install_acknowledgements.clear()
+	_pending_section_source_retirements.clear()
+	_pending_section_source_retirement_queue.clear()
+	_geometry_owner_rosters.clear()
+	_geometry_owner_prior_rosters.clear()
+	_geometry_owner_section_slice_cache.clear()
+	_geometry_owner_section_slice_cache_order.clear()
+	_geometry_owner_section_slice_jobs.clear()
+	_geometry_owner_section_slice_job_keys.clear()
+	_geometry_owner_capture_proofs.clear()
+	_retained_transform_artifact_captures.clear()
+	_geometry_owner_removal_sections.clear()
+	_geometry_owner_removal_bounds.clear()
+	_section_contribution_capture_jobs.clear()
+	_section_source_census_capture_jobs.clear()
+	_active_source_census_capture_key = ""
+	_active_source_census_member_work = 0
 	var state: Dictionary = admission.stats()
 	_generation = int(state.generation)
 	_seed = String(state.worldSeed)
@@ -633,6 +1098,419 @@ func _publication_plan_for_binding(binding: Dictionary):
 ## the other static domains are empty. This query uses the immutable plan and
 ## admission decisions only; scene Nodes and publication readiness are excluded.
 func capture_static_section_sources(world_id: String, section_keys: Array) -> Dictionary:
+	var snapshot_active := _owner_snapshot_active()
+	var values := _owner_snapshot_bucket("census") if snapshot_active else {}
+	var key := var_to_str([world_id, section_keys])
+	if snapshot_active and values.has(key): return values[key]
+	var result := _capture_resumable_static_section_sources(world_id, section_keys)
+	if snapshot_active and result.get("status") == "complete":
+		var sealed := result.duplicate(false)
+		sealed.make_read_only()
+		values[key] = sealed
+		return sealed
+	return result
+
+
+func _capture_resumable_static_section_sources(world_id: String,
+		section_keys: Array) -> Dictionary:
+	var canonical_sections: Array[Vector3i] = []
+	for section_value: Variant in section_keys:
+		if not section_value is Vector3i or section_value in canonical_sections:
+			return _capture_static_section_sources_uncached(world_id, section_keys)
+		canonical_sections.append(section_value)
+	canonical_sections.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	var capture_key := var_to_str([world_id, canonical_sections,
+		_owner_snapshot_token if _owner_snapshot_active() else 0])
+	var input_identity := _static_section_source_capture_identity(world_id, canonical_sections)
+	if input_identity.is_empty():
+		return {"status":"pending", "reason":"citadel_source_capture_identity_unavailable",
+			"retryable":true}
+	var job: Dictionary = _section_source_census_capture_jobs.get(capture_key, {})
+	if not job.is_empty() and String(job.get("inputIdentity", "")) != input_identity:
+		_section_source_census_capture_jobs.erase(capture_key)
+		job = {}
+	if job.is_empty():
+		_prune_static_section_source_capture_jobs(capture_key)
+		job = {"inputIdentity":input_identity, "worldId":world_id,
+			"sections":canonical_sections.duplicate(), "memberAuthorities":{},
+			"createdFrame":Engine.get_process_frames(),
+			"lastAdvanceFrame":Engine.get_process_frames(), "memberAuthorityCount":0}
+		_section_source_census_capture_jobs[capture_key] = job
+	if job.has("completedResult"):
+		var current_epoch_proof := _completed_census_member_epoch_proof(job)
+		if current_epoch_proof.get("status") == "ready" \
+				and String(current_epoch_proof.get("digest", "")) \
+				== String(job.get("completedAuthorityEpochDigest", "")):
+			job["validatedFrame"] = Engine.get_process_frames()
+			job["lastAdvanceFrame"] = Engine.get_process_frames()
+			_section_source_census_capture_jobs[capture_key] = job
+			return job.get("completedResult", {})
+		if current_epoch_proof.get("status") == "changed":
+			_section_source_census_capture_jobs.erase(capture_key)
+			return {"status":"pending", "reason":"citadel_section_source_census_member_changed",
+				"retryable":true, "captureProgress":{"phase":"member_authority_epoch_fence",
+					"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+					"requiredMemberAuthorityCount":job.get("validationMembers", []).size(),
+					"currentMemberId":String(current_epoch_proof.get("memberId", ""))}}
+		_active_source_census_member_work = 0
+		_active_source_census_started_usec = Time.get_ticks_usec()
+		var validation := _advance_completed_section_source_census_validation(
+			capture_key, job)
+		_active_source_census_member_work = 0
+		_active_source_census_started_usec = 0
+		if validation.get("status") == "ready":
+			return validation.get("result", {})
+		job["lastAdvanceFrame"] = Engine.get_process_frames()
+		_section_source_census_capture_jobs[capture_key] = job
+		return validation
+	_active_source_census_capture_key = capture_key
+	_active_source_census_member_work = 0
+	_active_source_census_started_usec = Time.get_ticks_usec()
+	var result := _capture_static_section_sources_uncached(world_id, canonical_sections)
+	_active_source_census_capture_key = ""
+	_active_source_census_member_work = 0
+	_active_source_census_started_usec = 0
+	var retain_completed_census: bool = result.get("status") == "complete" \
+		and String(result.get("worldId", "")) == world_id \
+		and result.get("sections", {}) is Dictionary \
+		and result.get("sourceRevisions", {}) is Dictionary
+	if retain_completed_census:
+		var sealed_result := result.duplicate(false)
+		sealed_result.make_read_only()
+		var validation_members: Array = job.get("memberAuthorities", {}).keys()
+		validation_members.sort()
+		job["completedResult"] = sealed_result
+		job["validationMembers"] = validation_members
+		job["validationCursor"] = 0
+		job["validatedAuthorities"] = {}
+		job["completedAuthorityEpochDigest"] = ""
+		job["validatedFrame"] = -1
+		job["lastAdvanceFrame"] = Engine.get_process_frames()
+		_section_source_census_capture_jobs[capture_key] = job
+		if validation_members.is_empty():
+			job["validatedFrame"] = Engine.get_process_frames()
+			_section_source_census_capture_jobs[capture_key] = job
+			return sealed_result
+		return {"status":"pending", "reason":"citadel_section_source_census_validation_slice_pending",
+			"retryable":true, "captureProgress":{"phase":"member_authority_validation",
+				"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+				"requiredMemberAuthorityCount":validation_members.size(),
+				"validatedMemberAuthorityCount":0}}
+	elif result.get("status") == "complete" or result.get("status") == "failed":
+		_section_source_census_capture_jobs.erase(capture_key)
+	else:
+		job["lastAdvanceFrame"] = Engine.get_process_frames()
+		_section_source_census_capture_jobs[capture_key] = job
+	return result
+
+
+func _advance_completed_section_source_census_validation(capture_key: String,
+		job: Dictionary) -> Dictionary:
+	var frame := Engine.get_process_frames()
+	var members: Array = job.get("validationMembers", [])
+	var cursor := int(job.get("validationCursor", 0))
+	var validated_authorities: Dictionary = job.get("validatedAuthorities", {})
+	var validation_started := Time.get_ticks_usec()
+	var validation_work := 0
+	while cursor < members.size():
+		if validation_work >= MAX_CITADEL_CENSUS_MEMBER_AUTHORITIES_PER_ADVANCE \
+				or validation_work > 0 and Time.get_ticks_usec() - validation_started \
+					>= CITADEL_CENSUS_MEMBER_AUTHORITY_ADVANCE_BUDGET_USEC:
+			job["validationCursor"] = cursor
+			job["lastAdvanceFrame"] = frame
+			_section_source_census_capture_jobs[capture_key] = job
+			return {"status":"pending", "reason":"citadel_section_source_census_validation_slice_pending",
+				"retryable":true, "captureProgress":{"phase":"member_authority_validation",
+					"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+					"requiredMemberAuthorityCount":members.size(),
+					"validatedMemberAuthorityCount":cursor}}
+		var encoded_key := String(members[cursor])
+		var authority_key: Variant = str_to_var(encoded_key)
+		if not authority_key is Array or authority_key.size() != 2:
+			return {"status":"failed", "reason":"citadel_census_member_validation_key_invalid"}
+		var site_id := String(authority_key[0])
+		var member_id := String(authority_key[1])
+		var cached: Dictionary = job.get("memberAuthorities", {}).get(encoded_key, {})
+		var current := _current_census_member_authority_proof(site_id, member_id,
+			cached)
+		if current.get("status") == "unsupported":
+			# A provider category without a cheap authoritative epoch proof keeps
+			# the original incremental full-authority comparison. Its cursor still
+			# survives calls; it is never silently treated as current.
+			current = _current_tree_member_artifact_authority(site_id, member_id) \
+				if member_id.begins_with("tree:") else \
+				_capture_member_transform_artifact_authority(site_id, member_id)
+		if current.get("status") == "pending":
+			return {"status":"pending", "reason":String(current.get("reason",
+				"citadel_census_member_validation_pending")), "retryable":true,
+				"captureProgress":{"phase":"member_authority_validation",
+					"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+					"requiredMemberAuthorityCount":members.size(),
+					"validatedMemberAuthorityCount":cursor,
+					"currentMemberId":member_id}}
+		var same_ready_authority: bool = current.get("status") == "ready" \
+			and cached.get("status") == "ready" \
+			and String(current.get("artifactAuthorityRevision", "")) \
+				== String(cached.get("artifactAuthorityRevision", ""))
+		var same_removed_authority: bool = current.get("status") == "absent" \
+			and current.get("reason") == "removed_prop" \
+			and cached.get("status") == "absent" \
+			and cached.get("reason") == "removed_prop" \
+			and String(current.get("propId", "")) == String(cached.get("propId", ""))
+		if not same_ready_authority and not same_removed_authority:
+			_section_source_census_capture_jobs.erase(capture_key)
+			return {"status":"pending", "reason":"citadel_section_source_census_member_changed",
+				"retryable":true, "captureProgress":{"phase":"member_authority_validation",
+					"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+					"requiredMemberAuthorityCount":members.size(),
+					"validatedMemberAuthorityCount":cursor,
+					"currentMemberId":member_id}}
+		validated_authorities[encoded_key] = current.get("epochProof",
+			String(current.get("artifactAuthorityRevision", "")))
+		job["validatedAuthorities"] = validated_authorities
+		cursor += 1
+		validation_work += 1
+	job["validationCursor"] = cursor
+	job["lastAdvanceFrame"] = frame
+	if cursor >= members.size():
+		# The provider identity is a final revision fence for admission, region
+		# reservations, plans, and scene-job ownership. It may change while the
+		# member authorities are being validated across frames.
+		var current_identity := _static_section_source_capture_identity(
+			String(job.get("worldId", "")), job.get("sections", []))
+		if current_identity.is_empty() \
+				or current_identity != String(job.get("inputIdentity", "")):
+			_section_source_census_capture_jobs.erase(capture_key)
+			return {"status":"pending", "reason":"citadel_section_source_census_identity_changed",
+				"retryable":true, "captureProgress":{"phase":"member_authority_validation",
+					"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+					"requiredMemberAuthorityCount":members.size(),
+					"validatedMemberAuthorityCount":cursor}}
+		# Keep the successful authority fence. Calls on later frames compare the
+		# source's current revision/epoch against this completed proof; they do
+		# not repeat the full artifact capture/digest pass when that proof is live.
+		job["validatedFrame"] = frame
+		job["validationCursor"] = 0
+		job["validatedAuthorities"] = validated_authorities
+		job["completedAuthorityEpochDigest"] = _digest_census_authority_epoch_proofs(
+			validated_authorities)
+		_section_source_census_capture_jobs[capture_key] = job
+		return {"status":"ready", "result":job.get("completedResult", {})}
+	_section_source_census_capture_jobs[capture_key] = job
+	return {"status":"pending", "reason":"citadel_section_source_census_validation_slice_pending",
+		"retryable":true, "captureProgress":{"phase":"member_authority_validation",
+			"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+		"requiredMemberAuthorityCount":members.size(),
+		"validatedMemberAuthorityCount":cursor}}
+
+
+func _completed_census_member_epoch_proof(job: Dictionary) -> Dictionary:
+	var members: Array = job.get("validationMembers", [])
+	var authorities: Dictionary = job.get("memberAuthorities", {})
+	var proofs: Dictionary = {}
+	for encoded_value: Variant in members:
+		var encoded_key := String(encoded_value)
+		var authority_key: Variant = str_to_var(encoded_key)
+		if not authority_key is Array or authority_key.size() != 2:
+			return {"status":"changed", "memberId":encoded_key}
+		var cached: Dictionary = authorities.get(encoded_key, {})
+		var current := _current_census_member_authority_proof(
+			String(authority_key[0]), String(authority_key[1]), cached)
+		if current.get("status") == "unsupported":
+			return {"status":"unsupported", "memberId":String(authority_key[1])}
+		if current.get("status") == "pending":
+			return {"status":"pending", "reason":String(current.get("reason",
+				"citadel_census_member_epoch_pending")),
+			"memberId":String(authority_key[1]), "retryable":true}
+		var current_revision := String(current.get("artifactAuthorityRevision", ""))
+		var cached_revision := String(cached.get("artifactAuthorityRevision", ""))
+		var same_ready: bool = current.get("status") == "ready" \
+			and cached.get("status") == "ready" \
+			and current_revision == cached_revision
+		var same_removed: bool = current.get("status") == "absent" \
+			and current.get("reason") == "removed_prop" \
+			and cached.get("status") == "absent" \
+			and cached.get("reason") == "removed_prop" \
+			and current.get("propId") == cached.get("propId")
+		if not same_ready and not same_removed:
+			return {"status":"changed", "memberId":String(authority_key[1])}
+		proofs[encoded_key] = current.get("epochProof", current_revision)
+	return {"status":"ready", "digest":_digest_census_authority_epoch_proofs(proofs)}
+
+
+func _digest_census_authority_epoch_proofs(proofs: Dictionary) -> String:
+	var keys: Array = proofs.keys()
+	keys.sort()
+	var rows: Array = []
+	for key_value: Variant in keys:
+		var key := String(key_value)
+		rows.append([key, proofs[key]])
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK \
+			or digest.update(var_to_bytes(["citadel-census-authority-epoch-proof/v1", rows])) != OK:
+		return ""
+	return digest.finish().hex_encode()
+
+
+func _current_census_member_authority_proof(site_id: String, member_id: String,
+		cached: Dictionary) -> Dictionary:
+	if member_id.begins_with("tree:"):
+		# Tree source authority already exposes a compact deterministic revision
+		# over its live producer/compiled-source identity and body transform.
+		return _current_tree_member_artifact_authority(site_id, member_id)
+	if not _is_transform_member(member_id):
+		return {"status":"unsupported"}
+	var owner := _current_transform_artifact_publisher_for_member(site_id, member_id)
+	if owner.get("status") != "ready":
+		return owner
+	var publisher: Variant = owner.get("publisher")
+	var part_id := _transform_part_id(member_id)
+	if not is_instance_valid(publisher) \
+			or not publisher.has_method("committed_static_visual_source_identity"):
+		return {"status":"unsupported"}
+	var expected_revision := _expected_visual_source_revision(owner, part_id)
+	if expected_revision.is_empty():
+		return {"status":"pending", "reason":"citadel_transform_member_binding_unavailable",
+			"sourcePartId":part_id, "retryable":true}
+	var current_identity: Dictionary = publisher.call(
+		"committed_static_visual_source_identity", part_id)
+	if current_identity.get("status") != "ready":
+		return {"status":"pending", "reason":String(current_identity.get("reason",
+			"citadel_transform_member_identity_unavailable")), "retryable":true,
+			"sourcePartId":part_id}
+	var captured_identity: Variant = cached.get("visualSourceReceipt", {})
+	var same_identity: bool = captured_identity is Dictionary \
+		and current_identity == captured_identity \
+		and String(current_identity.get("sourceRevision", "")) == expected_revision \
+		and current_identity.get("sourceToWorld") == owner.get("sourceToWorld") \
+		and int(cached.get("publisherInstanceId", -1)) == publisher.get_instance_id() \
+		and cached.get("sourceToWorld") == owner.get("sourceToWorld")
+	if not same_identity:
+		return {"status":"ready", "artifactAuthorityRevision":"__stale__"}
+	return {"status":"ready",
+		"artifactAuthorityRevision":String(cached.get("artifactAuthorityRevision", "")),
+		"epochProof":current_identity}
+
+
+func _static_section_source_capture_identity(world_id: String,
+		section_keys: Array[Vector3i]) -> String:
+	if _admission == null:
+		return ""
+	var identity_rows: Array = [["citadel-section-source-capture/v2", world_id,
+		_generation, int(_admission.stats().get("generation", -1)),
+		_owner_snapshot_token if _owner_snapshot_active() else 0]]
+	for section_key: Vector3i in section_keys:
+		var admission_bounds := _citadel_section_admission_bounds(section_key)
+		var low_region := Field.region_for_cell(admission_bounds.position)
+		var high_region := Field.region_for_cell(admission_bounds.end - Vector2i.ONE)
+		for rz in range(low_region.y, high_region.y + 1):
+			for rx in range(low_region.x, high_region.x + 1):
+				var region := Vector2i(rx, rz)
+				var source: Dictionary = _admission.source_state(region)
+				var binding: Dictionary = source.get("binding", {})
+				var plan = _publication_plan_for_binding(binding) if not binding.is_empty() else null
+				var scene_entry: Dictionary = _scenes.get(region, {})
+				var scene_job: Variant = scene_entry.get("job")
+				var publisher: Variant = scene_job.get("_building") \
+					if is_instance_valid(scene_job) else null
+				var publisher_id := int(publisher.get_instance_id()) \
+					if is_instance_valid(publisher) else 0
+				var parent: Variant = publisher.get("_scene_parent").get_ref() \
+					if is_instance_valid(publisher) and publisher.get("_scene_parent") is WeakRef else null
+				var source_transform: Transform3D = parent.global_transform \
+					if is_instance_valid(parent) and parent is Node3D else Transform3D.IDENTITY
+				identity_rows.append([section_key, region, String(source.get("status", "")),
+					source.get("reservationCells"), binding,
+					String(plan.output_signature) if plan != null else "",
+					int(scene_job.get_instance_id()) if is_instance_valid(scene_job) else 0,
+					publisher_id, source_transform])
+		var removals: Dictionary = _geometry_owner_removal_sections.get(section_key, {})
+		var removal_ids: Array = removals.keys()
+		removal_ids.sort()
+		identity_rows.append(["removals", section_key, removal_ids])
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK \
+			or digest.update(var_to_bytes(identity_rows)) != OK:
+		return ""
+	return digest.finish().hex_encode()
+
+
+func _capture_citadel_member_authority_for_census(site_id: String,
+		member_id: String) -> Dictionary:
+	var job: Dictionary = _section_source_census_capture_jobs.get(
+		_active_source_census_capture_key, {})
+	if job.is_empty():
+		return _current_tree_member_artifact_authority(site_id, member_id) \
+			if member_id.begins_with("tree:") else \
+			_capture_member_transform_artifact_authority(site_id, member_id)
+	var cache: Dictionary = job.get("memberAuthorities", {})
+	var authority_key := var_to_str([site_id, member_id])
+	if cache.has(authority_key):
+		return cache[authority_key]
+	var advance_elapsed_usec := Time.get_ticks_usec() - _active_source_census_started_usec \
+		if _active_source_census_started_usec > 0 else 0
+	if _active_source_census_member_work >= MAX_CITADEL_CENSUS_MEMBER_AUTHORITIES_PER_ADVANCE \
+			or _active_source_census_member_work > 0 \
+			and advance_elapsed_usec >= CITADEL_CENSUS_MEMBER_AUTHORITY_ADVANCE_BUDGET_USEC:
+		var continuation := {"schema":"static-section-provider-continuation/v1",
+			"stage":"member_authority",
+			"cursor":int(job.get("memberAuthorityCount", 0))}
+		continuation.make_read_only()
+		return {"status":"pending", "reason":"citadel_section_source_census_slice_pending",
+			"retryable":true, "continuationHint":continuation,
+			"captureProgress":{"phase":"member_authority",
+				"completedMemberAuthorityCount":int(job.get("memberAuthorityCount", 0)),
+				"lastAttemptedMemberId":String(job.get("lastAttemptedMemberId", "")),
+				"lastAuthorityStatus":String(job.get("lastAuthorityStatus", "")),
+				"lastAuthorityReason":String(job.get("lastAuthorityReason", "")),
+				"budgetDeferredMemberId":member_id}}
+	_active_source_census_member_work += 1
+	var authority: Dictionary = _current_tree_member_artifact_authority(site_id, member_id) \
+		if member_id.begins_with("tree:") else \
+		_capture_member_transform_artifact_authority(site_id, member_id)
+	if authority.get("status") == "ready" \
+		or authority.get("status") == "absent" and authority.get("reason") == "removed_prop":
+		cache[authority_key] = authority
+		job["memberAuthorityCount"] = int(job.get("memberAuthorityCount", 0)) + 1
+	job["memberAuthorities"] = cache
+	job["lastAdvanceFrame"] = Engine.get_process_frames()
+	job["lastAttemptedMemberId"] = member_id
+	job["lastAuthorityStatus"] = String(authority.get("status", ""))
+	job["lastAuthorityReason"] = String(authority.get("reason", ""))
+	_section_source_census_capture_jobs[_active_source_census_capture_key] = job
+	return authority
+
+
+func _prune_static_section_source_capture_jobs(except_key: String) -> void:
+	var current_frame := Engine.get_process_frames()
+	for key_value: Variant in _section_source_census_capture_jobs.keys():
+		var key := String(key_value)
+		if key == except_key:
+			continue
+		var job: Dictionary = _section_source_census_capture_jobs.get(key, {})
+		if current_frame - int(job.get("lastAdvanceFrame", current_frame)) \
+				> CITADEL_CENSUS_CAPTURE_IDLE_FRAMES:
+			_section_source_census_capture_jobs.erase(key)
+	while _section_source_census_capture_jobs.size() >= MAX_CITADEL_CENSUS_CAPTURE_JOBS:
+		var oldest_key := ""
+		var oldest_frame := current_frame
+		for key_value: Variant in _section_source_census_capture_jobs:
+			var key := String(key_value)
+			if key == except_key:
+				continue
+			var job: Dictionary = _section_source_census_capture_jobs[key]
+			var last_frame := int(job.get("lastAdvanceFrame", current_frame))
+			if oldest_key.is_empty() or last_frame < oldest_frame:
+				oldest_key = key
+				oldest_frame = last_frame
+		if oldest_key.is_empty():
+			break
+		_section_source_census_capture_jobs.erase(oldest_key)
+
+func _capture_static_section_sources_uncached(world_id: String, section_keys: Array) -> Dictionary:
 	if _admission == null or _closing or _world_reset_pending \
 			or world_id != "seed:%s:%d" % [_seed,_seed_hash(_seed)] or section_keys.is_empty():
 		return {"status":"pending","reason":"citadel_section_source_authority_unavailable","retryable":true}
@@ -649,16 +1527,16 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 			return a.z < b.z)
 	var section_rows: Dictionary = {}
 	var source_revisions: Dictionary = {}
+	var removals_by_section: Dictionary = {}
+	var authority_rows: Array = []
 	for section_key: Vector3i in sections:
+		_source_capture_active_section = section_key
+		_emit_source_capture_phase("section_admission", {"sectionKey":section_key})
 		var origin := SectionGrid.origin_for_key(section_key)
 		var section_bounds := AABB(origin,Vector3.ONE*SectionGrid.SECTION_SIZE_METERS)
 		# request_bounds operates on terrain cells and is deliberately conservative
 		# at the section edge; exact provider membership is filtered in 3D below.
-		var low := Vector2i(floori(origin.x/CitadelPublicationPlan.CELL)-2,
-			floori(origin.z/CitadelPublicationPlan.CELL)-2)
-		var high := Vector2i(ceili(section_bounds.end.x/CitadelPublicationPlan.CELL)+2,
-			ceili(section_bounds.end.z/CitadelPublicationPlan.CELL)+2)
-		var admission_bounds := Rect2i(low,high-low)
+		var admission_bounds := _citadel_section_admission_bounds(section_key)
 		var admitted: Dictionary = _admission.request_bounds(admission_bounds)
 		if admitted.get("status") == "pending":
 			return {"status":"pending","reason":"citadel_section_admission_pending",
@@ -670,13 +1548,24 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 		var high_region := Field.region_for_cell(admission_bounds.end-Vector2i.ONE)
 		var ids: Array[String] = []
 		var rows: Array = []
+		var region_decisions: Array = []
 		for rz in range(low_region.y,high_region.y+1):
 			for rx in range(low_region.x,high_region.x+1):
 				var region := Vector2i(rx,rz)
+				_emit_source_capture_phase("region_source_state", {
+					"sectionKey":section_key, "region":region})
 				var source: Dictionary = _admission.source_state(region)
 				if source.get("status") == "absent":
 					# request_bounds proved any unprepared region does not intersect
 					# the admitted query, so source_not_requested is also safe here.
+					var absent_decision := [[region.x, region.y], "absent",
+						int(_admission.stats().get("generation", -1))]
+					absent_decision[0].make_read_only()
+					absent_decision.make_read_only()
+					region_decisions.append(absent_decision)
+					var absent_authority_row := [section_key, absent_decision]
+					absent_authority_row.make_read_only()
+					authority_rows.append(absent_authority_row)
 					continue
 				if source.get("status") == "failed":
 					return {"status":"failed","reason":String(source.get("reason","citadel_section_source_failed")),
@@ -686,7 +1575,18 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 						"section":section_key,"region":region,"retryable":true}
 				if not source.get("reservationCells") is Rect2i:
 					return {"status":"failed","reason":"citadel_section_reservation_missing","region":region}
-				if not source.reservationCells.intersects(admission_bounds): continue
+				if not source.reservationCells.intersects(admission_bounds):
+					var outside_decision := [[region.x, region.y], "ready_outside_bounds",
+						source.reservationCells, String(source.get("binding", {}).get("siteId", "")),
+						String(source.get("binding", {}).get("sourceKey", "")),
+						int(source.get("binding", {}).get("generation", -1))]
+					outside_decision[0].make_read_only()
+					outside_decision.make_read_only()
+					region_decisions.append(outside_decision)
+					var outside_authority_row := [section_key, outside_decision]
+					outside_authority_row.make_read_only()
+					authority_rows.append(outside_authority_row)
+					continue
 				if _failures.has(region):
 					return {"status":"failed","reason":String(_failures[region].reason),"region":region}
 				var binding: Dictionary = source.get("binding",{})
@@ -698,38 +1598,618 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 				if description.get("status") != "described":
 					return {"status":"failed","reason":String(description.get("reason","citadel_section_membership_failed")),
 						"region":region}
-				for member: Dictionary in description.members:
+				var region_decision := [[region.x, region.y], String(source.get("status", "")),
+					source.reservationCells, String(binding.get("siteId", "")),
+					String(binding.get("sourceKey", "")), int(binding.get("generation", -1)),
+					plan.output_signature]
+				region_decision[0].make_read_only()
+				region_decision.make_read_only()
+				region_decisions.append(region_decision)
+				var plan_authority_row := [section_key, region_decision]
+				plan_authority_row.make_read_only()
+				authority_rows.append(plan_authority_row)
+				var described_members: Array = description.members.duplicate()
+				_emit_source_capture_phase("region_plan_members", {
+					"sectionKey":section_key, "region":region,
+					"memberCount":described_members.size(),
+					"plannedMemberCount":plan.member_records.size()})
+				# Declared tree bounds are a conservative broad phase, expanded by the
+				# active shader wind envelope. Only trees that can reach this section
+				# need a live admitted source authority; the selected tree's complete
+				# compiled support manifest remains the final membership proof below.
+				var selected_tree_ids: Dictionary = {}
+				for selected: Dictionary in described_members: selected_tree_ids[String(selected.memberId)] = true
+				var wind_envelope: Dictionary = TreeVisualPolicy.active_tree_visual_wind_envelope()
+				if wind_envelope.get("status") != "ready":
+					return {"status":"pending", "reason":String(wind_envelope.get("reason",
+						"citadel_tree_support_policy_pending")), "retryable":true,
+						"section":section_key, "region":region}
+				var horizontal_wind_margin := maxf(
+					float(wind_envelope.get("branchComponentDisplacementMaxMeters", 0.0)),
+					float(wind_envelope.get("foliageComponentDisplacementMaxMeters", 0.0)))
+				var vertical_wind_margin := float(wind_envelope.get(
+					"foliageVerticalDisplacementMaxMeters", 0.0))
+				for planned: Dictionary in plan.member_records:
+					var tree_member_id := String(planned.get("memberId", ""))
+					if not tree_member_id.begins_with("tree:") or selected_tree_ids.has(tree_member_id): continue
+					var declared_tree_bounds: Variant = planned.get("visualSupportBounds",
+						planned.get("bounds", null))
+					if not declared_tree_bounds is AABB:
+						return {"status":"failed", "reason":"citadel_tree_declared_bounds_missing",
+							"section":section_key, "region":region, "memberId":tree_member_id}
+					var conservative_tree_bounds := AABB(
+						declared_tree_bounds.position - Vector3(horizontal_wind_margin,
+							vertical_wind_margin, horizontal_wind_margin),
+						declared_tree_bounds.size + Vector3(horizontal_wind_margin * 2.0,
+							vertical_wind_margin * 2.0, horizontal_wind_margin * 2.0))
+					if not conservative_tree_bounds.intersects(section_bounds): continue
+					_emit_source_capture_phase("tree_artifact_authority", {
+						"sectionKey":section_key, "region":region,
+						"memberId":tree_member_id})
+					var tree_id := _citadel_census_source_id(String(binding.siteId), tree_member_id)
+					var previous_support: bool = _geometry_owner_removal_sections.get(section_key, {}).has(tree_id)
+					var tree_authority := _capture_citadel_member_authority_for_census(
+						String(binding.siteId), tree_member_id)
+					if tree_authority.get("status") == "ready":
+						var manifest: Dictionary = tree_authority.capture.producer.sourceManifest
+						if previous_support or section_key in manifest.get("sectionKeys", []):
+							described_members.append(planned)
+					elif previous_support:
+						# An old source must yield an explicit removal or replacement.
+						described_members.append(planned)
+				described_members.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+					return String(a.get("memberId", "")) < String(b.get("memberId", "")))
+				for member_value: Variant in described_members:
+					if not member_value is Dictionary:
+						return {"status":"failed","reason":"citadel_section_member_invalid"}
+					var member: Dictionary = member_value
 					var member_id := String(member.memberId)
-					var source_id := "citadel:%s:member:%s:section:%d,%d,%d" % [
-						String(binding.siteId),member_id,section_key.x,section_key.y,section_key.z]
-					var revision_bytes := var_to_bytes(["citadel-section-source/v1",binding.siteId,
-						binding.sourceKey,int(binding.get("generation",-1)),plan.output_signature,
-						member_id,member.groupId,member.bounds,section_key])
-					var source_digest := HashingContext.new()
-					if source_digest.start(HashingContext.HASH_SHA256) != OK:
+					var source_id := _citadel_census_source_id(String(binding.siteId), member_id)
+					_emit_source_capture_phase("member_transform_artifact_authority", {
+						"sectionKey":section_key, "region":region,
+						"memberId":member_id})
+					var artifact_authority := _capture_citadel_member_authority_for_census(
+						String(binding.siteId), member_id)
+					if member_id.begins_with("tree:") and artifact_authority.get("status") == "absent" \
+							and artifact_authority.get("reason") == "removed_prop":
+						authority_rows.append([section_key, source_id, "durably_removed",
+							artifact_authority.get("propId"), binding])
+						continue
+					if artifact_authority.get("status") != "ready":
+						artifact_authority["sectionKey"] = section_key
+						var capture_progress: Dictionary = artifact_authority.get("captureProgress", {})
+						capture_progress["budgetDeferredMemberId"] = member_id
+						artifact_authority["captureProgress"] = capture_progress
+						return artifact_authority
+					var revision := _citadel_member_source_revision(world_id, binding, plan,
+						member, String(artifact_authority.get("artifactAuthorityRevision", "")))
+					if revision.is_empty():
 						return {"status":"failed","reason":"citadel_section_revision_hash_failed"}
-					source_digest.update(revision_bytes)
-					var revision := source_digest.finish().hex_encode()
 					if source_revisions.has(source_id) and source_revisions[source_id] != revision:
 						return {"status":"failed","reason":"citadel_section_source_revision_conflict"}
 					source_revisions[source_id] = revision
 					ids.append(source_id)
 					rows.append([source_id,revision])
+					var artifact_authority_row := [section_key, source_id,
+						String(artifact_authority.get("artifactAuthorityRevision", ""))]
+					artifact_authority_row.make_read_only()
+					authority_rows.append(artifact_authority_row)
 		ids.sort()
 		rows.sort_custom(func(a: Array,b: Array) -> bool: return String(a[0]) < String(b[0]))
+		for row_value: Variant in rows:
+			if row_value is Array:
+				row_value.make_read_only()
+		ids.make_read_only()
+		rows.make_read_only()
+		region_decisions.make_read_only()
+		_emit_source_capture_phase("removal_census", {"sectionKey":section_key,
+			"sourceCount":ids.size()})
+		var removal_result: Dictionary = _collect_current_citadel_removals(
+			world_id, section_key, section_bounds, ids, rows, region_decisions)
+		if removal_result.get("status") != "ready":
+			return removal_result
+		var removals: Array[Dictionary] = removal_result.get("removals", [])
+		removals.make_read_only()
+		removals_by_section[section_key] = removals
+		var canonical_removals: Array = []
+		for removal: Dictionary in removals:
+			canonical_removals.append([String(removal.sourcePartId),
+				String(removal.sourceId), String(removal.sourceRevision),
+				String(removal.get("ownerBindingDigest", "")),
+				String(removal.get("memberBinding", "")), removal.get("bounds", AABB())])
 		var coverage_hash := HashingContext.new()
 		coverage_hash.start(HashingContext.HASH_SHA256)
-		coverage_hash.update(var_to_bytes([world_id,section_key,rows]))
-		section_rows[section_key] = {"status":"complete" if not ids.is_empty() else "empty",
-			"coverageRevision":coverage_hash.finish().hex_encode(),"sourcePartIds":ids}
+		coverage_hash.update(var_to_bytes([world_id,section_key,rows,
+			region_decisions,canonical_removals]))
+		var section_row := {"status":"complete" if not ids.is_empty() else "empty",
+			"coverageRevision":coverage_hash.finish().hex_encode(),"sourcePartIds":ids,
+			"regionDecisions":region_decisions}
+		section_row.make_read_only()
+		section_rows[section_key] = section_row
+		_emit_source_capture_phase("section_revision_sealed", {"sectionKey":section_key,
+			"sourceCount":ids.size(), "removalCount":removals.size()})
+	section_rows.make_read_only()
+	source_revisions.make_read_only()
+	removals_by_section.make_read_only()
+	for authority_row_value: Variant in authority_rows:
+		if authority_row_value is Array:
+			authority_row_value.make_read_only()
+	authority_rows.make_read_only()
 	var admission_state: Dictionary = _admission.stats()
 	var authority_hash := HashingContext.new()
 	authority_hash.start(HashingContext.HASH_SHA256)
 	authority_hash.update(var_to_bytes(["citadel-section-authority/v1",world_id,_generation,
-		int(admission_state.get("generation",-1))]))
+		int(admission_state.get("generation",-1)),authority_rows]))
 	return {"status":"complete","worldId":world_id,
 		"authorityRevision":authority_hash.finish().hex_encode(),
-		"sourceRevisions":source_revisions,"sections":section_rows}
+		"sourceRevisions":source_revisions,"sections":section_rows,
+		"removalsBySection":removals_by_section}
+
+
+## Bind the provider census to the live publisher incarnation, exact member
+## binding, parent transform, and committed transform-artifact content. This
+## keeps the generic coordinator census current across asynchronous compile and
+## install without retaining a mutable side-channel acceptance proof.
+static func _citadel_member_source_revision(world_id: String, binding: Dictionary,
+		plan, member: Dictionary, artifact_revision: String) -> String:
+	var digest := HashingContext.new()
+	if artifact_revision.is_empty() or digest.start(HashingContext.HASH_SHA256) != OK:
+		return ""
+	digest.update(var_to_bytes(["citadel-member-source/v3", world_id, binding.siteId,
+		binding.sourceKey, int(binding.get("generation", -1)), plan.output_signature,
+		member.memberId, member.groupId, member.bounds, artifact_revision]))
+	return digest.finish().hex_encode()
+
+
+func _captured_presentation_identity(capture: Dictionary) -> Dictionary:
+	if not capture.has("presentationMounts") and not capture.has("presentationBindings") and not capture.has("presentationDigest"):
+		return {"status":"ready", "members":[], "digest":"", "bindingWitnesses":[]}
+	var members: Variant = capture.get("presentationMounts")
+	var bindings: Variant = capture.get("presentationBindings")
+	if not members is Array or not members.is_read_only() or not bindings is Dictionary or not bindings.is_read_only() \
+			or members.size() != bindings.size(): return {"status":"pending", "reason":"citadel_presentation_capture_unsealed"}
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK or digest.update(var_to_bytes([
+			"building-practical-light-presentation/v1", members])) != OK:
+		return {"status":"failed", "reason":"citadel_presentation_capture_hash_failed"}
+	var content_digest := digest.finish().hex_encode()
+	if content_digest != capture.get("presentationDigest"):
+		return {"status":"pending", "reason":"citadel_presentation_capture_digest_stale"}
+	var seen: Dictionary = {}
+	var witnesses: Array = []
+	for member: Variant in members:
+		if not member is Dictionary or not member.is_read_only() \
+				or member.get("sourcePartId") != capture.get("sourcePartId") \
+				or member.get("sourceRevision") != capture.get("sourceRevision") \
+				or member.get("producerSourceRevision") != capture.get("sourceRevision"):
+			return {"status":"pending", "reason":"citadel_presentation_capture_source_stale"}
+		var key := String(member.get("attachmentKey", ""))
+		var binding: Variant = bindings.get(key)
+		if key.is_empty() or seen.has(key) or not binding is Dictionary or not binding.is_read_only():
+			return {"status":"pending", "reason":"citadel_presentation_capture_binding_missing"}
+		seen[key] = true
+		var witness: Array = []
+		for field: String in ["publisherInstanceId", "publicationEpoch", "sourcePartId", "sourceRevision",
+				"parentInstanceId", "bodyInstanceId", "mountInstanceId", "lightInstanceId", "attachmentKey", "presentationMemberId"]:
+			if not binding.has(field): return {"status":"pending", "reason":"citadel_presentation_binding_witness_missing:" + field}
+			witness.append(binding[field])
+		witnesses.append(witness)
+	return {"status":"ready", "members":members, "digest":content_digest, "bindingWitnesses":witnesses}
+
+func _current_member_transform_artifact_authority(site_id: String,
+		member_id: String) -> Dictionary:
+	if not _owner_snapshot_active(): return _capture_member_transform_artifact_authority(site_id, member_id)
+	var values := _owner_snapshot_bucket("memberAuthority")
+	var key := var_to_str([site_id, member_id])
+	if values.has(key): return values[key]
+	var result := _capture_member_transform_artifact_authority(site_id, member_id)
+	if result.get("status") == "ready":
+		var sealed := result.duplicate(false)
+		sealed.make_read_only()
+		values[key] = sealed
+		return sealed
+	return result
+
+func _capture_member_transform_artifact_authority(site_id: String, member_id: String) -> Dictionary:
+	if member_id.begins_with("tree:"):
+		return _current_tree_member_artifact_authority(site_id, member_id)
+	if not _is_transform_member(member_id):
+		return {"status":"failed", "reason":"citadel_transform_member_kind_invalid",
+			"siteId":site_id, "memberId":member_id}
+	var part_id := _transform_part_id(member_id)
+	_emit_source_capture_phase("member_publisher_lookup", {"memberId":member_id})
+	var owner := _current_transform_artifact_publisher_for_member(site_id, member_id)
+	_emit_source_capture_phase("member_publisher_lookup_complete", {"memberId":member_id,
+		"status":String(owner.get("status", ""))})
+	if owner.get("status") != "ready":
+		return owner
+	var publisher = owner.get("publisher")
+	_emit_source_capture_phase("member_revision_lookup", {"memberId":member_id,
+		"sourcePartId":part_id})
+	var member_binding := _expected_visual_source_revision(owner, part_id)
+	_emit_source_capture_phase("member_revision_lookup_complete", {"memberId":member_id,
+		"sourcePartId":part_id})
+	if member_binding.is_empty():
+		return {"status":"pending", "reason":"citadel_transform_member_binding_unavailable",
+			"sourcePartId":part_id, "retryable":true}
+	var capture: Dictionary = _capture_owner_source_snapshot(publisher,
+		part_id, member_binding)
+	_emit_source_capture_phase("member_source_capture_complete", {"memberId":member_id,
+		"sourcePartId":part_id, "status":String(capture.get("status", ""))})
+	if capture.get("status") != "ready" or String(capture.get("sourceRevision", "")) != member_binding:
+		return {"status":"pending", "reason":String(capture.get("reason",
+			"citadel_transform_member_artifact_unavailable")),
+			"sourcePartId":part_id, "retryable":true}
+	var groups_value: Variant = capture.get("groups", null)
+	_emit_source_capture_phase("member_presentation_identity", {"memberId":member_id,
+		"sourcePartId":part_id, "groupCount":groups_value.size() if groups_value is Array else -1})
+	var presentation_identity := _captured_presentation_identity(capture)
+	_emit_source_capture_phase("member_presentation_identity_complete", {"memberId":member_id,
+		"sourcePartId":part_id, "status":String(presentation_identity.get("status", ""))})
+	if presentation_identity.get("status") != "ready": return presentation_identity
+	if not groups_value is Array or not groups_value.is_read_only() \
+			or (groups_value.is_empty() and presentation_identity.members.is_empty()):
+		return {"status":"pending", "reason":"citadel_transform_member_artifact_manifest_unavailable",
+			"sourcePartId":part_id, "retryable":true}
+	var group_rows: Array = []
+	var seen_group_ids: Dictionary = {}
+	for group_value: Variant in groups_value:
+		if not group_value is Dictionary or not group_value.is_read_only():
+			return {"status":"pending", "reason":"citadel_transform_member_artifact_group_unsealed",
+				"sourcePartId":part_id, "retryable":true}
+		var group: Dictionary = group_value
+		var group_id := String(group.get("sourceId", ""))
+		_emit_source_capture_phase("member_group_identity", {"memberId":member_id,
+			"sourcePartId":part_id, "groupId":group_id})
+		var content_digest := String(group.get("contentDigest", ""))
+		if group_id.is_empty() or seen_group_ids.has(group_id) \
+				or content_digest.length() != 64 \
+				or String(group.get("sourcePartId", "")) != part_id \
+				or group.get("sourceToWorld") != owner.get("sourceToWorld"):
+			return {"status":"pending", "reason":"citadel_transform_member_artifact_identity_stale",
+				"sourcePartId":part_id, "retryable":true}
+		seen_group_ids[group_id] = true
+		var segment_rows: Array = []
+		var segments_value: Variant = group.get("segments", null)
+		if not segments_value is Array or not segments_value.is_read_only() or segments_value.is_empty():
+			return {"status":"pending", "reason":"citadel_transform_member_artifact_segments_unavailable",
+				"sourcePartId":part_id, "retryable":true}
+		for segment_value: Variant in segments_value:
+			if not segment_value is Dictionary or not segment_value.is_read_only():
+				return {"status":"pending", "reason":"citadel_transform_member_artifact_segment_unsealed",
+					"sourcePartId":part_id, "retryable":true}
+			var segment: Dictionary = segment_value
+			var segment_id := String(segment.get("segmentId", ""))
+			var segment_digest := String(segment.get("contentDigest", ""))
+			if segment_id.is_empty() or segment_digest.length() != 64:
+				return {"status":"pending", "reason":"citadel_transform_member_artifact_segment_identity_invalid",
+					"sourcePartId":part_id, "retryable":true}
+			segment_rows.append([segment_id, segment_digest,
+				segment.get("bounds"), int(segment.get("instanceCount", 0))])
+		segment_rows.sort_custom(func(a: Array, b: Array) -> bool:
+			return String(a[0]) < String(b[0]))
+		group_rows.append([group_id, content_digest,
+			String(group.get("meshContentDigest", "")),
+			String(group.get("materialContentDigest", "")),
+			group.get("sourceToWorld"), group.get("localBounds"),
+			group.get("worldBounds"), group.get("ownerCell"),
+			group.get("renderChunkKey"), String(group.get("renderLayer", "")),
+			String(group.get("transparencySortPolicy", "")),
+			int(group.get("instanceCount", 0)), segment_rows])
+	group_rows.sort_custom(func(a: Array, b: Array) -> bool:
+		return String(a[0]) < String(b[0]))
+	var payload := ["citadel-live-transform-artifact-authority/v1",
+		String(_admission.stats().get("worldSeed", "")), site_id,
+		owner.get("binding", {}), int(publisher.get_instance_id()), part_id,
+		member_binding, capture.get("visualSourceReceipt", {}), owner.get("sourceToWorld"), group_rows,
+		presentation_identity.digest, presentation_identity.bindingWitnesses]
+	if owner.has("sceneJobInstanceId"): payload.append(owner.sceneJobInstanceId)
+	_emit_source_capture_phase("member_authority_hash", {"memberId":member_id,
+		"sourcePartId":part_id, "groupCount":group_rows.size()})
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK \
+			or digest.update(var_to_bytes(payload)) != OK:
+		return {"status":"failed", "reason":"citadel_transform_member_authority_hash_failed"}
+	var authority_revision := digest.finish().hex_encode()
+	_emit_source_capture_phase("member_authority_hash_complete", {"memberId":member_id,
+		"sourcePartId":part_id, "groupCount":group_rows.size()})
+	return {"status":"ready", "artifactAuthorityRevision":authority_revision,
+		"publisherInstanceId":int(publisher.get_instance_id()),
+		"memberBinding":member_binding, "visualSourceReceipt":capture.get("visualSourceReceipt", {}), "sourceToWorld":owner.get("sourceToWorld")}
+
+
+## Reuse the same admitted scene job and live source-owner boundary as static
+## building parts. The alias is provider membership, never a rewritten tree ID.
+func _current_tree_member_artifact_authority(site_id: String, member_id: String) -> Dictionary:
+	var owner := _current_transform_artifact_publisher_for_site(site_id)
+	if owner.get("status") != "ready": return owner
+	var entry: Dictionary = _scenes.get(owner.region, {})
+	var job: Variant = entry.get("job")
+	if not is_instance_valid(job) or not job.has_method("capture_tree_section_source"):
+		return {"status":"pending", "reason":"citadel_tree_scene_source_unavailable", "retryable":true}
+	var capture: Dictionary = job.call("capture_tree_section_source", member_id, owner.binding)
+	if capture.get("status") == "absent" and capture.get("reason") == "removed_prop":
+		var absent := capture.duplicate()
+		absent["jobInstanceId"] = job.get_instance_id()
+		return absent
+	if capture.get("status") != "ready": return capture.duplicate()
+	var producer: Dictionary = capture.get("producer", {})
+	var manifest: Dictionary = producer.get("sourceManifest", {})
+	var expected_alias := _citadel_census_source_id(site_id, member_id)
+	if not capture.is_read_only() or capture.get("sourceId") != expected_alias \
+			or capture.get("binding") != owner.binding \
+			or int(capture.get("jobInstanceId", 0)) != job.get_instance_id():
+		return {"status":"pending", "reason":"citadel_tree_admitted_source_stale", "retryable":true}
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK \
+			or digest.update(var_to_bytes(["citadel-admitted-tree-authority/v1", expected_alias,
+			owner.binding, job.get_instance_id(), capture.get("admittedTreeRecord"),
+			producer.get("queueInstanceId"), producer.get("bodyInstanceId"),
+			producer.get("bodyGlobalTransform"), producer.get("propId"),
+			producer.get("producerSourceId"), producer.get("producerRevision"),
+			producer.get("compiledSourceRevision"), manifest.get("compiledAttributeDigest"),
+			manifest.get("ownedSectionKeys"), manifest.get("sectionKeys")])) != OK:
+		return {"status":"failed", "reason":"citadel_tree_authority_hash_failed"}
+	var revision := digest.finish().hex_encode()
+	return {"status":"ready", "artifactAuthorityRevision":revision,
+		"memberBinding":revision, "capture":capture, "job":job,
+		"publisherInstanceId":job.get_instance_id(), "binding":owner.binding,
+		"sourceToWorld":owner.sourceToWorld}
+
+func _expected_visual_source_revision(owner: Dictionary, part_id: String) -> String:
+	var binding: Dictionary = owner.get("binding", {})
+	var plan = _publication_plan_for_binding(binding)
+	if plan == null or not plan.matches(binding, plan.groups): return ""
+	var revisions: Variant = plan.get("visual_source_revisions")
+	if not revisions is Dictionary or not revisions.is_read_only(): return ""
+	return String(revisions.get("furnishing:" + part_id if owner.get("memberKind") == "furnishing" else part_id, ""))
+
+
+func _collect_current_citadel_removals(world_id: String,
+		section_key: Vector3i, section_bounds: AABB, current_source_ids: Array[String],
+		member_rows: Array, region_decisions: Array) -> Dictionary:
+	var current_ids: Dictionary = {}
+	for source_id: String in current_source_ids:
+		current_ids[source_id] = true
+	var removed_members: Dictionary = {}
+	var seen_sites: Dictionary = {}
+	for region_value: Variant in _scenes:
+		if not region_value is Vector2i or not _scenes[region_value] is Dictionary:
+			return {"status":"pending", "reason":"citadel_removal_scene_owner_unavailable",
+				"retryable":true}
+		var region: Vector2i = region_value
+		var entry: Dictionary = _scenes[region]
+		var binding: Dictionary = entry.get("binding", {})
+		if String(entry.get("phase", "")) != "scene_ready":
+			continue
+		var site_id := String(binding.get("siteId", ""))
+		if site_id.is_empty():
+			return {"status":"pending", "reason":"citadel_removal_scene_binding_unavailable",
+				"region":region, "retryable":true}
+		var current: Dictionary = _admission.source_state(region)
+		if current.get("status") not in ["ready", "prepared"] \
+				or current.get("binding", {}) != binding:
+			continue
+		var reservation_value: Variant = current.get("reservationCells", null)
+		if not reservation_value is Rect2i:
+			return {"status":"pending", "reason":"citadel_removal_reservation_unavailable",
+				"region":region, "retryable":true}
+		var reservation: Rect2i = reservation_value
+		if not reservation.intersects(_citadel_section_admission_bounds(section_key)):
+			continue
+		if seen_sites.has(site_id):
+			return {"status":"pending", "reason":"citadel_removal_site_owner_ambiguous",
+				"siteId":site_id, "retryable":true}
+		seen_sites[site_id] = true
+		var plan = _publication_plan_for_binding(binding)
+		if plan == null or not plan.matches(binding, plan.groups):
+			return {"status":"pending", "reason":"citadel_removal_current_plan_unavailable",
+				"siteId":site_id, "retryable":true}
+		var current_description: Dictionary = plan.visual_members_intersecting_bounds(section_bounds)
+		if current_description.get("status") != "described":
+			return {"status":"pending", "reason":"citadel_removal_current_membership_unavailable",
+				"siteId":site_id, "retryable":true}
+		var current_member_ids: Dictionary = {}
+		var all_current_members: Dictionary = {}
+		var plan_records: Variant = plan.get("member_records")
+		if not plan_records is Array:
+			return {"status":"pending", "reason":"citadel_removal_complete_plan_inventory_unavailable", "retryable":true}
+		if plan_records is Array:
+			for member_value: Variant in plan_records:
+				if not member_value is Dictionary or String(member_value.get("memberId", "")).is_empty() \
+						or all_current_members.has(String(member_value.get("memberId", ""))):
+					return {"status":"pending", "reason":"citadel_removal_complete_plan_inventory_invalid", "retryable":true}
+				all_current_members[String(member_value.memberId)] = member_value
+		for member_value: Variant in current_description.get("members", []):
+			if member_value is Dictionary:
+				current_member_ids[String(member_value.get("memberId", ""))] = true
+		var job = entry.get("job")
+		for publisher: Variant in _scene_visual_publishers(job):
+			if publisher == null or not is_instance_valid(publisher) \
+				or not _publisher_node_roster_available(publisher) \
+					or String(publisher.get("publication_site_id")) != site_id:
+				return {"status":"pending", "reason":"citadel_removal_publisher_unavailable",
+					"siteId":site_id, "retryable":true}
+			var binding_identity := [site_id, String(binding.get("sourceKey", "")),
+				int(binding.get("generation", -1))]
+			for visual_value: Variant in _published_legacy_geometry(publisher):
+				var visual := visual_value as GeometryInstance3D
+				if not is_instance_valid(visual) or not visual.is_inside_tree() \
+						or visual.is_queued_for_deletion() \
+						or (not visual.visible and not _legacy_has_section_ownership(visual)):
+					continue
+				var part_id := String(visual.get_meta("building_source_part_id", ""))
+				if part_id.is_empty() or current_member_ids.has(_visual_member_id(visual)):
+					continue
+				var bounds := visual.global_transform * visual.get_aabb()
+				if not bounds.position.is_finite() or not bounds.size.is_finite() \
+						or bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0:
+					return {"status":"pending", "reason":"citadel_removal_visual_bounds_unavailable",
+						"siteId":site_id, "sourcePartId":part_id, "memberId":_visual_member_id(visual), "retryable":true}
+				if section_key not in SectionGrid.keys_intersecting_bounds(bounds):
+					continue
+				var old_visual_identity: Dictionary = publisher.committed_static_visual_source_identity(part_id)
+				var old_member_binding := String(old_visual_identity.get("sourceRevision", "")) if old_visual_identity.get("status") == "ready" else ""
+				if old_member_binding.is_empty():
+					return {"status":"pending", "reason":"citadel_removal_old_member_binding_unavailable",
+						"siteId":site_id, "sourcePartId":part_id, "memberId":_visual_member_id(visual), "retryable":true}
+				var source_id := _citadel_census_source_id(site_id,
+					_visual_member_id(visual), section_key)
+				var member_authority_revision := ""
+				var current_member: Dictionary = all_current_members.get(_visual_member_id(visual), {})
+				if not current_member.is_empty():
+					var authority := _current_member_transform_artifact_authority(site_id, _visual_member_id(visual))
+					if authority.get("status") != "ready":
+						return authority
+					var current_capture: Dictionary = publisher.capture_committed_static_visual_source(
+						part_id, String(authority.get("memberBinding", "")))
+					for group: Dictionary in current_capture.get("groups", []):
+						var mesh: Mesh = group.get("resourceBindings", {}).get("mesh")
+						if mesh == null:
+							return {"status":"pending", "reason":"citadel_removal_current_mesh_unavailable", "retryable":true}
+						for segment: Dictionary in group.get("segments", []):
+							for instance_index in int(segment.get("instanceCount", 0)):
+								var transform := SectionGeometryAdapter.Attributes.decode_transform(segment.buffer,
+									instance_index * SectionGeometryAdapter.Attributes.FLOATS_PER_INSTANCE)
+								var instance_bounds: AABB = (group.sourceToWorld as Transform3D) * transform * mesh.get_aabb()
+								if SectionGrid.keys_intersecting_bounds(instance_bounds).has(section_key):
+									return {"status":"pending", "reason":"citadel_member_index_does_not_cover_compiled_geometry",
+										"retryable":true, "sourceId":source_id, "sectionKey":section_key}
+					member_authority_revision = _citadel_member_source_revision(world_id, binding, plan,
+						current_member, String(authority.get("artifactAuthorityRevision", "")))
+				if current_ids.has(source_id):
+					continue
+				var removal_row: Dictionary = removed_members.get(source_id, {
+					"siteId":site_id, "sourcePartId":part_id, "memberId":_visual_member_id(visual),
+					"sourceId":source_id, "ownerBinding":binding_identity,
+					"memberBinding":old_member_binding, "bounds":[],
+					"memberAuthorityRevision":member_authority_revision,
+					"planSignature":plan.output_signature})
+				if removal_row.get("ownerBinding", []) != binding_identity \
+						or String(removal_row.get("memberBinding", "")) != old_member_binding:
+					return {"status":"pending", "reason":"citadel_removal_identity_conflict",
+						"sourceId":source_id, "retryable":true}
+				var bounds_rows: Array = removal_row.get("bounds", [])
+				bounds_rows.append(bounds)
+				removal_row["bounds"] = bounds_rows
+				removed_members[source_id] = removal_row
+	var removal_ids: Array[String] = []
+	for source_id_value: Variant in removed_members:
+		removal_ids.append(String(source_id_value))
+	removal_ids.sort()
+	var result_rows: Array[Dictionary] = []
+	for source_id: String in removal_ids:
+		var old_row: Dictionary = removed_members[source_id]
+		var bounds_values: Array = old_row.get("bounds", [])
+		bounds_values.sort_custom(func(a: AABB, b: AABB) -> bool:
+			if a.position.x != b.position.x: return a.position.x < b.position.x
+			if a.position.y != b.position.y: return a.position.y < b.position.y
+			if a.position.z != b.position.z: return a.position.z < b.position.z
+			if a.size.x != b.size.x: return a.size.x < b.size.x
+			if a.size.y != b.size.y: return a.size.y < b.size.y
+			return a.size.z < b.size.z)
+		var owner_binding: Array = old_row.get("ownerBinding", [])
+		var member_binding := String(old_row.get("memberBinding", ""))
+		var revision_payload := ["citadel-member-tombstone/v2", world_id,
+			owner_binding, source_id, member_binding, old_row.get("planSignature", "")]
+		var revision := String(old_row.get("memberAuthorityRevision", ""))
+		if revision.is_empty():
+			revision = Marshalls.raw_to_base64(var_to_bytes(revision_payload)).sha256_text()
+		var owner_digest := Marshalls.raw_to_base64(var_to_bytes(owner_binding)).sha256_text()
+		var removal := {"sourceId":source_id, "sourcePartId":source_id,
+			"sourceRevision":revision, "sectionKey":section_key,
+			"siteId":String(old_row.get("siteId", "")),
+			"memberId":String(old_row.get("memberId", "")),
+			"ownerBindingDigest":owner_digest, "memberBinding":member_binding,
+			"bounds":bounds_values.duplicate()}
+		removal.bounds.make_read_only()
+		removal.make_read_only()
+		result_rows.append(removal)
+	# Admitted previous owner coverage survives retirement of legacy nodes.
+	for source_id: String in _geometry_owner_removal_sections.get(section_key, {}):
+		if current_ids.has(source_id): continue
+		var retained := _current_roster_removal(world_id, source_id, section_key)
+		if retained.get("status") != "ready": return retained
+		for index in range(result_rows.size() - 1, -1, -1):
+			if result_rows[index].get("sourceId") == source_id: result_rows.remove_at(index)
+		result_rows.append(retained.removal)
+	result_rows.make_read_only()
+	return {"status":"ready", "removals":result_rows}
+
+
+func _current_roster_removal(world_id: String, source_id: String, section: Vector3i) -> Dictionary:
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	if proof.get("kind") == "tree":
+		return _current_tree_roster_removal(world_id, source_id, section, proof)
+	var current := _current_transform_artifact_publisher_for_member(String(proof.get("siteId", "")), _proof_transform_member(proof))
+	var reference: WeakRef = proof.get("publisher")
+	var publisher: Object = reference.get_ref() if reference != null else null
+	if current.get("status") != "ready" or not is_instance_valid(publisher) \
+			or current.get("publisher") != publisher or publisher.get_instance_id() != int(proof.get("publisherId", 0)) \
+			or current.get("binding") != proof.get("binding") \
+			or current.get("sceneJobInstanceId", 0) != proof.get("sceneJobInstanceId", 0):
+		return {"status":"pending", "reason":"citadel_removal_retained_owner_changed", "retryable":true}
+	var binding: Dictionary = current.binding
+	var plan = _publication_plan_for_binding(binding)
+	if plan == null or not plan.matches(binding, plan.groups) or not plan.get("member_records") is Array:
+		return {"status":"pending", "reason":"citadel_removal_complete_plan_inventory_unavailable", "retryable":true}
+	var member_id := _proof_transform_member(proof)
+	var member: Dictionary = {}
+	for value: Variant in plan.get("member_records"):
+		if not value is Dictionary or String(value.get("memberId", "")).is_empty():
+			return {"status":"pending", "reason":"citadel_removal_complete_plan_inventory_invalid", "retryable":true}
+		if value.get("memberId") == member_id:
+			if not member.is_empty(): return {"status":"pending", "reason":"citadel_removal_member_ambiguous", "retryable":true}
+			member = value
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	var presentation_only: bool = roster.is_empty() and not proof.get("presentationMembers", []).is_empty() \
+		and proof.get("worldId") == world_id
+	if not presentation_only and (not OwnerCompletion.validate(roster) or roster.get("worldId") != world_id):
+		return {"status":"pending", "reason":"citadel_removal_prior_roster_missing", "retryable":true}
+	var revision := ""
+	if not member.is_empty():
+		var authority := _current_member_transform_artifact_authority(String(proof.siteId), member_id)
+		if authority.get("status") != "ready": return authority
+		var capture: Dictionary = publisher.capture_committed_static_visual_source(String(proof.partId), String(authority.memberBinding))
+		if capture.get("status") != "ready": return capture
+		for presentation: Dictionary in capture.get("presentationMounts", []):
+			if SectionGrid.key_for_world_position(presentation.neutralParentToWorld.origin) == section:
+				return {"status":"pending", "reason":"citadel_member_index_does_not_cover_presentation", "retryable":true}
+		for group: Dictionary in capture.get("groups", []):
+			var mesh: Mesh = group.get("resourceBindings", {}).get("mesh")
+			if mesh == null: return {"status":"pending", "reason":"citadel_removal_current_mesh_unavailable", "retryable":true}
+			for segment: Dictionary in group.get("segments", []):
+				for index in int(segment.get("instanceCount", 0)):
+					var transform := SectionGeometryAdapter.Attributes.decode_transform(segment.buffer, index * SectionGeometryAdapter.Attributes.FLOATS_PER_INSTANCE)
+					var instance_bounds: AABB = (group.sourceToWorld as Transform3D) * transform * mesh.get_aabb()
+					if section in SectionGrid.keys_intersecting_bounds(instance_bounds):
+						return {"status":"pending", "reason":"citadel_member_index_does_not_cover_compiled_geometry", "retryable":true}
+		revision = _citadel_member_source_revision(world_id, binding, plan, member, String(authority.artifactAuthorityRevision))
+	else:
+		var retained_identity: Dictionary = publisher.committed_static_visual_source_identity(String(proof.partId))
+		if retained_identity.get("status") != "ready" or retained_identity != proof.get("visualSourceReceipt", {}):
+			return {"status":"pending", "reason":"citadel_removal_prior_visual_receipt_changed", "retryable":true}
+		if bool(roster.get("explicitRemoval", false)):
+			revision = String(roster.sourceRevision)
+		else:
+			revision = Marshalls.raw_to_base64(var_to_bytes(["citadel-member-removal/v1", world_id,
+				source_id, roster.get("sourceRevision", proof.get("sourceRevision", "")),
+				_citadel_owner_binding_digest(binding), proof.get("memberBinding")])).sha256_text()
+			var sealed := OwnerCompletion.seal(world_id, source_id, source_id, revision,
+				String(roster.get("sourceIncarnation", proof.get("sourceIncarnation", ""))), [], true)
+			if sealed.get("status") != "ready": return sealed
+			proof = proof.duplicate(false)
+			proof["sourceRevision"] = revision
+			proof["presentationMembers"] = []
+			_retain_geometry_owner_roster(source_id, sealed.roster, proof)
+	var bounds: Array = _geometry_owner_removal_bounds.get(source_id, {}).get(section, []).duplicate()
+	bounds.make_read_only()
+	var removal := {"sourceId":source_id, "sourcePartId":source_id, "sourceRevision":revision,
+		"sectionKey":section, "siteId":String(proof.siteId), "memberId":member_id,
+		"ownerBindingDigest":_citadel_owner_binding_digest(binding), "memberBinding":String(proof.memberBinding),
+		"bounds":bounds}
+	removal.make_read_only()
+	return {"status":"ready", "removal":removal}
 
 
 ## Bridges the current immutable Citadel source census and the actual retained
@@ -760,16 +2240,13 @@ func capture_static_section_geometry_candidate(world_id: String, section_key: Ve
 			if site_id.is_empty() or not member_id.begins_with("building:"):
 				return {"status":"pending", "reason":"citadel_member_kind_has_no_prepared_static_packet",
 					"sourceId":source_id, "memberId":member_id, "retryable":true}
-			var part_id := member_id.trim_prefix("building:")
+			var part_id := _transform_part_id(member_id)
 			var owner_result := _current_packet_publisher_for_site(site_id)
 			if owner_result.get("status") != "ready":
 				owner_result["sourceId"] = source_id
 				return owner_result
 			var publisher = owner_result.publisher
-			var legacy_visual_state: Dictionary = _packet_member_legacy_visual_state(publisher, part_id)
-			if legacy_visual_state.get("status") != "clear":
-				legacy_visual_state["sourceId"] = source_id
-				return legacy_visual_state
+			_restore_stale_citadel_visuals(publisher, site_id, member_id)
 			var member_bindings_by_part: Dictionary = publisher.get("_physical_packet_bindings_by_part_id")
 			var member_binding := String(member_bindings_by_part.get(part_id, ""))
 			if member_binding.is_empty():
@@ -904,51 +2381,2183 @@ func capture_static_section_geometry_candidate(world_id: String, section_key: Ve
 	return result
 
 
-## Adapts the already admitted Citadel packet groups to the common provider
-## contribution boundary. Geometry stays value-only; the candidate assembler
-## performs the single cross-domain partition and no Citadel visuals are
-## retired here.
+## Adapts sealed BuildingPartPublisher transform artifacts to the common
+## provider contribution boundary. This path does not require legacy packet
+## expectations or receipts; geometry stays staged until the whole-section
+## native receipt is acknowledged by acknowledge_section_install.
 func capture_static_section_contribution(census: Dictionary,
-		section_key: Vector3i) -> Dictionary:
+		section_key: Vector3i, candidate_generation := 1) -> Dictionary:
 	if census.get("status") != "complete" or String(census.get("worldId", "")).is_empty():
 		return {"status":"pending", "reason":"citadel_contribution_census_unavailable",
 			"retryable":true}
-	var geometry: Dictionary = capture_static_section_geometry_candidate(
-		String(census.worldId), section_key, 1)
-	if geometry.get("status") != "ready":
-		return geometry
-	var coverage_map: Dictionary = census.get("providerCoverageRevisions", {}).get(
-		"blueprint_buildings", {})
-	var coverage_revision := String(coverage_map.get(section_key, ""))
-	var provider_revision := String(census.get("providerSnapshotRevisions", {}).get(
-		"blueprint_buildings", ""))
-	if coverage_revision.is_empty() or provider_revision.is_empty() \
-			or coverage_revision != String(geometry.get("coverageRevision", "")):
-		return {"status":"pending", "reason":"citadel_contribution_revision_stale",
+	var census_digest := String(census.get("censusDigest", ""))
+	var capture_job: Dictionary = _section_contribution_capture_jobs.get(section_key, {})
+	var transaction_matches := not capture_job.is_empty() \
+		and int(capture_job.get("serviceGeneration", -1)) == _generation \
+		and int(capture_job.get("candidateGeneration", -1)) == candidate_generation \
+		and String(capture_job.get("worldId", "")) == String(census.get("worldId", "")) \
+		and not census_digest.is_empty() \
+		and String(capture_job.get("censusDigest", "")) == census_digest
+	var current_before: Dictionary
+	if transaction_matches:
+		# The exact admitted census and its provider revision vector are pinned to
+		# this contribution transaction. Captures remain staged; the complete live
+		# provider/member fence below runs before any contribution is returned.
+		current_before = {"status":"ready",
+			"sourceIds":capture_job.get("sourceIds", []),
+			"sourceRevisions":capture_job.get("sourceRevisions", {}),
+			"authorityRevision":capture_job.get("authorityRevision", ""),
+			"coverageRevision":capture_job.get("coverageRevision", "")}
+	else:
+		current_before = _current_transform_artifact_census(census, section_key)
+		if current_before.get("status") != "ready":
+			return current_before
+	var expected_source_ids: Array[String] = current_before.get("sourceIds", [])
+	if census_digest.is_empty():
+		# The production roster supplies a sealed digest. Focused service fixtures
+		# may supply a narrower immutable census, so bind their continuation to the
+		# exact section, revision maps, and source closure instead of refusing it.
+		census_digest = Marshalls.raw_to_base64(var_to_bytes([
+			String(census.get("worldId", "")), section_key,
+			String(current_before.get("authorityRevision", "")),
+			String(current_before.get("coverageRevision", "")), expected_source_ids,
+			census.get("sourceRevisions", {})])).sha256_text()
+	if not capture_job.is_empty():
+		var same_inputs: bool = int(capture_job.get("serviceGeneration", -1)) == _generation \
+			and int(capture_job.get("candidateGeneration", -1)) == candidate_generation \
+			and String(capture_job.get("worldId", "")) == String(census.get("worldId", "")) \
+			and capture_job.get("sourceIds", []) == expected_source_ids \
+			and capture_job.get("sourceRevisions", {}) == current_before.get("sourceRevisions", {}) \
+			and String(capture_job.get("authorityRevision", "")) \
+				== String(current_before.get("authorityRevision", "")) \
+			and String(capture_job.get("coverageRevision", "")) \
+				== String(current_before.get("coverageRevision", ""))
+		if not same_inputs:
+			_section_contribution_capture_jobs.erase(section_key)
+			return {"status":"pending", "reason":"citadel_contribution_capture_inputs_stale",
+				"retryable":true, "sectionKey":section_key}
+		# Other required providers may advance while this source cursor is pending.
+		# Their new census is used for final assembly; the retained Citadel values
+		# remain reusable only while this exact Citadel source closure stays current.
+		capture_job["censusDigest"] = census_digest
+	else:
+		_prune_section_contribution_capture_jobs(section_key)
+		capture_job = {"serviceGeneration":_generation,
+			"candidateGeneration":candidate_generation,
+			"worldId":String(census.get("worldId", "")),
+			"sectionKey":section_key, "censusDigest":census_digest,
+			"authorityRevision":String(current_before.get("authorityRevision", "")),
+			"coverageRevision":String(current_before.get("coverageRevision", "")),
+			"sourceIds":expected_source_ids.duplicate(),
+			"sourceRevisions":current_before.get("sourceRevisions", {}),
+			"nextSourceIndex":0, "capturesBySource":{},
+			"memberBindings":{}, "ownerProofs":{},
+			"sourceArtifactCacheHitCount":0, "sourceLookupUsec":0,
+			"coldCaptureUsec":0, "maxSourceCaptureUsec":0,
+			"adapterUsec":0, "finalValidationUsec":0}
+		_section_contribution_capture_jobs[section_key] = capture_job
+	capture_job["lastAdvanceFrame"] = Engine.get_process_frames()
+	_section_contribution_capture_jobs[section_key] = capture_job
+	var captures_by_source: Dictionary = capture_job.get("capturesBySource", {})
+	var member_bindings: Dictionary = capture_job.get("memberBindings", {})
+	var owner_proofs: Dictionary = capture_job.get("ownerProofs", {})
+	var next_source_index := int(capture_job.get("nextSourceIndex", 0))
+	for source_index in range(next_source_index, expected_source_ids.size()):
+		var source_id := expected_source_ids[source_index]
+		var site_id := SectionGeometryAdapter._site_id_from_census_source(source_id)
+		var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+		if not site_id.is_empty() and member_id.begins_with("tree:"):
+			var tree_authority := _current_tree_member_artifact_authority(site_id, member_id)
+			if tree_authority.get("status") != "ready": return tree_authority
+			captures_by_source[source_id] = tree_authority.capture
+			member_bindings[source_id] = tree_authority.memberBinding
+			owner_proofs[source_id] = {"kind":"tree", "siteId":site_id,
+				"memberId":member_id, "authorityRevision":tree_authority.artifactAuthorityRevision,
+				"job":weakref(tree_authority.job), "jobInstanceId":tree_authority.job.get_instance_id(),
+				"binding":tree_authority.binding}
+			capture_job["nextSourceIndex"] = source_index + 1
+			capture_job["capturesBySource"] = captures_by_source
+			capture_job["memberBindings"] = member_bindings
+			capture_job["ownerProofs"] = owner_proofs
+			_section_contribution_capture_jobs[section_key] = capture_job
+			break
+		if site_id.is_empty() or not _is_transform_member(member_id):
+			return {"status":"pending", "reason":"citadel_transform_artifact_member_kind_unsupported",
+				"sourceId":source_id, "memberId":member_id, "retryable":true}
+		var part_id := _transform_part_id(member_id)
+		var owner_result := _current_transform_artifact_publisher_for_member(site_id, member_id)
+		if owner_result.get("status") != "ready":
+			owner_result["sourceId"] = source_id
+			return owner_result
+		var publisher = owner_result.publisher
+		_restore_stale_citadel_visuals(publisher, site_id, member_id)
+		var member_binding := _expected_visual_source_revision(owner_result, part_id)
+		if member_binding.is_empty():
+			return {"status":"pending", "reason":"citadel_transform_artifact_member_binding_unavailable",
+				"sourceId":source_id, "sourcePartId":part_id, "retryable":true}
+		var source_capture_started := Time.get_ticks_usec()
+		var capture: Dictionary = _cached_transform_artifact_capture(
+			source_id, member_id, part_id, member_binding, owner_result)
+		capture_job["sourceLookupUsec"] = int(capture_job.get("sourceLookupUsec", 0)) \
+			+ Time.get_ticks_usec() - source_capture_started
+		if capture.is_empty():
+			var cold_capture_started := Time.get_ticks_usec()
+			capture = publisher.capture_committed_static_visual_source(
+				part_id, member_binding)
+			capture_job["coldCaptureUsec"] = int(capture_job.get("coldCaptureUsec", 0)) \
+				+ Time.get_ticks_usec() - cold_capture_started
+		else:
+			capture_job["sourceArtifactCacheHitCount"] = int(
+				capture_job.get("sourceArtifactCacheHitCount", 0)) + 1
+		if capture.get("status") != "ready":
+			capture["sourceId"] = source_id
+			return capture
+		for group_value: Variant in capture.get("groups", []):
+			if not group_value is Dictionary \
+					or group_value.get("sourceToWorld") != owner_result.sourceToWorld:
+				return {"status":"pending", "reason":"citadel_transform_artifact_owner_transform_moved",
+					"sourceId":source_id, "retryable":true}
+		captures_by_source[source_id] = capture
+		capture_job["maxSourceCaptureUsec"] = maxi(
+			int(capture_job.get("maxSourceCaptureUsec", 0)),
+			Time.get_ticks_usec() - source_capture_started)
+		member_bindings[source_id] = member_binding
+		owner_proofs[source_id] = {"siteId":site_id, "partId":part_id, "memberId":member_id,
+			"publisher":publisher, "binding":owner_result.binding,
+			"sceneJobInstanceId":owner_result.get("sceneJobInstanceId", 0),
+			"memberBinding":member_binding, "sourceToWorld":owner_result.sourceToWorld}
+		capture_job["nextSourceIndex"] = source_index + 1
+		capture_job["capturesBySource"] = captures_by_source
+		capture_job["memberBindings"] = member_bindings
+		capture_job["ownerProofs"] = owner_proofs
+		_section_contribution_capture_jobs[section_key] = capture_job
+		break
+	if int(capture_job.get("nextSourceIndex", 0)) < expected_source_ids.size():
+		var continuation := {"schema":"static-section-provider-continuation/v1",
+			"providerId":"blueprint_buildings", "sectionKey":section_key,
+			"censusDigest":census_digest,
+			"candidateGeneration":candidate_generation,
+			"sourceCursor":int(capture_job.get("nextSourceIndex", 0))}
+		continuation.make_read_only()
+		return {"status":"pending", "reason":"citadel_section_contribution_slice_pending",
+			"retryable":true, "continuationHint":continuation,
+			"sectionKey":section_key,
+			"completedSourceCount":int(capture_job.get("nextSourceIndex", 0)),
+			"requiredSourceCount":expected_source_ids.size(),
+			"sourceArtifactCacheHitCount":int(capture_job.get("sourceArtifactCacheHitCount", 0)),
+			"sourceLookupUsec":int(capture_job.get("sourceLookupUsec", 0)),
+			"coldCaptureUsec":int(capture_job.get("coldCaptureUsec", 0)),
+			"maxSourceCaptureUsec":int(capture_job.get("maxSourceCaptureUsec", 0))}
+
+	var needs_translucent_pov := false
+	for source_capture: Dictionary in captures_by_source.values():
+		for group: Dictionary in source_capture.get("groups", []):
+			if group.get("renderLayer") == "translucent": needs_translucent_pov = true
+	var pov_snapshot: Dictionary = {}
+	var pov_owner: Variant = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if needs_translucent_pov:
+		if not is_instance_valid(pov_owner) or not pov_owner.has_method("current_translucent_pov_snapshot"):
+			return {"status":"pending", "reason":"citadel_translucent_pov_owner_unavailable", "retryable":true}
+		pov_snapshot = pov_owner.call("current_translucent_pov_snapshot", section_key)
+		if pov_snapshot.get("status") != "ready": return pov_snapshot
+	var adapter_started := Time.get_ticks_usec()
+	var adapter_result: Dictionary = SectionGeometryAdapter.capture_transform_artifact_contribution(
+		census, section_key, candidate_generation, captures_by_source, member_bindings, pov_snapshot)
+	capture_job["adapterUsec"] = Time.get_ticks_usec() - adapter_started
+	if adapter_result.get("status") != "ready":
+		return adapter_result
+	if needs_translucent_pov:
+		var current_pov: Dictionary = pov_owner.call("current_translucent_pov_snapshot", section_key)
+		if current_pov.get("status") != "ready" or current_pov.get("revision") != pov_snapshot.get("revision"):
+			return {"status":"pending", "reason":"citadel_translucent_pov_changed_during_capture", "retryable":true}
+	var validation_started := Time.get_ticks_usec()
+	var current_after := _current_transform_artifact_census(census, section_key)
+	if current_after.get("status") != "ready":
+		return current_after
+	if current_after.get("sourceIds", []) != current_before.get("sourceIds", []) \
+			or String(current_after.get("authorityRevision", "")) \
+			!= String(current_before.get("authorityRevision", "")) \
+			or String(current_after.get("coverageRevision", "")) \
+			!= String(current_before.get("coverageRevision", "")) \
+			or current_after.get("sourceRevisions", {}) \
+			!= current_before.get("sourceRevisions", {}):
+		return {"status":"pending", "reason":"citadel_transform_artifact_census_changed_during_capture",
 			"retryable":true}
-	var authority_source_revisions: Dictionary = {}
-	for member_value: Variant in geometry.get("members", []):
-		if not member_value is Dictionary:
-			return {"status":"failed", "reason":"citadel_contribution_member_invalid"}
-		var member: Dictionary = member_value
-		var source_part_id := String(member.get("sourcePartId", ""))
-		var revision := String(member.get("censusRevision", ""))
-		if source_part_id.is_empty() or revision.is_empty() \
-				or String(census.get("sourceRevisions", {}).get(source_part_id, "")) != revision \
-				or authority_source_revisions.has(source_part_id):
-			return {"status":"pending", "reason":"citadel_contribution_member_revision_stale",
-				"retryable":true, "sourcePartId":source_part_id}
-		authority_source_revisions[source_part_id] = revision
-	authority_source_revisions.make_read_only()
-	var contribution := {"providerId":"blueprint_buildings",
-		"sectionKey":section_key, "coverageRevision":coverage_revision,
-		"authorityRevision":provider_revision,
-		"authoritySourceRevisions":authority_source_revisions,
-		"inputs":geometry.get("inputs", []),
-		"compatibilityByKey":geometry.get("compatibilityByKey", {}),
-		"resourceBindings":geometry.get("resourceBindings", {})}
-	contribution.make_read_only()
-	return {"status":"ready", "contribution":contribution}
+	for source_id: String in expected_source_ids:
+		var proof: Dictionary = owner_proofs.get(source_id, {})
+		if proof.get("kind") == "tree":
+			var tree_after := _current_tree_member_artifact_authority(String(proof.siteId), String(proof.memberId))
+			if tree_after.get("status") != "ready": return tree_after
+			if tree_after.artifactAuthorityRevision != proof.authorityRevision \
+					or tree_after.job.get_instance_id() != proof.jobInstanceId \
+					or tree_after.binding != proof.binding:
+				return {"status":"pending", "reason":"citadel_tree_source_changed_during_capture", "retryable":true}
+			var complete_members: Array = adapter_result.get("geometryOwnerMembersBySource", {}).get(source_id, [])
+			var revision := String(complete_members[0].get("sourceRevision", "")) if not complete_members.is_empty() else ""
+			var incarnation := str(proof.jobInstanceId) + ":" + _citadel_owner_binding_digest(proof.binding) \
+				+ ":" + str(tree_after.capture.producer.bodyInstanceId)
+			var sealed := OwnerCompletion.seal(String(census.worldId), source_id, source_id,
+				revision, incarnation, complete_members)
+			if sealed.get("status") != "ready": return sealed
+			var support_bounds: Array[AABB] = []
+			for member: Dictionary in tree_after.capture.producer.sourceManifest.get("geometryOwnership", []):
+				var bounds: Variant = member.get("conservativeWorldBounds")
+				if not bounds is AABB or not bounds.position.is_finite() or not bounds.size.is_finite():
+					return {"status":"failed", "reason":"citadel_tree_support_bounds_invalid"}
+				if bounds not in support_bounds: support_bounds.append(bounds)
+			proof["supportBounds"] = support_bounds
+			_retain_geometry_owner_roster(source_id, sealed.roster, proof)
+			continue
+		var owner_after := _current_transform_artifact_publisher_for_member(
+			String(proof.get("siteId", "")), _proof_transform_member(proof))
+		if owner_after.get("status") != "ready" \
+				or owner_after.get("publisher") != proof.get("publisher") \
+				or owner_after.get("sceneJobInstanceId", 0) != proof.get("sceneJobInstanceId", 0) \
+				or owner_after.get("binding", {}) != proof.get("binding", {}) \
+				or owner_after.get("sourceToWorld") != proof.get("sourceToWorld"):
+			return {"status":"pending", "reason":"citadel_transform_artifact_owner_changed_during_capture",
+				"sourceId":source_id, "retryable":true}
+		var publisher = owner_after.publisher
+		if _expected_visual_source_revision(owner_after, String(proof.partId)) != String(proof.memberBinding):
+			return {"status":"pending", "reason":"citadel_transform_artifact_member_binding_changed",
+				"sourceId":source_id, "retryable":true}
+		# capture_committed_static_visual_source already brackets its immutable
+		# geometry snapshot with exact publication-boundary identities. Rebuilding
+		# the full mesh/segment snapshot here duplicated the most expensive work for
+		# every source in the section. Recheck the cheap boundary token instead;
+		# candidate installation and provider acknowledgement revalidate revisions
+		# after this worker input has been admitted.
+		var capture: Dictionary = captures_by_source.get(source_id, {})
+		var captured_identity: Dictionary = capture.get("visualSourceReceipt", {})
+		if not publisher.has_method("committed_static_visual_source_identity"):
+			return {"status":"pending", "reason":"citadel_transform_artifact_identity_api_unavailable",
+				"sourceId":source_id, "retryable":true}
+		var identity_after: Dictionary = publisher.call(
+			"committed_static_visual_source_identity", String(proof.partId))
+		if identity_after.get("status") != "ready":
+			identity_after["sourceId"] = source_id
+			return identity_after
+		if captured_identity.is_empty() or identity_after != captured_identity:
+			return {"status":"pending", "reason":"citadel_transform_artifact_content_changed_during_capture",
+				"sourceId":source_id, "retryable":true}
+		var complete_members: Array = adapter_result.get("geometryOwnerMembersBySource", {}).get(source_id, [])
+		var presentation_members: Array = adapter_result.get("presentationOwnerMembersBySource", {}).get(source_id, [])
+		var revision := String(complete_members[0].get("sourceRevision", "")) if not complete_members.is_empty() \
+			else String(presentation_members[0].get("sourceRevision", "")) if not presentation_members.is_empty() else ""
+		var incarnation := str(publisher.get_instance_id()) + ":" + _citadel_owner_binding_digest(proof.binding)
+		if int(proof.get("sceneJobInstanceId", 0)) != 0: incarnation += ":job:" + str(proof.sceneJobInstanceId)
+		var sealed := {"status":"ready", "roster":{}}
+		if not complete_members.is_empty():
+			sealed = OwnerCompletion.seal(String(census.worldId), source_id, source_id, revision, incarnation, complete_members)
+			if sealed.get("status") != "ready": return sealed
+		elif presentation_members.is_empty():
+			return {"status":"pending", "reason":"citadel_complete_source_roster_unavailable"}
+		var current_plan = _publication_plan_for_binding(proof.binding)
+		if current_plan == null: return {"status":"pending", "reason":"citadel_presentation_plan_unavailable"}
+		var retained_proof := {"publisher":weakref(publisher), "publisherId":publisher.get_instance_id(),
+			"sceneJobInstanceId":proof.get("sceneJobInstanceId", 0),
+			"siteId":proof.siteId, "partId":proof.partId, "memberId":_proof_transform_member(proof), "binding":proof.binding,
+			"memberBinding":proof.memberBinding, "sourceToWorld":proof.sourceToWorld,
+		"visualSourceReceipt":captured_identity,
+		"artifactCapture":capture,
+		"artifactGroups":capture.get("groups", []),
+		"captureIdentity":_geometry_capture_identity(capture),
+			"worldId":String(census.worldId), "sourceRevision":revision, "sourceIncarnation":incarnation,
+			"presentationMembers":presentation_members, "planSignature":String(current_plan.output_signature)}
+		_retain_geometry_owner_roster(source_id, sealed.roster, retained_proof)
+	capture_job["finalValidationUsec"] = Time.get_ticks_usec() - validation_started
+	_section_contribution_capture_jobs.erase(section_key)
+	var completed_result := adapter_result.duplicate(false)
+	completed_result["sourceArtifactCacheHitCount"] = int(
+		capture_job.get("sourceArtifactCacheHitCount", 0))
+	completed_result["sourceLookupUsec"] = int(capture_job.get("sourceLookupUsec", 0))
+	completed_result["coldCaptureUsec"] = int(capture_job.get("coldCaptureUsec", 0))
+	completed_result["maxSourceCaptureUsec"] = int(capture_job.get("maxSourceCaptureUsec", 0))
+	completed_result["adapterUsec"] = int(capture_job.get("adapterUsec", 0))
+	completed_result["finalValidationUsec"] = int(capture_job.get("finalValidationUsec", 0))
+	completed_result.make_read_only()
+	return completed_result
+
+
+## Reuse the producer's immutable transform-artifact roster across sections
+## only while the exact publisher, source boundary, mesh receipt and material
+## fingerprints remain current. Presentation mounts retain their existing
+## full capture path because their freshness contract is separate.
+func _cached_transform_artifact_capture(source_id: String, member_id: String,
+		part_id: String, member_binding: String, owner_result: Dictionary) -> Dictionary:
+	var publisher: Variant = owner_result.get("publisher")
+	if not is_instance_valid(publisher): return {}
+	var publisher_id: int = publisher.get_instance_id()
+	var scene_job_instance_id := int(owner_result.get("sceneJobInstanceId", 0))
+	var cache_key := _transform_artifact_capture_cache_key(publisher_id,
+		scene_job_instance_id, part_id, member_binding)
+	var cached: Dictionary = _retained_transform_artifact_captures.get(cache_key, {})
+	var reference: Variant = cached.get("publisher", null)
+	var cached_publisher: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(cached_publisher) or cached_publisher != publisher \
+			or cached_publisher.get_instance_id() != int(cached.get("publisherId", 0)) \
+			or cached.get("memberId", "") != member_id \
+			or cached.get("binding", {}) != owner_result.get("binding", {}) \
+			or int(cached.get("sceneJobInstanceId", 0)) != scene_job_instance_id \
+			or cached.get("memberBinding", "") != member_binding \
+			or cached.get("sourceToWorld") != owner_result.get("sourceToWorld"):
+		return {}
+	var capture: Dictionary = cached.get("capture", {})
+	var groups: Variant = capture.get("groups", null)
+	if capture.get("status") != "ready" or not groups is Array \
+			or not capture.get("presentationMounts", []).is_empty() \
+			or not capture.get("presentationBindings", {}).is_empty():
+		return {}
+	if not cached_publisher.has_method("committed_static_visual_source_identity") \
+			or not cached_publisher.has_method("static_section_transform_artifact_receipt_is_current"):
+		return {}
+	var current_identity: Dictionary = cached_publisher.call(
+		"committed_static_visual_source_identity", part_id)
+	if current_identity.get("status") != "ready" \
+			or current_identity != cached.get("visualSourceReceipt", {}) \
+			or current_identity != capture.get("visualSourceReceipt", {}) \
+			or current_identity.get("sourceRevision", "") != member_binding \
+			or current_identity.get("sourceToWorld") != owner_result.get("sourceToWorld"):
+		return {}
+	if not bool(cached_publisher.call(
+			"static_section_transform_artifact_receipt_is_current",
+			part_id, member_binding, groups)):
+		return {}
+	cached["lastUseFrame"] = Engine.get_process_frames()
+	_retained_transform_artifact_captures[cache_key] = cached
+	return capture
+
+
+static func _transform_artifact_capture_cache_key(publisher_id: int,
+		scene_job_instance_id: int, part_id: String, member_binding: String) -> String:
+	return var_to_str([publisher_id, scene_job_instance_id, part_id, member_binding])
+
+
+## Partial source captures are private producer inputs. Expire abandoned work and
+## bound retained mesh/material aliases when the camera has moved on.
+func _prune_section_contribution_capture_jobs(except_section: Vector3i) -> void:
+	var current_frame := Engine.get_process_frames()
+	for section_value: Variant in _section_contribution_capture_jobs.keys():
+		if not section_value is Vector3i or section_value == except_section:
+			continue
+		var job: Dictionary = _section_contribution_capture_jobs.get(section_value, {})
+		if current_frame - int(job.get("lastAdvanceFrame", current_frame)) \
+				> SECTION_CONTRIBUTION_CAPTURE_IDLE_FRAMES:
+			_section_contribution_capture_jobs.erase(section_value)
+	while _section_contribution_capture_jobs.size() >= MAX_SECTION_CONTRIBUTION_CAPTURE_JOBS:
+		var oldest_section: Variant = null
+		var oldest_frame := current_frame
+		for section_value: Variant in _section_contribution_capture_jobs:
+			if section_value == except_section:
+				continue
+			var job: Dictionary = _section_contribution_capture_jobs[section_value]
+			var touched := int(job.get("lastAdvanceFrame", -1))
+			if oldest_section == null or touched < oldest_frame:
+				oldest_section = section_value
+				oldest_frame = touched
+		if oldest_section == null:
+			break
+		_section_contribution_capture_jobs.erase(oldest_section)
+
+
+func _current_transform_artifact_census(census: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	var world_id := String(census.get("worldId", ""))
+	var source_ids: Array[String] = []
+	var shared_revisions_by_source_id: Dictionary = {}
+	var expected_by_section: Variant = census.get("expectedContributorsBySection", null)
+	var source_provider_ids: Variant = census.get("sourceProviderIds", null)
+	var source_revisions_value: Variant = census.get("sourceRevisions", null)
+	var source_identities_value: Variant = census.get("sourceIdentities", null)
+	var provider_snapshot_revisions: Variant = census.get("providerSnapshotRevisions", null)
+	var provider_coverage_revisions: Variant = census.get("providerCoverageRevisions", null)
+	var expected_value: Variant = expected_by_section.get(section_key, null) \
+		if expected_by_section is Dictionary else null
+	if world_id.is_empty() or not expected_value is Array \
+			or not source_provider_ids is Dictionary \
+			or not source_revisions_value is Dictionary \
+			or not source_identities_value is Dictionary \
+			or not provider_snapshot_revisions is Dictionary \
+			or not provider_coverage_revisions is Dictionary:
+		return {"status":"pending", "reason":"citadel_transform_artifact_roster_unavailable",
+			"retryable":true}
+	if not census.is_read_only() or not expected_by_section.is_read_only() \
+			or not expected_value.is_read_only() or not source_provider_ids.is_read_only() \
+			or not source_revisions_value.is_read_only() \
+			or not source_identities_value.is_read_only() \
+			or not provider_snapshot_revisions.is_read_only() \
+			or not provider_coverage_revisions.is_read_only():
+		return {"status":"pending", "reason":"citadel_transform_artifact_roster_unsealed",
+			"retryable":true}
+	for source_value: Variant in expected_value:
+		if not source_value is String:
+			return {"status":"failed", "reason":"citadel_transform_artifact_source_id_invalid"}
+		var identity_key := String(source_value)
+		var identity_value: Variant = source_identities_value.get(identity_key, null)
+		if not identity_value is Dictionary or not identity_value.is_read_only():
+			return {"status":"pending", "reason":"citadel_transform_artifact_identity_missing",
+				"retryable":true}
+		var source_id := String(identity_value.get("sourceId", ""))
+		var source_part_id := String(identity_value.get("sourcePartId", ""))
+		if source_id.is_empty() or source_part_id.is_empty() \
+				or _static_source_identity_key(source_id, source_part_id) != identity_key:
+			return {"status":"pending", "reason":"citadel_transform_artifact_identity_mismatch",
+				"retryable":true}
+		if String(source_provider_ids.get(identity_key, "")) == "blueprint_buildings":
+			if shared_revisions_by_source_id.has(source_id):
+				return {"status":"pending",
+					"reason":"citadel_transform_artifact_source_identity_ambiguous",
+					"retryable":true}
+			source_ids.append(source_id)
+			shared_revisions_by_source_id[source_id] = String(
+				source_revisions_value.get(identity_key, ""))
+	source_ids.sort()
+	var current := capture_static_section_sources(world_id, [section_key])
+	if current.get("status") != "complete":
+		return current
+	var shared_provider_revision := String(provider_snapshot_revisions.get(
+		"blueprint_buildings", ""))
+	if shared_provider_revision.is_empty() \
+			or shared_provider_revision != String(current.get("authorityRevision", "")):
+		return {"status":"pending", "reason":"citadel_transform_artifact_provider_revision_stale",
+			"retryable":true}
+	var current_row: Dictionary = current.get("sections", {}).get(section_key, {})
+	if current_row.is_empty():
+		return {"status":"pending", "reason":"citadel_transform_artifact_current_section_missing",
+			"retryable":true}
+	var current_source_ids: Array[String] = []
+	for source_value: Variant in current_row.get("sourcePartIds", []):
+		current_source_ids.append(String(source_value))
+	current_source_ids.sort()
+	if current_source_ids != source_ids:
+		return {"status":"pending", "reason":"citadel_transform_artifact_source_roster_stale",
+			"expectedSourceIds":source_ids, "currentSourceIds":current_source_ids,
+			"retryable":true}
+	var shared_coverage_map: Variant = provider_coverage_revisions.get(
+		"blueprint_buildings", {})
+	if not shared_coverage_map is Dictionary or not shared_coverage_map.is_read_only():
+		return {"status":"pending", "reason":"citadel_transform_artifact_coverage_unsealed",
+			"retryable":true}
+	var shared_coverage := String(shared_coverage_map.get(section_key, "")) \
+		if shared_coverage_map is Dictionary else ""
+	if shared_coverage.is_empty() \
+			or shared_coverage != String(current_row.get("coverageRevision", "")):
+		return {"status":"pending", "reason":"citadel_transform_artifact_coverage_stale",
+			"retryable":true}
+	var current_revisions: Dictionary = current.get("sourceRevisions", {})
+	for source_id: String in source_ids:
+		var revision := String(shared_revisions_by_source_id.get(source_id, ""))
+		if revision.is_empty() or revision != String(current_revisions.get(source_id, "")):
+			return {"status":"pending", "reason":"citadel_transform_artifact_source_revision_stale",
+				"sourceId":source_id, "retryable":true}
+	return {"status":"ready", "sourceIds":source_ids,
+		"authorityRevision":String(current.get("authorityRevision", "")),
+		"coverageRevision":String(current_row.get("coverageRevision", "")),
+		"sourceRevisions":shared_revisions_by_source_id}
+
+
+static func _static_source_identity_key(source_id: String, source_part_id: String) -> String:
+	if source_id.is_empty() or source_part_id.is_empty(): return ""
+	return "section-part:" + var_to_bytes([source_id, source_part_id]).hex_encode()
+
+
+static func _is_transform_member(member_id: String) -> bool:
+	return member_id.begins_with("building:") or member_id.begins_with("furnishing:")
+
+
+static func _transform_part_id(member_id: String) -> String:
+	return member_id.trim_prefix("furnishing:") if member_id.begins_with("furnishing:") else member_id.trim_prefix("building:")
+
+
+static func _proof_transform_member(proof: Dictionary) -> String:
+	return String(proof.get("memberId", "building:" + String(proof.get("partId", ""))))
+
+
+static func _visual_member_id(visual: GeometryInstance3D) -> String:
+	return String(visual.get_meta("section_source_member_id", "building:" + String(visual.get_meta("building_source_part_id", ""))))
+
+
+func _current_transform_artifact_publisher_for_member(site_id: String, member_id: String) -> Dictionary:
+	var owner := _current_transform_artifact_publisher_for_site(site_id)
+	if owner.get("status") != "ready" or not member_id.begins_with("furnishing:"): return owner
+	var job: Variant = _scenes.get(owner.region, {}).get("job")
+	if not is_instance_valid(job) or not job.has_method("furnishing_section_publisher"):
+		return {"status":"pending", "reason":"citadel_furnishing_scene_owner_unavailable", "retryable":true}
+	var result: Dictionary = job.furnishing_section_publisher(member_id, owner.binding)
+	if result.get("status") != "ready": return result
+	job.bind_furnishing_section_owner(self)
+	result.publisher.bind_section_lifetime_owner(self)
+	var value := owner.duplicate(false)
+	value["publisher"] = result.publisher
+	value["memberKind"] = "furnishing"
+	value["sceneJobInstanceId"] = result.jobInstanceId
+	return value
+
+
+func furnishing_publisher_has_retained_sources(publisher_instance_id: int) -> bool:
+	for proof: Dictionary in _geometry_owner_capture_proofs.values():
+		if int(proof.get("publisherId", 0)) == publisher_instance_id:
+			return true
+	return false
+
+
+func furnishing_section_visual_installed(site_id: String, member_id: String, body: Node3D) -> bool:
+	if not is_instance_valid(body) or not member_id.begins_with("furnishing:"): return false
+	var source_id := _citadel_census_source_id(site_id, member_id)
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if proof.is_empty() or roster.is_empty(): return false
+	var owner := _current_transform_artifact_publisher_for_member(site_id, member_id)
+	if owner.get("status") != "ready" \
+			or not _publisher_node_roster_snapshot(owner.publisher).has(body): return false
+	if _geometry_owner_roster_is_current(source_id, roster, {}).get("status") != "ready": return false
+	var coordinator: Variant = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if not is_instance_valid(coordinator): return false
+	# This legacy bool query is not called by a production publisher today. Keep
+	# its full live-source currentness guard until that caller has a resumable
+	# owner-currentness token; advancing only native receipts here could bless a
+	# stale producer transform between calls.
+	var completion: Dictionary = coordinator.call("validate_geometry_owner_completion",
+		roster, _geometry_owner_prior_rosters.get(source_id, []))
+	return completion.get("status") == "ready" and _validate_citadel_presentation_completion(source_id).get("status") == "ready"
+
+
+func _current_transform_artifact_publisher_for_site(site_id: String) -> Dictionary:
+	if site_id.is_empty() or _closing or _world_reset_pending or _admission == null:
+		return {"status":"pending", "reason":"citadel_transform_artifact_owner_unavailable",
+			"siteId":site_id, "retryable":true}
+	var match_region := Vector2i.ZERO
+	var match_entry: Dictionary = {}
+	for region: Vector2i in _scenes:
+		var entry: Dictionary = _scenes[region]
+		if String(entry.get("binding", {}).get("siteId", "")) != site_id:
+			continue
+		if not match_entry.is_empty():
+			return {"status":"pending", "reason":"citadel_site_has_multiple_scene_owners",
+				"siteId":site_id, "retryable":true}
+		match_region = region
+		match_entry = entry
+	if match_entry.is_empty():
+		return {"status":"pending", "reason":"citadel_transform_artifact_scene_owner_unavailable",
+			"siteId":site_id, "retryable":true}
+	if match_entry.get("phase") != "scene_ready":
+		return {"status":"pending", "reason":"citadel_transform_artifact_scene_not_ready",
+			"siteId":site_id, "phase":match_entry.get("phase"), "retryable":true}
+	var current: Dictionary = _admission.source_state(match_region)
+	if current.get("status") not in ["ready", "prepared"] \
+			or current.get("binding", {}) != match_entry.get("binding", {}):
+		return {"status":"pending", "reason":"citadel_transform_artifact_scene_binding_stale",
+			"siteId":site_id, "retryable":true}
+	var job = match_entry.get("job")
+	var publisher = job.get("_building") if job != null else null
+	if publisher == null or not is_instance_valid(publisher) \
+			or String(publisher.get("publication_site_id")) != site_id:
+		return {"status":"pending", "reason":"citadel_transform_artifact_publisher_unavailable",
+			"siteId":site_id, "retryable":true}
+	if publisher.has_pending_static_flush():
+		return {"status":"pending", "reason":"citadel_transform_artifact_flush_pending",
+			"siteId":site_id, "retryable":true}
+	var profile = match_entry.get("profile")
+	if profile == null or not profile.get("origin") is Vector3 \
+			or not profile.origin.is_finite():
+		return {"status":"pending", "reason":"citadel_transform_artifact_root_transform_unavailable",
+			"siteId":site_id, "retryable":true}
+	var source_parent_ref: Variant = publisher.get("_scene_parent")
+	if not source_parent_ref is WeakRef:
+		return {"status":"pending", "reason":"citadel_transform_artifact_source_parent_unavailable",
+			"siteId":site_id, "retryable":true}
+	var source_parent := source_parent_ref.get_ref() as Node3D
+	if not is_instance_valid(source_parent) or not source_parent.is_inside_tree() \
+			or source_parent.is_queued_for_deletion():
+		return {"status":"pending", "reason":"citadel_transform_artifact_source_parent_stale",
+			"siteId":site_id, "retryable":true}
+	var source_to_world := source_parent.global_transform
+	if not source_to_world.origin.is_finite() \
+			or not source_to_world.basis.x.is_finite() \
+			or not source_to_world.basis.y.is_finite() \
+			or not source_to_world.basis.z.is_finite():
+		return {"status":"pending", "reason":"citadel_transform_artifact_source_transform_invalid",
+			"siteId":site_id, "retryable":true}
+	return {"status":"ready", "publisher":publisher, "region":match_region,
+		"binding":match_entry.binding,
+		"sourceToWorld":source_to_world}
+
+
+## Called by the world coordinator only after a whole-section native receipt is
+## live. A source visual may span more than one render section, so retain it
+## until every intersected section has a current receipt for this same member
+## revision. Gameplay collision, doors, furnishings, and navigation stay owned
+## by the building publisher.
+func acknowledge_section_install(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary = {}) -> Dictionary:
+	if _admission == null or _closing or _world_reset_pending \
+			or coverage_revision.strip_edges().is_empty():
+		return {"status":"pending", "reason":"citadel_section_acknowledgement_unavailable",
+			"retryable":true}
+	var current: Dictionary = capture_static_section_sources(
+		String(receipt.get("worldId", "")), [section_key])
+	return acknowledge_section_install_with_census(section_key,
+		coverage_revision, receipt, current)
+
+
+## Retry path receives the coordinator's already recaptured current census. The
+## coordinator compares its digest with the candidate before dispatching ACK,
+## so repeating the same expensive Citadel census here adds no freshness proof.
+func acknowledge_section_install_with_census(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary,
+		current: Dictionary) -> Dictionary:
+	if _admission == null or _closing or _world_reset_pending \
+			or coverage_revision.strip_edges().is_empty():
+		return {"status":"pending", "reason":"citadel_section_acknowledgement_unavailable",
+			"retryable":true}
+	_section_ack_phase_diagnostics = {"phaseUsec":{}, "counts":{}}
+	var previous_currentness_scope := _section_ack_currentness_scope
+	_section_ack_currentness_scope = {"current":current,
+		"sectionKey":section_key, "generation":_generation}
+	var result := _acknowledge_section_install_from_census_impl(section_key,
+		coverage_revision, receipt, current)
+	if result.is_read_only(): result = result.duplicate(false)
+	result["ackDiagnostics"] = _section_ack_phase_diagnostics.duplicate(true)
+	_section_ack_phase_diagnostics = {}
+	_section_ack_currentness_scope = previous_currentness_scope
+	return result
+
+
+func _record_section_ack_phase(name: String, started_usec: int,
+		count_name := "", count := 0) -> void:
+	if _section_ack_phase_diagnostics.is_empty(): return
+	var phases: Dictionary = _section_ack_phase_diagnostics.get("phaseUsec", {})
+	phases[name] = int(phases.get(name, 0)) + Time.get_ticks_usec() - started_usec
+	_section_ack_phase_diagnostics["phaseUsec"] = phases
+	if not count_name.is_empty():
+		var counts: Dictionary = _section_ack_phase_diagnostics.get("counts", {})
+		counts[count_name] = int(counts.get(count_name, 0)) + count
+		_section_ack_phase_diagnostics["counts"] = counts
+
+
+func _count_section_ack_work(name: String, count := 1) -> void:
+	if _section_ack_phase_diagnostics.is_empty(): return
+	var counts: Dictionary = _section_ack_phase_diagnostics.get("counts", {})
+	counts[name] = int(counts.get(name, 0)) + count
+	_section_ack_phase_diagnostics["counts"] = counts
+
+
+func _acknowledge_section_install_from_census_impl(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary,
+		current: Dictionary) -> Dictionary:
+	if current.get("status") != "complete":
+		return {"status":"pending", "reason":String(current.get("reason",
+			"citadel_section_acknowledgement_census_pending")), "retryable":true}
+	var world_id := String(current.get("worldId", ""))
+	var row: Dictionary = current.get("sections", {}).get(section_key, {})
+	if world_id.is_empty() or row.is_empty() \
+			or String(row.get("coverageRevision", "")) != coverage_revision:
+		return {"status":"pending", "reason":"citadel_section_acknowledgement_coverage_stale",
+			"retryable":true, "sectionKey":section_key}
+	var source_revisions: Dictionary = {}
+	var current_source_revisions: Dictionary = current.get("sourceRevisions", {})
+	for source_id_value: Variant in row.get("sourcePartIds", []):
+		var source_id := String(source_id_value)
+		var revision := String(current_source_revisions.get(source_id, ""))
+		if source_id.is_empty() or revision.is_empty():
+			return {"status":"pending", "reason":"citadel_section_acknowledgement_source_revision_missing",
+				"retryable":true, "sourceId":source_id}
+		source_revisions[source_id] = revision
+	var removal_records_by_id: Dictionary = {}
+	var removal_revisions: Dictionary = {}
+	var raw_removals: Variant = current.get("removalsBySection", {}).get(section_key, [])
+	if not raw_removals is Array:
+		return {"status":"pending", "reason":"citadel_section_removal_inventory_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	for removal_value: Variant in raw_removals:
+		if not removal_value is Dictionary:
+			return {"status":"pending", "reason":"citadel_section_removal_record_invalid",
+				"retryable":true, "sectionKey":section_key}
+		var removal: Dictionary = removal_value
+		var removed_source_id := String(removal.get("sourceId", ""))
+		var removed_part_id := String(removal.get("sourcePartId", ""))
+		var removed_revision := String(removal.get("sourceRevision", ""))
+		if removed_source_id.is_empty() or removed_part_id != removed_source_id \
+				or removed_revision.length() != 64 or removal.get("sectionKey") != section_key \
+				or source_revisions.has(removed_source_id) \
+				or removal_records_by_id.has(removed_source_id):
+			return {"status":"pending", "reason":"citadel_section_removal_record_invalid",
+				"retryable":true, "sectionKey":section_key,
+				"sourceId":removed_source_id}
+		removal_records_by_id[removed_source_id] = removal
+		removal_revisions[removed_source_id] = removed_revision
+	removal_revisions.make_read_only()
+	if not _valid_citadel_section_receipt(world_id, section_key,
+			String(current.get("authorityRevision", "")), coverage_revision, receipt):
+		return {"status":"pending", "reason":"citadel_section_acknowledgement_receipt_stale",
+			"retryable":true, "sectionKey":section_key}
+	source_revisions.make_read_only()
+	var visual_results: Array[Dictionary] = []
+	var publisher_by_source: Dictionary = {}
+	var publisher_sources: Dictionary = {}
+	var visuals_by_publisher: Dictionary = {}
+	var section_source_ids: Dictionary = {}
+	for section_source_value: Variant in row.get("sourcePartIds", []):
+		section_source_ids[String(section_source_value)] = true
+	for source_id_value: Variant in row.get("sourcePartIds", []):
+		var source_id := String(source_id_value)
+		var site_id := SectionGeometryAdapter._site_id_from_census_source(source_id)
+		var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+		if site_id.is_empty() or not _is_transform_member(member_id):
+			continue
+		var owner_lookup_started := Time.get_ticks_usec()
+		var publisher_result: Dictionary = _current_transform_artifact_publisher_for_member(site_id, member_id) if member_id.begins_with("furnishing:") else _current_packet_publisher_for_site(site_id)
+		_record_section_ack_phase("ownerPublisherLookup", owner_lookup_started,
+			"ownerPublisherLookupCount", 1)
+		if publisher_result.get("status") != "ready":
+			return {"status":"pending", "reason":String(publisher_result.get("reason",
+				"citadel_visual_owner_unavailable")), "retryable":true,
+				"sectionKey":section_key, "sourceId":source_id}
+		var publisher = publisher_result.get("publisher")
+		if publisher == null or not is_instance_valid(publisher) \
+				or not _publisher_node_roster_available(publisher):
+			return {"status":"pending", "reason":"citadel_visual_inventory_unavailable",
+				"retryable":true, "sectionKey":section_key, "sourceId":source_id}
+		publisher_by_source[source_id] = publisher
+		var publisher_instance_id: int = publisher.get_instance_id()
+		if not publisher_sources.has(publisher_instance_id):
+			publisher_sources[publisher_instance_id] = {"publisher":publisher,
+				"siteId":site_id, "partIds":{}}
+		var publisher_source: Dictionary = publisher_sources[publisher_instance_id]
+		publisher_source.partIds[_transform_part_id(member_id)] = true
+		publisher_sources[publisher_instance_id] = publisher_source
+	for publisher_source_value: Variant in publisher_sources.values():
+		var publisher_source: Dictionary = publisher_source_value
+		var publisher: Object = publisher_source.publisher
+		var source_part_ids: Array[String] = []
+		for part_value: Variant in publisher_source.partIds:
+			source_part_ids.append(String(part_value))
+		for removal_value: Variant in removal_records_by_id.values():
+			if removal_value is Dictionary \
+					and String(removal_value.get("siteId", "")) == String(publisher_source.siteId):
+				var removed_member := SectionGeometryAdapter._member_id_from_census_source(
+					String(removal_value.get("sourceId", "")))
+				if removed_member.begins_with("building:"):
+					source_part_ids.append(_transform_part_id(removed_member))
+		var legacy_index_started := Time.get_ticks_usec()
+		var indexed_visuals: Dictionary = _legacy_visual_section_index.request_section_sources(
+			publisher, section_key, source_part_ids)
+		_record_section_ack_phase("legacySectionIndex", legacy_index_started,
+			"legacySectionIndexQueries", 1)
+		if indexed_visuals.get("status") != "ready":
+			return {"status":"pending", "reason":String(indexed_visuals.get("reason",
+				"citadel_visual_inventory_index_pending")), "retryable":true,
+				"sectionKey":section_key,
+				"indexedNodeCount":int(indexed_visuals.get("indexedNodeCount", 0)),
+				"pendingNodeCount":int(indexed_visuals.get("pendingNodeCount", 0))}
+		var publisher_inventory_started := Time.get_ticks_usec()
+		var inventory: Dictionary = _validate_visible_citadel_section_visual_inventory(
+			publisher, String(publisher_source.siteId), section_key, section_source_ids,
+			removal_revisions, indexed_visuals.get("visuals", []), true)
+		_record_section_ack_phase("publisherVisualInventory", publisher_inventory_started,
+			"publisherVisualInventoryQueries", 1)
+		if inventory.get("status") != "ready":
+			for inventory_result_value: Variant in inventory.get("visualResults", []):
+				if inventory_result_value is Dictionary:
+					visual_results.append(inventory_result_value)
+			return {"status":"pending", "reason":"citadel_visual_inventory_unresolved",
+				"retryable":true, "sectionKey":section_key,
+				"waitingVisualCount":int(inventory.get("waitingVisualCount", 1)),
+				"visualResults":visual_results}
+		visuals_by_publisher[publisher.get_instance_id()] = indexed_visuals.get("visuals", [])
+	var retained_inventory_started := Time.get_ticks_usec()
+	var scene_inventory: Dictionary = _validate_visible_citadel_scene_visual_inventory(
+		section_key, section_source_ids, removal_revisions, removal_records_by_id)
+	_record_section_ack_phase("retainedSceneInventory", retained_inventory_started,
+		"retainedSceneInventoryQueries", 1)
+	if scene_inventory.get("status") != "ready":
+		return {"status":"pending", "reason":"citadel_scene_visual_inventory_unresolved",
+			"retryable":true, "sectionKey":section_key,
+			"waitingVisualCount":int(scene_inventory.get("waitingVisualCount", 1)),
+			"visualResults":scene_inventory.get("visualResults", [])}
+	var receipt_proof := {"receipt":receipt,
+		"worldId":world_id,
+		"authorityRevision":String(current.get("authorityRevision", "")),
+		"coverageRevision":coverage_revision,
+		"sourceRevisions":source_revisions,
+		"removalRevisions":removal_revisions}
+	receipt_proof.make_read_only()
+	_section_install_acknowledgements[section_key] = receipt_proof
+	var retired_count := 0
+	var waiting_count := 0
+	var receipt_scope_owner: Object = _geometry_completion_owner.get_ref() \
+		if _geometry_completion_owner != null else null
+	var receipt_scope_token := 0
+	if is_instance_valid(receipt_scope_owner) \
+			and receipt_scope_owner.has_method("begin_geometry_owner_receipt_validation_scope"):
+		var receipt_scope: Dictionary = receipt_scope_owner.call(
+			"begin_geometry_owner_receipt_validation_scope", self)
+		if receipt_scope.get("status") == "ready":
+			receipt_scope_token = int(receipt_scope.get("token", 0))
+	for source_id_value: Variant in row.get("sourcePartIds", []):
+		var source_id := String(source_id_value)
+		var site_id := SectionGeometryAdapter._site_id_from_census_source(source_id)
+		var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+		if not site_id.is_empty() and member_id.begins_with("tree:"):
+			# Tree authority acknowledgement aggregates every section owned by the
+			# tree. Keep that full-source check on the retirement retry path so this
+			# section's installed receipt can be acknowledged independently.
+			var queued_tree_retirement := _queue_section_source_retirement(
+				"tree", source_id, site_id, member_id)
+			visual_results.append(queued_tree_retirement)
+			if queued_tree_retirement.get("status") != "queued":
+				waiting_count += 1
+			continue
+		if site_id.is_empty() or not _is_transform_member(member_id):
+			continue
+		var publisher = publisher_by_source.get(source_id)
+		if publisher == null or not is_instance_valid(publisher):
+			waiting_count += 1
+			continue
+		var part_id := _transform_part_id(member_id)
+		var presentation_started := Time.get_ticks_usec()
+		var presentation_completion := _validate_citadel_presentation_completion(source_id)
+		_record_section_ack_phase("presentationCompletion", presentation_started,
+			"presentationCompletionQueries", 1)
+		if presentation_completion.get("status") != "ready":
+			visual_results.append(presentation_completion)
+			var queued_presentation_retirement := _queue_section_source_retirement(
+				"transform", source_id, site_id, member_id, {}, publisher)
+			if queued_presentation_retirement.get("status") != "queued":
+				waiting_count += 1
+			continue
+		if _geometry_owner_rosters.get(source_id, {}).is_empty() \
+				and _geometry_owner_capture_proofs.has(source_id):
+			_geometry_owner_capture_proofs[source_id]["priorPresentationMembers"] = []
+		var source_visuals: Array[GeometryInstance3D] = []
+		for visual_value: Variant in visuals_by_publisher.get(publisher.get_instance_id(), []):
+			var visual := visual_value as GeometryInstance3D
+			if not is_instance_valid(visual) or not visual.is_inside_tree() \
+					or visual.is_queued_for_deletion() \
+					or (not visual.visible and not _legacy_has_section_ownership(visual)) \
+					or String(visual.get_meta("building_source_part_id", "")) != part_id:
+				continue
+			source_visuals.append(visual)
+		var retirement_started := Time.get_ticks_usec()
+		var retirement := _retire_citadel_visuals_if_section_coverage_is_live(
+			source_visuals, site_id, member_id, {}, presentation_completion)
+		_record_section_ack_phase("geometryVisualRetirement", retirement_started,
+			"geometryVisualRetirementQueries", 1)
+		if retirement.get("status") == "retired":
+			retired_count += int(retirement.get("retiredVisualCount", 0))
+			_clear_section_source_retirement(source_id)
+		elif retirement.get("status") == "pending":
+			visual_results.append({"sourceId":source_id, "status":"pending",
+				"reason":String(retirement.get("reason", "citadel_visual_retirement_pending")),
+				"sectionKey":section_key, "details":retirement})
+			var queued_transform_retirement := _queue_section_source_retirement(
+				"transform", source_id, site_id, member_id, {}, publisher)
+			if queued_transform_retirement.get("status") != "queued":
+				waiting_count += 1
+	for source_id_value: Variant in removal_records_by_id:
+		var source_id := String(source_id_value)
+		var removal: Dictionary = removal_records_by_id[source_id]
+		var expected_roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+		var completion_owner: Object = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+		if not is_instance_valid(completion_owner) \
+				or _geometry_owner_roster_is_current(source_id, expected_roster, removal).get("status") != "ready":
+			waiting_count += 1
+			continue
+		var removal_completion := _request_citadel_geometry_owner_completion(
+			completion_owner, expected_roster,
+			_geometry_owner_prior_rosters.get(source_id, []))
+		if removal_completion.get("status") != "ready":
+			visual_results.append({"sourceId":source_id, "status":"pending",
+				"reason":"citadel_removal_owner_receipts_pending", "completion":removal_completion})
+			var queued_removal_retirement := _queue_section_source_retirement(
+				"removal", source_id, String(removal.get("siteId", "")),
+				String(removal.get("memberId", "")), removal)
+			if queued_removal_retirement.get("status") != "queued":
+				waiting_count += 1
+			continue
+		var presentation_removal := _validate_citadel_presentation_completion(source_id, String(removal.sourceRevision))
+		if presentation_removal.get("status") != "ready":
+			visual_results.append(presentation_removal)
+			var queued_presentation_removal := _queue_section_source_retirement(
+				"removal", source_id, String(removal.get("siteId", "")),
+				String(removal.get("memberId", "")), removal)
+			if queued_presentation_removal.get("status") != "queued":
+				waiting_count += 1
+			continue
+		var removed_visuals: Dictionary = _current_citadel_removal_visuals(removal)
+		if removed_visuals.get("status") != "ready":
+			var queued_removed_visuals := _queue_section_source_retirement(
+				"removal", source_id, String(removal.get("siteId", "")),
+				String(removal.get("memberId", "")), removal)
+			if queued_removed_visuals.get("status") != "queued":
+				waiting_count += int(removed_visuals.get("waitingVisualCount", 1))
+			continue
+		for visual_value: Variant in removed_visuals.get("visuals", []):
+			var visual := visual_value as GeometryInstance3D
+			var site_id := String(removal.get("siteId", ""))
+			var member_id := String(removal.get("memberId", ""))
+			var retirement := _retire_citadel_visual_if_section_coverage_is_live(
+				visual, site_id, member_id, removal)
+			var visual_result := {"sourceId":source_id,
+				"status":String(retirement.get("status", "pending")),
+				"reason":String(retirement.get("reason", "")),
+				"sectionKey":retirement.get("sectionKey", section_key)}
+			visual_result.make_read_only()
+			visual_results.append(visual_result)
+			if retirement.get("status") == "retired":
+				retired_count += 1
+				_clear_section_source_retirement(source_id)
+			elif retirement.get("status") == "pending":
+				var queued_visual_retirement := _queue_section_source_retirement(
+					"removal", source_id, site_id, member_id, removal)
+				if queued_visual_retirement.get("status") != "queued":
+					waiting_count += 1
+	var receipt_scope_result: Dictionary = {"status":"unavailable"}
+	if receipt_scope_token > 0:
+		receipt_scope_result = receipt_scope_owner.call(
+			"end_geometry_owner_receipt_validation_scope", self, receipt_scope_token)
+	var has_pending_visuals: bool = waiting_count > 0
+	var pending_reason := "citadel_visual_retirement_pending" if has_pending_visuals else ""
+	return {"status":"pending" if has_pending_visuals else "acknowledged",
+		"retryable":has_pending_visuals,
+		"reason":pending_reason,
+		"sectionKey":section_key,
+		"coverageRevision":coverage_revision, "retiredVisualCount":retired_count,
+		"waitingVisualCount":waiting_count, "visualResults":visual_results,
+		"receiptValidationScope":receipt_scope_result}
+
+
+func _queue_section_source_retirement(kind: String, source_id: String,
+		site_id: String, member_id: String, removal: Dictionary = {},
+		visual_owner: Object = null) -> Dictionary:
+	if kind not in ["transform", "tree", "removal"] or source_id.is_empty():
+		return {"status":"pending", "reason":"invalid_section_source_retirement_identity"}
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if roster.is_empty() or String(roster.get("sourceRevision", "")).is_empty() \
+			or String(roster.get("sourceIncarnation", "")).is_empty() \
+			or String(roster.get("digest", "")).length() != 64:
+		return {"status":"pending", "reason":"section_source_retirement_roster_unavailable"}
+	if _pending_section_source_retirements.has(source_id):
+		var existing: Dictionary = _pending_section_source_retirements[source_id]
+		if String(existing.get("sourceRevision", "")) == String(roster.sourceRevision) \
+				and String(existing.get("sourceIncarnation", "")) == String(roster.sourceIncarnation) \
+				and String(existing.get("rosterDigest", "")) == String(roster.digest) \
+				and String(existing.get("kind", "")) == kind:
+			return {"status":"queued", "deduplicated":true}
+	elif _pending_section_source_retirements.size() >= MAX_PENDING_SECTION_SOURCE_RETIREMENTS:
+		return {"status":"pending", "reason":"section_source_retirement_queue_full",
+			"retryable":true}
+	var obligation := {"kind":kind, "sourceId":source_id, "siteId":site_id,
+		"memberId":member_id, "worldId":String(roster.get("worldId", "")),
+		"sourceRevision":String(roster.sourceRevision),
+		"sourceIncarnation":String(roster.sourceIncarnation),
+		"rosterDigest":String(roster.digest), "removal":removal,
+		"obligationId":_next_section_source_retirement_id(),
+		"ownerInstanceId":visual_owner.get_instance_id() \
+			if is_instance_valid(visual_owner) else 0,
+		"attempts":0, "lastReason":""}
+	obligation.make_read_only()
+	_pending_section_source_retirements[source_id] = obligation
+	if not _pending_section_source_retirement_queue.has(source_id):
+		_pending_section_source_retirement_queue.append(source_id)
+	return {"status":"queued", "deduplicated":false}
+
+
+func _next_section_source_retirement_id() -> int:
+	_section_source_retirement_serial += 1
+	if _section_source_retirement_serial <= 0:
+		_section_source_retirement_serial = 1
+	return _section_source_retirement_serial
+
+
+func _clear_section_source_retirement(source_id: String) -> void:
+	_pending_section_source_retirements.erase(source_id)
+	var queued_index := _pending_section_source_retirement_queue.find(source_id)
+	if queued_index >= 0:
+		_pending_section_source_retirement_queue.remove_at(queued_index)
+
+
+func _advance_pending_section_source_retirements(max_attempts: int,
+		budget_usec: int) -> Dictionary:
+	if max_attempts < 1 or budget_usec < 1 or _pending_section_source_retirements.is_empty():
+		return {"status":"idle", "attempts":0,
+			"pendingCount":_pending_section_source_retirements.size()}
+	var started_usec := Time.get_ticks_usec()
+	var attempts := 0
+	var initial_queue_count := _pending_section_source_retirement_queue.size()
+	while attempts < max_attempts and attempts < initial_queue_count \
+			and not _pending_section_source_retirement_queue.is_empty() \
+			and Time.get_ticks_usec() - started_usec < budget_usec:
+		var source_id: String = _pending_section_source_retirement_queue.pop_front()
+		var obligation: Dictionary = _pending_section_source_retirements.get(source_id, {})
+		if obligation.is_empty(): continue
+		attempts += 1
+		var result := _attempt_section_source_retirement(obligation)
+		var current_obligation: Dictionary = _pending_section_source_retirements.get(source_id, {})
+		if int(current_obligation.get("obligationId", 0)) != int(obligation.get("obligationId", 0)):
+			# A reentrant callback replaced this request while it was being checked.
+			# Preserve and retry the newest owner identity instead of erasing it.
+			if not current_obligation.is_empty() \
+					and not _pending_section_source_retirement_queue.has(source_id):
+				_pending_section_source_retirement_queue.append(source_id)
+			continue
+		if result.get("status") in ["retired", "acknowledged", "stale_dropped"]:
+			_pending_section_source_retirements.erase(source_id)
+			continue
+		var retained := obligation.duplicate(false)
+		retained["attempts"] = int(obligation.get("attempts", 0)) + 1
+		retained["lastReason"] = String(result.get("reason", "section_source_retirement_pending"))
+		retained.make_read_only()
+		_pending_section_source_retirements[source_id] = retained
+		_pending_section_source_retirement_queue.append(source_id)
+	return {"status":"advanced" if attempts > 0 else "idle", "attempts":attempts,
+		"pendingCount":_pending_section_source_retirements.size(),
+		"elapsedUsec":Time.get_ticks_usec() - started_usec}
+
+
+func _attempt_section_source_retirement(obligation: Dictionary) -> Dictionary:
+	var source_id := String(obligation.get("sourceId", ""))
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if roster.is_empty() \
+			or String(roster.get("worldId", "")) != String(obligation.get("worldId", "")) \
+			or String(roster.get("sourceRevision", "")) != String(obligation.get("sourceRevision", "")) \
+			or String(roster.get("sourceIncarnation", "")) != String(obligation.get("sourceIncarnation", "")) \
+			or String(roster.get("digest", "")) != String(obligation.get("rosterDigest", "")):
+		return {"status":"stale_dropped", "reason":"section_source_retirement_owner_revision_changed"}
+	var kind := String(obligation.get("kind", ""))
+	if kind == "tree":
+		return _acknowledge_tree_section_install(source_id,
+			String(obligation.get("siteId", "")), String(obligation.get("memberId", "")))
+	if kind == "transform":
+		var site_id := String(obligation.get("siteId", ""))
+		var member_id := String(obligation.get("memberId", ""))
+		var publisher_result: Dictionary = _current_transform_artifact_publisher_for_member(
+			site_id, member_id) if member_id.begins_with("furnishing:") \
+			else _current_packet_publisher_for_site(site_id)
+		if publisher_result.get("status") != "ready":
+			return {"status":"pending", "reason":String(publisher_result.get("reason",
+				"section_source_retirement_publisher_pending"))}
+		var publisher: Object = publisher_result.get("publisher")
+		if not is_instance_valid(publisher) \
+				or int(obligation.get("ownerInstanceId", 0)) != publisher.get_instance_id():
+			return {"status":"stale_dropped", "reason":"section_source_retirement_publisher_replaced"}
+		var part_id := _transform_part_id(member_id)
+		var source_visuals: Array[GeometryInstance3D] = []
+		for visual_value: Variant in _published_legacy_geometry(publisher):
+			var visual := visual_value as GeometryInstance3D
+			if is_instance_valid(visual) and visual.is_inside_tree() \
+					and not visual.is_queued_for_deletion() \
+					and String(visual.get_meta("building_source_part_id", "")) == part_id \
+					and (visual.visible or _legacy_has_section_ownership(visual)):
+				source_visuals.append(visual)
+		var retirement := _retire_citadel_visuals_if_section_coverage_is_live(
+			source_visuals, site_id, member_id)
+		if retirement.get("status") == "retired":
+			return {"status":"retired", "retiredVisualCount":int(
+				retirement.get("retiredVisualCount", 0))}
+		return retirement
+	if kind == "removal":
+		return _attempt_citadel_removal_retirement(obligation, roster)
+	return {"status":"stale_dropped", "reason":"section_source_retirement_kind_invalid"}
+
+
+func _attempt_citadel_removal_retirement(obligation: Dictionary,
+		roster: Dictionary) -> Dictionary:
+	var source_id := String(obligation.get("sourceId", ""))
+	var removal: Dictionary = obligation.get("removal", {})
+	if removal.is_empty() or String(removal.get("sourceId", "")) != source_id \
+			or String(removal.get("sourceRevision", "")) != String(roster.get("sourceRevision", "")):
+		return {"status":"stale_dropped", "reason":"section_source_removal_identity_changed"}
+	var owner: Object = _geometry_completion_owner.get_ref() \
+		if _geometry_completion_owner != null else null
+	if not is_instance_valid(owner) \
+			or _geometry_owner_roster_is_current(source_id, roster, removal).get("status") != "ready":
+		return {"status":"pending", "reason":"citadel_removal_owner_currentness_pending"}
+	var completion := _request_citadel_geometry_owner_completion(owner, roster,
+		_geometry_owner_prior_rosters.get(source_id, []))
+	if completion.get("status") != "ready": return completion
+	var presentation := _validate_citadel_presentation_completion(source_id,
+		String(removal.get("sourceRevision", "")))
+	if presentation.get("status") != "ready": return presentation
+	var removed_visuals := _current_citadel_removal_visuals(removal)
+	if removed_visuals.get("status") != "ready": return removed_visuals
+	var retired_count := 0
+	for visual_value: Variant in removed_visuals.get("visuals", []):
+		var visual := visual_value as GeometryInstance3D
+		var retirement := _retire_citadel_visual_if_section_coverage_is_live(visual,
+			String(removal.get("siteId", "")), String(removal.get("memberId", "")), removal)
+		if retirement.get("status") == "retired":
+			retired_count += int(retirement.get("retiredVisualCount", 0))
+		else:
+			return retirement
+	return {"status":"retired", "retiredVisualCount":retired_count}
+
+
+## Release only the exact provider claim represented by this installed receipt.
+## A delayed release for an older slot cannot erase a newer acknowledgement.
+func release_section_install(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary = {}) -> Dictionary:
+	if coverage_revision.is_empty() or not receipt.is_read_only() \
+			or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key:
+		return {"status":"pending", "reason":"citadel_section_release_receipt_invalid",
+			"retryable":true}
+	var stored: Dictionary = _section_install_acknowledgements.get(section_key, {})
+	if stored.is_empty():
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"reason":"citadel_section_release_claim_already_absent"}
+	if String(stored.get("coverageRevision", "")) != coverage_revision \
+			or not _same_citadel_section_receipt_token(
+				stored.get("receipt", {}), receipt):
+		# A newer receipt has replaced this exact claim; preserve it.
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"reason":"citadel_section_release_claim_replaced"}
+	_section_install_acknowledgements.erase(section_key)
+	var restored_visual_count := 0
+	var source_revisions: Dictionary = stored.get("sourceRevisions", {})
+	for removal_source_value: Variant in stored.get("removalRevisions", {}):
+		_clear_section_source_retirement(String(removal_source_value))
+	for source_id_value: Variant in source_revisions:
+		var source_id := String(source_id_value)
+		_clear_section_source_retirement(source_id)
+		var site_id := SectionGeometryAdapter._site_id_from_census_source(source_id)
+		var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+		if site_id.is_empty() or not _is_transform_member(member_id):
+			continue
+		var owner := _current_transform_artifact_publisher_for_member(site_id, member_id)
+		if owner.get("status") != "ready":
+			continue
+		var publisher = owner.get("publisher")
+		if publisher == null or not is_instance_valid(publisher) \
+				or not _publisher_node_roster_available(publisher):
+			continue
+		var part_id := _transform_part_id(member_id)
+		for visual_value: Variant in _published_legacy_geometry(publisher):
+			var visual := visual_value as GeometryInstance3D
+			if not is_instance_valid(visual) or visual.is_queued_for_deletion() \
+					or not _legacy_has_section_ownership(visual) \
+					or String(visual.get_meta("building_source_part_id", "")) != part_id:
+				continue
+			var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+			if section_key not in OwnerCompletion.owner_sections(roster):
+				continue
+			_citadel_visual_retirement_pending(visual, "citadel_geometry_owner_install_released")
+			restored_visual_count += 1
+	return {"status":"acknowledged", "sectionKey":section_key,
+		"restoredVisualCount":restored_visual_count,
+		"reason":"citadel_section_release_exact_claim_removed"}
+
+
+static func _same_citadel_section_receipt_token(left_value: Variant,
+		right: Dictionary) -> bool:
+	if not left_value is Dictionary:
+		return false
+	var left: Dictionary = left_value
+	for field: String in ["status", "worldId", "sectionKey", "generation",
+			"contentManifestDigest", "backendInstanceId", "chunkInstanceId", "ownerCell"]:
+		if left.get(field) != right.get(field):
+			return false
+	return true
+
+
+## A receipt can retire only visuals that map back to current census members.
+## Unknown visible geometry remains on screen and keeps the provider ack
+## retryable; collision bodies and gameplay owners are not in this visual list.
+func _validate_visible_citadel_section_visual_inventory(publisher: Object,
+		site_id: String, section_key: Vector3i, section_source_ids: Dictionary,
+		removal_revisions: Dictionary = {}, indexed_visuals: Array = [],
+		use_indexed_visuals := false) -> Dictionary:
+	if publisher == null or not is_instance_valid(publisher) \
+			or not _publisher_node_roster_available(publisher):
+		return {"status":"pending", "reason":"citadel_visual_inventory_unavailable",
+			"retryable":true, "waitingVisualCount":1,
+			"visualResults":[{"status":"pending",
+				"reason":"citadel_visual_inventory_unavailable"}]}
+	var waiting_count := 0
+	var visual_results: Array[Dictionary] = []
+	var visual_values: Array = indexed_visuals if use_indexed_visuals \
+		else _published_legacy_geometry(publisher)
+	for visual_value: Variant in visual_values:
+		var visual := visual_value as GeometryInstance3D
+		if not is_instance_valid(visual) or not visual.is_inside_tree() \
+				or visual.is_queued_for_deletion():
+			continue
+		var section_owned := _legacy_has_section_ownership(visual)
+		if not visual.visible and not section_owned:
+			continue
+		var bounds := visual.global_transform * visual.get_aabb()
+		var visual_sections: Array[Vector3i] = SectionGrid.keys_intersecting_bounds(bounds)
+		if visual_sections.is_empty() or visual_sections.size() > 256:
+			waiting_count += 1
+			if section_owned:
+				_restore_legacy_visual_if_unclaimed(visual)
+			var invalid_bounds := {"status":"pending",
+				"reason":"citadel_visible_visual_section_bounds_unavailable",
+				"siteId":site_id, "nodeInstanceId":visual.get_instance_id()}
+			invalid_bounds.make_read_only()
+			visual_results.append(invalid_bounds)
+			continue
+		if section_key not in visual_sections:
+			continue
+		var part_id := String(visual.get_meta("building_source_part_id", ""))
+		if part_id.is_empty():
+			waiting_count += 1
+			if section_owned:
+				_restore_legacy_visual_if_unclaimed(visual)
+			var unidentified := {"status":"pending",
+				"reason":"citadel_visible_visual_source_identity_unavailable",
+				"siteId":site_id, "sectionKey":section_key,
+				"nodeInstanceId":visual.get_instance_id()}
+			unidentified.make_read_only()
+			visual_results.append(unidentified)
+			continue
+		var source_id := _citadel_census_source_id(site_id,
+			_visual_member_id(visual), section_key)
+		if not section_source_ids.has(source_id) and not removal_revisions.has(source_id):
+			waiting_count += 1
+			if section_owned:
+				_restore_legacy_visual_if_unclaimed(visual)
+			var unrostered := {"status":"pending",
+				"reason":"citadel_visible_visual_source_not_in_current_census",
+				"siteId":site_id, "sectionKey":section_key,
+				"sourcePartId":part_id, "nodeInstanceId":visual.get_instance_id()}
+			unrostered.make_read_only()
+			visual_results.append(unrostered)
+	if waiting_count > 0:
+		return {"status":"pending", "reason":"citadel_visual_inventory_unresolved",
+			"retryable":true, "waitingVisualCount":waiting_count,
+			"visualResults":visual_results}
+	return {"status":"ready", "waitingVisualCount":0, "visualResults":visual_results}
+
+
+## Also inspect every retained scene publisher, including when the current census
+## has no building members in this section. This finds visuals left behind by a
+## source that disappeared from the current roster; those require an explicit
+## removal/tombstone proof before the empty section can be acknowledged.
+func _validate_visible_citadel_scene_visual_inventory(section_key: Vector3i,
+		section_source_ids: Dictionary, removal_revisions: Dictionary = {},
+		removal_records_by_id: Dictionary = {}) -> Dictionary:
+	var checked_publishers: Dictionary = {}
+	var waiting_count := 0
+	var visual_results: Array[Dictionary] = []
+	var section_admission_bounds := _citadel_section_admission_bounds(section_key)
+	var low_region := Field.region_for_cell(section_admission_bounds.position)
+	var high_region := Field.region_for_cell(section_admission_bounds.end - Vector2i.ONE)
+	for region_value: Variant in _scenes:
+		_count_section_ack_work("retainedSceneRegionsVisited")
+		if not region_value is Vector2i:
+			return {"status":"pending", "waitingVisualCount":1,
+				"visualResults":[{"status":"pending",
+					"reason":"citadel_retained_scene_region_unavailable"}]}
+		var region: Vector2i = region_value
+		var entry_value: Variant = _scenes[region_value]
+		if not entry_value is Dictionary:
+			return {"status":"pending", "waitingVisualCount":1,
+				"visualResults":[{"status":"pending",
+					"reason":"citadel_retained_scene_entry_unavailable",
+					"region":region}]}
+		var entry: Dictionary = entry_value
+		var admission_source: Dictionary = _admission.source_state(region) \
+			if _admission != null else {"status":"pending"}
+		var reservation_value: Variant = admission_source.get("reservationCells", null)
+		var possibly_intersects: bool = region.x >= low_region.x and region.x <= high_region.x \
+			and region.y >= low_region.y and region.y <= high_region.y
+		var reservation_is_current: bool = admission_source.get("status") in ["ready", "prepared"] \
+			and admission_source.get("binding", {}) == entry.get("binding", {})
+		if reservation_value is Rect2i and reservation_is_current:
+			var reservation_cells: Rect2i = reservation_value
+			possibly_intersects = reservation_cells.intersects(section_admission_bounds)
+		if not possibly_intersects:
+			continue
+		var site_id := String(entry.get("binding", {}).get("siteId", ""))
+		var job = entry.get("job")
+		for publisher: Variant in _scene_visual_publishers(job):
+			_count_section_ack_work("retainedScenePublishersVisited")
+			if publisher == null or not is_instance_valid(publisher) \
+				or not _publisher_node_roster_available(publisher):
+				waiting_count += 1
+				var missing_owner := {"status":"pending",
+					"reason":"citadel_retained_scene_visual_owner_unavailable",
+					"region":region, "siteId":site_id,
+					"sourceStatus":String(admission_source.get("status", "pending"))}
+				missing_owner.make_read_only()
+				visual_results.append(missing_owner)
+				continue
+			var publisher_instance_id: int = publisher.get_instance_id()
+			if checked_publishers.has(publisher_instance_id):
+				continue
+			checked_publishers[publisher_instance_id] = true
+			var owner_removal_revisions: Dictionary = {}
+			var owner_binding_digest := _citadel_owner_binding_digest(entry.get("binding", {}))
+			for source_id_value: Variant in removal_records_by_id:
+				var source_id := String(source_id_value)
+				var removal: Dictionary = removal_records_by_id[source_id]
+				if String(removal.get("siteId", "")) == site_id \
+						and String(removal.get("ownerBindingDigest", "")) == owner_binding_digest:
+					owner_removal_revisions[source_id] = String(removal.get("sourceRevision", ""))
+			owner_removal_revisions.make_read_only()
+			var scoped_part_ids: Array[String] = []
+			for source_id_value: Variant in section_source_ids:
+				var source_id := String(source_id_value)
+				if SectionGeometryAdapter._site_id_from_census_source(source_id) != site_id:
+					continue
+				var member_id := SectionGeometryAdapter._member_id_from_census_source(source_id)
+				if _is_transform_member(member_id):
+					scoped_part_ids.append(_transform_part_id(member_id))
+			for removal_id_value: Variant in owner_removal_revisions:
+				var member_id := SectionGeometryAdapter._member_id_from_census_source(
+					String(removal_id_value))
+				if member_id.begins_with("building:"):
+					scoped_part_ids.append(_transform_part_id(member_id))
+			var indexed_visuals: Dictionary = _legacy_visual_section_index.request_section_sources(
+				publisher, section_key, scoped_part_ids)
+			if indexed_visuals.get("status") != "ready":
+				waiting_count += 1
+				var index_pending := {"status":"pending",
+					"reason":String(indexed_visuals.get("reason",
+						"citadel_visual_inventory_index_pending")),
+					"region":region, "siteId":site_id,
+					"indexedNodeCount":int(indexed_visuals.get("indexedNodeCount", 0)),
+					"pendingNodeCount":int(indexed_visuals.get("pendingNodeCount", 0))}
+				index_pending.make_read_only()
+				visual_results.append(index_pending)
+				continue
+			var inventory: Dictionary = _validate_visible_citadel_section_visual_inventory(
+				publisher, site_id, section_key, section_source_ids, owner_removal_revisions,
+				indexed_visuals.get("visuals", []), true)
+			if inventory.get("status") != "ready":
+				waiting_count += int(inventory.get("waitingVisualCount", 1))
+				for result_value: Variant in inventory.get("visualResults", []):
+					if result_value is Dictionary:
+						visual_results.append(result_value)
+	if waiting_count > 0:
+		return {"status":"pending", "waitingVisualCount":waiting_count,
+			"visualResults":visual_results}
+	# A scene removed from _scenes is still an owner while its incremental
+	# retirement job drains. Bypass it only after current complete inventory
+	# proves that no retained visual intersects this section.
+	for entry_value: Variant in _retiring_scenes:
+		if not entry_value is Dictionary:
+			return {"status":"pending", "waitingVisualCount":1,
+				"visualResults":[{"status":"pending",
+					"reason":"citadel_retiring_scene_entry_unavailable"}]}
+		var retiring_entry: Dictionary = entry_value
+		var retiring_region_value: Variant = retiring_entry.get("region", null)
+		if not retiring_region_value is Vector2i:
+			return {"status":"pending", "waitingVisualCount":1,
+				"visualResults":[{"status":"pending",
+					"reason":"citadel_retiring_scene_region_unavailable"}]}
+		var retiring_region: Vector2i = retiring_region_value
+		var retiring_source: Dictionary = _admission.source_state(retiring_region) \
+			if _admission != null else {"status":"pending"}
+		var retiring_reservation_value: Variant = retiring_source.get("reservationCells", null)
+		var retiring_binding: Dictionary = retiring_entry.get("binding", {})
+		var retiring_reservation_is_current: bool = \
+			retiring_source.get("status") in ["ready", "prepared"] \
+			and retiring_source.get("binding", {}) == retiring_binding
+		# reservationCells describes the admitted source envelope, but that alone
+		# does not prove every runtime visual stays inside it. Narrow this guard
+		# only when the still-live teardown job can enumerate its complete visual
+		# owners and their transformed bounds for this exact section.
+		var exact_retirement_inventory: Dictionary = {}
+		if retiring_reservation_value is Rect2i and retiring_reservation_is_current:
+			exact_retirement_inventory = _retiring_citadel_inventory_disjoint_from_section(
+				retiring_entry, retiring_source, retiring_binding, section_key)
+			if exact_retirement_inventory.get("status") == "ready" \
+					and bool(exact_retirement_inventory.get("disjoint", false)):
+				continue
+		waiting_count += 1
+		var retiring_result := {"status":"pending",
+			"reason":"citadel_retiring_scene_visual_owner_not_drained",
+			"region":retiring_region,
+			"siteId":String(retiring_entry.get("binding", {}).get("siteId", "")),
+			"sourceStatus":String(retiring_source.get("status", "pending")),
+			"inventoryReason":String(exact_retirement_inventory.get("reason", "")),
+			"inventoryIntersectingNode":int(exact_retirement_inventory.get("nodeInstanceId", 0))}
+		retiring_result.make_read_only()
+		visual_results.append(retiring_result)
+	if waiting_count > 0:
+		return {"status":"pending", "waitingVisualCount":waiting_count,
+			"visualResults":visual_results}
+	return {"status":"ready", "waitingVisualCount":0, "visualResults":visual_results}
+
+
+func _retiring_citadel_inventory_disjoint_from_section(retiring_entry: Dictionary,
+		retiring_source: Dictionary, retiring_binding: Dictionary,
+		section_key: Vector3i) -> Dictionary:
+	if retiring_source.get("status") not in ["ready", "prepared"] \
+			or retiring_source.get("binding", {}) != retiring_binding:
+		return {"status":"pending", "reason":"retiring_admission_binding_stale"}
+	var job = retiring_entry.get("job")
+	if job == null or not is_instance_valid(job) \
+			or not job.has_method("own_node_root") or not job.has_method("status_count") \
+			or job.get("_binding") != retiring_binding:
+		return {"status":"pending", "reason":"retiring_scene_job_binding_unavailable"}
+	var job_status: Dictionary = job.call("status_count")
+	if String(job_status.get("phase", "")) not in ["teardown", "detach_publishers", "retired"]:
+		return {"status":"pending", "reason":"retiring_scene_phase_unavailable"}
+	# These authorities can own visible objects outside the building publisher's
+	# published_nodes list. Until their exact retirement claim drains, the scene
+	# inventory is not complete enough to narrow the coarse gate.
+	for claim_field: String in ["_door_claims", "_tree_retirement_claims", "_registered_tree_ids"]:
+		var claims: Variant = job.get(claim_field)
+		if not claims is Dictionary or not claims.is_empty():
+			return {"status":"pending", "reason":"retiring_external_visual_claims_unresolved",
+				"claimField":claim_field}
+	var building = job.get("_building")
+	var furniture = job.get("_furniture")
+	if building == null or not is_instance_valid(building) \
+			or not _publisher_node_roster_available(building):
+		return {"status":"pending", "reason":"retiring_building_visual_inventory_unavailable"}
+	if furniture != null and (not is_instance_valid(furniture) \
+			or not furniture.get("published_parts") is Array):
+		return {"status":"pending", "reason":"retiring_furniture_visual_inventory_unavailable"}
+	if not building.has_method("has_pending_chunk_static_packet_retirement") \
+			or bool(building.call("has_pending_chunk_static_packet_retirement")):
+		return {"status":"pending", "reason":"retiring_chunk_packet_visual_claim_unresolved"}
+	var publisher_site_id := String(building.get("publication_site_id"))
+	if publisher_site_id != String(retiring_binding.get("siteId", "")):
+		return {"status":"pending", "reason":"retiring_publisher_binding_unavailable"}
+	var root_value: Variant = job.call("own_node_root")
+	if root_value != null and (not is_instance_valid(root_value) or not root_value is Node3D):
+		return {"status":"pending", "reason":"retiring_scene_root_unavailable"}
+	var scan_roots: Array[Node] = []
+	if root_value is Node:
+		scan_roots.append(root_value)
+	var publisher_owner_root_count := 0
+	for owner_value: Variant in [building, furniture]:
+		if owner_value == null:
+			continue
+		if owner_value is Node:
+			if not is_instance_valid(owner_value):
+				return {"status":"pending", "reason":"retiring_publisher_owner_unavailable"}
+			scan_roots.append(owner_value)
+			publisher_owner_root_count += 1
+		elif owner_value == building:
+			# BuildingPartPublisher is a RefCounted owner. Its live scene parent is
+			# the only root that can prove inventory completeness when the job root
+			# is absent; published_nodes alone cannot reveal omitted descendants.
+			var scene_parent_ref: Variant = owner_value.get("_scene_parent")
+			if scene_parent_ref is WeakRef:
+				var scene_parent = scene_parent_ref.get_ref()
+				if is_instance_valid(scene_parent) and scene_parent is Node:
+					scan_roots.append(scene_parent)
+					publisher_owner_root_count += 1
+		var published: Array = _publisher_node_roster_snapshot(owner_value) if owner_value == building \
+				else owner_value.get("published_parts")
+		for node_value: Variant in published:
+			if node_value == null or not is_instance_valid(node_value):
+				continue
+			if not node_value is Node:
+				return {"status":"pending", "reason":"retiring_published_node_inventory_invalid"}
+			scan_roots.append(node_value)
+	if root_value == null and publisher_owner_root_count == 0:
+		return {"status":"pending", "reason":"retiring_publisher_ancestry_unavailable"}
+	if root_value == null and scan_roots.is_empty():
+		return {"status":"ready", "disjoint":true, "visualCount":0}
+	var visited: Dictionary = {}
+	var stack: Array[Node] = scan_roots
+	var visual_count := 0
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if not is_instance_valid(node):
+			continue
+		var node_id: int = node.get_instance_id()
+		if visited.has(node_id):
+			continue
+		visited[node_id] = true
+		var visual := node as GeometryInstance3D
+		if visual != null and is_instance_valid(visual) and visual.is_inside_tree() \
+				and (visual.visible or bool(visual.get_meta("citadel_section_owned", false))):
+			var local_bounds := visual.get_aabb()
+			if not local_bounds.position.is_finite() or not local_bounds.size.is_finite() \
+					or local_bounds.size.x <= 0.0 or local_bounds.size.y <= 0.0 \
+					or local_bounds.size.z <= 0.0:
+				return {"status":"pending", "reason":"retiring_visual_bounds_unavailable",
+					"nodeInstanceId":node_id}
+			var world_bounds: AABB = visual.global_transform * local_bounds
+			var intersected_sections: Array[Vector3i] = SectionGrid.keys_intersecting_bounds(
+				world_bounds)
+			if intersected_sections.is_empty() or intersected_sections.size() > 256:
+				return {"status":"pending", "reason":"retiring_visual_section_bounds_unavailable",
+					"nodeInstanceId":node_id}
+			visual_count += 1
+			if section_key in intersected_sections:
+				return {"status":"pending", "reason":"retiring_visual_intersects_section",
+					"nodeInstanceId":node_id, "visualCount":visual_count}
+		for child_index: int in node.get_child_count(true):
+			var child := node.get_child(child_index, true)
+			if child is Node:
+				stack.append(child)
+	return {"status":"ready", "disjoint":true, "visualCount":visual_count}
+
+
+func _citadel_section_admission_bounds(section_key: Vector3i) -> Rect2i:
+	var origin := SectionGrid.origin_for_key(section_key)
+	var section_bounds := AABB(origin, Vector3.ONE * SectionGrid.SECTION_SIZE_METERS)
+	var low := Vector2i(floori(origin.x / SitePreparation.CELL) - 2,
+		floori(origin.z / SitePreparation.CELL) - 2)
+	var high := Vector2i(ceili(section_bounds.end.x / SitePreparation.CELL) + 2,
+		ceili(section_bounds.end.z / SitePreparation.CELL) + 2)
+	return Rect2i(low, high - low)
+
+
+func _current_citadel_removal_visuals(removal: Dictionary) -> Dictionary:
+	if String(removal.get("memberId", "")).begins_with("tree:"):
+		var source_id := String(removal.get("sourceId", ""))
+		var current := _current_tree_roster_removal(String(_geometry_owner_rosters.get(source_id, {}).get("worldId", "")),
+			source_id, removal.get("sectionKey", Vector3i.ZERO), _geometry_owner_capture_proofs.get(source_id, {}))
+		if current.get("status") != "ready" or current.get("removal") != removal:
+			return {"status":"pending", "reason":"citadel_tree_removal_changed", "waitingVisualCount":1}
+		return {"status":"ready", "visuals":[]}
+	var site_id := String(removal.get("siteId", ""))
+	var part_id := _transform_part_id(String(removal.get("memberId", "")))
+	var source_id := String(removal.get("sourceId", ""))
+	var expected_member_binding := String(removal.get("memberBinding", ""))
+	var expected_owner_digest := String(removal.get("ownerBindingDigest", ""))
+	var expected_bounds: Variant = removal.get("bounds", null)
+	if site_id.is_empty() or part_id.is_empty() or source_id.is_empty() \
+			or expected_member_binding.is_empty() or expected_owner_digest.length() != 64 \
+			or not expected_bounds is Array:
+		return {"status":"pending", "reason":"citadel_removal_identity_invalid",
+			"retryable":true, "waitingVisualCount":1}
+	var matching_entry: Dictionary = {}
+	for region: Vector2i in _scenes:
+		var entry: Dictionary = _scenes[region]
+		var binding: Dictionary = entry.get("binding", {})
+		if String(binding.get("siteId", "")) != site_id:
+			continue
+		if _citadel_owner_binding_digest(binding) != expected_owner_digest:
+			continue
+		if not matching_entry.is_empty():
+			return {"status":"pending", "reason":"citadel_removal_owner_ambiguous",
+				"retryable":true, "waitingVisualCount":1}
+		matching_entry = entry
+	if matching_entry.is_empty():
+		return {"status":"pending", "reason":"citadel_removal_owner_changed",
+			"retryable":true, "waitingVisualCount":1}
+	var region_value: Variant = matching_entry.get("region", null)
+	if not region_value is Vector2i:
+		return {"status":"pending", "reason":"citadel_removal_owner_region_missing",
+			"retryable":true, "waitingVisualCount":1}
+	var region: Vector2i = region_value
+	var current: Dictionary = _admission.source_state(region)
+	if current.get("status") not in ["ready", "prepared"] \
+			or current.get("binding", {}) != matching_entry.get("binding", {}):
+		return {"status":"pending", "reason":"citadel_removal_owner_binding_stale",
+			"retryable":true, "waitingVisualCount":1}
+	var job = matching_entry.get("job")
+	var publisher = job.get("_furniture" if String(removal.get("memberId", "")).begins_with("furnishing:") else "_building") if job != null else null
+	if publisher == null or not is_instance_valid(publisher) \
+			or not _publisher_node_roster_available(publisher) \
+			or String(publisher.get("publication_site_id")) != site_id:
+		return {"status":"pending", "reason":"citadel_removal_publisher_unavailable",
+			"retryable":true, "waitingVisualCount":1}
+	var retained_identity: Dictionary = publisher.committed_static_visual_source_identity(part_id)
+	if retained_identity.get("status") != "ready" \
+			or String(retained_identity.get("sourceRevision", "")) != expected_member_binding:
+		return {"status":"pending", "reason":"citadel_removal_member_binding_stale",
+			"retryable":true, "waitingVisualCount":1}
+	var visuals: Array[GeometryInstance3D] = []
+	var actual_bounds: Array[AABB] = []
+	for visual_value: Variant in _published_legacy_geometry(publisher):
+		var visual := visual_value as GeometryInstance3D
+		if not is_instance_valid(visual) or not visual.is_inside_tree() \
+				or visual.is_queued_for_deletion() \
+				or (not visual.visible and not bool(visual.get_meta("citadel_section_owned", false))) \
+				or String(visual.get_meta("building_source_part_id", "")) != part_id:
+			continue
+		var bounds := visual.global_transform * visual.get_aabb()
+		var actual_sections: Array[Vector3i] = SectionGrid.keys_intersecting_bounds(bounds)
+		if removal.get("sectionKey") not in actual_sections:
+			continue
+		visuals.append(visual)
+		actual_bounds.append(bounds)
+	actual_bounds.sort_custom(func(a: AABB, b: AABB) -> bool:
+		if a.position.x != b.position.x: return a.position.x < b.position.x
+		if a.position.y != b.position.y: return a.position.y < b.position.y
+		if a.position.z != b.position.z: return a.position.z < b.position.z
+		if a.size.x != b.size.x: return a.size.x < b.size.x
+		if a.size.y != b.size.y: return a.size.y < b.size.y
+		return a.size.z < b.size.z)
+	if actual_bounds != expected_bounds:
+		return {"status":"pending", "reason":"citadel_removal_visual_bounds_changed",
+			"retryable":true, "waitingVisualCount":1,
+			"expectedBounds":expected_bounds, "actualBounds":actual_bounds}
+	return {"status":"ready", "visuals":visuals,
+		"publisher":publisher, "region":region}
+
+
+static func _citadel_owner_binding_digest(binding: Dictionary) -> String:
+	return Marshalls.raw_to_base64(var_to_bytes([
+		String(binding.get("siteId", "")), String(binding.get("sourceKey", "")),
+		int(binding.get("generation", -1))])).sha256_text()
+
+
+func _retire_citadel_visual_if_section_coverage_is_live(visual: GeometryInstance3D,
+		site_id: String, member_id: String, removal: Dictionary = {}) -> Dictionary:
+	return _retire_citadel_visuals_if_section_coverage_is_live([visual],
+		site_id, member_id, removal)
+
+
+func _request_citadel_geometry_owner_completion(owner: Object, roster: Dictionary,
+		prior_rosters: Array) -> Dictionary:
+	var started_usec := Time.get_ticks_usec()
+	if owner == null or not is_instance_valid(owner) \
+			or not owner.has_method("request_geometry_owner_completion"):
+		_record_section_ack_phase("geometryOwnerProofRequest", started_usec,
+			"geometryOwnerProofRequests", 1)
+		return {"status":"pending", "reason":"citadel_geometry_owner_request_api_unavailable",
+			"retryable":true, "workItems":0}
+	var result: Dictionary = owner.call("request_geometry_owner_completion", roster,
+		prior_rosters)
+	_record_section_ack_phase("geometryOwnerProofRequest", started_usec,
+		"geometryOwnerProofRequests", 1)
+	if result.get("status") == "ready":
+		var receipts_current := _geometry_owner_completion_receipts_are_current(
+			owner, roster, result)
+		if receipts_current.get("status") != "ready":
+			return receipts_current
+		return result
+	if result.get("status") == "pending":
+		var pending := result.duplicate(false)
+		pending["reason"] = "citadel_section_ack_source_slice_pending"
+		pending["proofRequestReason"] = String(result.get("reason", ""))
+		pending["retryable"] = true
+		return pending
+	return {"status":"pending", "reason":"citadel_geometry_owner_request_rejected",
+		"retryable":true, "requestResult":result}
+
+
+func _geometry_owner_completion_receipts_are_current(owner: Object,
+		roster: Dictionary, completion: Dictionary) -> Dictionary:
+	if completion.get("status") != "ready" or not is_instance_valid(owner) \
+			or not owner.has_method("installed_section_receipt_is_current"):
+		return {"status":"pending", "reason":"citadel_geometry_owner_completion_receipts_unavailable",
+			"retryable":true}
+	var owner_sections: Variant = completion.get("ownerSections", null)
+	var receipts_by_section: Variant = completion.get("receiptsBySection", null)
+	if not owner_sections is Array or not receipts_by_section is Dictionary \
+			or owner_sections.size() != receipts_by_section.size():
+		return {"status":"pending", "reason":"citadel_geometry_owner_completion_receipt_set_invalid",
+			"retryable":true}
+	var source_id := String(roster.get("sourceId", ""))
+	var source_part_id := String(roster.get("sourcePartId", ""))
+	var source_revision := String(roster.get("sourceRevision", ""))
+	var identity_key := SourceRoster._source_part_identity_key(source_id, source_part_id)
+	if identity_key.is_empty() or source_revision.is_empty():
+		return {"status":"pending", "reason":"citadel_geometry_owner_completion_identity_invalid",
+			"retryable":true}
+	for section_value: Variant in owner_sections:
+		if not section_value is Vector3i:
+			return {"status":"pending", "reason":"citadel_geometry_owner_completion_section_invalid",
+				"retryable":true}
+		var section := Vector3i(section_value)
+		var receipt_value: Variant = receipts_by_section.get(section, null)
+		if not receipt_value is Dictionary or receipt_value.is_empty() \
+				or not bool(owner.call("installed_section_receipt_is_current", section, receipt_value)):
+			return {"status":"pending", "reason":"citadel_geometry_owner_completion_receipt_stale",
+				"retryable":true, "sectionKey":section}
+		var revision_claims: Dictionary = receipt_value.get(
+			"removalRevisions" if bool(roster.get("explicitRemoval", false)) \
+			else "sourceRevisions", {})
+		if String(revision_claims.get(identity_key, "")) != source_revision:
+			return {"status":"pending", "reason":"citadel_geometry_owner_completion_revision_unclaimed",
+				"retryable":true, "sectionKey":section}
+	return {"status":"ready", "receiptCount":owner_sections.size()}
+
+
+func _retire_citadel_visuals_if_section_coverage_is_live(
+		visuals: Array, site_id: String, member_id: String,
+		removal: Dictionary = {}, presentation_proof: Dictionary = {}) -> Dictionary:
+	var live_visuals: Array[GeometryInstance3D] = []
+	for visual_value: Variant in visuals:
+		var visual := visual_value as GeometryInstance3D
+		if not is_instance_valid(visual) or not visual.is_inside_tree() \
+				or visual.is_queued_for_deletion():
+			return _citadel_visual_retirement_pending(visual,
+				"citadel_visual_owner_changed")
+		live_visuals.append(visual)
+	if live_visuals.is_empty(): return {"status":"retired", "retiredVisualCount":0}
+	var source_id := _citadel_census_source_id(site_id, member_id, Vector3i.ZERO)
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	var owner: Object = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if not is_instance_valid(owner) or roster.is_empty():
+		return _citadel_visuals_retirement_pending(live_visuals,
+			"citadel_full_geometry_owner_roster_unavailable")
+	var current := _geometry_owner_roster_is_current(source_id, roster, removal)
+	if current.get("status") != "ready":
+		return _citadel_visuals_retirement_pending(live_visuals,
+			String(current.get("reason", "citadel_geometry_owner_stale")))
+	var expected: Dictionary = current.get("roster", roster)
+	var prior: Array = _geometry_owner_prior_rosters.get(source_id, []).duplicate()
+	if expected != roster and roster not in prior: prior.append(roster)
+	var completion := _request_citadel_geometry_owner_completion(owner, expected, prior)
+	if completion.get("status") != "ready":
+		return _citadel_visuals_retirement_pending(live_visuals,
+			String(completion.get("reason", "citadel_geometry_owner_pending")), completion)
+	var presentation_completion: Dictionary = presentation_proof
+	if presentation_completion.is_empty():
+		presentation_completion = _validate_citadel_presentation_completion(source_id,
+			String(expected.get("sourceRevision", "")) if bool(expected.get("explicitRemoval", false)) else "")
+	if presentation_completion.get("status") != "ready":
+		return _citadel_visuals_retirement_pending(live_visuals,
+			String(presentation_completion.get("reason", "citadel_presentation_owner_pending")))
+	if _geometry_owner_roster_is_current(source_id, roster, removal).get("status") != "ready":
+		return _citadel_visuals_retirement_pending(live_visuals,
+			"citadel_geometry_owner_changed_during_completion")
+	var receipts_current := _geometry_owner_completion_receipts_are_current(
+		owner, expected, completion)
+	if receipts_current.get("status") != "ready":
+		return _citadel_visuals_retirement_pending(live_visuals,
+			String(receipts_current.get("reason", "citadel_geometry_owner_completion_receipt_stale")),
+			receipts_current)
+	for visual: GeometryInstance3D in live_visuals:
+		visual.visible = false
+		visual.set_meta("citadel_section_owned", true)
+		visual.set_meta("citadel_section_owned_source_id", source_id)
+	if not bool(expected.get("explicitRemoval", false)):
+		_geometry_owner_prior_rosters.erase(source_id)
+		if _geometry_owner_capture_proofs.has(source_id):
+			_geometry_owner_capture_proofs[source_id]["priorPresentationMembers"] = []
+	return {"status":"retired", "geometryCompletion":completion,
+		"retiredVisualCount":live_visuals.size()}
+
+
+func _citadel_visuals_retirement_pending(visuals: Array[GeometryInstance3D],
+		reason: String, details := {}) -> Dictionary:
+	for visual: GeometryInstance3D in visuals:
+		_citadel_visual_retirement_pending(visual, reason, details)
+	var result: Dictionary = details.duplicate(false)
+	result["status"] = "pending"
+	result["reason"] = reason
+	return result
+
+
+func _validate_citadel_presentation_completion(source_id: String, removal_revision := "") -> Dictionary:
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	var expected: Array = proof.get("presentationMembers", []) if removal_revision.is_empty() else []
+	var previous: Array = proof.get("priorPresentationMembers", []).duplicate()
+	if not removal_revision.is_empty():
+		for member: Dictionary in proof.get("presentationMembers", []):
+			if member not in previous: previous.append(member)
+	if expected.is_empty() and previous.is_empty(): return {"status":"ready"}
+	var reference: Variant = proof.get("publisher")
+	var publisher: Variant = reference.get_ref() if reference is WeakRef else null
+	var owner: Variant = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if not is_instance_valid(publisher) or not is_instance_valid(owner) \
+			or not owner.has_method("validate_presentation_owner_completion"):
+		return {"status":"pending", "reason":"citadel_presentation_owner_unavailable"}
+	var current := _current_transform_artifact_publisher_for_member(String(proof.get("siteId", "")), _proof_transform_member(proof))
+	if current.get("status") != "ready" or current.get("publisher") != publisher \
+			or current.get("binding") != proof.get("binding") \
+			or current.get("sceneJobInstanceId", 0) != proof.get("sceneJobInstanceId", 0):
+		return {"status":"pending", "reason":"citadel_presentation_owner_replaced"}
+	if removal_revision.is_empty():
+		var plan = _publication_plan_for_binding(current.binding)
+		if plan == null or String(plan.output_signature) != String(proof.get("planSignature", "")):
+			return {"status":"pending", "reason":"citadel_presentation_plan_changed"}
+		var capture: Dictionary = _capture_owner_source_snapshot(publisher, String(proof.partId), String(proof.memberBinding))
+		if capture.get("status") != "ready" or _geometry_capture_identity(capture) != proof.get("captureIdentity"):
+			return {"status":"pending", "reason":"citadel_presentation_capture_changed"}
+	var result: Dictionary = owner.call("validate_presentation_owner_completion", String(proof.get("worldId", "")),
+		source_id, source_id, removal_revision if not removal_revision.is_empty() else String(proof.get("sourceRevision", "")), expected, previous)
+	return result
+
+func _geometry_capture_identity(capture: Dictionary) -> String:
+	var presentation_identity := _captured_presentation_identity(capture)
+	if presentation_identity.get("status") != "ready": return ""
+	var values: Array = [capture.get("sourcePartId"), capture.get("sourceRevision"), capture.get("visualSourceReceipt", {}),
+		presentation_identity.digest, presentation_identity.members, presentation_identity.bindingWitnesses]
+	for group: Dictionary in capture.get("groups", []):
+		values.append([group.get("sourceId"), group.get("contentDigest"), group.get("sourceToWorld")])
+	return Marshalls.raw_to_base64(var_to_bytes(values)).sha256_text()
+
+
+## Door publishers retain bodies as roots; enumerate their exact legacy child
+## geometry while leaving packet-owned attachment roots to native receipts.
+static func _scene_visual_publishers(job: Variant) -> Array:
+	if not job is Dictionary and not is_instance_valid(job): return [null]
+	var owners: Array = [job.get("_building")]
+	var furniture: Variant = job.get("_furniture")
+	if is_instance_valid(furniture): owners.append(furniture)
+	return owners
+
+
+static func _publisher_node_roster_available(publisher: Object) -> bool:
+	return is_instance_valid(publisher) \
+		and (publisher.has_method("published_node_roster_snapshot") \
+			or publisher.get("published_parts") is Array)
+
+
+static func _publisher_node_roster_snapshot(publisher: Object) -> Array:
+	if not is_instance_valid(publisher): return []
+	if publisher.has_method("published_node_roster_snapshot"):
+		return publisher.call("published_node_roster_snapshot")
+	var parts: Variant = publisher.get("published_parts")
+	if not parts is Array: return []
+	var snapshot: Array = parts.duplicate()
+	snapshot.make_read_only()
+	return snapshot
+
+
+static func _published_legacy_geometry(publisher: Object) -> Array[GeometryInstance3D]:
+	var result: Array[GeometryInstance3D] = []
+	var stack: Array[Node] = []
+	for value: Variant in _publisher_node_roster_snapshot(publisher):
+		if is_instance_valid(value) and value is Node: stack.append(value)
+	var seen: Dictionary = {}
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if not is_instance_valid(node) or seen.has(node.get_instance_id()): continue
+		seen[node.get_instance_id()] = true
+		if bool(node.get_meta("section_attachment_native_root", false)): continue
+		if node is GeometryInstance3D: result.append(node)
+		for child: Node in node.get_children(): stack.append(child)
+	return result
+
+
+func _current_tree_roster_removal(world_id: String, source_id: String,
+		section: Vector3i, proof: Dictionary) -> Dictionary:
+	var authority := _current_tree_member_artifact_authority(String(proof.get("siteId", "")), String(proof.get("memberId", "")))
+	if authority.get("status") != "absent" or authority.get("reason") != "removed_prop" \
+			or authority.get("binding") != proof.get("binding") \
+			or authority.get("jobInstanceId") != proof.get("jobInstanceId"):
+		return {"status":"pending", "reason":"citadel_tree_removal_authority_pending", "retryable":true}
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	if not OwnerCompletion.validate(roster) or roster.get("worldId") != world_id:
+		return {"status":"pending", "reason":"citadel_tree_removal_roster_pending"}
+	var revision := String(roster.sourceRevision)
+	if not bool(roster.get("explicitRemoval", false)):
+		revision = var_to_bytes(["citadel-tree-removal/v1", world_id, source_id,
+			proof.binding, authority.get("propId"), roster.sourceRevision]).hex_encode().sha256_text()
+		var sealed := OwnerCompletion.seal(world_id, source_id, source_id, revision,
+			String(roster.sourceIncarnation), [], true)
+		if sealed.get("status") != "ready": return sealed
+		_retain_geometry_owner_roster(source_id, sealed.roster, proof)
+	var bounds: Array = _geometry_owner_removal_bounds.get(source_id, {}).get(section, []).duplicate()
+	bounds.make_read_only()
+	var removal := {"sourceId":source_id, "sourcePartId":source_id, "sourceRevision":revision,
+		"sectionKey":section, "siteId":String(proof.siteId), "memberId":String(proof.memberId),
+		"ownerBindingDigest":_citadel_owner_binding_digest(proof.binding),
+		"memberBinding":String(proof.authorityRevision), "bounds":bounds}
+	removal.make_read_only()
+	return {"status":"ready", "removal":removal}
+
+func _acknowledge_tree_section_install(source_id: String, site_id: String, member_id: String) -> Dictionary:
+	var authority := _current_tree_member_artifact_authority(site_id, member_id)
+	if authority.get("status") != "ready": return authority
+	var roster: Dictionary = _geometry_owner_rosters.get(source_id, {})
+	var owner: Variant = _geometry_completion_owner.get_ref() if _geometry_completion_owner != null else null
+	if not is_instance_valid(owner) or roster.is_empty():
+		return {"status":"pending", "reason":"citadel_tree_geometry_roster_pending"}
+	var current := _geometry_owner_roster_is_current(source_id, roster, {})
+	if current.get("status") != "ready": return current
+	var completion := _request_citadel_geometry_owner_completion(owner, roster,
+		_geometry_owner_prior_rosters.get(source_id, []))
+	if completion.get("status") != "ready": return completion
+	var receipts_current := _geometry_owner_completion_receipts_are_current(
+		owner, roster, completion)
+	if receipts_current.get("status") != "ready": return receipts_current
+	var sections: Array[Vector3i] = []
+	for section_value: Variant in completion.get("ownerSections", []):
+		if not section_value is Vector3i:
+			return {"status":"pending", "reason":"citadel_tree_owner_section_invalid",
+				"retryable":true}
+		sections.append(section_value)
+	var receipts: Dictionary = completion.get("receiptsBySection", {})
+	for section: Vector3i in sections:
+		var receipt: Dictionary = receipts.get(section, {})
+		var proof: Dictionary = _section_install_acknowledgements.get(section, {})
+		if proof.get("sourceRevisions", {}).get(source_id) != roster.sourceRevision \
+				or proof.get("receipt", {}) != receipt:
+			return {"status":"pending", "reason":"citadel_tree_owner_receipt_pending", "sectionKey":section}
+	var final_authority := _current_tree_member_artifact_authority(site_id, member_id)
+	if final_authority.get("status") != "ready" \
+			or final_authority.get("binding") != authority.get("binding") \
+			or final_authority.get("jobInstanceId") != authority.get("jobInstanceId") \
+			or final_authority.get("artifactAuthorityRevision") \
+				!= authority.get("artifactAuthorityRevision") \
+			or _geometry_owner_roster_is_current(source_id, roster, {}).get("status") != "ready":
+		return {"status":"pending", "reason":"citadel_tree_owner_changed_before_retirement",
+			"retryable":true}
+	var captured: Dictionary = authority.capture
+	var producer: Dictionary = captured.producer
+	var queue_reference: Variant = producer.get("queue")
+	var queue: Variant = queue_reference.get_ref() if queue_reference is WeakRef else null
+	if not is_instance_valid(queue) or queue.get_instance_id() != producer.get("queueInstanceId"):
+		return {"status":"pending", "reason":"citadel_tree_queue_owner_changed"}
+	var alias_binding := {"job":weakref(authority.job), "jobInstanceId":authority.job.get_instance_id(),
+		"binding":authority.binding, "memberId":member_id, "sourceId":source_id,
+		"admittedTreeRecord":captured.admittedTreeRecord, "bodyInstanceId":producer.bodyInstanceId,
+		"producerSourceId":producer.producerSourceId, "producerRevision":producer.producerRevision,
+		"compiledSourceRevision":producer.compiledSourceRevision}
+	alias_binding.make_read_only()
+	var result: Dictionary = queue.call("acknowledge_prepared_tree_section_install", source_id,
+		String(roster.sourceRevision), sections, receipts, alias_binding)
+	if result.get("status") == "acknowledged": _geometry_owner_prior_rosters.erase(source_id)
+	return result
+
+func _geometry_owner_roster_is_current(source_id: String, roster: Dictionary, removal: Dictionary) -> Dictionary:
+	if not _owner_snapshot_active(): return _capture_geometry_owner_roster_currentness(source_id, roster, removal)
+	var values := _owner_snapshot_bucket("rosterCurrentness")
+	var key := var_to_str([source_id, roster.get("digest", ""), removal])
+	var previous: Dictionary = values.get(key, {})
+	if not previous.is_empty() and previous.roster == roster: return previous.result
+	var result := _capture_geometry_owner_roster_currentness(source_id, roster, removal)
+	if result.get("status") == "ready":
+		var sealed := result.duplicate(false)
+		sealed.make_read_only()
+		values[key] = {"roster":roster, "result":sealed}
+		return sealed
+	return result
+
+func _capture_geometry_owner_roster_currentness(source_id: String, roster: Dictionary, removal: Dictionary) -> Dictionary:
+	var proof: Dictionary = _geometry_owner_capture_proofs.get(source_id, {})
+	if proof.get("kind") == "tree":
+		var current_tree := _current_tree_member_artifact_authority(String(proof.get("siteId", "")), String(proof.get("memberId", "")))
+		if bool(roster.get("explicitRemoval", false)):
+			if not OwnerCompletion.validate(roster) or current_tree.get("status") != "absent" \
+					or current_tree.get("reason") != "removed_prop" \
+					or current_tree.get("binding") != proof.get("binding") \
+					or current_tree.get("jobInstanceId") != proof.get("jobInstanceId"):
+				return {"status":"pending", "reason":"citadel_tree_removal_owner_changed"}
+			return {"status":"ready", "roster":roster}
+		if current_tree.get("status") != "ready": return current_tree
+		if not OwnerCompletion.validate(roster) or current_tree.binding != proof.get("binding") \
+				or current_tree.job.get_instance_id() != proof.get("jobInstanceId") \
+				or current_tree.artifactAuthorityRevision != proof.get("authorityRevision"):
+			return {"status":"pending", "reason":"citadel_tree_geometry_owner_changed"}
+		return {"status":"ready", "roster":roster}
+	var reference: WeakRef = proof.get("publisher")
+	var publisher: Object = reference.get_ref() if reference != null else null
+	if not is_instance_valid(publisher) or publisher.get_instance_id() != int(proof.get("publisherId", 0)):
+		return {"status":"pending", "reason":"citadel_geometry_owner_publisher_changed"}
+	var current := _current_transform_artifact_publisher_for_member(String(proof.get("siteId", "")), _proof_transform_member(proof))
+	if current.get("status") != "ready" or current.get("publisher") != publisher \
+			or current.get("binding") != proof.get("binding") or current.get("sourceToWorld") != proof.get("sourceToWorld") \
+			or current.get("sceneJobInstanceId", 0) != proof.get("sceneJobInstanceId", 0):
+		return {"status":"pending", "reason":"citadel_geometry_owner_incarnation_changed"}
+	if bool(roster.get("explicitRemoval", false)):
+		if not OwnerCompletion.validate(roster): return {"status":"pending", "reason":"citadel_removal_roster_invalid"}
+		var previous_owners: Array[Vector3i] = []
+		for previous: Dictionary in _geometry_owner_prior_rosters.get(source_id, []):
+			for section: Vector3i in OwnerCompletion.owner_sections(previous):
+				if section not in previous_owners: previous_owners.append(section)
+		for member: Dictionary in proof.get("presentationMembers", []) + proof.get("priorPresentationMembers", []):
+			var section := SectionGrid.key_for_world_position(member.neutralParentToWorld.origin)
+			if section not in previous_owners: previous_owners.append(section)
+		if previous_owners.is_empty(): return {"status":"pending", "reason":"citadel_geometry_owner_prior_members_missing"}
+		for section: Vector3i in previous_owners:
+			var retained := _current_roster_removal(String(roster.worldId), source_id, section)
+			if retained.get("status") != "ready" or retained.get("removal", {}).get("sourceRevision") != roster.sourceRevision:
+				return {"status":"pending", "reason":"citadel_geometry_owner_explicit_removal_missing"}
+		return {"status":"ready", "roster":roster}
+	var part_id := String(proof.get("partId", ""))
+	var visual_identity: Dictionary = publisher.committed_static_visual_source_identity(part_id)
+	if visual_identity.get("status") != "ready" or visual_identity != proof.get("visualSourceReceipt", {}):
+		return {"status":"pending", "reason":"citadel_geometry_owner_member_binding_changed"}
+	var sections := OwnerCompletion.owner_sections(roster)
+	if sections.is_empty(): return {"status":"pending", "reason":"citadel_geometry_owner_prior_members_missing"}
+	var capture: Dictionary = _capture_owner_source_snapshot(publisher, part_id, String(proof.memberBinding))
+	if capture.get("status") != "ready" or _geometry_capture_identity(capture) != proof.get("captureIdentity"):
+		return {"status":"pending", "reason":"citadel_geometry_owner_full_capture_changed"}
+	if _section_ack_census_proves_source_current(source_id, roster):
+		_count_section_ack_work("ownerCurrentnessFastPath")
+		return {"status":"ready", "roster":roster}
+	var census_started := Time.get_ticks_usec()
+	var census: Dictionary = capture_static_section_sources(String(roster.worldId), sections)
+	_record_section_ack_phase("ownerCurrentnessFullCensus", census_started,
+		"ownerCurrentnessFullCensusCount", 1)
+	if census.get("status") != "complete": return census
+	var revision := String(census.get("sourceRevisions", {}).get(source_id, ""))
+	if not removal.is_empty() and revision.is_empty():
+		var tombstone_revision := String(removal.get("sourceRevision", ""))
+		for section: Vector3i in sections:
+			var found := false
+			for row: Dictionary in census.get("removalsBySection", {}).get(section, []):
+				if row.get("sourceId") == source_id and row.get("sourceRevision") == tombstone_revision \
+						and row.get("memberBinding") == removal.get("memberBinding") \
+						and row.get("ownerBindingDigest") == removal.get("ownerBindingDigest"): found = true
+			if not found: return {"status":"pending", "reason":"citadel_geometry_owner_explicit_removal_missing"}
+		var empty := OwnerCompletion.seal(String(roster.worldId), source_id, source_id,
+			tombstone_revision, String(roster.sourceIncarnation), [], true)
+		return {"status":"ready", "roster":empty.roster} if empty.get("status") == "ready" else empty
+	if revision != roster.sourceRevision:
+		return {"status":"pending", "reason":"citadel_geometry_owner_authority_revision_changed"}
+	return {"status":"ready", "roster":roster}
+
+
+func _section_ack_census_proves_source_current(source_id: String,
+		roster: Dictionary) -> bool:
+	if _section_ack_currentness_scope.is_empty() \
+			or int(_section_ack_currentness_scope.get("generation", -1)) != _generation:
+		return false
+	var current: Variant = _section_ack_currentness_scope.get("current", {})
+	var section_value: Variant = _section_ack_currentness_scope.get("sectionKey", null)
+	if not current is Dictionary or current.get("status") != "complete" \
+			or current.get("worldId") != roster.get("worldId") \
+			or not section_value is Vector3i:
+		return false
+	var section_key: Vector3i = section_value
+	var row: Dictionary = current.get("sections", {}).get(section_key, {})
+	if row.is_empty() or source_id not in row.get("sourcePartIds", []):
+		return false
+	return String(current.get("sourceRevisions", {}).get(source_id, "")) \
+		== String(roster.get("sourceRevision", ""))
+
+
+
+
+## A previously hidden legacy visual is the retained fallback while any section
+## in its bounds has stale or missing current installation proof.
+func _citadel_visual_retirement_pending(visual: GeometryInstance3D,
+		reason: String, details := {}) -> Dictionary:
+	if is_instance_valid(visual) and not visual.is_queued_for_deletion() \
+			and bool(visual.get_meta("citadel_section_owned", false)):
+		_restore_legacy_visual_if_unclaimed(visual)
+	var result: Dictionary = details.duplicate(false)
+	result["status"] = "pending"
+	result["reason"] = reason
+	return result
+
+
+## Reconcile old section-owned visuals while preparing their replacement. This
+## makes a retired representation visible again as soon as its owner receipt,
+## source revision, or intersected-section closure is no longer current.
+static func _native_legacy_claim(visual: GeometryInstance3D) -> Dictionary:
+	var backend_id := int(visual.get_meta("section_attachment_native_backend_id", 0))
+	if backend_id <= 0 or not is_instance_id_valid(backend_id): return {}
+	var backend := instance_from_id(backend_id)
+	if not is_instance_valid(backend) or not backend.has_method("legacy_visual_state"): return {}
+	var claim: Dictionary = backend.call("legacy_visual_state", visual.get_instance_id())
+	return {"backend":backend, "claim":claim}
+
+
+static func _legacy_has_section_ownership(visual: GeometryInstance3D) -> bool:
+	if bool(visual.get_meta("citadel_section_owned", false)): return true
+	var native := _native_legacy_claim(visual)
+	return native.get("claim", {}).get("status") in ["pending_presentation", "installed", "retained_previous", "retained_suppressed", "stale"]
+
+
+static func _restore_legacy_visual_if_unclaimed(visual: GeometryInstance3D) -> void:
+	var native := _native_legacy_claim(visual)
+	var status := String(native.get("claim", {}).get("status", "unowned"))
+	# Pending presentation is real ownership, but never an owner-completion ACK.
+	if status in ["pending_presentation", "installed", "retained_previous", "retained_suppressed"]: return
+	if status == "stale":
+		# Native withdraws the complete bundle before restoring exact surviving IDs.
+		# Never expose one legacy child alongside its still-visible replacement.
+		native.backend.call("restore_legacy_for_visual", visual.get_instance_id())
+		return
+	if _native_restoration_receipt_is_current(visual): return
+	visual.visible = true
+
+
+## Evidence of a completed native visibility operation only. This never grants
+## section readiness or an installed geometry receipt.
+static func _native_restoration_receipt_is_current(visual: GeometryInstance3D) -> bool:
+	const RECEIPT_META := "section_attachment_legacy_restoration_receipt"
+	if not is_instance_valid(visual) or not visual.has_meta(RECEIPT_META): return false
+	var value: Variant = visual.get_meta(RECEIPT_META)
+	if not value is Dictionary or not value.is_read_only() \
+			or value.get("visualInstanceId") != visual.get_instance_id() \
+			or visual.get_parent() == null \
+			or value.get("parentInstanceId") != visual.get_parent().get_instance_id() \
+			or not value.get("originalVisible") is bool \
+			or visual.visible != value.originalVisible:
+		return false
+	var body_id := int(value.get("bodyInstanceId", 0))
+	if not is_instance_id_valid(body_id): return false
+	var body := instance_from_id(body_id) as Node3D
+	if not is_instance_valid(body) or body.is_queued_for_deletion() \
+			or not body.has_meta("section_attachment_publisher_instance_id") \
+			or not body.has_meta("section_attachment_publication_epoch") \
+			or not body.has_meta("section_attachment_source_revision"):
+		return false
+	return is_instance_valid(body) and not body.is_queued_for_deletion() \
+		and body.is_ancestor_of(visual) \
+		and value.get("publisherInstanceId") == body.get_meta("section_attachment_publisher_instance_id") \
+		and value.get("publicationEpoch") == body.get_meta("section_attachment_publication_epoch") \
+		and value.get("producerSourceRevision") == body.get_meta("section_attachment_source_revision")
+
+
+func _restore_stale_citadel_visuals(publisher, site_id: String,
+		member_id: String) -> void:
+	if publisher == null or not is_instance_valid(publisher) \
+			or not _publisher_node_roster_available(publisher):
+		return
+	var part_id := _transform_part_id(member_id)
+	for visual_value: Variant in _published_legacy_geometry(publisher):
+		var visual := visual_value as GeometryInstance3D
+		if not is_instance_valid(visual) or not visual.is_inside_tree() \
+				or visual.is_queued_for_deletion() \
+				or not bool(visual.get_meta("citadel_section_owned", false)) \
+				or String(visual.get_meta("building_source_part_id", "")) != part_id:
+			continue
+		_retire_citadel_visual_if_section_coverage_is_live(visual, site_id, member_id)
+
+
+func _valid_citadel_section_receipt(world_id: String, section_key: Vector3i,
+		authority_revision: String, coverage_revision: String,
+		receipt: Dictionary) -> bool:
+	if receipt.is_empty() or not receipt.is_read_only() \
+			or receipt.get("status") != "installed" \
+			or String(receipt.get("worldId", "")) != world_id \
+			or receipt.get("sectionKey") != section_key \
+			or int(receipt.get("generation", 0)) <= 0 \
+			or String(receipt.get("contentManifestDigest", "")).length() != 64 \
+			or int(receipt.get("backendInstanceId", 0)) <= 0 \
+			or int(receipt.get("chunkInstanceId", 0)) <= 0 \
+			or receipt.get("ownerCell") != SectionGrid.chunk_key_for_section(section_key):
+		return false
+	var provider_coverage: Variant = receipt.get("providerCoverage", [])
+	if not provider_coverage is Array:
+		return false
+	var has_current_citadel_coverage: bool = false
+	for entry_value: Variant in provider_coverage:
+		if not entry_value is Array or entry_value.size() < 3:
+			continue
+		var entry: Array = entry_value
+		if String(entry[0]) == "blueprint_buildings" \
+				and String(entry[1]) == coverage_revision \
+				and String(entry[2]) == authority_revision:
+			has_current_citadel_coverage = true
+			break
+	if not has_current_citadel_coverage:
+		return false
+	var owner_cell := SectionGrid.chunk_key_for_section(section_key)
+	var owner: Dictionary = SectionPacketOwner.resolve_existing_static_section_backend(owner_cell)
+	if owner.get("status") != "ready":
+		return false
+	var backend := owner.get("backend") as Node
+	var chunk := owner.get("chunk") as Node3D
+	if not is_instance_valid(backend) or not is_instance_valid(chunk) \
+			or backend.get_instance_id() != int(receipt.backendInstanceId) \
+			or chunk.get_instance_id() != int(receipt.chunkInstanceId) \
+			or not backend.has_method("installed_snapshot") \
+			or not backend.has_method("receipt_installed"):
+		return false
+	var generation := int(receipt.generation)
+	var source_id := SectionInstallSession.slot_id(world_id, section_key)
+	var installed: Dictionary = backend.call("installed_snapshot", source_id)
+	if installed.get("status") != "ready" \
+			or int(installed.get("generation", 0)) != generation \
+			or installed.get("ownerCell") != owner_cell \
+			or String(installed.get("packetDigest", "")) \
+			!= String(receipt.contentManifestDigest):
+		return false
+	var source_revision := String(installed.get("sourceRevision", ""))
+	return not source_revision.is_empty() \
+		and bool(backend.call("receipt_installed", source_id, generation,
+			source_revision, String(receipt.contentManifestDigest)))
+
+
+static func _citadel_census_source_id(site_id: String, member_id: String,
+		_section_key: Vector3i = Vector3i.ZERO) -> String:
+	# World identity is carried by the census; a member keeps the same identity
+	# in every section intersected by its geometry.
+	return "citadel:%s:member:%s" % [site_id, member_id]
 
 
 func _current_packet_publisher_for_site(site_id: String) -> Dictionary:
@@ -993,24 +4602,6 @@ func _current_packet_publisher_for_site(site_id: String) -> Dictionary:
 	return {"status":"ready", "publisher":publisher, "region":match_region,
 		"binding":match_entry.binding,
 		"sourceToWorld":Transform3D(Basis.IDENTITY, profile.origin)}
-
-
-func _packet_member_legacy_visual_state(publisher, part_id: String) -> Dictionary:
-	if publisher == null or not is_instance_valid(publisher) \
-			or not publisher.get("published_nodes") is Array:
-		return {"status":"pending", "reason":"citadel_legacy_visual_census_unavailable",
-			"retryable":true}
-	for visual_value: Variant in publisher.get("published_nodes"):
-		if not visual_value is GeometryInstance3D or not is_instance_valid(visual_value) \
-				or not visual_value.is_inside_tree() or visual_value.is_queued_for_deletion():
-			continue
-		if not visual_value.has_meta("building_source_part_id"):
-			return {"status":"pending", "reason":"citadel_legacy_visual_member_identity_unavailable",
-				"retryable":true}
-		if String(visual_value.get_meta("building_source_part_id")) == part_id:
-			return {"status":"pending", "reason":"citadel_member_has_unmigrated_legacy_visual",
-				"sourcePartId":part_id, "retryable":true}
-	return {"status":"clear"}
 
 
 static func _seed_hash(value: String) -> int:
@@ -1071,6 +4662,11 @@ static func _bounded_region_rectangle(bounds: Rect2i) -> bool:
 	var high := Field.region_for_cell(bounds.end - Vector2i.ONE)
 	return (high.x-low.x+1)*(high.y-low.y+1) <= MAX_REGIONS
 
+
+func advance_legacy_visual_inventory(max_nodes := 96,
+		budget_usec := LegacyVisualIndex.DEFAULT_ADVANCE_USEC) -> Dictionary:
+	return _legacy_visual_section_index.advance(max_nodes, budget_usec)
+
 func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget_usec := 2500) -> Dictionary:
 	if budget_usec<1 or budget_usec>4000: return {"status":"rejected","reason":"invalid_slice_budget"}
 	if _advancing: return {"status":"rejected","reason":"reentrant_advance"}
@@ -1078,6 +4674,13 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 	var started := Time.get_ticks_usec()
 	if _admission != null and int(_admission.stats().generation) != _generation:
 		configure(_admission)
+	_advance_owner_section_slice_jobs(mini(OWNER_SECTION_SLICE_ADVANCE_BUDGET_USEC,
+		budget_usec))
+	_advance_pending_section_source_retirements(
+		MAX_SECTION_SOURCE_RETIREMENTS_PER_ADVANCE,
+		mini(SECTION_SOURCE_RETIREMENT_ADVANCE_BUDGET_USEC, budget_usec))
+	advance_legacy_visual_inventory(96,
+		mini(LegacyVisualIndex.MAX_ADVANCE_USEC, budget_usec))
 	var configuration:=_configuration_serial
 	var demand_revision := _demand_revision
 	allow_dispatch = allow_dispatch and not _world_reset_pending
@@ -2377,6 +5980,11 @@ func world_reset_ready() -> bool:
 
 func request_shutdown() -> void:
 	_closing = true
+	_pending_section_source_retirements.clear()
+	_pending_section_source_retirement_queue.clear()
+	_legacy_visual_section_index.clear()
+	_section_contribution_capture_jobs.clear()
+	_retained_transform_artifact_captures.clear()
 	_retained_source_compile_job = {}
 	_retained_region_bounds = []
 	_retained_consumers = []
@@ -2437,7 +6045,9 @@ func stats() -> Dictionary:
 		"preparedSites":_prepared.size(),"bootstrapBases":_packet_bootstrap_bases.size(),"describedSites":_described.size(),"pendingRetirements":_retired.size(),
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,
+		"pendingSectionSourceRetirements":_pending_section_source_retirements.size(),
 		"publicationReady":false,"worker":_last_worker_status,"sourceScheduling":scheduling,
+		"legacyVisualIndex":_legacy_visual_section_index.stats(),
 		"sceneDiagnostics":scenes,"sceneUnitMetrics":_scene_unit_metrics_compact(),"demandRevision":_demand_revision,"viewRevision":_view_revision,
 		"doorLifecycleConfigured":_door_lifecycle_configured,"doorLifecycleAvailable":_door_callbacks_ready(),
 		"constructionStatus":"available" if _scene_callbacks_ready() else "pending",
@@ -3260,7 +6870,7 @@ func visual_source_state(bounds: Rect2i) -> Dictionary:
 					continue
 				if candidates.size() >= 16384:
 					return {"status":"pending","reason":"citadel_visual_candidate_capacity","retryable":true}
-				var member_bounds: AABB = record.bounds
+				var member_bounds: AABB = record.get("visualSupportBounds", record.bounds)
 				var member_world_bounds := Rect2(
 					Vector2(member_bounds.position.x,member_bounds.position.z),
 					Vector2(member_bounds.size.x,member_bounds.size.z))

@@ -348,7 +348,7 @@ func _full_pass(publisher, b, selected: Dictionary, phase: String) -> Dictionary
 		publisher.static_visual_batches.clear()
 		publisher.static_visual_transform_count = 0
 		publisher.captured_mesh_batches.clear()
-		publisher.published_nodes.clear()
+		publisher.clear_published_node_roster()
 		if publisher._publication_failed():
 			_stop_reason = "full_order_publication_guard_failed:" + part.id
 			break

@@ -10,7 +10,15 @@ const SCHEMA := "ecology-support-policy/v1"
 const STATIC_MEMBER_ENVELOPE_SCHEMA := "ecology-certified-static-member-envelope/v1"
 const CENSUS_SCHEMA := "ecology-source-domain-census/v1"
 const REQUIRED_CATEGORIES := ["trees", "surface_rocks", "ore", "forage", "details", "underground_props"]
+const FAMILY_REQUEST_SCHEMA := "ecology-source-family-request/v1"
+const FAMILY_RESULT_SCHEMA := "ecology-source-family-result/v1"
+const FAMILY_BUNDLE_SCHEMA := "ecology-source-domain-family-bundle/v2"
+const FAMILY_BAND_BUNDLE_SCHEMA := "ecology-source-domain-family-band-bundle/v1"
 const TREE_SUPPORT_ENVELOPE_REVISION := "procedural-tree-support-envelope-v2"
+# The natural producer's legacy maximum is 6.8 m; CitadelUrbanPocComposer's
+# existing three-height cycle is 6.2, 7.1, 8.0 m. This bounds both producers
+# for profiles without a height range; it never changes their generated sizes.
+const MAX_PRODUCER_FALLBACK_TREE_HEIGHT_METERS := 8.0
 const TREE_GRAMMAR_REVISION := "tree-spawn-service-v10:bushy-oak-v21:norway-spruce-v2:umbrella-thorn-v2"
 const TREE_VISUAL_REVISION := "procedural-tree-visual-factory+procedural-tree-branch-shader+procedural-tree-foliage-shader+environment-wind-system"
 const STATIC_BASE_SUPPORT_REVISION := "ecology-support-base-v1"
@@ -25,9 +33,41 @@ const TREE_SPATIAL_REVIEWED_SOURCE_DIGESTS := {
 	"res://scripts/environment/tree_grammars/MathematicalTreePocBushyOakRecipeBuilder.gd":"7732f35e113c8b60baa29e49e4f9142bc9104ed1fcdbf1c3cbd2730a812639d0",
 	"res://scripts/environment/tree_grammars/MathematicalTreePocConiferRecipeBuilder.gd":"2558e11b39f10a64a68cdaa8f33753883ae5bbb82c0a71ee9968651c9f44dbf8",
 	"res://scripts/environment/tree_grammars/MathematicalTreePocSavannaRecipeBuilder.gd":"a1c373d87694b93a262bf5cbf5e2ea24b053d8b9d369dc858e29449260b33f33",
-	"res://scripts/visual/ProceduralTreeVisualFactory.gd":"2d05e04ce2001966ae739d603ee926521943e1ce501936606cd443eb4c4b74a5",
-	"res://scripts/world/TreeRecipeSectionCompiler.gd":"8722d3f4a593e3f55fb5ea53428760132e69ec849a3bbec37e8b5e1eb773c227",
-	"res://scripts/environment/EnvironmentWindSystem.gd":"4b40c0de4b474c96b9b8526ec413446ce60886a1938e43edbb6ed42c41a42b84",
+	# HEAD/independent review 2026-10-07: far recipe publication and section
+	# compilation share the native three-instance descriptor; planar mesh support
+	# adds only a sealed bounds policy, preserving actual mesh vertices/materials.
+	"res://scripts/visual/ProceduralTreeVisualFactory.gd":"775e4473853292a8c6a2eb742a9058ed7af13e00b8f11aeb3ca05ccfe5857fdb",
+	# Reviewed 2026-10-06: certify_recipe_support_envelope bounds the finalized
+	# recipe against shared branch/foliage meshes, body transform, active wind
+	# expansion and intersected sections. Source-band compilation now verifies
+	# immutable authority identity, exact owner/support closure, explicit empty
+	# completion, and contributor equality with the renderer-consumed aggregate
+	# instance buffer before sealing section output. Independent review approves
+	# this compiler contract only; candidate installation and gameplay remain
+	# separate acceptance gates.
+	# Reviewed 2026-10-07: the completion proof materializes validated string IDs
+	# from a generic frozen array into a typed local array before sealing; values,
+	# order, authority, geometry, and bounds are unchanged.
+	# Reviewed 2026-10-07: section-band output uses its shared artifact schema;
+	# non-band output and compiler revision retain SCHEMA. Reversing only this
+	# schema declaration/selection delta reproduces the prior reviewed digest;
+	# recipe geometry, support bounds, source ordering and payloads are unchanged.
+	# Reviewed 2026-10-07: immutable source content identity shallow-projects
+	# sealed recipes without stats.timingUsec. This excludes measured profiling
+	# noise while retaining semantic recipe, request, envelope and provenance.
+	# Reviewed 2026-10-07: retained failed compilers expose the original terminal
+	# rejection through advance/progress; ownership still drains through retirement.
+	# Geometry, recipe values, source ordering and spatial calculations are unchanged.
+	# Reviewed 2026-10-07: procedural factory/native variation uses immutable
+	# request.treeId; durable record.propId still owns source/save identity.
+	# Natural-tree arguments and all spatial support math are unchanged.
+	# Reviewed 2026-10-07: far impostors compile bole1/crown2 from the same
+	# native descriptor; source identity/currentness and old-slot ACK remain.
+	# The recipe tier must agree with runtimeImpostor before envelope admission.
+	"res://scripts/world/TreeRecipeSectionCompiler.gd":"a37c2e6794cd4275e74de511a92cae82c0026002921a52efeb21dc3dc880cf63",
+	# HEAD reviewed immutable profile-value reads; wind response, default,
+	# clamp and displacement calculations are unchanged.
+	"res://scripts/environment/EnvironmentWindSystem.gd":"7ea41ad406f1df19d462bd430c3d553574cb0cab3d13db76063e25e16942526f",
 	"res://resources/visual/procedural_tree_branch.gdshader":"d50c72fd94a4f8958b807e74b530f93daba4e5f4fc9f88b6825b3ea0768aca6e",
 	"res://resources/visual/procedural_tree_foliage.gdshader":"2e55f5a392dc5849fcf84caece2deee957a3294dd8d09a023715579ab7b32f2d",
 }
@@ -70,32 +110,73 @@ static var _runtime_support_policy_cache_order: Array[String] = []
 
 
 func completed_snapshot_for(world_id: String, source_chunk_key: Vector2i,
-		source_inputs: Dictionary, removed_projection_digest: String) -> Dictionary:
+		source_inputs: Dictionary, removed_projection_digest: String,
+		catalog_artifact: Dictionary = {}, expected_requested_families: Array = [],
+		allow_family_superset := false) -> Dictionary:
 	var identity := snapshot_cache_identity(world_id, source_chunk_key, source_inputs,
-		removed_projection_digest)
+		removed_projection_digest, catalog_artifact)
 	var value: Variant = _completed_snapshot_cache.get(identity, null)
 	if not value is Dictionary:
 		return {"status": "pending", "reason": "ecology_source_snapshot_not_cached",
 			"cacheIdentity": identity}
 	var snapshot: Dictionary = value
-	if not validate_source_domain_snapshot(snapshot, world_id, source_chunk_key):
+	if not validate_source_domain_snapshot(snapshot, world_id, source_chunk_key,
+		catalog_artifact):
 		_completed_snapshot_cache.erase(identity)
 		_completed_snapshot_order.erase(identity)
 		return {"status": "pending", "reason": "ecology_cached_snapshot_stale",
 			"cacheIdentity": identity}
+	if not expected_requested_families.is_empty():
+		if String(snapshot.get("schema", "")) != FAMILY_BUNDLE_SCHEMA \
+				or (allow_family_superset \
+					and not _family_bundle_covers(snapshot, expected_requested_families)) \
+				or (not allow_family_superset \
+					and not _family_bundle_matches_request(snapshot, expected_requested_families)):
+			return {"status":"pending", "reason":"ecology_cached_family_bundle_incomplete",
+				"cacheIdentity":identity}
 	return {"status": "ready", "cacheIdentity": identity, "snapshot": snapshot}
 
 
-func retain_completed_snapshot(snapshot: Dictionary) -> bool:
+static func _family_bundle_covers(snapshot: Dictionary, expected_families: Array) -> bool:
+	var requested_value: Variant = snapshot.get("requestedFamilies", null)
+	var coverage_value: Variant = snapshot.get("familyCoverage", null)
+	if not requested_value is Array or not coverage_value is Array:
+		return false
+	for family_value: Variant in expected_families:
+		var family := String(family_value)
+		if family not in REQUIRED_CATEGORIES or family not in requested_value:
+			return false
+		var found_complete := false
+		for row_value: Variant in coverage_value:
+			if row_value is Dictionary and String(row_value.get("family", "")) == family:
+				found_complete = String(row_value.get("disposition", "")) \
+					in ["complete_empty", "complete_nonempty"]
+				break
+		if not found_complete:
+			return false
+	return true
+
+
+static func _family_bundle_matches_request(snapshot: Dictionary,
+		expected_families: Array) -> bool:
+	var expected := expected_families.duplicate()
+	expected.sort()
+	return snapshot.get("requestedFamilies", null) == expected \
+		and _family_bundle_covers(snapshot, expected)
+
+
+func retain_completed_snapshot(snapshot: Dictionary,
+		catalog_artifact: Dictionary = {}) -> bool:
 	if String(snapshot.get("status", "")) != "ready" \
-			or not validate_source_domain_snapshot(snapshot):
+			or not validate_source_domain_snapshot(snapshot, "",
+				Vector2i(2147483647, 2147483647), catalog_artifact):
 		return false
 	var source_inputs: Variant = snapshot.get("sourceInputs", {})
 	if not source_inputs is Dictionary:
 		return false
 	var identity := snapshot_cache_identity(String(snapshot.worldId),
 		snapshot.sourceChunkKey, source_inputs,
-		String(snapshot.get("removedSourceProjectionDigest", "")))
+		String(snapshot.get("removedSourceProjectionDigest", "")), catalog_artifact)
 	if not _completed_snapshot_cache.has(identity):
 		_completed_snapshot_order.append(identity)
 	_completed_snapshot_cache[identity] = snapshot
@@ -124,6 +205,12 @@ func clear_pending_capture_progress(identity: String) -> void:
 	_pending_capture_progress.erase(identity)
 
 
+func clear_all_snapshots() -> void:
+	_completed_snapshot_cache.clear()
+	_completed_snapshot_order.clear()
+	_pending_capture_progress.clear()
+
+
 func invalidate_source_chunk(world_id: String, source_chunk_key: Vector2i) -> void:
 	var prefix := "%s|%d,%d|" % [world_id, source_chunk_key.x, source_chunk_key.y]
 	for identity_value: Variant in _completed_snapshot_cache.keys():
@@ -134,11 +221,15 @@ func invalidate_source_chunk(world_id: String, source_chunk_key: Vector2i) -> vo
 			_pending_capture_progress.erase(identity)
 
 
-static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
+static func support_policy(source_inputs: Dictionary = {},
+		catalog_artifact: Dictionary = {}) -> Dictionary:
 	# Policy derivation reads the active resource/source catalog. Workers receive
 	# its sealed value through admission; they never mutate this Main-owned cache.
 	if not Thread.is_main_thread():
 		return {"status":"pending", "runtimePolicyReason":"ecology_support_policy_requires_main_thread"}
+	if String(source_inputs.get("schema", "")) == "ecology-source-domain-inputs/v2":
+		var artifact_policy := _policy_from_catalog_artifact(source_inputs, catalog_artifact)
+		return artifact_policy
 	var policy_context_digest := support_policy_context_digest(source_inputs) \
 		if not source_inputs.is_empty() else ""
 	var declared_context_digest := String(source_inputs.get("supportPolicyContextDigest", ""))
@@ -158,7 +249,7 @@ static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
 	var families: Dictionary = _canonical_value(FAMILY_POLICY)
 	var runtime_policy := derive_runtime_support_policy(source_inputs) \
 		if not source_inputs.is_empty() else {"status":"pending", "reason":"runtime_ecology_catalog_inputs_required"}
-	if String(runtime_policy.get("status", "")) == "ready":
+	if runtime_policy.get("families", {}) is Dictionary:
 		families.merge(runtime_policy.get("families", {}), true)
 	var policy := {
 		"schema": SCHEMA,
@@ -174,6 +265,13 @@ static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
 		"runtimePolicyReason":String(runtime_policy.get("reason", "")),
 		"runtimePolicyDigest":String(runtime_policy.get("digest", "")),
 	}
+	var family_rows_complete := true
+	for family: String in REQUIRED_CATEGORIES:
+		var family_value: Variant = families.get(family, null)
+		if not family_value is Dictionary \
+				or String(family_value.get("status", "")) not in ["bounded", "pending", "failed"]:
+			family_rows_complete = false
+	policy["certificateStatus"] = "ready" if family_rows_complete else "pending"
 	policy["status"] = "ready" if _all_families_bounded(families) \
 		and String(runtime_policy.get("status", "")) == "ready" else "pending"
 	policy["digest"] = _digest(policy)
@@ -189,9 +287,116 @@ static func support_policy(source_inputs: Dictionary = {}) -> Dictionary:
 	return policy
 
 
+static func _policy_from_catalog_artifact(source_inputs: Dictionary,
+		catalog_artifact: Dictionary) -> Dictionary:
+	if String(catalog_artifact.get("schema", "")) != "ecology-producer-catalog-artifact/v2" \
+			or not catalog_artifact.is_read_only() \
+			or String(catalog_artifact.get("artifactId", "")) != String(source_inputs.get(
+			"catalogArtifactId", "")) \
+			or String(catalog_artifact.get("catalogContentDigest", "")) != String(
+				source_inputs.get("catalogContentDigest", "")) \
+			or String(catalog_artifact.get("worldId", "")) != String(source_inputs.get("worldId", "")) \
+			or String(catalog_artifact.get("worldSeed", "")) != String(source_inputs.get("worldSeed", "")) \
+			or int(catalog_artifact.get("worldEpoch", 0)) != int(source_inputs.get("worldEpoch", 0)):
+		return {"status":"pending", "runtimePolicyStatus":"pending",
+			"runtimePolicyReason":"ecology_catalog_artifact_missing_or_stale"}
+	var policy: Variant = catalog_artifact.get("supportPolicy", null)
+	if not policy is Dictionary or not policy.is_read_only() \
+			or String(policy.get("certificateStatus", "")) != "ready" \
+			or String(policy.get("revision", "")).is_empty() \
+			or String(policy.get("digest", "")).length() != 64 \
+			or String(policy.get("revision", "")) != String(source_inputs.get(
+				"influencePolicyRevision", "")) \
+			or String(policy.get("digest", "")) != String(source_inputs.get(
+				"influencePolicyDigest", "")):
+		return {"status":"pending", "runtimePolicyStatus":"pending",
+			"runtimePolicyReason":"ecology_catalog_artifact_policy_mismatch"}
+	return policy
+
+
+static func family_support_policy(source_inputs: Dictionary, catalog_artifact: Dictionary,
+		family: String) -> Dictionary:
+	if family not in REQUIRED_CATEGORIES:
+		return {"status":"failed", "reason":"unknown_ecology_support_family",
+			"family":family}
+	var policy := support_policy(source_inputs, catalog_artifact)
+	if String(policy.get("revision", "")).is_empty() \
+			or String(policy.get("digest", "")).length() != 64:
+		return {"status":"pending", "reason":String(policy.get("runtimePolicyReason",
+			"ecology_family_support_policy_unavailable")), "family":family}
+	var families: Variant = policy.get("families", null)
+	if not families is Dictionary or not families.has(family):
+		return {"status":"pending", "reason":"ecology_family_support_policy_missing",
+			"family":family}
+	var row: Variant = families.get(family, null)
+	if not row is Dictionary:
+		return {"status":"pending", "reason":"ecology_family_support_policy_invalid",
+			"family":family}
+	if String(row.get("status", "")) == "failed":
+		return {"status":"failed", "reason":String(row.get("reason",
+			"ecology_family_support_policy_failed")), "family":family,
+			"policyRevision":String(policy.revision), "policyDigest":String(policy.digest),
+			"familyPolicy":row.duplicate(true)}
+	if String(row.get("status", "")) != "bounded":
+		return {"status":"pending", "reason":String(row.get("reason",
+			"ecology_family_support_policy_unbounded")), "family":family,
+			"policyRevision":String(policy.revision), "policyDigest":String(policy.digest),
+			"familyPolicy":row.duplicate(true)}
+	var horizontal := float(row.get("maxHorizontalSupportMeters", -1.0))
+	var vertical := float(row.get("maxVerticalSupportMeters", -1.0))
+	var family_policy_revision := String(row.get("envelopeRevision", ""))
+	var family_policy_digest := String(row.get("envelopeDigest", ""))
+	if family_policy_revision.is_empty():
+		family_policy_revision = "%s:%s" % [STATIC_BASE_SUPPORT_REVISION, family]
+	if family_policy_digest.is_empty():
+		var family_inputs: Variant = source_inputs.get("detailProducerInputs", {}) \
+			if family == "details" else {}
+		family_policy_digest = _digest([family_policy_revision, family, row, family_inputs])
+	if not is_finite(horizontal) or not is_finite(vertical) \
+			or horizontal < 0.0 or vertical < 0.0 \
+			or family_policy_revision.is_empty() \
+			or family_policy_digest.length() != 64:
+		return {"status":"failed", "reason":"ecology_family_support_certificate_invalid",
+			"family":family}
+	var family_digest := _digest([FAMILY_RESULT_SCHEMA, family,
+		String(policy.get("revision", "")), String(policy.get("digest", "")), row])
+	return {"status":"ready", "family":family,
+		"policyRevision":String(policy.revision), "policyDigest":String(policy.digest),
+		"familyPolicyRevision":family_policy_revision,
+		"familyPolicyDigest":family_policy_digest,
+		"familyCertificateDigest":family_digest,
+		"maxHorizontalSupportMeters":horizontal,
+		"maxVerticalSupportMeters":vertical,
+		"familyPolicy":row.duplicate(true)}
+
+
+static func validate_support_policy_certificate(policy: Dictionary) -> bool:
+	if String(policy.get("schema", "")) != SCHEMA \
+			or String(policy.get("certificateStatus", "")) != "ready" \
+			or String(policy.get("revision", "")).is_empty():
+		return false
+	var families: Variant = policy.get("families", null)
+	if not families is Dictionary:
+		return false
+	for family: String in REQUIRED_CATEGORIES:
+		var row: Variant = families.get(family, null)
+		if not row is Dictionary or String(row.get("status", "")) not in [
+				"bounded", "pending", "failed"]:
+			return false
+	var mutable := policy.duplicate(true)
+	var declared_digest := String(mutable.get("digest", ""))
+	mutable.erase("digest")
+	return declared_digest.length() == 64 and _digest(mutable) == declared_digest
+
+
 static func support_policy_context_digest(source_inputs: Dictionary) -> String:
 	## Derives identity from actual canonical policy/catalog inputs, never from a
 	## caller-provided digest or per-source terrain/admission/removal revisions.
+	if String(source_inputs.get("schema", "")) == "ecology-source-domain-inputs/v2":
+		return _digest(["ecology-support-policy-context/v2",
+			String(source_inputs.get("catalogContentDigest", "")),
+			String(source_inputs.get("influencePolicyRevision", "")),
+			String(source_inputs.get("influencePolicyDigest", ""))])
 	var values := {
 		"schema":"ecology-support-policy-context/v1",
 		"biomeProfileSnapshotStatus":source_inputs.get("biomeProfileSnapshotStatus", ""),
@@ -211,56 +416,84 @@ static func support_policy_context_digest(source_inputs: Dictionary) -> String:
 
 static func derive_runtime_support_policy(source_inputs: Dictionary) -> Dictionary:
 	var profiles: Variant = source_inputs.get("biomeProfileSnapshot", null)
-	if not profiles is Dictionary:
-		return {"status":"pending", "reason":"ecology_profile_catalog_missing"}
-	var tree := derive_tree_grammar_support_envelope(profiles)
-	if String(tree.get("status", "")) != "ready":
-		return {"status":String(tree.get("status", "pending")),
-			"reason":String(tree.get("reason", "tree_support_envelope_unavailable"))}
-	if String(source_inputs.get("treeGrammarEnvelopeDigest", "")) != String(tree.get("digest", "")):
-		return {"status":"pending", "reason":"tree_support_envelope_input_digest_mismatch"}
+	var tree: Dictionary = {"status":"pending", "reason":"ecology_profile_catalog_missing"}
+	if profiles is Dictionary:
+		tree = derive_tree_grammar_support_envelope(profiles)
+		if String(tree.get("status", "")) == "ready" \
+				and String(source_inputs.get("treeGrammarEnvelopeDigest", "")) \
+				!= String(tree.get("digest", "")):
+			tree = {"status":"pending", "reason":"tree_support_envelope_input_digest_mismatch"}
 	var rock: Variant = source_inputs.get("rockSupportEnvelope", null)
-	if not rock is Dictionary or String(rock.get("status", "")) != "ready":
-		return {"status":"pending", "reason":String(rock.get("reason",
-			"rock_catalog_descriptor_envelope_unavailable")) if rock is Dictionary \
-			else "rock_catalog_descriptor_envelope_missing"}
-	if String(rock.get("profileCatalogRevision", "")) != String(profiles.get("contentIdentity", "")) \
-			or String(rock.get("eligibleAssetSetDigest", "")).length() != 64 \
-			or String(rock.get("digest", "")).length() != 64 \
-			or String(rock.get("assetSetDigest", "")).length() != 64 \
-			or String(rock.get("registryRevision", "")).is_empty() \
-			or not rock.get("assetRows", null) is Array \
-			or (rock.get("assetRows", []) as Array).is_empty():
-		return {"status":"pending", "reason":"rock_support_envelope_provenance_incomplete"}
-	var tree_horizontal := float(tree.maxHorizontalSupportMeters)
-	var tree_vertical := float(tree.maxVerticalSupportMeters)
-	var rock_horizontal := float(rock.maxHorizontalSupportMeters)
-	var rock_vertical := float(rock.maxVerticalSupportMeters)
-	if not is_finite(rock_horizontal) or not is_finite(rock_vertical) \
-			or rock_horizontal <= 0.0 or rock_vertical <= 0.0:
-		return {"status":"failed", "reason":"rock_support_envelope_extents_invalid"}
+	var rock_ready := rock is Dictionary and String(rock.get("status", "")) == "ready"
+	if rock_ready:
+		if profiles is Dictionary and String(rock.get("profileCatalogRevision", "")) \
+				!= String(profiles.get("contentIdentity", "")) \
+				or String(rock.get("eligibleAssetSetDigest", "")).length() != 64 \
+				or String(rock.get("digest", "")).length() != 64 \
+				or String(rock.get("assetSetDigest", "")).length() != 64 \
+				or String(rock.get("registryRevision", "")).is_empty() \
+				or not rock.get("assetRows", null) is Array \
+				or (rock.get("assetRows", []) as Array).is_empty():
+			rock_ready = false
+			rock = {"status":"pending", "reason":"rock_support_envelope_provenance_incomplete"}
+	var rock_horizontal := float(rock.get("maxHorizontalSupportMeters", 0.0)) \
+		if rock_ready else 0.0
+	var rock_vertical := float(rock.get("maxVerticalSupportMeters", 0.0)) \
+		if rock_ready else 0.0
+	if rock_ready and (not is_finite(rock_horizontal) or not is_finite(rock_vertical) \
+			or rock_horizontal <= 0.0 or rock_vertical <= 0.0):
+		rock_ready = false
+		rock = {"status":"failed", "reason":"rock_support_envelope_extents_invalid"}
 	var families: Dictionary = _canonical_value(FAMILY_POLICY)
-	families["trees"] = {"status":"bounded", "maxHorizontalSupportMeters":tree_horizontal,
-		"maxVerticalSupportMeters":tree_vertical, "envelopeDigest":String(tree.digest),
-		"envelopeRevision":TREE_SUPPORT_ENVELOPE_REVISION}
-	families["surface_rocks"] = {"status":"bounded",
-		"maxHorizontalSupportMeters":rock_horizontal,
-		"maxVerticalSupportMeters":rock_vertical,
-		"envelopeDigest":String(rock.digest), "envelopeRevision":"rock-static-descriptor-envelope-v1"}
+	if String(tree.get("status", "")) == "ready":
+		families["trees"] = {"status":"bounded",
+			"maxHorizontalSupportMeters":float(tree.maxHorizontalSupportMeters),
+			"maxVerticalSupportMeters":float(tree.maxVerticalSupportMeters),
+			"envelopeDigest":String(tree.digest),
+			"envelopeRevision":TREE_SUPPORT_ENVELOPE_REVISION}
+	else:
+		families["trees"] = {"status":"pending", "reason":String(tree.get("reason",
+			"tree_support_envelope_unavailable")), "maxHorizontalSupportMeters":0.0,
+			"maxVerticalSupportMeters":0.0,
+			"envelopeRevision":TREE_SUPPORT_ENVELOPE_REVISION}
+	if rock_ready:
+		families["surface_rocks"] = {"status":"bounded",
+			"maxHorizontalSupportMeters":rock_horizontal,
+			"maxVerticalSupportMeters":rock_vertical,
+			"envelopeDigest":String(rock.digest),
+			"envelopeRevision":"rock-static-descriptor-envelope-v1"}
+	else:
+		families["surface_rocks"] = {"status":"pending", "reason":String(rock.get(
+			"reason", "rock_catalog_descriptor_envelope_unavailable")),
+			"maxHorizontalSupportMeters":0.0, "maxVerticalSupportMeters":0.0,
+			"envelopeRevision":"rock-static-descriptor-envelope-v1"}
 	# The underground pass emits rock, ore, and forage descriptors. Its support is
 	# the component-wise union of those source families, measured from each
 	# emitted source origin; it does not inherit the source scan radius.
-	families["underground_props"] = {"status":"bounded",
-		"maxHorizontalSupportMeters":maxf(rock_horizontal, 5.0),
-		"maxVerticalSupportMeters":maxf(rock_vertical, 4.0),
-		"envelopeDigest":_digest([String(rock.digest), "ore-source-recipe/v1",
-			"forage-source-recipe/v1"]), "envelopeRevision":"underground-source-union-v1"}
+	if rock_ready:
+		families["underground_props"] = {"status":"bounded",
+			"maxHorizontalSupportMeters":maxf(rock_horizontal, 5.0),
+			"maxVerticalSupportMeters":maxf(rock_vertical, 4.0),
+			"envelopeDigest":_digest([String(rock.digest), "ore-source-recipe/v1",
+				"forage-source-recipe/v1"]),
+			"envelopeRevision":"underground-source-union-v1"}
+	else:
+		families["underground_props"] = {"status":"pending",
+			"reason":String(rock.get("reason",
+				"underground_source_union_envelope_unavailable")),
+			"maxHorizontalSupportMeters":0.0,
+			"maxVerticalSupportMeters":0.0,
+			"envelopeRevision":"underground-source-union-v1"}
 	var payload := {"schema":"ecology-runtime-support-policy/v1",
 		"baseRevision":STATIC_BASE_SUPPORT_REVISION,
 		"treeEnvelope":tree, "rockEnvelope":rock,
-		"profileCatalogRevision":String(profiles.get("contentIdentity", "")),
+		"profileCatalogRevision":String(profiles.get("contentIdentity", "")) \
+			if profiles is Dictionary else "",
 		"families":families}
 	payload["status"] = "ready" if _all_families_bounded(families) else "pending"
+	payload["familyReadiness"] = {}
+	for family: String in REQUIRED_CATEGORIES:
+		payload["familyReadiness"][family] = String(families[family].get("status", "pending"))
 	payload["digest"] = _digest(payload)
 	return payload
 
@@ -734,7 +967,7 @@ static func derive_tree_request_envelope(profile_snapshot: Dictionary) -> Dictio
 				or trunk_min < 0.0 or trunk_max < trunk_min or wind_response < 0.0:
 			return {"status":"failed", "reason":"tree_profile_spatial_parameters_invalid:%s" % profile_id}
 		var request_height := height_max * 1.06 * tree_scale \
-			if height_min > 0.0 else 6.8 * tree_scale
+			if height_min > 0.0 else MAX_PRODUCER_FALLBACK_TREE_HEIGHT_METERS * tree_scale
 		# ProceduralTreeRecipeBuilder has a six metre canonical minimum even when
 		# callers ask for less; include that effective request in the envelope.
 		request_height = maxf(6.0, request_height)
@@ -801,7 +1034,7 @@ static func derive_tree_request_envelope(profile_snapshot: Dictionary) -> Dictio
 		"maxTrunkRadiusMeters":max_trunk, "maxCanopyRadiusMeters":max_canopy,
 		"maxWindResponse":max_wind_response,
 		"profileBounds":profile_bounds,
-		"fallbackLegacyHeightUpperMeters":6.8,
+		"fallbackLegacyHeightUpperMeters":MAX_PRODUCER_FALLBACK_TREE_HEIGHT_METERS,
 		"geneticHeightMultiplierUpper":1.06,
 		"geneticRadiusMultiplierUpper":1.10,
 		"grammarEnvelopeStatus":"pending_compiled_geometry_proof"
@@ -862,41 +1095,648 @@ static func derive_static_recipe_profile_envelope(profile_snapshot: Dictionary) 
 	return envelope
 
 
-static func maximum_horizontal_support_meters(source_inputs: Dictionary = {}) -> float:
+static func maximum_horizontal_support_meters(source_inputs: Dictionary = {},
+		catalog_artifact: Dictionary = {}) -> float:
 	var result := 0.0
-	var policy := support_policy(source_inputs)
+	var policy := support_policy(source_inputs, catalog_artifact)
 	for family_value: Variant in (policy.get("families", {}) as Dictionary).values():
 		if family_value is Dictionary:
 			result = maxf(result, float(family_value.get("maxHorizontalSupportMeters", 0.0)))
 	return result
 
 
+static func maximum_horizontal_support_for_family(source_inputs: Dictionary,
+		catalog_artifact: Dictionary, family: String) -> Dictionary:
+	var family_policy := family_support_policy(source_inputs, catalog_artifact, family)
+	if String(family_policy.get("status", "")) != "ready":
+		return family_policy
+	return {"status":"ready", "family":family,
+		"maxHorizontalSupportMeters":float(family_policy.maxHorizontalSupportMeters),
+		"maxVerticalSupportMeters":float(family_policy.maxVerticalSupportMeters),
+		"familyPolicyRevision":String(family_policy.familyPolicyRevision),
+		"familyPolicyDigest":String(family_policy.familyPolicyDigest),
+		"familyCertificateDigest":String(family_policy.familyCertificateDigest)}
+
+
 static func snapshot_cache_identity(world_id: String, source_chunk_key: Vector2i,
-		source_inputs: Dictionary, removed_projection_digest: String) -> String:
-	var policy := support_policy(source_inputs)
+		source_inputs: Dictionary, removed_projection_digest: String,
+		catalog_artifact: Dictionary = {}) -> String:
+	var policy := support_policy(source_inputs, catalog_artifact)
+	if String(policy.get("revision", "")).is_empty() \
+			or String(policy.get("digest", "")).length() != 64:
+		return ""
 	var inputs_digest := _digest({
 		"sourceInputs": source_inputs,
 		"removedSourceProjectionDigest": removed_projection_digest,
-		"influencePolicyRevision": policy.revision,
-		"influencePolicyDigest": policy.digest,
+		"influencePolicyRevision": String(policy.get("revision", "")),
+		"influencePolicyDigest": String(policy.get("digest", "")),
+		"catalogArtifactId":String(source_inputs.get("catalogArtifactId", "")),
+		"worldEpoch":int(source_inputs.get("worldEpoch", 0)),
 	})
 	return "%s|%d,%d|%s" % [world_id, source_chunk_key.x, source_chunk_key.y, inputs_digest]
 
 
 static func source_domain_revision(world_id: String, world_seed: String,
 		source_chunk_key: Vector2i, source_inputs: Dictionary,
-		removed_projection_digest: String) -> String:
-	var policy := support_policy(source_inputs)
+		removed_projection_digest: String, catalog_artifact: Dictionary = {}) -> String:
+	var policy := support_policy(source_inputs, catalog_artifact)
+	if String(policy.get("revision", "")).is_empty() \
+			or String(policy.get("digest", "")).length() != 64:
+		return ""
+	var semantic_inputs: Dictionary = source_inputs
+	if String(source_inputs.get("schema", "")) == "ecology-source-domain-inputs/v2":
+		# Artifact ids and structure owner generations are runtime freshness
+		# authorities. They must reject stale work, but identical generated
+		# content from a replacement owner keeps the same producer revision.
+		semantic_inputs = {
+			"schema":"ecology-source-domain-semantic-inputs/v1",
+			"catalogContentDigest":String(source_inputs.get("catalogContentDigest", "")),
+			"influencePolicyRevision":String(policy.get("revision", "")),
+			"influencePolicyDigest":String(policy.get("digest", "")),
+			"terrainVolumeChunkRevision":String(source_inputs.get(
+				"terrainVolumeChunkRevision", "")),
+			"structureDependencyStatus":String(source_inputs.get(
+				"structureDependencyStatus", "")),
+			"structureDependencyContentDigest":String(source_inputs.get(
+				"structureDependencyContentDigest", "")),
+			"structureAdmissionRevision":String(source_inputs.get(
+				"structureAdmissionRevision", "")),
+			"structureAdmissionStatus":String(source_inputs.get(
+				"structureAdmissionStatus", "")),
+		}
 	return _digest({
 		"schema": "ecology-source-domain-snapshot/v1",
 		"worldId": world_id,
 		"worldSeed": world_seed,
 		"sourceChunkKey": source_chunk_key,
-		"sourceInputs": source_inputs,
+		"sourceInputs": semantic_inputs,
 		"removedSourceProjectionDigest": removed_projection_digest,
-		"influencePolicyRevision": policy.revision,
-		"influencePolicyDigest": policy.digest,
+		"influencePolicyRevision": String(policy.get("revision", "")),
+		"influencePolicyDigest": String(policy.get("digest", "")),
 	})
+
+
+static func build_source_family_request(requested_families: Array,
+		world_id: String, world_seed: String, source_chunk_key: Vector2i,
+		source_inputs: Dictionary, removed_projection_digest: String,
+		catalog_artifact: Dictionary, catalog_lease_token := "") -> Dictionary:
+	var canonical_families: Array[String] = []
+	for family_value: Variant in requested_families:
+		var family := String(family_value)
+		if family not in REQUIRED_CATEGORIES or family in canonical_families:
+			return {"status":"failed", "reason":"ecology_family_request_invalid",
+				"family":family}
+		canonical_families.append(family)
+	if canonical_families.is_empty():
+		return {"status":"failed", "reason":"ecology_family_request_empty"}
+	canonical_families.sort()
+	var source_revision := source_domain_revision(world_id, world_seed,
+		source_chunk_key, source_inputs, removed_projection_digest, catalog_artifact)
+	if source_revision.is_empty():
+		return {"status":"pending", "reason":"ecology_source_revision_pending",
+			"schema":FAMILY_REQUEST_SCHEMA, "requestedFamilies":canonical_families}
+	var family_policies: Array = []
+	var all_policies_ready := true
+	var any_policy_failed := false
+	for family: String in canonical_families:
+		var family_policy := family_support_policy(source_inputs, catalog_artifact, family)
+		var row := {"family":family,
+			"status":String(family_policy.get("status", "pending")),
+			"familyPolicyRevision":String(family_policy.get("familyPolicyRevision", "")),
+			"familyPolicyDigest":String(family_policy.get("familyPolicyDigest", "")),
+			"reason":String(family_policy.get("reason", ""))}
+		family_policies.append(row)
+		if String(family_policy.get("status", "")) != "ready":
+			all_policies_ready = false
+			if String(family_policy.get("status", "")) == "failed":
+				any_policy_failed = true
+	var payload := {"schema":FAMILY_REQUEST_SCHEMA,
+		"worldId":world_id, "worldSeed":world_seed,
+		"worldEpoch":int(source_inputs.get("worldEpoch", 0)),
+		"sourceChunkKey":source_chunk_key,
+		"sourceDomainRevision":source_revision,
+		"catalogArtifactId":String(source_inputs.get("catalogArtifactId", "")),
+		"catalogContentDigest":String(source_inputs.get("catalogContentDigest", "")),
+		"removedSourceProjectionDigest":removed_projection_digest,
+		"requestedFamilies":canonical_families,
+		"familyPolicies":family_policies}
+	payload["requestDigest"] = _digest(payload)
+	payload["status"] = "failed" if any_policy_failed else ("ready" if all_policies_ready else "pending")
+	if not all_policies_ready:
+		payload["reason"] = "ecology_requested_family_policy_failed" if any_policy_failed \
+			else "ecology_requested_family_policy_pending"
+	return _freeze_value(payload)
+
+
+static func validate_source_family_request(request: Dictionary,
+		world_id: String, world_seed: String, source_chunk_key: Vector2i,
+		source_inputs: Dictionary, removed_projection_digest: String,
+		catalog_artifact: Dictionary, catalog_lease_token := "") -> bool:
+	if String(request.get("schema", "")) != FAMILY_REQUEST_SCHEMA \
+			or not request.is_read_only():
+		return false
+	var families: Variant = request.get("requestedFamilies", null)
+	if not families is Array:
+		return false
+	var expected := build_source_family_request(families, world_id, world_seed,
+		source_chunk_key, source_inputs, removed_projection_digest,
+		catalog_artifact, catalog_lease_token)
+	if String(expected.get("status", "")) != String(request.get("status", "")):
+		return false
+	return request == expected
+
+
+static func _family_rows_from_source_rows(source_rows: Array, family: String) -> Array:
+	var rows: Array = []
+	for row_value: Variant in source_rows:
+		if row_value is Dictionary and String(row_value.get("producerFamily", "")) == family:
+			var canonical_row: Dictionary = row_value.duplicate(true)
+			canonical_row.erase("familyRevision")
+			canonical_row.erase("producerSnapshotRevision")
+			canonical_row.erase("familyManifestDigest")
+			rows.append(canonical_row)
+	rows.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var a_key := "%s|%s" % [String(a.get("sourceId", "")),
+			String(a.get("sourcePartId", ""))]
+		var b_key := "%s|%s" % [String(b.get("sourceId", "")),
+			String(b.get("sourcePartId", ""))]
+		return a_key < b_key)
+	return rows
+
+
+static func _family_result_digest(family: String, source_revision: String,
+		family_policy_revision: String, family_policy_digest: String,
+		disposition: String, source_rows: Array) -> String:
+	return _digest([FAMILY_RESULT_SCHEMA, family, source_revision,
+		family_policy_revision, family_policy_digest, disposition, source_rows])
+
+
+static func seal_source_domain_family_bundle(fields: Dictionary,
+		catalog_artifact: Dictionary = {}) -> Dictionary:
+	var source_inputs: Dictionary = fields.get("sourceInputs", {}) \
+		if fields.get("sourceInputs", {}) is Dictionary else {}
+	var request: Dictionary = fields.get("familyRequest", {}) \
+		if fields.get("familyRequest", {}) is Dictionary else {}
+	var requested_value: Variant = request.get("requestedFamilies", null)
+	if String(request.get("schema", "")) != FAMILY_REQUEST_SCHEMA \
+			or not requested_value is Array \
+			or not validate_source_family_request(request,
+				String(fields.get("worldId", "")), String(fields.get("worldSeed", "")),
+				fields.get("sourceChunkKey", Vector2i.ZERO), source_inputs,
+				String(fields.get("removedSourceProjectionDigest", "")),
+				catalog_artifact):
+		return {"status":"failed", "reason":"ecology_family_bundle_request_invalid"}
+	var policy := support_policy(source_inputs, catalog_artifact)
+	if not validate_support_policy_certificate(policy):
+		return {"status":"pending", "reason":"ecology_family_bundle_policy_certificate_pending"}
+	var world_id := String(fields.get("worldId", ""))
+	var world_seed := String(fields.get("worldSeed", ""))
+	var source_chunk_value: Variant = fields.get("sourceChunkKey", null)
+	if not source_chunk_value is Vector2i:
+		return {"status":"failed", "reason":"ecology_family_bundle_source_chunk_invalid"}
+	var source_chunk_key: Vector2i = source_chunk_value
+	var removed_digest := String(fields.get("removedSourceProjectionDigest", ""))
+	var source_revision := source_domain_revision(world_id, world_seed,
+		source_chunk_key, source_inputs, removed_digest, catalog_artifact)
+	if source_revision.length() != 64:
+		return {"status":"pending", "reason":"ecology_family_bundle_source_revision_pending"}
+	var actor_intents_value: Variant = fields.get("actorIntentSnapshot", [])
+	if not actor_intents_value is Array:
+		return {"status":"failed", "reason":"ecology_family_bundle_actor_intents_invalid"}
+	var actor_intents: Array = actor_intents_value.duplicate()
+	actor_intents.sort_custom(func(a: Variant, b: Variant) -> bool:
+		if not a is Dictionary: return true
+		if not b is Dictionary: return false
+		return String(a.get("propId", "")) < String(b.get("propId", "")))
+	var actor_intent_digest := _digest(actor_intents)
+	# Keep the legacy v1 source revision and actor-intent digest byte-for-byte
+	# compatible while avoiding a throwaway full v1 bundle seal. The source rows
+	# and family results are sealed exactly once below.
+	var base := {"schema":FAMILY_BUNDLE_SCHEMA,
+		"worldId":world_id, "worldSeed":world_seed,
+		"sourceChunkKey":source_chunk_key, "sourceInputs":source_inputs,
+		"removedSourceProjectionDigest":removed_digest,
+		"removedPropsRevision":removed_digest,
+		"terrainVolumeChunkRevision":String(source_inputs.get(
+			"terrainVolumeChunkRevision", "")),
+		"structureAdmissionRevision":String(source_inputs.get(
+			"structureAdmissionRevision", "")),
+		"structureAdmissionStatus":String(source_inputs.get(
+			"structureAdmissionStatus", "pending")),
+		"influencePolicyRevision":String(policy.get("revision", "")),
+		"influencePolicyDigest":String(policy.get("digest", "")),
+		"catalogArtifactId":String(source_inputs.get("catalogArtifactId", "")),
+		"catalogContentDigest":String(source_inputs.get("catalogContentDigest", "")),
+		"worldEpoch":int(source_inputs.get("worldEpoch", 0)),
+		"sourceRevision":source_revision, "sourceDomainRevision":source_revision,
+		"producerCatalogRevision":String(source_inputs.get("producerCatalogRevision", "")),
+		"actorIntentDigest":actor_intent_digest}
+	var all_rows: Variant = fields.get("sourceRows", [])
+	if not all_rows is Array:
+		return {"status":"failed", "reason":"ecology_family_bundle_source_rows_invalid"}
+	var completed_value: Variant = fields.get("completedFamilies", [])
+	var completed: Array = completed_value if completed_value is Array else []
+	var family_coverage: Array = []
+	var bundle_rows: Array = []
+	var all_requested_complete := true
+	for family_value: Variant in REQUIRED_CATEGORIES:
+		var family := String(family_value)
+		var requested: bool = requested_value.has(family)
+		var family_policy := family_support_policy(source_inputs, catalog_artifact, family)
+		var disposition := "deferred_unrequested"
+		if requested:
+			if String(family_policy.get("status", "")) != "ready":
+				disposition = "pending_dependency"
+			elif family not in completed:
+				disposition = "pending_dependency"
+			else:
+				disposition = "complete_nonempty"
+		var family_rows := _family_rows_from_source_rows(all_rows, family)
+		if disposition == "complete_nonempty" and family_rows.is_empty():
+			disposition = "complete_empty"
+		if disposition not in ["complete_nonempty", "complete_empty"]:
+			# Deferred and pending rows are retained only in Main's private pass
+			# session. They must never leak through a narrower immutable result.
+			family_rows.clear()
+		if disposition not in ["complete_nonempty", "complete_empty"] and requested:
+			all_requested_complete = false
+		var family_revision := _digest([source_revision, family,
+			String(family_policy.get("familyPolicyRevision", "")),
+			String(family_policy.get("familyPolicyDigest", "")),
+			family_rows]) if disposition in ["complete_nonempty", "complete_empty"] else ""
+		var family_manifest_digest := _family_result_digest(family,
+			source_revision,
+			String(family_policy.get("familyPolicyRevision", "")),
+			String(family_policy.get("familyPolicyDigest", "")),
+			disposition, family_rows)
+		var published_family_rows: Array = []
+		for row_value: Variant in family_rows:
+			var published_row: Dictionary = row_value.duplicate(true)
+			if disposition in ["complete_nonempty", "complete_empty"]:
+				published_row["familyRevision"] = family_revision
+				published_row["producerSnapshotRevision"] = family_revision
+				published_row["familyManifestDigest"] = family_manifest_digest
+			published_family_rows.append(published_row)
+		family_rows = published_family_rows
+		if disposition in ["complete_nonempty", "complete_empty"]:
+			# Keep the bundle union byte-for-byte aligned with the family rows
+			# consumed by compilers, including their sealed family revision fields.
+			bundle_rows.append_array(family_rows)
+		var row := {"schema":FAMILY_RESULT_SCHEMA,
+			"family":family, "disposition":disposition,
+			"familyRevision":family_revision,
+			"familyPolicyRevision":String(family_policy.get("familyPolicyRevision", "")),
+			"familyPolicyDigest":String(family_policy.get("familyPolicyDigest", "")),
+			"memberCount":family_rows.size(),
+			"sourceManifestDigest":family_manifest_digest,
+			"sourceRows":family_rows}
+		family_coverage.append(row)
+	bundle_rows.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var a_key := "%s|%s" % [String(a.get("sourceId", "")), String(a.get("sourcePartId", ""))]
+		var b_key := "%s|%s" % [String(b.get("sourceId", "")), String(b.get("sourcePartId", ""))]
+		return a_key < b_key)
+	var requested_families: Array = requested_value.duplicate()
+	requested_families.sort()
+	var bundle := base.duplicate(false)
+	bundle["schema"] = FAMILY_BUNDLE_SCHEMA
+	bundle["status"] = "ready" if all_requested_complete else "pending"
+	bundle["reason"] = "" if all_requested_complete else "ecology_requested_family_capture_pending"
+	bundle["producerComplete"] = all_requested_complete
+	bundle["producerStatus"] = "ready" if all_requested_complete else "pending"
+	bundle["requestedFamilies"] = requested_families
+	bundle["familyRequest"] = request
+	bundle["familyRequestDigest"] = String(request.get("requestDigest", ""))
+	bundle["familyCoverage"] = family_coverage
+	bundle["sourceRows"] = bundle_rows
+	bundle["categoriesComplete"] = requested_families.filter(
+		func(family: Variant) -> bool:
+			for coverage_value: Variant in family_coverage:
+				if coverage_value is Dictionary and String(coverage_value.get("family", "")) == String(family):
+					return String(coverage_value.get("disposition", "")) in ["complete_nonempty", "complete_empty"]
+			return false)
+	bundle["enumeratedSourceCount"] = bundle_rows.size()
+	bundle["sourceManifestDigest"] = _digest([requested_families, family_coverage])
+	bundle["producerSnapshotRevision"] = _digest([source_revision,
+		bundle.familyRequestDigest, bundle.sourceManifestDigest,
+		String(base.get("actorIntentDigest", ""))])
+	bundle["actorIntentSnapshot"] = fields.get("actorIntentSnapshot", [])
+	bundle["familyCoverageDigest"] = _digest(family_coverage)
+	return _freeze_value(bundle)
+
+
+static func validate_source_domain_family_bundle(snapshot: Dictionary,
+		expected_world_id := "", expected_source_chunk_key := Vector2i(2147483647, 2147483647),
+		catalog_artifact: Dictionary = {}, expected_requested_families: Array = []) -> bool:
+	if String(snapshot.get("schema", "")) != FAMILY_BUNDLE_SCHEMA \
+			or not snapshot.is_read_only():
+		return false
+	var source_inputs: Variant = snapshot.get("sourceInputs", null)
+	var request: Variant = snapshot.get("familyRequest", null)
+	var coverage: Variant = snapshot.get("familyCoverage", null)
+	var source_chunk_value: Variant = snapshot.get("sourceChunkKey", null)
+	if not source_inputs is Dictionary or not request is Dictionary or not coverage is Array \
+			or not source_chunk_value is Vector2i:
+		return false
+	var source_chunk_key: Vector2i = source_chunk_value
+	if not expected_world_id.is_empty() and String(snapshot.get("worldId", "")) != expected_world_id:
+		return false
+	if expected_source_chunk_key != Vector2i(2147483647, 2147483647) \
+			and source_chunk_key != expected_source_chunk_key:
+		return false
+	if not expected_requested_families.is_empty():
+		var expected_families := expected_requested_families.duplicate()
+		expected_families.sort()
+		if snapshot.get("requestedFamilies", null) != expected_families:
+			return false
+	var expected_source_revision := source_domain_revision(
+		String(snapshot.get("worldId", "")), String(snapshot.get("worldSeed", "")),
+		source_chunk_key, source_inputs,
+		String(snapshot.get("removedSourceProjectionDigest", "")), catalog_artifact)
+	if expected_source_revision != String(snapshot.get("sourceRevision", "")) \
+			or String(request.get("requestDigest", "")) != String(snapshot.get("familyRequestDigest", "")):
+		return false
+	if not validate_source_family_request(request, String(snapshot.worldId),
+		String(snapshot.worldSeed), snapshot.sourceChunkKey, source_inputs,
+		String(snapshot.get("removedSourceProjectionDigest", "")), catalog_artifact):
+		return false
+	var expected := seal_source_domain_family_bundle({
+		"worldId":snapshot.worldId, "worldSeed":snapshot.worldSeed,
+		"sourceChunkKey":snapshot.sourceChunkKey, "sourceInputs":source_inputs,
+		"sourceRows":snapshot.get("sourceRows", []),
+		"actorIntentSnapshot":snapshot.get("actorIntentSnapshot", []),
+		"categoriesComplete":snapshot.get("categoriesComplete", []),
+		"completedFamilies":snapshot.get("categoriesComplete", []),
+		"familyRequest":request,
+		"removedSourceProjectionDigest":snapshot.get("removedSourceProjectionDigest", "")
+	}, catalog_artifact)
+	if String(expected.get("status", "")) != String(snapshot.get("status", "")) \
+			or String(expected.get("familyCoverageDigest", "")) != String(snapshot.get("familyCoverageDigest", "")):
+		return false
+	for field: String in ["sourceRevision", "sourceDomainRevision",
+			"producerCatalogRevision", "removedPropsRevision",
+			"familyCoverage", "sourceRows", "sourceManifestDigest",
+			"producerSnapshotRevision", "familyRequestDigest", "categoriesComplete",
+			"actorIntentDigest", "influencePolicyRevision", "influencePolicyDigest",
+			"catalogArtifactId", "catalogContentDigest", "worldEpoch",
+			"terrainVolumeChunkRevision", "structureAdmissionRevision", "structureAdmissionStatus",
+			"producerComplete", "producerStatus", "reason", "enumeratedSourceCount"]:
+		if snapshot.get(field, null) != expected.get(field, null):
+			return false
+	return true
+
+
+static func source_family_result(snapshot: Dictionary, family: String,
+		catalog_artifact: Dictionary = {}) -> Dictionary:
+	if family not in REQUIRED_CATEGORIES:
+		return {"status":"failed", "reason":"unknown_ecology_source_family", "family":family}
+	if not validate_source_domain_family_bundle(snapshot, "",
+		Vector2i(2147483647, 2147483647), catalog_artifact):
+		return {"status":"failed", "reason":"ecology_source_family_bundle_invalid", "family":family}
+	for value: Variant in snapshot.get("familyCoverage", []):
+		if value is Dictionary and String(value.get("family", "")) == family:
+			var disposition := String(value.get("disposition", ""))
+			return {"status":"ready" if disposition in ["complete_empty", "complete_nonempty"] \
+				else ("failed" if disposition == "failed" else "pending"),
+				"disposition":disposition, "family":family,
+				"familyRevision":String(value.get("familyRevision", "")),
+				"familyPolicyRevision":String(value.get("familyPolicyRevision", "")),
+				"familyPolicyDigest":String(value.get("familyPolicyDigest", "")),
+				"memberCount":int(value.get("memberCount", 0)),
+				"sourceManifestDigest":String(value.get("sourceManifestDigest", "")),
+				"sourceRows":value.get("sourceRows", [])}
+	return {"status":"failed", "reason":"ecology_source_family_row_missing", "family":family}
+
+
+## Project a sealed full source-chunk family bundle into one render section.
+## This only selects members from the already completed horizontal capture; it
+## never reruns producer enumeration or changes its ordering/RNG decisions.
+## Bounds are half-open and must exactly describe the supplied section key.
+static func project_source_domain_family_bundle_to_band(snapshot: Dictionary,
+		band_key: Vector3i, band_bounds: AABB,
+		catalog_artifact: Dictionary = {}) -> Dictionary:
+	if not validate_source_domain_family_bundle(snapshot,
+		String(snapshot.get("worldId", "")), snapshot.get("sourceChunkKey", Vector2i.ZERO),
+		catalog_artifact):
+		return {"status":"failed", "reason":"ecology_band_projection_source_bundle_invalid"}
+	if not _valid_band_bounds(band_key, band_bounds):
+		return {"status":"failed", "reason":"ecology_band_projection_bounds_invalid",
+			"bandKey":band_key, "bandBounds":band_bounds}
+	var projected := _build_source_domain_family_band_bundle(snapshot, band_key,
+		band_bounds)
+	return _freeze_value(projected)
+
+
+## Build one section slice after the source-publication owner has validated and
+## retained this exact immutable source bundle. Admission is deliberately not
+## performed here: callers must establish the publication alias/lease first.
+## `source_bundle_digest` is computed once by that owner and keeps the output
+## byte-for-byte equivalent to the validating projection entry point.
+static func build_admitted_source_domain_family_band_bundle(snapshot: Dictionary,
+		band_key: Vector3i, band_bounds: AABB, source_bundle_digest: String) -> Dictionary:
+	if String(snapshot.get("schema", "")) != FAMILY_BUNDLE_SCHEMA \
+			or String(snapshot.get("status", "")) != "ready" \
+			or String(snapshot.get("sourceRevision", "")).is_empty() \
+			or source_bundle_digest.length() != 64:
+		return {"status":"failed", "reason":"ecology_admitted_band_source_identity_invalid"}
+	if not _valid_band_bounds(band_key, band_bounds):
+		return {"status":"failed", "reason":"ecology_band_projection_bounds_invalid",
+			"bandKey":band_key, "bandBounds":band_bounds}
+	return _freeze_value(_build_source_domain_family_band_bundle(snapshot,
+		band_key, band_bounds, source_bundle_digest))
+
+
+## Validate a projected bundle against the exact retained source bundle from
+## which it was derived. The original snapshot is needed to prove that an empty
+## band omitted no intersecting member.
+static func validate_source_domain_family_band_bundle(projected: Dictionary,
+		source_snapshot: Dictionary, expected_band_key: Vector3i,
+		expected_band_bounds: AABB, catalog_artifact: Dictionary = {}) -> bool:
+	if String(projected.get("schema", "")) != FAMILY_BAND_BUNDLE_SCHEMA \
+			or not projected.is_read_only() \
+			or not _valid_band_bounds(expected_band_key, expected_band_bounds) \
+			or projected.get("bandKey", null) != expected_band_key \
+			or projected.get("sectionKey", null) != expected_band_key \
+			or projected.get("bandBounds", null) != expected_band_bounds:
+		return false
+	var expected := project_source_domain_family_bundle_to_band(source_snapshot,
+		expected_band_key, expected_band_bounds, catalog_artifact)
+	return String(expected.get("status", "")) != "failed" \
+		and projected == expected
+
+
+static func _build_source_domain_family_band_bundle(snapshot: Dictionary,
+		band_key: Vector3i, band_bounds: AABB, source_bundle_digest := "") -> Dictionary:
+	var coverage_by_family: Dictionary = {}
+	for coverage_value: Variant in snapshot.get("familyCoverage", []):
+		if coverage_value is Dictionary:
+			coverage_by_family[String(coverage_value.get("family", ""))] = coverage_value
+	var band_coverage: Array = []
+	var bundle_rows: Array = []
+	var requested_value: Variant = snapshot.get("requestedFamilies", null)
+	if not requested_value is Array:
+		return {"status":"failed", "reason":"ecology_band_projection_requested_families_invalid"}
+	for family_value: Variant in requested_value:
+		var family := String(family_value)
+		var source_coverage: Variant = coverage_by_family.get(family, null)
+		if not source_coverage is Dictionary:
+			return {"status":"failed", "reason":"ecology_band_projection_family_missing",
+				"family":family}
+		var source_disposition := String(source_coverage.get("disposition", ""))
+		var disposition := source_disposition
+		var source_rows: Array = source_coverage.get("sourceRows", []) \
+			if source_coverage.get("sourceRows", []) is Array else []
+		var band_rows: Array = []
+		var source_family_revision := String(source_coverage.get("familyRevision", ""))
+		var source_family_manifest_digest := String(source_coverage.get("sourceManifestDigest", ""))
+		if source_disposition in ["complete_empty", "complete_nonempty"]:
+			for source_row_value: Variant in source_rows:
+				if not source_row_value is Dictionary \
+						or String(source_row_value.get("producerFamily", "")) != family:
+					return {"status":"failed", "reason":"ecology_band_projection_source_row_invalid",
+						"family":family}
+				var proof_value: Variant = source_row_value.get("supportProof", null)
+				var world_bounds_value: Variant = proof_value.get("worldBounds", null) \
+					if proof_value is Dictionary else null
+				if not proof_value is Dictionary \
+						or String(proof_value.get("status", "")) != "ready" \
+						or not world_bounds_value is AABB \
+						or not _valid_positive_bounds(world_bounds_value):
+					return {"status":"pending", "reason":"ecology_band_projection_member_bounds_pending",
+						"family":family,
+						"sourceId":String(source_row_value.get("sourceId", ""))}
+				if _half_open_bounds_intersect(world_bounds_value, band_bounds):
+					band_rows.append(source_row_value)
+			disposition = "complete_nonempty" if not band_rows.is_empty() else "complete_empty"
+		var source_family_policy_revision := String(source_coverage.get(
+			"familyPolicyRevision", ""))
+		var source_family_policy_digest := String(source_coverage.get(
+			"familyPolicyDigest", ""))
+		var source_family_ids := _source_ids_from_rows(source_rows)
+		var band_manifest_digest := _digest([FAMILY_BAND_BUNDLE_SCHEMA,
+			String(snapshot.get("sourceRevision", "")), family, source_family_revision,
+			source_family_manifest_digest, band_key, band_bounds, disposition, band_rows])
+		var published_band_rows: Array = []
+		for row_value: Variant in band_rows:
+			var band_row: Dictionary = row_value.duplicate(true)
+			band_row["sourceFamilyRevision"] = source_family_revision
+			band_row["sourceFamilyManifestDigest"] = source_family_manifest_digest
+			band_row["familyRevision"] = band_manifest_digest
+			band_row["producerSnapshotRevision"] = band_manifest_digest
+			band_row["familyManifestDigest"] = band_manifest_digest
+			published_band_rows.append(band_row)
+		if source_disposition not in ["complete_empty", "complete_nonempty"]:
+			published_band_rows.clear()
+		var band_family_revision := band_manifest_digest \
+			if disposition in ["complete_empty", "complete_nonempty"] else ""
+		var receipt := {"schema":"ecology-source-family-band-result/v1",
+			"family":family, "bandKey":band_key, "sectionKey":band_key,
+			"sectionY":band_key.y,
+			"bandBounds":band_bounds,
+			"disposition":disposition,
+			"familyRevision":band_family_revision,
+			"sourceFamilyRevision":source_family_revision,
+			"familyPolicyRevision":source_family_policy_revision,
+			"familyPolicyDigest":source_family_policy_digest,
+			"sourceManifestDigest":band_manifest_digest,
+			"sourceFamilyManifestDigest":source_family_manifest_digest,
+			"sourceIds":_source_ids_from_rows(published_band_rows),
+			"sourceIdsDigest":_digest(_source_ids_from_rows(published_band_rows)),
+			"sourceFamilyIdsDigest":_digest(source_family_ids),
+			"sourceFamilyMemberCount":source_rows.size(),
+			"sourceFamilyMemberRowCount":source_rows.size(),
+			"sourceFamilySourceIdCount":source_family_ids.size(),
+			"memberCount":published_band_rows.size(),
+			"sourceRows":published_band_rows}
+		band_coverage.append(receipt)
+		bundle_rows.append_array(published_band_rows)
+	bundle_rows.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var a_key := "%s|%s|%s" % [String(a.get("producerFamily", "")),
+			String(a.get("sourceId", "")), String(a.get("sourcePartId", ""))]
+		var b_key := "%s|%s|%s" % [String(b.get("producerFamily", "")),
+			String(b.get("sourceId", "")), String(b.get("sourcePartId", ""))]
+		return a_key < b_key)
+	var requested_families: Array = snapshot.get("requestedFamilies", []).duplicate()
+	var requested_complete := String(snapshot.get("status", "")) == "ready"
+	var source_manifest_digest := _digest([String(snapshot.get("sourceRevision", "")),
+		String(snapshot.get("familyRequestDigest", "")), band_key, band_bounds, band_coverage])
+	return {"schema":FAMILY_BAND_BUNDLE_SCHEMA,
+		"status":"ready" if requested_complete else "pending",
+		"reason":"" if requested_complete else "ecology_band_projection_source_pending",
+		"worldId":String(snapshot.get("worldId", "")),
+		"worldSeed":String(snapshot.get("worldSeed", "")),
+		"worldEpoch":int(snapshot.get("worldEpoch", 0)),
+		"sourceChunkKey":snapshot.get("sourceChunkKey", Vector2i.ZERO),
+		"sourceRevision":String(snapshot.get("sourceRevision", "")),
+		"catalogArtifactId":String(snapshot.get("catalogArtifactId", "")),
+		"catalogContentDigest":String(snapshot.get("catalogContentDigest", "")),
+		"removedSourceProjectionDigest":String(snapshot.get("removedSourceProjectionDigest", "")),
+		"terrainVolumeChunkRevision":String(snapshot.get("terrainVolumeChunkRevision", "")),
+		"structureAdmissionRevision":String(snapshot.get("structureAdmissionRevision", "")),
+		"structureAdmissionStatus":String(snapshot.get("structureAdmissionStatus", "")),
+		"influencePolicyRevision":String(snapshot.get("influencePolicyRevision", "")),
+		"influencePolicyDigest":String(snapshot.get("influencePolicyDigest", "")),
+		"familyRequestDigest":String(snapshot.get("familyRequestDigest", "")),
+		"sourceBundleDigest":source_bundle_digest if source_bundle_digest.length() == 64 \
+			else _digest(snapshot),
+		"bandKey":band_key, "sectionKey":band_key,
+		"sectionY":band_key.y, "bandBounds":band_bounds,
+		"requestedFamilies":requested_families,
+		"familyCoverage":band_coverage,
+		"sourceRows":bundle_rows,
+		"categoriesComplete":requested_families.duplicate(),
+		"producerComplete":requested_complete,
+		"producerStatus":"ready" if requested_complete else "pending",
+		"enumeratedSourceCount":bundle_rows.size(),
+		"sourceManifestDigest":source_manifest_digest,
+		"familyCoverageDigest":_digest(band_coverage),
+		"producerSnapshotRevision":_digest([FAMILY_BAND_BUNDLE_SCHEMA,
+			String(snapshot.get("sourceRevision", "")),
+			String(snapshot.get("familyRequestDigest", "")), source_manifest_digest])}
+
+
+static func _source_ids_from_rows(rows: Array) -> Array[String]:
+	var seen: Dictionary = {}
+	for row_value: Variant in rows:
+		if row_value is Dictionary:
+			var source_id := String(row_value.get("sourceId", ""))
+			if not source_id.is_empty():
+				seen[source_id] = true
+	var source_ids: Array[String] = []
+	for source_id_value: Variant in seen.keys():
+		source_ids.append(String(source_id_value))
+	source_ids.sort()
+	return source_ids
+
+
+static func _valid_band_bounds(band_key: Vector3i, band_bounds: AABB) -> bool:
+	return _valid_positive_bounds(band_bounds) and band_bounds == section_bounds(band_key)
+
+
+static func _valid_positive_bounds(bounds: AABB) -> bool:
+	return bounds.position.is_finite() and bounds.size.is_finite() \
+		and bounds.end.is_finite() \
+		and bounds.size.x > 0.0 and bounds.size.y > 0.0 and bounds.size.z > 0.0
+
+
+static func _half_open_bounds_intersect(a: AABB, b: AABB) -> bool:
+	return a.position.x < b.end.x and a.end.x > b.position.x \
+		and a.position.y < b.end.y and a.end.y > b.position.y \
+		and a.position.z < b.end.z and a.end.z > b.position.z
+
+
+static func source_domain_request_digest(request: Dictionary) -> String:
+	var mutable: Dictionary = request.duplicate(true)
+	var digest := String(mutable.get("requestDigest", ""))
+	mutable.erase("requestDigest")
+	mutable.erase("catalogLeaseToken")
+	mutable.erase("status")
+	mutable.erase("reason")
+	return digest if digest.length() == 64 and _digest(mutable) == digest else ""
+
+
+static func source_publication_member_key(family: String, source_id: String,
+		source_part_id: String) -> String:
+	return _digest(["ecology-source-member-key/v1", family, source_id, source_part_id])
 
 
 static func digest_value(value: Variant) -> String:
@@ -951,9 +1791,27 @@ static func static_member_envelope_digest(world_id: String, source_id: String,
 
 
 static func inverse_source_chunk_keys_for_section(section_key: Vector3i,
-		source_inputs: Dictionary = {}) -> Array[Vector2i]:
+		source_inputs: Dictionary = {}, catalog_artifact: Dictionary = {}) -> Array[Vector2i]:
+	var union: Array[Vector2i] = []
+	for family: String in REQUIRED_CATEGORIES:
+		var family_keys := inverse_source_chunk_keys_for_family(section_key, family,
+			source_inputs, catalog_artifact)
+		for key: Vector2i in family_keys:
+			if key not in union:
+				union.append(key)
+	union.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x < b.x if a.x != b.x else a.y < b.y)
+	return union
+
+
+static func inverse_source_chunk_keys_for_family(section_key: Vector3i, family: String,
+		source_inputs: Dictionary = {}, catalog_artifact: Dictionary = {}) -> Array[Vector2i]:
+	var family_support := maximum_horizontal_support_for_family(source_inputs,
+		catalog_artifact, family)
+	if String(family_support.get("status", "")) != "ready":
+		return []
 	var bounds := section_bounds(section_key)
-	var support := maximum_horizontal_support_meters(source_inputs)
+	var support := float(family_support.maxHorizontalSupportMeters)
 	var chunk_size := StaticRenderSectionGridScript.STREAM_CHUNK_SIZE_METERS
 	# Source origins range over half-open source chunk cells. The lower inclusive
 	# key is ceil(lower_origin / chunk_size) - 1, which includes the cell touching
@@ -972,28 +1830,61 @@ static func inverse_source_chunk_keys_for_section(section_key: Vector3i,
 
 
 static func source_domain_census_certificate(section_key: Vector3i,
-		source_inputs: Dictionary = {}) -> Dictionary:
+		source_inputs: Dictionary = {}, catalog_artifact: Dictionary = {}) -> Dictionary:
 	var bounds := section_bounds(section_key)
-	var keys := inverse_source_chunk_keys_for_section(section_key, source_inputs)
-	var policy := support_policy(source_inputs)
+	var policy := support_policy(source_inputs, catalog_artifact)
+	var keys_by_family: Dictionary = {}
+	var family_rows: Array = []
+	var all_families_ready := true
+	var key_set: Dictionary = {}
+	for family: String in REQUIRED_CATEGORIES:
+		var family_policy := family_support_policy(source_inputs, catalog_artifact, family)
+		var row := {"family":family, "status":String(family_policy.get("status", "pending")),
+			"reason":String(family_policy.get("reason", "")),
+			"familyPolicyRevision":String(family_policy.get("familyPolicyRevision", "")),
+			"familyPolicyDigest":String(family_policy.get("familyPolicyDigest", ""))}
+		if String(family_policy.get("status", "")) == "ready":
+			var family_keys := inverse_source_chunk_keys_for_family(section_key, family,
+				source_inputs, catalog_artifact)
+			keys_by_family[family] = family_keys
+			for key: Vector2i in family_keys:
+				key_set[key] = true
+			row["sourceChunkKeysDigest"] = _digest(_source_chunk_key_rows(
+				family_keys))
+		else:
+			all_families_ready = false
+			# Null is intentional: unknown support cannot be mistaken for an empty set.
+			keys_by_family[family] = null
+		family_rows.append(row)
+	var keys: Array[Vector2i] = []
+	for key_value: Variant in key_set.keys():
+		if key_value is Vector2i:
+			keys.append(key_value)
+	keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x < b.x if a.x != b.x else a.y < b.y)
 	var key_rows: Array = []
-	for key: Vector2i in keys:
-		key_rows.append([key.x, key.y])
+	key_rows = _source_chunk_key_rows(keys)
 	var certificate := {
-		"status": "ready" if String(policy.get("status", "pending")) == "ready" else "pending",
+		"status": "ready" if all_families_ready else "pending",
+		"reason":"" if all_families_ready else "ecology_family_support_policy_unbounded",
 		"schema": CENSUS_SCHEMA,
 		"sectionKey": section_key,
 		"sectionBounds": bounds,
-		"influencePolicyRevision": String(policy.revision),
-		"influencePolicyDigest": String(policy.digest),
-		"sourceChunkSizeMeters": float(policy.sourceChunkSizeMeters),
-		"sourceOriginDomainFootprintMeters":float(policy.sourceChunkSizeMeters),
-		"maxHorizontalSupportMeters": maximum_horizontal_support_meters(source_inputs),
+		"influencePolicyRevision": String(policy.get("revision", "")),
+		"influencePolicyDigest": String(policy.get("digest", "")),
+		"catalogArtifactId":String(source_inputs.get("catalogArtifactId", "")),
+		"catalogContentDigest":String(source_inputs.get("catalogContentDigest", "")),
+		"worldEpoch":int(source_inputs.get("worldEpoch", 0)),
+		"sourceChunkSizeMeters": float(policy.get("sourceChunkSizeMeters", 0.0)),
+		"sourceOriginDomainFootprintMeters":float(policy.get("sourceChunkSizeMeters", 0.0)),
+		"maxHorizontalSupportMeters": maximum_horizontal_support_meters(source_inputs,
+			catalog_artifact),
 		"sourceInputs":_freeze_value(source_inputs.duplicate(true)),
 		"sourceInputsDigest":_digest(source_inputs),
-		"supportPolicy":_freeze_value(policy.duplicate(true)),
 		"sourceChunkKeys": keys,
 		"sourceChunkKeysDigest": _digest(key_rows),
+		"sourceChunkKeysByFamily":keys_by_family,
+		"familyCensusRows":family_rows,
 	}
 	if certificate.status == "pending":
 		certificate["reason"] = "ecology_support_policy_unbounded"
@@ -1002,7 +1893,7 @@ static func source_domain_census_certificate(section_key: Vector3i,
 
 static func validate_source_domain_census_certificate(certificate: Dictionary,
 		expected_section_key := Vector3i(2147483647, 2147483647, 2147483647),
-			source_inputs: Dictionary = {}) -> bool:
+			source_inputs: Dictionary = {}, catalog_artifact: Dictionary = {}) -> bool:
 	if String(certificate.get("schema", "")) != CENSUS_SCHEMA:
 		return false
 	var section_key: Variant = certificate.get("sectionKey", null)
@@ -1018,7 +1909,8 @@ static func validate_source_domain_census_certificate(certificate: Dictionary,
 		return false
 	var effective_inputs: Dictionary = source_inputs if not source_inputs.is_empty() \
 		else certificate_inputs
-	var expected := source_domain_census_certificate(section_key, effective_inputs)
+	var expected := source_domain_census_certificate(section_key, effective_inputs,
+		catalog_artifact)
 	if String(expected.get("status", "")) != String(certificate.get("status", "")):
 		return false
 	for field: String in ["sectionBounds", "influencePolicyRevision", "influencePolicyDigest",
@@ -1026,8 +1918,12 @@ static func validate_source_domain_census_certificate(certificate: Dictionary,
 			"maxHorizontalSupportMeters", "sourceChunkKeysDigest", "sourceInputsDigest"]:
 		if certificate.get(field) != expected.get(field):
 			return false
-	if _digest(certificate.get("supportPolicy", {})) != _digest(expected.get("supportPolicy", {})):
-		return false
+	for field: String in ["sourceChunkKeysByFamily", "familyCensusRows"]:
+		if certificate.get(field, null) != expected.get(field, null):
+			return false
+	for field: String in ["catalogArtifactId", "catalogContentDigest", "worldEpoch"]:
+		if certificate.get(field, null) != expected.get(field, null):
+			return false
 	if String(expected.get("status", "")) != "ready" \
 			and String(certificate.get("reason", "")) != String(expected.get("reason", "")):
 		return false
@@ -1037,7 +1933,17 @@ static func validate_source_domain_census_certificate(certificate: Dictionary,
 	return true
 
 
-static func seal_source_domain_snapshot(fields: Dictionary) -> Dictionary:
+static func _source_chunk_key_rows(keys: Array) -> Array:
+	var rows: Array = []
+	for key_value: Variant in keys:
+		if key_value is Vector2i:
+			var key: Vector2i = key_value
+			rows.append([key.x, key.y])
+	return rows
+
+
+static func seal_source_domain_snapshot(fields: Dictionary,
+		catalog_artifact: Dictionary = {}) -> Dictionary:
 	var snapshot: Dictionary = fields.duplicate(true)
 	snapshot["schema"] = "ecology-source-domain-snapshot/v1"
 	var world_id := String(snapshot.get("worldId", ""))
@@ -1055,7 +1961,7 @@ static func seal_source_domain_snapshot(fields: Dictionary) -> Dictionary:
 	var terrain_revision := String(source_inputs.get("terrainVolumeChunkRevision", ""))
 	var structure_revision := String(source_inputs.get("structureAdmissionRevision", ""))
 	var structure_status := String(source_inputs.get("structureAdmissionStatus", "pending"))
-	var policy := support_policy(source_inputs)
+	var policy := support_policy(source_inputs, catalog_artifact)
 	source_rows.sort_custom(func(a: Variant, b: Variant) -> bool:
 		if not a is Dictionary: return true
 		if not b is Dictionary: return false
@@ -1073,10 +1979,13 @@ static func seal_source_domain_snapshot(fields: Dictionary) -> Dictionary:
 	snapshot["terrainVolumeChunkRevision"] = terrain_revision
 	snapshot["structureAdmissionRevision"] = structure_revision
 	snapshot["structureAdmissionStatus"] = structure_status
-	snapshot["influencePolicyRevision"] = String(policy.revision)
-	snapshot["influencePolicyDigest"] = String(policy.digest)
+	snapshot["influencePolicyRevision"] = String(policy.get("revision", ""))
+	snapshot["influencePolicyDigest"] = String(policy.get("digest", ""))
+	snapshot["catalogArtifactId"] = String(source_inputs.get("catalogArtifactId", ""))
+	snapshot["catalogContentDigest"] = String(source_inputs.get("catalogContentDigest", ""))
+	snapshot["worldEpoch"] = int(source_inputs.get("worldEpoch", 0))
 	snapshot["sourceRevision"] = source_domain_revision(world_id, world_seed,
-		source_chunk_key, source_inputs, removed_projection_digest)
+		source_chunk_key, source_inputs, removed_projection_digest, catalog_artifact)
 	snapshot["sourceDomainRevision"] = snapshot.sourceRevision
 	snapshot["producerCatalogRevision"] = String(source_inputs.get(
 		"producerCatalogRevision", ""))
@@ -1093,11 +2002,20 @@ static func seal_source_domain_snapshot(fields: Dictionary) -> Dictionary:
 	snapshot["producerComplete"] = bool(snapshot.get("producerComplete", false))
 	var producer_status := String(snapshot.get("producerStatus",
 		"ready" if snapshot.producerComplete else "pending"))
+	var compact_inputs_complete := String(source_inputs.get("schema", "")) \
+		== "ecology-source-domain-inputs/v2" \
+		and String(source_inputs.get("catalogArtifactId", "")).length() == 64 \
+		and String(source_inputs.get("catalogContentDigest", "")).length() == 64 \
+		and int(source_inputs.get("worldEpoch", 0)) > 0 \
+		and String(source_inputs.get("structureDependencyContentDigest", "")).length() == 64 \
+		and String(source_inputs.get("structureDependencyStatus", "")) == "ready"
 	var source_inputs_complete := not terrain_revision.is_empty() \
 		and not structure_revision.is_empty() and structure_status == "ready" \
 		and removed_projection_digest.length() == 64 \
 		and not world_id.is_empty() and not world_seed.is_empty() \
-		and source_chunk_key is Vector2i
+		and source_chunk_key is Vector2i \
+		and (compact_inputs_complete or String(source_inputs.get("schema", "")) != \
+			"ecology-source-domain-inputs/v2")
 	var complete_categories := true
 	for required_category: String in REQUIRED_CATEGORIES:
 		if not categories_complete.has(required_category):
@@ -1113,7 +2031,11 @@ static func seal_source_domain_snapshot(fields: Dictionary) -> Dictionary:
 
 
 static func validate_source_domain_snapshot(snapshot: Dictionary, expected_world_id := "",
-		expected_source_chunk_key := Vector2i(2147483647, 2147483647)) -> bool:
+		expected_source_chunk_key := Vector2i(2147483647, 2147483647),
+		catalog_artifact: Dictionary = {}) -> bool:
+	if String(snapshot.get("schema", "")) == FAMILY_BUNDLE_SCHEMA:
+		return validate_source_domain_family_bundle(snapshot, expected_world_id,
+			expected_source_chunk_key, catalog_artifact)
 	if String(snapshot.get("schema", "")) != "ecology-source-domain-snapshot/v1":
 		return false
 	if not expected_world_id.is_empty() and String(snapshot.get("worldId", "")) != expected_world_id:
@@ -1122,11 +2044,18 @@ static func validate_source_domain_snapshot(snapshot: Dictionary, expected_world
 			and snapshot.get("sourceChunkKey", null) != expected_source_chunk_key:
 		return false
 	var mutable: Dictionary = snapshot.duplicate(true)
-	var expected := seal_source_domain_snapshot(mutable)
+	var source_inputs: Variant = snapshot.get("sourceInputs", {})
+	if source_inputs is Dictionary and String(source_inputs.get("schema", "")) \
+			== "ecology-source-domain-inputs/v2" \
+			and String(catalog_artifact.get("artifactId", "")) != String(
+				source_inputs.get("catalogArtifactId", "")):
+		return false
+	var expected := seal_source_domain_snapshot(mutable, catalog_artifact)
 	for field: String in ["sourceRevision", "sourceDomainRevision", "producerCatalogRevision", "sourceManifestDigest", "actorIntentDigest", "producerSnapshotRevision",
 			"enumeratedSourceCount", "producerComplete", "producerStatus", "status", "reason",
 			"influencePolicyRevision", "influencePolicyDigest", "removedPropsRevision",
-			"terrainVolumeChunkRevision", "structureAdmissionRevision", "structureAdmissionStatus"]:
+			"terrainVolumeChunkRevision", "structureAdmissionRevision", "structureAdmissionStatus",
+			"catalogArtifactId", "catalogContentDigest", "worldEpoch"]:
 		if snapshot.get(field, null) != expected.get(field, null):
 			return false
 	return true
@@ -1142,8 +2071,10 @@ static func _all_families_bounded(families: Dictionary) -> bool:
 
 static func validate_source_bounds(family: String, source_origin: Vector3, bounds: AABB,
 		runtime_policy: Dictionary = {}) -> Dictionary:
-	var families: Dictionary = runtime_policy.get("families", {}) \
-		if String(runtime_policy.get("status", "")) == "ready" else FAMILY_POLICY
+	var families: Dictionary = FAMILY_POLICY
+	var supplied_families: Variant = runtime_policy.get("families", null)
+	if supplied_families is Dictionary and not supplied_families.is_empty():
+		families = supplied_families
 	if not families.has(family):
 		return {"status": "pending", "reason": "unknown_ecology_support_family", "family": family}
 	if not source_origin.is_finite() or not bounds.position.is_finite() or not bounds.size.is_finite() \

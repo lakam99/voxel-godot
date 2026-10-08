@@ -1,11 +1,11 @@
 import path from 'node:path';
-import { cli, options, context, prepare, launchRecord, phaseRun, read, demand } from '../lib/building-runner.mjs';
+import { cli, options, context, prepare, launchRecord, phaseRun, read, demand, stable } from '../lib/building-runner.mjs';
 
 cli(async () => {
   const o = options(process.argv.slice(2), { outputdirectory: '', godotexe: '', projectpath: '' });
   const c = context(o, 'native-section-presentation-lifecycle-');
   prepare(c, 'userdata', false);
-  launchRecord(c, [
+  const sourceHashes = launchRecord(c, [
     'scripts/testing/world/WholeSectionCandidateNativeInstallFixture.gd',
     'scripts/testing/world/WholeSectionCandidateNativeInstallFixture.gd.uid',
     'scripts/MainCore.gd',
@@ -27,6 +27,8 @@ cli(async () => {
     'scripts/world/WorldStaticSectionCandidateAssembler.gd',
     'native/terrain_meshing/src/chunk_render_packet_backend.cpp',
     'native/terrain_meshing/src/chunk_render_packet_backend.h',
+    'native/terrain_meshing/src/native_section_compile_dispatcher.cpp',
+    'native/terrain_meshing/src/native_section_compile_dispatcher.h',
     'native/terrain_meshing/build/world_backend/debug/build-manifest.json',
     'addons/terrain_meshing_backend/terrain_meshing_backend.gdextension',
     'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll',
@@ -47,8 +49,16 @@ cli(async () => {
       VOXEL_NATIVE_SECTION_LIFECYCLE_REPORT: path.join(c.run, 'report.json')
     },
     timeout: 120,
-    logPolicy: { emptyStderr: false }
+    // Godot's Vulkan loader can emit this exact, non-fatal registry warning on
+    // Windows even when the renderer and native backend initialize normally.
+    // Keep all other engine diagnostics fatal.
+    logPolicy: {
+      emptyStderr: false,
+      expectedError: 'WARNING: GENERAL - Message Id Number: 0 | Message Id Name: Loader Message',
+      expectedCount: 1
+    }
   });
+  stable(c.project, sourceHashes);
   const report = read(path.join(c.run, 'report.json'));
   demand(report.schema === 'native-section-pending-presentation-lifecycle/v1' && report.passed === true,
     'Headed synthetic native section lifecycle fixture failed.');

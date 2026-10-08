@@ -61,39 +61,64 @@ func setup_from_main(main, generation_towns: Variant = null) -> void:
 			initial_terrain_edits[cell_value] = state.duplicate(true)
 	setup_noise()
 
-func clone_for_worker():
+func clone_for_worker(profile_snapshot: Dictionary = {}, isolate_resources := false):
 	var context = get_script().new()
 	context.seed_text = seed_text
 	context.seed_hash = seed_hash
 	context.pinned_town_regions = pinned_town_regions
 	context.initial_terrain_edits = initial_terrain_edits
 	var profile_revision := 0
-	if generated_site_profile_store != null:
-		var profile_snapshot: Dictionary = generated_site_profile_store.snapshot_with_revision()
-		context.generated_site_profiles = profile_snapshot.profiles
+	if not profile_snapshot.is_empty():
+		var supplied_profiles: Variant = profile_snapshot.get("profiles", null)
+		if not supplied_profiles is Array or not profile_snapshot.get("revision") is int:
+			return null
+		context.generated_site_profiles = supplied_profiles
 		profile_revision = int(profile_snapshot.revision)
+		# The worker owns this exact admitted profile array. It must not acquire a
+		# second store snapshot after its revision/digest were captured.
+		context.generated_site_profile_store = null
+	elif generated_site_profile_store != null:
+		var stored_snapshot: Dictionary = generated_site_profile_store.snapshot_with_revision()
+		context.generated_site_profiles = stored_snapshot.profiles
+		profile_revision = int(stored_snapshot.revision)
 	else:
 		context.generated_site_profiles = generated_site_profiles
 	# Cave recipes depend on this exact admitted profile snapshot. Share the
 	# native, mutex-protected recipe cache only among blocks of one revision.
-	_cave_fields_mutex.lock()
-	if not _cave_fields_by_revision.has(profile_revision):
-		var field = ClassDB.instantiate("NativeCaveField")
-		assert(field != null and bool(field.setup(seed_text, CELL)))
-		_cave_fields_by_revision[profile_revision] = field
-		if _cave_fields_by_revision.size() > 4:
-			var oldest_revision: int = _cave_fields_by_revision.keys().min()
-			_cave_fields_by_revision.erase(oldest_revision)
-	context.cave_field = _cave_fields_by_revision[profile_revision]
-	_cave_fields_mutex.unlock()
-	# These noise resources are immutable after setup and safe to share for
-	# concurrent sampling. Reusing them avoids constructing five resources for
-	# every 16^3 VoxelTerrain generation block.
-	context.height_noise = height_noise
-	context.ridge_noise = ridge_noise
-	context.flat_noise = flat_noise
-	context.moisture_noise = moisture_noise
-	context.temp_noise = temp_noise
+	if isolate_resources:
+		# Section snapshot workers own a private resource graph. This excludes
+		# concurrent mutation through the live context and avoids calling one
+		# NativeCaveField RefCounted from multiple worker threads.
+		var isolated_cave_field = ClassDB.instantiate("NativeCaveField")
+		if isolated_cave_field == null or not bool(isolated_cave_field.setup(seed_text, CELL)):
+			return null
+		context.cave_field = isolated_cave_field
+		context.height_noise = height_noise.duplicate(true) as FastNoiseLite
+		context.ridge_noise = ridge_noise.duplicate(true) as FastNoiseLite
+		context.flat_noise = flat_noise.duplicate(true) as FastNoiseLite
+		context.moisture_noise = moisture_noise.duplicate(true) as FastNoiseLite
+		context.temp_noise = temp_noise.duplicate(true) as FastNoiseLite
+		if context.height_noise == null or context.ridge_noise == null \
+				or context.flat_noise == null or context.moisture_noise == null \
+				or context.temp_noise == null:
+			return null
+	else:
+		_cave_fields_mutex.lock()
+		if not _cave_fields_by_revision.has(profile_revision):
+			var field = ClassDB.instantiate("NativeCaveField")
+			assert(field != null and bool(field.setup(seed_text, CELL)))
+			_cave_fields_by_revision[profile_revision] = field
+			if _cave_fields_by_revision.size() > 4:
+				var oldest_revision: int = _cave_fields_by_revision.keys().min()
+				_cave_fields_by_revision.erase(oldest_revision)
+		context.cave_field = _cave_fields_by_revision[profile_revision]
+		_cave_fields_mutex.unlock()
+		# Existing VoxelTools block generation shares these resources read-only.
+		context.height_noise = height_noise
+		context.ridge_noise = ridge_noise
+		context.flat_noise = flat_noise
+		context.moisture_noise = moisture_noise
+		context.temp_noise = temp_noise
 	return context
 
 func set_generator(generator_node) -> void:

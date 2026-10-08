@@ -190,7 +190,7 @@ func _collision_payload(publisher, part) -> Dictionary:
 	publisher.publish_part(part, parent)
 	var result := _collect_collision_payload(parent)
 	parent.free()
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	return result
 
 func _furnishing_payload(publisher, part) -> Dictionary:
@@ -364,7 +364,7 @@ func _extract_overlap_payload(publisher, blueprint, part, phase: String) -> Dict
 	_inventory.append({"phase": phase, "partId": part.id, "primitiveCount": result.primitives.size(), "errors": captured.errors})
 	# Publication retains nodes for normal finish/cleanup. This diagnostic frees
 	# each temporary parent immediately; do not accumulate dangling node entries.
-	publisher.published_nodes.clear()
+	publisher.clear_published_node_roster()
 	return result
 
 func _visual_payload(captured: Dictionary, counter: String) -> Dictionary:

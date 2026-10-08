@@ -6,6 +6,7 @@ class_name CitadelPublicationPlan
 ## Those owners still validate every selected physical group at publication.
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const SourceRecordBinding = preload("res://scripts/buildings/BuildingSourceRecordBinding.gd")
+const DoorGeometry = preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const CELL := 1.35
 const BUCKET_WORLD_SIZE := 32.0
 # Exact readiness closures are admitted before optional presentation. Sixteen
@@ -112,6 +113,7 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 			group.get("doorPartIds",[]),bool(group.get("hasCollision",false))]))
 	var by_part: Dictionary = description.publication_groups.get("groupByPart",{})
 	var building_visuals: Dictionary = {}
+	var motion_support: Dictionary = {}
 	for raw_part in building_source.get("parts",[]):
 		if raw_part is Dictionary:
 			var part_id := String(raw_part.get("id", ""))
@@ -120,8 +122,37 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 				return {"ready":false, "reason":"publication_plan_visual_source_identity_invalid"}
 			plan.visual_source_revisions[part_id] = source_revision
 			var recipe: Variant = raw_part.get("recipe",{})
+			if String(raw_part.get("kind", "")) == "door" and recipe is Dictionary:
+				var pose := Transform3D(Basis.from_euler(raw_part.rotation), description.origin + raw_part.position)
+				var swept := AABB()
+				var count := 0
+				var rows: Array = DoorGeometry.portcullis_sweep_bounds(raw_part.size, pose) \
+					if String(recipe.get("doorMotion", "swing")) == "raise" \
+					else DoorGeometry.ordinary_sweep_bounds(raw_part.size, pose)
+				for value: Variant in rows:
+					var bounds: AABB = value if value is AABB else value.bounds
+					swept = bounds if count == 0 else swept.merge(bounds)
+					count += 1
+				if count == 0: return {"ready":false, "reason":"publication_plan_door_sweep_missing"}
+				motion_support["building:"+part_id] = swept
 			building_visuals["building:"+String(raw_part.get("id",""))] = \
 				bool(recipe.get("visual",true)) if recipe is Dictionary else true
+			if recipe is Dictionary and bool(recipe.get("practicalLight", false)):
+				var light_support := _practical_light_support(raw_part, description.origin)
+				if light_support.get("status") != "ready": return {"ready":false, "reason":light_support.get("reason")}
+				var member_key := "building:" + part_id
+				var bounds: AABB = light_support.bounds
+				if motion_support.has(member_key): bounds = bounds.merge(motion_support[member_key])
+				motion_support[member_key] = bounds
+				building_visuals[member_key] = true
+	for raw_part: Variant in furnishing_source.get("parts", []):
+		if not raw_part is Dictionary:
+			return {"ready":false, "reason":"publication_plan_furnishing_source_invalid"}
+		var member_key := "furnishing:" + String(raw_part.get("id", ""))
+		var source_revision := SourceRecordBinding.encode(raw_part)
+		if member_key == "furnishing:" or source_revision.is_empty() or plan.visual_source_revisions.has(member_key):
+			return {"ready":false, "reason":"publication_plan_furnishing_identity_invalid"}
+		plan.visual_source_revisions[member_key] = source_revision
 	var part_member_ids: Array[String] = []
 	for member_id: String in description.parts: part_member_ids.append(member_id)
 	part_member_ids.sort()
@@ -131,9 +162,13 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 			return {"ready":false,"reason":"publication_plan_visual_source_missing","memberId":member_id}
 		var member_bounds: Variant = description.parts[member_id].get("bounds")
 		if not _member_bounds_valid(member_bounds): return {"ready":false,"reason":"publication_plan_member_bounds_invalid","memberId":member_id}
+		var visual_support: Variant = description.parts[member_id].get("visualSupportBounds", member_bounds)
+		if not _member_bounds_valid(visual_support): return {"ready":false,"reason":"publication_plan_member_visual_support_invalid","memberId":member_id}
+		if motion_support.has(member_id): visual_support = visual_support.merge(motion_support[member_id])
 		_add_member_record(plan,member_id,String(by_part[member_id]),member_bounds,
 			bool(building_visuals.get(member_id,true)),
-			String(plan.visual_source_revisions.get(member_id.trim_prefix("building:"), "")) if member_id.begins_with("building:") else "")
+			String(plan.visual_source_revisions.get(member_id.trim_prefix("building:") if member_id.begins_with("building:") else member_id, "")),
+			visual_support)
 	var tree_members: Dictionary = description.publication_groups.get("treeMembers",{})
 	var tree_member_ids: Array[String] = []
 	for member_id: String in tree_members: tree_member_ids.append(member_id)
@@ -199,6 +234,8 @@ static func build(description, building_source: Dictionary, furnishing_source: D
 	var canonical_members: Array = []
 	for record: Dictionary in plan.member_records:
 		canonical_members.append([record.memberId,record.groupId,record.bounds,record.visual,record.sourceRevision])
+		if record.has("visualSupportBounds"):
+			canonical_members.append([record.memberId,"motion-support/v1",record.visualSupportBounds])
 	signature.update(var_to_bytes(canonical_members))
 	var source_ids: Array = plan.visual_source_revisions.keys()
 	source_ids.sort()
@@ -298,7 +335,7 @@ func visual_member_requirements(bounds: Rect2i) -> Dictionary:
 	var members: Array[Dictionary] = []
 	for index: int in indices:
 		var record: Dictionary = member_records[index]
-		if bool(record.visual) and _rect_intersects_aabb(world_query,record.bounds):
+		if bool(record.visual) and _rect_intersects_aabb(world_query,record.get("visualSupportBounds",record.bounds)):
 			members.append(record)
 	return {"status":"described","binding":binding,"members":members,
 		"descriptionComplete":true,"sourceSignature":output_signature,
@@ -318,7 +355,7 @@ func visual_members_intersecting_bounds(section_bounds: AABB) -> Dictionary:
 	var members: Array[Dictionary] = []
 	for index: int in indices:
 		var record: Dictionary = member_records[index]
-		if bool(record.get("visual",false)) and _aabb_intersects_section(record.bounds,section_bounds):
+		if bool(record.get("visual",false)) and _aabb_intersects_section(record.get("visualSupportBounds",record.bounds),section_bounds):
 			members.append(record)
 	members.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
 		return String(a.memberId) < String(b.memberId))
@@ -450,14 +487,34 @@ static func _freeze_bucket_index(index: Dictionary) -> void:
 		ids.make_read_only()
 
 
+static func _practical_light_support(part: Dictionary, origin: Vector3) -> Dictionary:
+	var recipe: Variant = part.get("recipe", {})
+	if not recipe is Dictionary or not bool(recipe.get("practicalLight", false)) \
+			or not part.get("position") is Vector3 or not part.get("rotation") is Vector3:
+		return {"status":"failed", "reason":"publication_plan_light_recipe_invalid"}
+	var radius := float(recipe.get("lightRange", 5.0))
+	var pose := Transform3D(Basis.from_euler(part.rotation), origin + part.position)
+	if not pose.is_finite() or not is_finite(radius) or radius <= 0.0:
+		return {"status":"failed", "reason":"publication_plan_light_bounds_invalid"}
+	# Source root is translation-only; publisher uses this same part pose and
+	# a zero-offset light under its borrowed mount. Range is world-space.
+	var bounds := AABB(pose.origin - Vector3.ONE * radius, Vector3.ONE * radius * 2.0)
+	if not _member_bounds_valid(bounds):
+		return {"status":"failed", "reason":"publication_plan_light_support_capacity"}
+	return {"status":"ready", "bounds":bounds}
+
 static func _add_member_record(plan, member_id: String, group_id: String, bounds: AABB,
-		visual := true, source_revision := "") -> void:
+		visual := true, source_revision := "", support: Variant = null) -> void:
 	var index: int = plan.member_records.size()
 	var record := {"memberId":member_id,"groupId":group_id,"bounds":bounds,"visual":visual,"sourceRevision":source_revision}
+	var index_bounds: AABB = bounds
+	if support is AABB and support != bounds:
+		index_bounds = bounds.merge(support)
+		record["visualSupportBounds"] = index_bounds
 	record.make_read_only()
 	plan.member_records.append(record)
-	var low := _bucket_for_point(bounds.position)
-	var high := _bucket_for_point(bounds.end-Vector3(0.0001,0.0,0.0001))
+	var low := _bucket_for_point(index_bounds.position)
+	var high := _bucket_for_point(index_bounds.end-Vector3(0.0001,0.0,0.0001))
 	for z: int in range(low.y,high.y+1):
 		for x: int in range(low.x,high.x+1):
 			var encoded := "%d,%d" % [x,z]

@@ -15,6 +15,7 @@
 using namespace godot;
 
 void ChunkStaticRenderBackend::_bind_methods() {
+	ClassDB::bind_static_method("ChunkStaticRenderBackend", D_METHOD("tree_impostor_descriptor", "recipe"), &ChunkStaticRenderBackend::tree_impostor_descriptor);
 	ClassDB::bind_method(D_METHOD("publish_tree_impostor", "body", "request", "recipe", "branch_mesh", "crown_mesh", "branch_material", "foliage_material"), &ChunkStaticRenderBackend::publish_tree_impostor);
 	ClassDB::bind_method(D_METHOD("release_tree", "body"), &ChunkStaticRenderBackend::release_tree);
 	ClassDB::bind_method(D_METHOD("installed_snapshot", "body"), &ChunkStaticRenderBackend::installed_snapshot);
@@ -91,6 +92,29 @@ void ChunkStaticRenderBackend::_tree_transforms(const Transform3D &p_body_to_bat
 	r_transforms[0] = p_body_to_batch * trunk;
 	r_transforms[1] = p_body_to_batch * crown_a;
 	r_transforms[2] = p_body_to_batch * crown_b;
+}
+
+Dictionary ChunkStaticRenderBackend::tree_impostor_descriptor(const Dictionary &p_recipe) {
+	Dictionary result;
+	const double height = p_recipe.get("height", 0.0);
+	const double radius = p_recipe.get("canopyRadius", 0.0);
+	const double trunk = p_recipe.get("trunkRadius", 0.0);
+	if (!std::isfinite(height) || !std::isfinite(radius) || !std::isfinite(trunk) || height <= 0 || radius <= 0 || trunk <= 0) {
+		result["status"] = "failed";
+		result["reason"] = "invalid_tree_impostor_dimensions";
+		result.make_read_only();
+		return result;
+	}
+	Transform3D transforms[3];
+	_tree_transforms(Transform3D(), height, radius, trunk, transforms);
+	Array instances;
+	for (const Transform3D &transform : transforms) instances.push_back(transform);
+	instances.make_read_only();
+	result["status"] = "ready";
+	result["schema"] = "tree-impostor-descriptor/v1";
+	result["transforms"] = instances;
+	result.make_read_only();
+	return result;
 }
 
 void ChunkStaticRenderBackend::_expand_page_cull_range(Group &r_group, int32_t p_page_index, double p_cull_range_end) {

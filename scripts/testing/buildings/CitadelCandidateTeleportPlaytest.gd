@@ -2559,22 +2559,94 @@ func _toggle_door_with_player_input(door: Node3D, desired_open: bool, label: Str
 		if bool(player.get("invert_y")): motion.relative.y=-motion.relative.y
 		root.push_input(motion)
 		await physics_frame
+		if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+			return {"passed":false,"reason":"door_owner_lost","label":label,"phase":"focus_physics","attempts":attempts}
 		await _frame()
+		if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+			return {"passed":false,"reason":"door_owner_lost","label":label,"phase":"focus_draw","attempts":attempts}
 		hit=main.focused_interaction_hit()
 		if main.interaction_block_from_collider(hit.get("collider"))==door: break
 	if main.interaction_block_from_collider(hit.get("collider"))!=door:
 		return {"passed":false,"reason":"door_not_in_production_interaction_ray","attempts":attempts,
 			"targetCount":targets.size(),"hit":hit}
+	var attachment_before := _door_native_attachment_evidence(door)
+	if not bool(attachment_before.get("passed", false)):
+		return {"passed":false,"reason":"door_native_attachment_not_installed_before_input",
+			"attachment":attachment_before,"label":label}
+	var before_capture := await _capture(label+"_native_before")
+	if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+		return {"passed":false,"reason":"door_owner_lost","label":label,"phase":"before_input_capture"}
 	for pressed: bool in [true,false]:
 		var click:=InputEventMouseButton.new()
 		click.button_index=MOUSE_BUTTON_RIGHT; click.pressed=pressed
 		click.position=root.get_visible_rect().size*0.5; click.global_position=click.position
 		root.push_input(click)
-	for frame in range(24): await physics_frame
+	var first_motion: Dictionary = {}
+	var first_draw_capture := false
+	for frame in range(24):
+		await physics_frame
+		if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+			return {"passed":false,"reason":"door_owner_lost","label":label,"phase":"motion_physics","frame":frame}
+		var sample := _door_native_attachment_evidence(door)
+		if first_motion.is_empty() and sample.get("passed", false) \
+				and not (sample.rootWorld as Transform3D).is_equal_approx(attachment_before.rootWorld):
+			first_motion = sample
+			first_motion["physicsFrame"] = Engine.get_physics_frames()
+			# Capture the first draw following observed real controller motion.
+			first_draw_capture = await _capture(label+"_native_first_motion", "ordinary_player_viewport", true)
+			if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+				return {"passed":false,"reason":"door_owner_lost","label":label,"phase":"first_motion_capture","frame":frame}
 	var actual_open:=bool(door.get_meta("open",false))
-	return {"passed":actual_open==desired_open,"reason":"door_state_reached" if actual_open==desired_open else "door_state_mismatch",
+	var attachment_after := _door_native_attachment_evidence(door)
+	var attachment_passed := before_capture and first_draw_capture and not first_motion.is_empty() \
+		and bool(attachment_after.get("passed", false)) \
+		and attachment_before.get("identity") == attachment_after.get("identity") \
+		and attachment_before.get("collisionIds") == attachment_after.get("collisionIds")
+	return {"passed":actual_open==desired_open and attachment_passed,"reason":"door_state_reached" if actual_open==desired_open and attachment_passed else "door_state_or_native_motion_mismatch",
 		"label":label,"attempts":attempts,"desiredOpen":desired_open,"actualOpen":actual_open,
+		"nativeAttachment":{"passed":attachment_passed,"before":attachment_before,"firstMotion":first_motion,
+			"after":attachment_after,"beforeCapture":before_capture,"firstDrawCapture":first_draw_capture},
 		"doorPath":String(main.get_path_to(door)),"scope":"Production focus ray and ordinary viewport right-click input."}
+
+
+func _door_native_attachment_evidence(door: Node3D) -> Dictionary:
+	if not is_instance_valid(door) or door.is_queued_for_deletion() or not door.is_inside_tree():
+		return {"passed":false,"reason":"door_owner_lost","phase":"attachment_evidence"}
+	var stack: Array[Node] = [door]
+	var attachment: Node3D
+	var collision_ids: Array[int] = []
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child: Node in node.get_children(): stack.append(child)
+		if node is CollisionShape3D: collision_ids.append(node.get_instance_id())
+		if node is Node3D and bool(node.get_meta("section_attachment_native_root", false)):
+			if attachment != null: return {"passed":false,"reason":"multiple_native_door_roots"}
+			attachment = node as Node3D
+	if attachment == null: return {"passed":false,"reason":"native_door_root_missing"}
+	var backend_id := int(attachment.get_meta("packet_backend_instance_id", 0))
+	if not is_instance_id_valid(backend_id): return {"passed":false,"reason":"native_backend_missing"}
+	var backend := instance_from_id(backend_id)
+	if not backend.has_method("installed_snapshot"): return {"passed":false,"reason":"native_backend_invalid"}
+	var source_id := String(attachment.get_meta("packet_source_id", ""))
+	var receipt: Dictionary = backend.call("installed_snapshot", source_id)
+	if receipt.get("status") != "ready": return {"passed":false,"reason":"native_receipt_not_current","receipt":receipt}
+	for row: Dictionary in receipt.get("attachmentRoots", []):
+		if int(row.get("rootInstanceId", 0)) != attachment.get_instance_id(): continue
+		var parent := attachment.get_parent() as Node3D
+		if not is_instance_valid(parent): return {"passed":false,"reason":"native_attachment_parent_missing"}
+		var passed := parent != null and int(row.get("parentInstanceId", 0)) == parent.get_instance_id() \
+			and int(row.get("bodyInstanceId", 0)) == door.get_instance_id() and attachment.is_visible_in_tree() \
+			and attachment.global_transform.is_equal_approx(parent.global_transform * attachment.transform)
+		var claims: Array = row.get("legacyVisuals", [])
+		passed = passed and not claims.is_empty()
+		for claim: Dictionary in claims: passed = passed and bool(claim.get("hidden", false))
+		collision_ids.sort()
+		return {"passed":passed,"identity":[backend_id,source_id,receipt.get("generation"),
+			row.get("rootInstanceId"),row.get("parentInstanceId"),row.get("bodyInstanceId")],
+			"motionKind":row.get("motionKind"),"rootWorld":attachment.global_transform,
+			"parentWorld":parent.global_transform,"rootLocal":attachment.transform,
+			"collisionIds":collision_ids,"legacyVisualCount":claims.size(),"receipt":receipt}
+	return {"passed":false,"reason":"native_attachment_receipt_missing"}
 
 
 func _live_door_interaction_targets(door: Node3D) -> Array[Vector3]:
@@ -4225,12 +4297,12 @@ func _terrain_collision_hold_observation() -> Dictionary:
 		"samples":terrain_collision_hold_samples.duplicate(true),"samplesDropped":maxi(0,terrain_collision_hold_frames-terrain_collision_hold_samples.size()),
 		"scope":"Production PlayerController terrain-collision fail-closed state observed once per headed process frame."}
 
-func _capture(label: String, camera_kind := "ordinary_player_viewport") -> bool:
+func _capture(label: String, camera_kind := "ordinary_player_viewport", next_draw_only := false) -> bool:
 	if DisplayServer.get_name()=="headless":
 		captures.append({"label":label,"saved":false,"reason":"headless_capture_skipped","elapsedMsec":_elapsed()})
 		return false # Headless servers need not ever emit frame_post_draw.
 	if is_instance_valid(render_observation): render_observation.phase = "capture:"+label
-	await process_frame
+	if not next_draw_only: await process_frame
 	await RenderingServer.frame_post_draw
 	var image := root.get_texture().get_image()
 	var path := output.path_join(label+".png")

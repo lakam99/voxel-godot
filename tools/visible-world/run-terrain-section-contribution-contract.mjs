@@ -6,6 +6,10 @@ cli(async () => {
   const c = context(o, 'terrain-section-contribution-');
   prepare(c, 'userdata', false);
   launchRecord(c, [
+    'scripts/MainSetupScene.gd',
+    'resources/visual/water_material.tres',
+    'shaders/stylized_water.gdshader',
+    'scripts/TerrainVolumeService.gd',
     'scripts/terrain/TerrainSectionShadowPublisher.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd',
     'scripts/world/WorldStaticSectionCandidateAssembler.gd',

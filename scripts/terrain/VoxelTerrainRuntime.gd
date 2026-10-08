@@ -7,9 +7,11 @@ const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.g
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const SITE_GATE_SCRIPT := preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
+const NativeSectionInstallSessionScript := preload("res://scripts/world/NativeStaticSectionInstallSession.gd")
 const NPC_CONSTANTS_SCRIPT := preload("res://scripts/npc_ai/NpcConstants.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
 const TERRAIN_SECTION_SHADOW_PUBLISHER := preload("res://scripts/terrain/TerrainSectionShadowPublisher.gd")
+const AUTHORITATIVE_TERRAIN_SECTION_SNAPSHOT := preload("res://scripts/terrain/AuthoritativeTerrainSectionSnapshot.gd")
 
 const CELL := 1.35
 const GAME_CHUNK_SIZE := 28
@@ -45,6 +47,9 @@ const VERTICAL_BOUNDS_EXPANSION_STEP_CELLS := 16
 const NATIVE_MESH_BLOCK_SIZE_CELLS := 16
 const SECTION_SIZE := NATIVE_MESH_BLOCK_SIZE_CELLS
 const MAX_TERRAIN_SECTION_FLUID_PROOFS := 256
+const MAX_DESIRED_SECTION_TERRAIN_RENDER_CLAIMS := 8192
+const MAX_PENDING_SECTION_TERRAIN_RENDER_RELEASES_PER_KEY := 8
+const MAX_PENDING_SECTION_TERRAIN_RENDER_RELEASES := 8192
 const EDIT_SECTIONS_PER_FRAME := 1
 const PUBLICATION_PROBES_PER_PHYSICS_FRAME := 2
 const COLLISION_SURFACE_TOLERANCE := CELL * 2.5
@@ -62,7 +67,6 @@ const GAMEPLAY_CHUNK_COLLISION_PROBE_OFFSETS := [
 	Vector2(0.22, 0.78),
 	Vector2(0.78, 0.78)
 ]
-const SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const SEED_RESET_REQUIRED_QUIET_FRAMES := 2
 const SITE_TRAVERSAL_READINESS_POLL_USEC := 100000
 const MOTION_PROOF_MAX_SAMPLES := 32
@@ -108,6 +112,12 @@ var terrain_section_fluid_probe_states: Dictionary = {}
 var terrain_section_fluid_proofs: Dictionary = {}
 var terrain_section_fluid_probe_queue: Array[Vector3i] = []
 var terrain_section_fluid_probe_queued: Dictionary = {}
+var _desired_section_terrain_render_claims: Dictionary = {}
+var _installed_section_terrain_render_claims: Dictionary = {}
+var _pending_section_terrain_render_claim_releases: Dictionary = {}
+var _pending_section_terrain_render_claim_release_count := 0
+var _section_terrain_render_reconcile_order: Array[Vector3i] = []
+var _section_terrain_render_reconcile_cursor := 0
 var retained_gameplay_chunks: Dictionary = {}
 var retained_chunk_viewers: Dictionary = {}
 var retained_viewer_groups: Dictionary = {}
@@ -766,7 +776,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	# The Voxel Tools documentation explicitly warns that changing a script while
 	# worker threads are using it is undefined behavior, so preserve the loading
 	# screen and wait for a stable idle boundary before the replacement.
-	var task_drain_result := await wait_for_seed_reset_task_drain()
+	var task_drain_result := await wait_for_seed_reset_task_drain(next_seed)
 	if not bool(task_drain_result.get("ok", false)):
 		return task_drain_result
 	var reset_started_usec := Time.get_ticks_usec()
@@ -822,13 +832,22 @@ func reset_for_current_seed_staged() -> Dictionary:
 		"taskDrain": task_drain_result.get("metrics", {})
 	})
 
-func wait_for_seed_reset_task_drain() -> Dictionary:
+func wait_for_seed_reset_task_drain(expected_seed: String) -> Dictionary:
 	var drain_started_usec := Time.get_ticks_usec()
 	var checks := 0
 	var quiet_frames := 0
 	var peak_pending_tasks := 0
 	var last_pending_tasks := -1
 	while quiet_frames < SEED_RESET_REQUIRED_QUIET_FRAMES:
+		if main == null or not is_instance_valid(main):
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_main_missing")
+		if main.get("shutdown_requested") == true:
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("startup_cancelled")
+		if String(main.get("seed_text")) != expected_seed:
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_superseded", {}, [], {
+				"expectedSeed": expected_seed,
+				"currentSeed": String(main.get("seed_text"))
+			})
 		if terrain == null or not is_instance_valid(terrain):
 			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_authority_missing")
 		var pending_tasks := voxel_engine_pending_task_count()
@@ -839,13 +858,6 @@ func wait_for_seed_reset_task_drain() -> Dictionary:
 		else:
 			quiet_frames = 0
 		var elapsed_seconds := float(Time.get_ticks_usec() - drain_started_usec) / 1000000.0
-		if elapsed_seconds >= SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS:
-			return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_seed_reset_task_drain_timeout", {}, [], {
-				"pendingTasks": pending_tasks,
-				"peakPendingTasks": peak_pending_tasks,
-				"checks": checks,
-				"elapsedMs": elapsed_seconds * 1000.0
-			})
 		if quiet_frames >= SEED_RESET_REQUIRED_QUIET_FRAMES:
 			break
 		if main != null and is_instance_valid(main) and main.has_method("startup_loading_yield") \
@@ -853,7 +865,8 @@ func wait_for_seed_reset_task_drain() -> Dictionary:
 			await main.call("startup_loading_yield", "Retiring previous terrain: %d tasks" % pending_tasks, "terrain_authority", "pending", {
 				"pendingTasks": pending_tasks,
 				"peakPendingTasks": peak_pending_tasks,
-				"checks": checks
+				"checks": checks,
+				"elapsedMs": elapsed_seconds * 1000.0
 			})
 		else:
 			await get_tree().process_frame
@@ -912,8 +925,8 @@ func admit_gameplay_chunk(chunk_key: Vector2i) -> Dictionary:
 	return site_gate.request_cells(Rect2i(chunk_key*GAME_CHUNK_SIZE,Vector2i.ONE*GAME_CHUNK_SIZE).grow(2))
 
 func wait_for_site_admission(chunk_keys: Array) -> Dictionary:
-	# Source preparation precedes the existing chunk/collision readiness clocks.
-	# Keep the real loading overlay responsive; do not widen their timeouts.
+    # Source admission is a retryable prerequisite. Yield every frame so the
+    # loading overlay stays responsive while the persistent admission owner advances.
 	while true:
 		if not is_instance_valid(main) or main.get("shutdown_requested") == true:
 			return STARTUP_READINESS_RESULT_SCRIPT.failed("startup_cancelled")
@@ -1424,6 +1437,7 @@ func _process(delta: float) -> void:
 		advance_terrain_section_fluid_probes()
 		if terrain_section_shadow_publisher != null:
 			terrain_section_shadow_publisher.advance()
+		advance_section_terrain_render_claim_reconciliation(1)
 		observe_native_viewer_workload()
 		update_viewer_position()
 		update_viewer_distance(delta)
@@ -2021,13 +2035,8 @@ func capture_static_section_sources(world_id: String, section_keys: Array) -> Di
 			request_terrain_section_fluid_probe(section_key)
 			return {"status":"pending", "reason":"terrain_exact_fluid_section_probe_pending",
 				"section":section_key, "retryable":true}
-		if bool(proof.get("hasFluid", false)):
-			return {"status":"pending", "reason":"terrain_fluid_section_layer_not_supported",
-				"section":section_key, "fluidPayloadSignature":String(proof.get("signature", "")),
-				"retryable":true}
 		var source_part_id := _terrain_section_source_part_id(section_key)
-		var revision := _terrain_section_source_revision(section_key,
-			String(proof.get("signature", "")))
+		var revision := _terrain_section_source_revision(section_key, proof)
 		if revision.is_empty():
 			return {"status":"pending", "reason":"terrain_section_revision_capture_pending",
 				"section":section_key, "retryable":true}
@@ -2086,6 +2095,349 @@ func capture_static_section_contribution(census: Dictionary,
 	return terrain_section_shadow_publisher.capture_contribution(census, section_key)
 
 
+## Called by StaticSectionSourceRoster only after the coordinator has accepted
+## the current native section receipt. The VoxelTools mesh remains visible until
+## this exact terrain contributor and block incarnation can be covered.
+func acknowledge_section_install(section_key: Vector3i, coverage_revision: String,
+		receipt: Dictionary) -> Dictionary:
+	var claim_result := _terrain_render_claim_from_section_receipt(
+		section_key, coverage_revision, receipt)
+	if claim_result.get("status") != "ready":
+		return claim_result
+	var desired: Dictionary = claim_result.desired
+	if not _desired_section_terrain_render_claims.has(section_key) \
+			and _desired_section_terrain_render_claims.size() >= MAX_DESIRED_SECTION_TERRAIN_RENDER_CLAIMS:
+		return {"status":"pending", "reason":"terrain_render_claim_desire_backpressure",
+			"retryable":true, "sectionKey":section_key}
+	_desired_section_terrain_render_claims[section_key] = desired
+	_ensure_section_terrain_render_reconcile_key(section_key)
+	return _apply_desired_section_terrain_render_claim(section_key, desired)
+
+
+## Releases one provider claim before its section-render owner and receipt are
+## retired. A stale receipt cannot remove a newer generation's claim.
+func release_section_install(section_key: Vector3i, coverage_revision: String,
+		receipt: Dictionary) -> Dictionary:
+	var claim_result := _terrain_render_claim_from_section_receipt(
+		section_key, coverage_revision, receipt, false)
+	if claim_result.get("status") != "ready":
+		return claim_result
+	var claim: Dictionary = claim_result.claim
+	# Removal is exact-tokened by the native owner. A newer desired receipt may
+	# coexist during replacement; retire the old token without touching it.
+	if not _queue_section_terrain_render_claim_release(section_key, claim):
+		return {"status":"pending", "reason":"terrain_render_claim_release_backpressure",
+			"retryable":true, "sectionKey":section_key}
+	var removed := _remove_section_terrain_render_claim(section_key, claim)
+	if removed.get("status") == "acknowledged":
+		_finish_section_terrain_render_claim_release(section_key, claim)
+	return removed
+
+
+func advance_section_terrain_render_claim_reconciliation(max_sections := 1) -> Dictionary:
+	if max_sections < 1 or max_sections > 8:
+		return {"status":"failed", "reason":"invalid_terrain_render_claim_reconcile_budget"}
+	if _section_terrain_render_reconcile_order.is_empty():
+		_section_terrain_render_reconcile_cursor = 0
+		return {"status":"idle", "count":0}
+	_section_terrain_render_reconcile_cursor = posmod(
+		_section_terrain_render_reconcile_cursor, _section_terrain_render_reconcile_order.size())
+	var results: Array[Dictionary] = []
+	var attempts := mini(max_sections, _section_terrain_render_reconcile_order.size())
+	for _offset in attempts:
+		if _section_terrain_render_reconcile_order.is_empty():
+			_section_terrain_render_reconcile_cursor = 0
+			break
+		_section_terrain_render_reconcile_cursor = posmod(
+			_section_terrain_render_reconcile_cursor, _section_terrain_render_reconcile_order.size())
+		var index := _section_terrain_render_reconcile_cursor
+		var section_key := _section_terrain_render_reconcile_order[index]
+		var releases: Array = _pending_section_terrain_render_claim_releases.get(section_key, [])
+		var desired: Dictionary = _desired_section_terrain_render_claims.get(section_key, {})
+		if releases.is_empty() and desired.is_empty():
+			_section_terrain_render_reconcile_order.remove_at(index)
+			if _section_terrain_render_reconcile_order.is_empty():
+				_section_terrain_render_reconcile_cursor = 0
+			else:
+				_section_terrain_render_reconcile_cursor = posmod(index,
+					_section_terrain_render_reconcile_order.size())
+			continue
+		if not releases.is_empty():
+			var retiring_claim: Dictionary = releases[0]
+			var removed := _remove_section_terrain_render_claim(section_key, retiring_claim)
+			if removed.get("status") == "acknowledged":
+				_finish_section_terrain_render_claim_release(section_key, retiring_claim)
+			results.append({"sectionKey":section_key, "status":String(removed.get("status", "failed")),
+				"reason":String(removed.get("reason", "")), "release":true})
+		else:
+			var applied := _apply_desired_section_terrain_render_claim(section_key, desired)
+			results.append({"sectionKey":section_key, "status":String(applied.get("status", "failed")),
+				"reason":String(applied.get("reason", "")),
+				"ownerGeneration":int(applied.get("ownerGeneration", 0))})
+		_section_terrain_render_reconcile_cursor = (
+			_section_terrain_render_reconcile_cursor + 1) % _section_terrain_render_reconcile_order.size() \
+			if not _section_terrain_render_reconcile_order.is_empty() else 0
+	results.make_read_only()
+	return {"status":"advanced", "count":results.size(), "results":results}
+
+
+func _ensure_section_terrain_render_reconcile_key(section_key: Vector3i) -> void:
+	if section_key not in _section_terrain_render_reconcile_order:
+		_section_terrain_render_reconcile_order.append(section_key)
+
+
+func _queue_section_terrain_render_claim_release(section_key: Vector3i,
+		claim: Dictionary) -> bool:
+	var releases: Array = _pending_section_terrain_render_claim_releases.get(section_key, [])
+	for existing_value: Variant in releases:
+		if existing_value is Dictionary and _terrain_section_render_claims_equal(existing_value, claim):
+			return true
+	if releases.size() >= MAX_PENDING_SECTION_TERRAIN_RENDER_RELEASES_PER_KEY \
+			or _pending_section_terrain_render_claim_release_count >= MAX_PENDING_SECTION_TERRAIN_RENDER_RELEASES:
+		return false
+	releases.append(claim)
+	_pending_section_terrain_render_claim_releases[section_key] = releases
+	_pending_section_terrain_render_claim_release_count += 1
+	_ensure_section_terrain_render_reconcile_key(section_key)
+	return true
+
+
+func _finish_section_terrain_render_claim_release(section_key: Vector3i,
+		claim: Dictionary) -> void:
+	var releases: Array = _pending_section_terrain_render_claim_releases.get(section_key, [])
+	var removed_release := false
+	for index in range(releases.size()):
+		var release_value: Variant = releases[index]
+		if release_value is Dictionary and _terrain_section_render_claims_equal(
+				release_value, claim):
+			releases.remove_at(index)
+			removed_release = true
+			break
+	if removed_release:
+		_pending_section_terrain_render_claim_release_count = maxi(0,
+			_pending_section_terrain_render_claim_release_count - 1)
+	if releases.is_empty():
+		_pending_section_terrain_render_claim_releases.erase(section_key)
+	else:
+		_pending_section_terrain_render_claim_releases[section_key] = releases
+	var desired: Dictionary = _desired_section_terrain_render_claims.get(section_key, {})
+	if not desired.is_empty() and _terrain_section_render_claims_equal(
+			desired.get("claim", {}), claim):
+		_desired_section_terrain_render_claims.erase(section_key)
+	var installed: Dictionary = _installed_section_terrain_render_claims.get(section_key, {})
+	if not installed.is_empty() and _terrain_section_render_claims_equal(
+			installed.get("claim", {}), claim):
+		_installed_section_terrain_render_claims.erase(section_key)
+
+
+func _terrain_render_claim_from_section_receipt(section_key: Vector3i,
+		coverage_revision: String, receipt: Dictionary, require_current := true) -> Dictionary:
+	if not receipt.is_read_only() or receipt.get("status") != "installed" \
+			or receipt.get("sectionKey") != section_key \
+			or String(receipt.get("worldId", "")).is_empty() \
+			or int(receipt.get("generation", 0)) <= 0 \
+			or String(receipt.get("contentManifestDigest", "")).is_empty() \
+			or coverage_revision.strip_edges().is_empty():
+		return {"status":"failed", "reason":"invalid_terrain_section_render_receipt",
+			"sectionKey":section_key}
+	var terrain_source_part_id := _terrain_section_source_part_id(section_key)
+	var source_revisions_value: Variant = receipt.get("sourceRevisions", {})
+	if not source_revisions_value is Dictionary:
+		return {"status":"failed", "reason":"terrain_section_receipt_source_revisions_missing",
+			"sectionKey":section_key}
+	var terrain_source_revision := String(source_revisions_value.get(terrain_source_part_id, ""))
+	if terrain_source_revision.is_empty():
+		return {"status":"failed", "reason":"terrain_section_receipt_source_revision_missing",
+			"sectionKey":section_key, "sourcePartId":terrain_source_part_id}
+	var provider_coverage_value: Variant = receipt.get("providerCoverage", [])
+	if not provider_coverage_value is Array:
+		return {"status":"failed", "reason":"terrain_section_receipt_provider_coverage_missing",
+			"sectionKey":section_key}
+	var terrain_coverage_found := false
+	for coverage_value: Variant in provider_coverage_value:
+		if not coverage_value is Array or coverage_value.size() < 2:
+			return {"status":"failed", "reason":"terrain_section_receipt_provider_coverage_invalid",
+				"sectionKey":section_key}
+		if String(coverage_value[0]) == "terrain" \
+				and String(coverage_value[1]) == coverage_revision:
+			terrain_coverage_found = true
+	if not terrain_coverage_found:
+		return {"status":"failed", "reason":"terrain_section_coverage_revision_mismatch",
+			"sectionKey":section_key}
+	var claim := {"worldId":String(receipt.worldId),
+		"slotOwnerId":NativeSectionInstallSessionScript.slot_id(
+			String(receipt.worldId), section_key),
+		"sectionGeneration":int(receipt.generation), "sectionKey":section_key,
+		"sourceRevision":terrain_source_revision,
+		"receiptDigest":String(receipt.contentManifestDigest)}
+	claim.make_read_only()
+	if require_current:
+		var current := _validate_current_terrain_section_render_receipt(
+			section_key, receipt, terrain_source_revision)
+		if current.get("status") != "ready":
+			return current
+	return {"status":"ready", "claim":claim, "sourcePartId":terrain_source_part_id,
+		"sourceRevision":terrain_source_revision,
+		"desired":{"receipt":receipt, "coverageRevision":coverage_revision,
+			"claim":claim, "sourcePartId":terrain_source_part_id,
+			"sourceRevision":terrain_source_revision}}
+
+
+func _validate_current_terrain_section_render_receipt(section_key: Vector3i,
+		receipt: Dictionary, expected_source_revision: String) -> Dictionary:
+	if not authority_ready or not generation_context_current():
+		return {"status":"pending", "reason":"terrain_section_receipt_authority_pending",
+			"retryable":true, "sectionKey":section_key}
+	if main == null or not is_instance_valid(main):
+		return {"status":"pending", "reason":"terrain_section_receipt_main_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var expected_world_id := "seed:%s:%d" % [String(main.get("seed_text")), int(main.get("seed_hash"))]
+	if String(receipt.get("worldId", "")) != expected_world_id:
+		return {"status":"failed", "reason":"terrain_section_receipt_world_mismatch",
+			"sectionKey":section_key}
+	var coordinator = main.get("world_static_section_coordinator") \
+		if is_instance_valid(main) else null
+	if coordinator == null or not is_instance_valid(coordinator) \
+			or not coordinator.has_method("installed_section_receipt_is_current"):
+		return {"status":"pending", "reason":"terrain_section_receipt_coordinator_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	if not bool(coordinator.call("installed_section_receipt_is_current", section_key, receipt)):
+		return {"status":"pending", "reason":"terrain_section_receipt_not_current",
+			"retryable":true, "sectionKey":section_key}
+	var proof: Dictionary = terrain_section_fluid_proofs.get(section_key, {})
+	if not _terrain_section_fluid_proof_is_current(section_key, proof):
+		request_terrain_section_fluid_probe(section_key)
+		return {"status":"pending", "reason":"terrain_section_receipt_fluid_proof_stale",
+			"retryable":true, "sectionKey":section_key}
+	var current_revision := _terrain_section_source_revision(section_key, proof)
+	if current_revision.is_empty() or current_revision != expected_source_revision:
+		return {"status":"pending", "reason":"terrain_section_source_revision_changed_before_retirement",
+			"retryable":true, "sectionKey":section_key,
+			"expectedSourceRevision":expected_source_revision,
+			"currentSourceRevision":current_revision}
+	return {"status":"ready", "sectionKey":section_key,
+		"sourceRevision":current_revision}
+
+
+func _apply_desired_section_terrain_render_claim(section_key: Vector3i,
+		desired: Dictionary) -> Dictionary:
+	var claim_value: Variant = desired.get("claim", null)
+	var receipt_value: Variant = desired.get("receipt", null)
+	if not claim_value is Dictionary or not claim_value.is_read_only() \
+			or not receipt_value is Dictionary or not receipt_value.is_read_only():
+		return {"status":"failed", "reason":"invalid_desired_terrain_render_claim",
+			"sectionKey":section_key}
+	if terrain == null or not is_instance_valid(terrain) \
+			or not terrain.has_method("get_mesh_block_viewer_state") \
+			or not terrain.has_method("replace_mesh_block_render_coverage") \
+			or not terrain.has_method("remove_mesh_block_render_coverage_claim"):
+		return {"status":"pending", "reason":"voxel_tools_render_coverage_api_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var state_value: Variant = terrain.call("get_mesh_block_viewer_state", section_key)
+	if not state_value is Dictionary or not bool(state_value.get("present", false)):
+		return {"status":"pending", "reason":"voxel_tools_mesh_block_owner_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var state: Dictionary = state_value
+	var terrain_instance_id := int(state.get("terrain_instance_id", 0))
+	var owner_generation := int(state.get("owner_generation", 0))
+	var expected_coverage_revision := int(state.get("render_coverage_revision", -1))
+	if terrain_instance_id != terrain.get_instance_id() or owner_generation <= 0 \
+			or expected_coverage_revision < 0:
+		return {"status":"pending", "reason":"voxel_tools_mesh_block_identity_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var current := _validate_current_terrain_section_render_receipt(section_key,
+		receipt_value, String(claim_value.get("sourceRevision", "")))
+	if current.get("status") != "ready":
+		return current
+	var applied: Dictionary = _installed_section_terrain_render_claims.get(section_key, {})
+	if int(applied.get("terrainInstanceId", 0)) == terrain_instance_id \
+			and int(applied.get("ownerGeneration", 0)) == owner_generation \
+			and _terrain_claim_rows_contain(state.get("render_coverage_claims", []), claim_value):
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"ownerGeneration":owner_generation, "alreadyInstalled":true}
+	var replace_result: Variant = terrain.call("replace_mesh_block_render_coverage",
+		section_key, terrain_instance_id, owner_generation, expected_coverage_revision,
+		String(claim_value.get("worldId", "")), [claim_value])
+	if not replace_result is Dictionary or replace_result.get("status") != "ready" \
+			or not bool(replace_result.get("coverageComplete", false)) \
+			or not bool(replace_result.get("renderSuppressed", false)):
+		var failure := {"status":"pending", "reason":"voxel_tools_render_coverage_not_accepted",
+			"retryable":true, "sectionKey":section_key, "ownerGeneration":owner_generation}
+		if replace_result is Dictionary:
+			failure["nativeResult"] = replace_result
+		return failure
+	_installed_section_terrain_render_claims[section_key] = {
+		"terrainInstanceId":terrain_instance_id, "ownerGeneration":owner_generation,
+		"claim":claim_value}
+	return {"status":"acknowledged", "sectionKey":section_key,
+		"ownerGeneration":owner_generation,
+		"coverageRevision":int(replace_result.get("coverageRevision", -1)),
+		"renderSuppressed":true}
+
+
+func _remove_section_terrain_render_claim(section_key: Vector3i,
+		claim: Dictionary) -> Dictionary:
+	if terrain == null or not is_instance_valid(terrain):
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"released":false, "reason":"voxel_terrain_owner_retired"}
+	if not terrain.has_method("get_mesh_block_viewer_state") \
+			or not terrain.has_method("remove_mesh_block_render_coverage_claim"):
+		return {"status":"pending", "reason":"voxel_tools_render_coverage_release_api_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	var state_value: Variant = terrain.call("get_mesh_block_viewer_state", section_key)
+	if not state_value is Dictionary or not bool(state_value.get("present", false)):
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"released":false, "reason":"voxel_tools_mesh_block_owner_retired"}
+	var state: Dictionary = state_value
+	var terrain_instance_id := int(state.get("terrain_instance_id", 0))
+	var owner_generation := int(state.get("owner_generation", 0))
+	var expected_coverage_revision := int(state.get("render_coverage_revision", -1))
+	if terrain_instance_id != terrain.get_instance_id() or owner_generation <= 0 \
+			or expected_coverage_revision < 0:
+		return {"status":"pending", "reason":"voxel_tools_mesh_block_identity_unavailable",
+			"retryable":true, "sectionKey":section_key}
+	if not _terrain_claim_rows_contain(state.get("render_coverage_claims", []), claim):
+		return {"status":"acknowledged", "sectionKey":section_key,
+			"released":false, "reason":"exact_terrain_render_claim_not_present"}
+	var removed: Variant = terrain.call("remove_mesh_block_render_coverage_claim",
+		section_key, terrain_instance_id, owner_generation, expected_coverage_revision,
+		String(claim.get("worldId", "")), String(claim.get("slotOwnerId", "")),
+		int(claim.get("sectionGeneration", 0)), Vector3i(claim.get("sectionKey", section_key)),
+		String(claim.get("sourceRevision", "")), String(claim.get("receiptDigest", "")))
+	if not removed is Dictionary or removed.get("status") != "ready":
+		var failure := {"status":"pending", "reason":"voxel_tools_render_coverage_release_not_accepted",
+			"retryable":true, "sectionKey":section_key}
+		if removed is Dictionary:
+			failure["nativeResult"] = removed
+		return failure
+	if not bool(removed.get("removed", false)):
+		return {"status":"pending", "reason":"voxel_tools_exact_claim_removal_not_confirmed",
+			"retryable":true, "sectionKey":section_key, "nativeResult":removed}
+	return {"status":"acknowledged", "sectionKey":section_key,
+		"released":true,
+		"coverageComplete":bool(removed.get("coverageComplete", false)),
+		"renderSuppressed":bool(removed.get("renderSuppressed", false))}
+
+
+static func _terrain_claim_rows_contain(rows_value: Variant, expected: Dictionary) -> bool:
+	if not rows_value is Array:
+		return false
+	for row_value: Variant in rows_value:
+		if not row_value is Dictionary:
+			continue
+		if _terrain_section_render_claims_equal(row_value, expected):
+			return true
+	return false
+
+
+static func _terrain_section_render_claims_equal(a: Dictionary, b: Dictionary) -> bool:
+	for key: String in ["worldId", "slotOwnerId", "sectionGeneration", "sectionKey",
+			"sourceRevision", "receiptDigest"]:
+		if a.get(key) != b.get(key):
+			return false
+	return true
+
+
 func advance_terrain_section_fluid_probes() -> Dictionary:
 	if terrain_section_fluid_probe_queue.is_empty():
 		return {"status":"idle"}
@@ -2117,10 +2469,12 @@ func advance_terrain_section_fluid_probes() -> Dictionary:
 		_remove_terrain_section_fluid_probe(section_key)
 		return {"status":"failed", "reason":"exact_fluid_section_revision_rows_missing",
 			"section":section_key}
-	var proof := {"schema":"terrain-fluid-section-proof/v1", "sectionKey":section_key,
+	var proof := {"schema":"terrain-fluid-section-proof/v2", "sectionKey":section_key,
 		"hasFluid":bool(payload.get("hasFluid", false)),
 		"volumeRevision":int(payload.get("revision", -1)),
 		"fluidRevision":int(payload.get("fluidRevision", -1)),
+		"boundsInclusive":bool(payload.get("boundsInclusive", false)),
+		"minCell":payload.get("minCell", null), "maxCell":payload.get("maxCell", null),
 		"sectionRevisions":revision_rows_value,
 		"signature":String(payload.get("signature", ""))}
 	var immutable_revision_rows: Array[Dictionary] = []
@@ -2140,6 +2494,10 @@ func advance_terrain_section_fluid_probes() -> Dictionary:
 		return {"status":"pending", "reason":"exact_fluid_section_probe_revision_changed",
 			"section":section_key, "retryable":true}
 	terrain_section_fluid_proofs[section_key] = proof
+	if bool(proof.get("hasFluid", false)) and terrain_section_shadow_publisher != null \
+			and terrain_section_shadow_publisher.has_method("retain_exact_fluid_payload"):
+		terrain_section_shadow_publisher.call("retain_exact_fluid_payload", section_key,
+			payload, proof)
 	while terrain_section_fluid_proofs.size() > MAX_TERRAIN_SECTION_FLUID_PROOFS:
 		terrain_section_fluid_proofs.erase(terrain_section_fluid_proofs.keys()[0])
 	var demand_wake := _wake_visible_section_demand_for_current_fluid_proof(
@@ -2167,25 +2525,100 @@ func _wake_visible_section_demand_for_current_fluid_proof(section_key: Vector3i,
 
 func _terrain_section_fluid_proof_is_current(section_key: Vector3i, proof_value: Variant) -> bool:
 	if not proof_value is Dictionary or not proof_value.is_read_only() \
-			or String(proof_value.get("schema", "")) != "terrain-fluid-section-proof/v1" \
-			or proof_value.get("sectionKey") != section_key:
+			or typeof(proof_value.get("schema", null)) != TYPE_STRING \
+			or proof_value.get("schema") != "terrain-fluid-section-proof/v2" \
+			or proof_value.get("sectionKey") != section_key \
+			or not proof_value.get("hasFluid") is bool \
+			or proof_value.get("boundsInclusive") != true:
 		return false
+	var min_cell_value: Variant = proof_value.get("minCell", null)
+	var max_cell_value: Variant = proof_value.get("maxCell", null)
+	if not min_cell_value is Vector3i or not max_cell_value is Vector3i:
+		return false
+	var min_cell: Vector3i = min_cell_value
+	var max_cell: Vector3i = max_cell_value
+	if min_cell.x > max_cell.x or min_cell.y > max_cell.y or min_cell.z > max_cell.z:
+		return false
+	var proof_volume_revision_value: Variant = proof_value.get("volumeRevision", null)
+	var proof_fluid_revision_value: Variant = proof_value.get("fluidRevision", null)
+	var signature_value: Variant = proof_value.get("signature", null)
+	if typeof(proof_volume_revision_value) != TYPE_INT \
+			or typeof(proof_fluid_revision_value) != TYPE_INT \
+			or typeof(signature_value) != TYPE_STRING:
+		return false
+	var proof_volume_revision: int = proof_volume_revision_value
+	var proof_fluid_revision: int = proof_fluid_revision_value
+	var signature: String = signature_value
 	var service = volume_service()
-	if service == null or int(proof_value.get("volumeRevision", -1)) != int(service.get("revision")) \
-			or int(proof_value.get("fluidRevision", -1)) != int(service.get("fluid_revision")):
+	if service == null or not service.has_method("exact_fluid_section_revision") \
+			or not service.has_method("exact_fluid_payload_bounds") \
+			or proof_volume_revision < 0 or proof_fluid_revision < 0 or signature.is_empty() \
+			or proof_volume_revision != int(service.get("revision")) \
+			or proof_fluid_revision != int(service.get("fluid_revision")):
+		return false
+	var origin := section_key * SECTION_SIZE
+	var expected_bounds: Dictionary = service.call("exact_fluid_payload_bounds",
+		origin.x, origin.z, SECTION_SIZE, origin.y, origin.y + SECTION_SIZE - 1)
+	if expected_bounds.get("status") != "ready" \
+			or expected_bounds.get("minCell") != min_cell \
+			or expected_bounds.get("maxCell") != max_cell:
 		return false
 	var revision_rows: Variant = proof_value.get("sectionRevisions", null)
-	if not revision_rows is Array or revision_rows.is_empty():
+	if not revision_rows is Array or not revision_rows.is_read_only() or revision_rows.is_empty():
 		return false
+	var min_section := _terrain_section_key_for_cell(min_cell)
+	var max_section := _terrain_section_key_for_cell(max_cell)
+	var expected_section_count := (max_section.x - min_section.x + 1) \
+		* (max_section.y - min_section.y + 1) * (max_section.z - min_section.z + 1)
+	if expected_section_count <= 0 or revision_rows.size() != expected_section_count:
+		return false
+	var seen_sections: Dictionary = {}
+	var includes_target_section := false
 	for row_value in revision_rows:
-		if not row_value is Dictionary:
+		if not row_value is Dictionary or not row_value.is_read_only():
 			return false
 		var row: Dictionary = row_value
 		var key_value: Variant = row.get("sectionKey", null)
-		if not key_value is Vector3i \
-				or int(row.get("revision", -1)) != int(service.call("exact_fluid_section_revision", key_value)):
+		var section_revision_value: Variant = row.get("revision", null)
+		if typeof(section_revision_value) != TYPE_INT:
 			return false
-	return not String(proof_value.get("signature", "")).is_empty()
+		var section_revision: int = section_revision_value
+		if not key_value is Vector3i or section_revision < 0 \
+				or not _terrain_section_key_is_in_bounds(key_value, min_section, max_section) \
+				or seen_sections.has(key_value) \
+		or section_revision != int(service.call("exact_fluid_section_revision", key_value)):
+			return false
+		seen_sections[key_value] = section_revision
+		includes_target_section = includes_target_section or key_value == section_key
+	if not includes_target_section or seen_sections.size() != expected_section_count:
+		return false
+	var ordered_sections: Array[Vector3i] = []
+	for section_value: Variant in seen_sections:
+		ordered_sections.append(section_value)
+	ordered_sections.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
+	var signature_parts := PackedStringArray()
+	for dependency_key: Vector3i in ordered_sections:
+		var key_text := "%d,%d,%d" % [dependency_key.x, dependency_key.y, dependency_key.z]
+		signature_parts.append("%s:%d" % [key_text, seen_sections[dependency_key]])
+	var expected_signature := "exact-fluid-v2:%s" % Marshalls.raw_to_base64(
+		var_to_bytes(["exact-fluid-capture/v2", proof_volume_revision,
+			proof_fluid_revision, min_cell, max_cell, signature_parts])).sha256_text()
+	return signature == expected_signature
+
+
+func _terrain_section_key_for_cell(cell: Vector3i) -> Vector3i:
+	return Vector3i(floori(float(cell.x) / SECTION_SIZE),
+		floori(float(cell.y) / SECTION_SIZE), floori(float(cell.z) / SECTION_SIZE))
+
+
+static func _terrain_section_key_is_in_bounds(section_key: Vector3i,
+		min_section: Vector3i, max_section: Vector3i) -> bool:
+	return section_key.x >= min_section.x and section_key.x <= max_section.x \
+		and section_key.y >= min_section.y and section_key.y <= max_section.y \
+		and section_key.z >= min_section.z and section_key.z <= max_section.z
 
 
 func _terrain_section_source_part_id(section_key: Vector3i) -> String:
@@ -2193,19 +2626,36 @@ func _terrain_section_source_part_id(section_key: Vector3i) -> String:
 
 
 func _terrain_section_source_revision(section_key: Vector3i,
-		fluid_signature := "") -> String:
-	var service = volume_service()
-	if service == null:
+		fluid_proof: Dictionary) -> String:
+	if generator == null or not is_instance_valid(generator):
 		return ""
-	var origin := section_key * SECTION_SIZE - Vector3i.ONE
-	var revisions := _terrain_capture_section_revisions(service, origin,
-		Vector3i.ONE * (SECTION_SIZE + 3))
-	if revisions.get("status") != "ready":
+	var main_node: Object = main if is_instance_valid(main) else null
+	if main_node == null:
 		return ""
-	return Marshalls.raw_to_base64(var_to_bytes(["resident-terrain-source/v1", configured_seed,
-		collision_owner_generation, section_key, String(revisions.revisionDigest),
-		fluid_signature, _terrain_capture_mesher_material_revision(),
-		"transvoxel-s4-no-transitions-v1"])).sha256_text()
+	var world_id := "seed:%s:%d" % [String(main_node.get("seed_text")),
+		int(main_node.get("seed_hash"))]
+	var revision: Dictionary = AUTHORITATIVE_TERRAIN_SECTION_SNAPSHOT.current_source_revision(
+		generator, volume_service(), section_key, world_id,
+		_terrain_capture_mesher_material_revision(), fluid_proof)
+	return String(revision.get("sourceRevision", "")) \
+		if revision.get("status") == "ready" else ""
+
+
+## Validate a generated section snapshot against deterministic generation,
+## durable edits/profile revisions and the exact current fluid proof. This path
+## remains independent of Voxel Tools block residency.
+func authoritative_terrain_section_capture_is_current(capture: Dictionary) -> bool:
+	if not capture.is_read_only() or not generation_context_current():
+		return false
+	var section_value: Variant = capture.get("sectionKey")
+	if not section_value is Vector3i:
+		return false
+	var section_key: Vector3i = section_value
+	var proof: Dictionary = terrain_section_fluid_proofs.get(section_key, {})
+	return _terrain_section_fluid_proof_is_current(section_key, proof) \
+		and AUTHORITATIVE_TERRAIN_SECTION_SNAPSHOT.is_current(capture, generator,
+			volume_service(), String(capture.get("worldId", "")),
+			_terrain_capture_mesher_material_revision(), proof)
 
 
 func _remove_terrain_section_fluid_probe(section_key: Vector3i) -> void:
@@ -3094,24 +3544,23 @@ func spawn_presentation_state(world_position: Vector3) -> Dictionary:
 	return {"ready":bool(proof.get("passed",false)),"reason":"spawn_mesh_publication","chunk":key,
 		"seed":configured_seed,"volumeRevision":last_volume_revision,"mesh":proof}
 
-func wait_for_spawn_presentation(world_position: Vector3, timeout_seconds: float) -> Dictionary:
+func wait_for_spawn_presentation(world_position: Vector3) -> Dictionary:
 	# Existing startup gates already require nearby chunk meshes and physics.
 	# Keep the loading UI and movement lock until a frame using those resources
 	# has been drawn. Headless contracts cannot certify visual presentation.
 	if DisplayServer.get_name() == "headless":
 		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {"presentationVerified":false,"reason":"headless_presentation_excluded"})
-	var started := Time.get_ticks_msec()
 	var drawn := [false]
 	var on_draw := func(): drawn[0] = true
 	var armed_state := {}
-	while float(Time.get_ticks_msec()-started)/1000.0 < timeout_seconds:
+	while true:
 		if not is_instance_valid(main) or main.get("shutdown_requested") == true:
 			if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
 			return STARTUP_READINESS_RESULT_SCRIPT.failed("startup_cancelled")
 		var state := spawn_presentation_state(world_position)
 		if state.get("ready",false):
 			if drawn[0] and state == armed_state:
-				var metrics := {"presentationVerified":true,"elapsedMs":Time.get_ticks_msec()-started,"terrain":state}
+				var metrics := {"presentationVerified":true,"terrain":state}
 				await main.startup_loading_yield("Nearby terrain displayed", "terrain_presentation", "ready", metrics)
 				return STARTUP_READINESS_RESULT_SCRIPT.ready({},metrics)
 			if armed_state != state:
@@ -3124,8 +3573,10 @@ func wait_for_spawn_presentation(world_position: Vector3, timeout_seconds: float
 			drawn[0] = false
 			armed_state = {}
 		await main.startup_loading_yield("Drawing nearby terrain", "terrain_presentation", "pending",state)
+	# GDScript requires a return after `while true`; reachable exits above are
+	# stable post-draw success or explicit owner/shutdown cancellation.
 	if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
-	return STARTUP_READINESS_RESULT_SCRIPT.failed("terrain_presentation_timeout",{},[],{"terrain":spawn_presentation_state(world_position)})
+	return STARTUP_READINESS_RESULT_SCRIPT.failed("unreachable_terrain_presentation_exit",{},[],{"terrain":spawn_presentation_state(world_position)})
 
 func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_radius := 0.0) -> Dictionary:
 	if terrain == null:

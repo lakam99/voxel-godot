@@ -1447,6 +1447,22 @@ func run() -> void:
         await run_production_section_candidate_diagnostic()
         finish_playtest()
         return
+    if only_section == "static_section_owner_replay":
+        if not bool(main.get("launch_options").get("skipTutorial", false)):
+            add_result("static_section_owner_replay_launch_options", false,
+                "The isolated owner replay acceptance requires --skip-tutorial")
+            finish_playtest()
+            return
+        mark_progress("static_section_owner_replay_waiting_for_playable_world")
+        if not await wait_for_runtime_loading_complete():
+            add_result("static_section_owner_replay_startup", false,
+                JSON.stringify(startup_failure_diagnostics(main)))
+            finish_playtest()
+            return
+        await wait_physics_frames(20)
+        await test_static_section_owner_replay_lifecycle()
+        finish_playtest()
+        return
     if not await wait_for_runtime_loading_complete():
         add_result("startup_loading_complete", false, JSON.stringify(startup_failure_diagnostics(main)))
         finish_playtest()
@@ -1681,6 +1697,224 @@ func run() -> void:
     mark_progress("block_destroy_ray")
     await test_block_destroy_ray()
     finish_playtest()
+
+func test_static_section_owner_replay_lifecycle() -> void:
+    var coordinator: Object = main.get("world_static_section_coordinator")
+    if not is_instance_valid(coordinator):
+        add_result("main_static_section_owner_replay", false,
+            "Main world static section coordinator is unavailable")
+        return
+    var candidates_value: Variant = coordinator.get("_committed_candidates")
+    var receipts_value: Variant = coordinator.get("_installed_receipts")
+    var production_candidates_value: Variant = coordinator.get("_production_candidates_by_section")
+    var production_receipts_value: Variant = coordinator.get("_production_candidate_receipts")
+    var candidates: Dictionary = candidates_value if candidates_value is Dictionary else {}
+    var receipts: Dictionary = receipts_value if receipts_value is Dictionary else {}
+    var production_candidates: Dictionary = production_candidates_value \
+        if production_candidates_value is Dictionary else {}
+    var production_receipts: Dictionary = production_receipts_value \
+        if production_receipts_value is Dictionary else {}
+    var selected_section := Vector3i.ZERO
+    var selected_candidate: Dictionary = {}
+    var selected_owner: Node3D
+    var selected_owner_cell := Vector2i.ZERO
+    var selected_production_candidate := false
+    for section_value: Variant in production_candidates:
+        if not section_value is Vector3i:
+            continue
+        var section_key: Vector3i = section_value
+        var candidate: Dictionary = production_candidates.get(section_key, {})
+        var receipt: Dictionary = production_receipts.get(section_key, {})
+        if candidate.is_empty() or receipt.is_empty():
+            continue
+        var owner_cell: Vector2i = StaticSectionGridScript.chunk_key_for_section(section_key)
+        var owner_result: Dictionary = main.call("get_static_section_render_owner", owner_cell, false)
+        var owner := owner_result.get("owner") as Node3D
+        if owner_result.get("status") != "ready" or not is_instance_valid(owner) \
+                or int(receipt.get("chunkInstanceId", 0)) != owner.get_instance_id():
+            continue
+        selected_section = section_key
+        selected_candidate = candidate
+        selected_owner = owner
+        selected_owner_cell = owner_cell
+        selected_production_candidate = true
+        break
+    if selected_candidate.is_empty():
+        for section_value: Variant in candidates:
+            if not section_value is Vector3i:
+                continue
+            var section_key: Vector3i = section_value
+            var candidate: Dictionary = candidates.get(section_key, {})
+            var receipt: Dictionary = receipts.get(section_key, {})
+            if candidate.is_empty() or receipt.is_empty():
+                continue
+            var owner_cell: Vector2i = StaticSectionGridScript.chunk_key_for_section(section_key)
+            var owner_result: Dictionary = main.call("get_static_section_render_owner", owner_cell, false)
+            var owner := owner_result.get("owner") as Node3D
+            if owner_result.get("status") != "ready" or not is_instance_valid(owner) \
+                    or int(receipt.get("chunkInstanceId", 0)) != owner.get_instance_id():
+                continue
+            selected_section = section_key
+            selected_candidate = candidate
+            selected_owner = owner
+            selected_owner_cell = owner_cell
+            break
+    if selected_candidate.is_empty() or not is_instance_valid(selected_owner) \
+            or not selected_production_candidate:
+        add_result("main_static_section_owner_replay", false,
+            "No currently installed production candidate receipt owned by a live Main render owner")
+        return
+
+    var world_id := String(selected_candidate.get("worldId", ""))
+    var generation := int(selected_candidate.get("generation", 0))
+    var manifest_digest := String(selected_candidate.get("contentManifestDigest", ""))
+    var prior_owner_id := selected_owner.get_instance_id()
+    var prior_owner_weak: WeakRef = weakref(selected_owner)
+    var owner_demand_value: Variant = main.get("static_section_owner_demand_cells")
+    var synthetic_demand: Dictionary = owner_demand_value.duplicate() \
+        if owner_demand_value is Dictionary else {selected_owner_cell:true}
+    if not synthetic_demand.has(selected_owner_cell):
+        add_result("main_static_section_owner_replay", false,
+            "Selected installed owner cell is absent from Main's retained render demand")
+        return
+
+    # Exercise Main's production demand-edge and retirement hooks. This simulates
+    # one bounded stream-owner departure/re-entry without relocating the player
+    # or changing source, collision, interaction, or gameplay chunk state.
+    synthetic_demand.erase(selected_owner_cell)
+    var demand_exit_count := int(main.call("sync_static_section_render_owner_demands", synthetic_demand))
+    var retired_count := int(main.call("prune_static_section_render_owners", synthetic_demand))
+    var receipts_after_retire: Variant = coordinator.get("_installed_receipts")
+    var candidate_after_retire: Variant = coordinator.get("_committed_candidates")
+    var production_receipts_after_retire: Variant = coordinator.get(
+        "_production_candidate_receipts")
+    var production_candidates_after_retire: Variant = coordinator.get(
+        "_production_candidates_by_section")
+    var receipt_removed := production_receipts_after_retire is Dictionary \
+        and not (production_receipts_after_retire as Dictionary).has(selected_section)
+    var candidate_retained := candidate_after_retire is Dictionary \
+        and (candidate_after_retire as Dictionary).has(selected_section) \
+        and production_candidates_after_retire is Dictionary \
+        and (production_candidates_after_retire as Dictionary).has(selected_section)
+    var retirement_passed: bool = demand_exit_count == 0 \
+        and retired_count == 1 \
+        and not main.get("static_section_render_owners").has(selected_owner_cell) \
+        and receipt_removed and candidate_retained
+    if not retirement_passed:
+        return
+
+    # A production candidate can be pending on lazy owner creation after a
+    # demand edge. Prove that the subsequent ownerless departure cancels that
+    # exact job before Main can create a renderer owner for departed demand.
+    var pending_demand := {selected_owner_cell:true}
+    var pending_enter_count := int(main.call("sync_static_section_render_owner_demands",
+        pending_demand))
+    var original_render_root: Node3D = main.get("static_section_render_root") as Node3D
+    main.set("static_section_render_root", null)
+    var pending_owner_result: Dictionary = coordinator.call(
+        "advance_complete_section_candidate", selected_section, 1)
+    main.set("static_section_render_root", original_render_root)
+    var pending_jobs_before: Variant = coordinator.get("_production_candidate_jobs")
+    var pending_owner_job_queued := pending_jobs_before is Dictionary \
+        and (pending_jobs_before as Dictionary).has(selected_section)
+    var pending_exit_count := int(main.call("sync_static_section_render_owner_demands", {}))
+    var pending_jobs_after: Variant = coordinator.get("_production_candidate_jobs")
+    var pending_candidates_after: Variant = coordinator.get("_production_candidates_by_section")
+    var pending_receipts_after: Variant = coordinator.get("_production_candidate_receipts")
+    var pending_job_cancelled := pending_jobs_after is Dictionary \
+        and not (pending_jobs_after as Dictionary).has(selected_section)
+    var pending_candidate_retained := pending_candidates_after is Dictionary \
+        and (pending_candidates_after as Dictionary).has(selected_section)
+    var pending_receipt_absent := pending_receipts_after is Dictionary \
+        and not (pending_receipts_after as Dictionary).has(selected_section)
+    var pending_owner_cancel_passed: bool = pending_enter_count == 1 \
+        and pending_owner_result.get("status") == "pending_owner" \
+        and pending_owner_job_queued and pending_exit_count == 0 \
+        and pending_job_cancelled and pending_candidate_retained \
+        and pending_receipt_absent \
+        and not main.get("static_section_render_owners").has(selected_owner_cell)
+    add_result("main_ownerless_demand_exit_cancels_pending_install_job",
+        pending_owner_cancel_passed, JSON.stringify({
+            "sectionKey":selected_section,
+            "ownerCell":selected_owner_cell,
+            "demandEnterCount":pending_enter_count,
+            "pendingOwnerStatus":String(pending_owner_result.get("status", "")),
+            "pendingOwnerReason":String(pending_owner_result.get("reason", "")),
+            "jobPresentBeforeDemandExit":pending_owner_job_queued,
+            "demandExitCount":pending_exit_count,
+            "jobCancelledAfterDemandExit":pending_job_cancelled,
+            "candidateRetained":pending_candidate_retained,
+            "productionReceiptAbsent":pending_receipt_absent,
+            "scope":"preparatory owner-lifecycle evidence only: one actual Main production candidate; pending-owner admission with render root temporarily unavailable; Stage 1 exit and full Stage 2 gate remain open; no traversal or stage-completion claim"}))
+    if not pending_owner_cancel_passed:
+        return
+
+    await get_tree().process_frame
+    await get_tree().process_frame
+    var old_owner_destroyed := prior_owner_weak.get_ref() == null
+    retirement_passed = retirement_passed and old_owner_destroyed
+    add_result("main_owner_retirement_invalidates_receipt_and_retains_candidate",
+        retirement_passed, JSON.stringify({
+            "sectionKey":selected_section, "ownerCell":selected_owner_cell,
+            "priorOwnerInstanceId":prior_owner_id, "retiredOwnerCount":retired_count,
+            "receiptRemoved":receipt_removed, "candidateRetained":candidate_retained,
+            "priorOwnerFreed":old_owner_destroyed}))
+    if not retirement_passed:
+        return
+
+    var fresh_receipt: Dictionary = {}
+    var fresh_candidate: Dictionary = {}
+    var fresh_owner: Node3D
+    var fresh_backend: Node
+    for frame_index in range(900):
+        await get_tree().process_frame
+        var candidate_map: Variant = coordinator.get("_committed_candidates")
+        var receipt_map: Variant = coordinator.get("_installed_receipts")
+        if not candidate_map is Dictionary or not receipt_map is Dictionary:
+            continue
+        fresh_candidate = (candidate_map as Dictionary).get(selected_section, {})
+        fresh_receipt = (receipt_map as Dictionary).get(selected_section, {})
+        if fresh_candidate.is_empty() or fresh_receipt.is_empty():
+            continue
+        var owner_result: Dictionary = main.call("get_static_section_render_owner",
+            selected_owner_cell, false)
+        fresh_owner = owner_result.get("owner") as Node3D
+        fresh_backend = owner_result.get("backend") as Node
+        if owner_result.get("status") == "ready" and is_instance_valid(fresh_owner) \
+                and is_instance_valid(fresh_backend) \
+                and int(fresh_receipt.get("chunkInstanceId", 0)) == fresh_owner.get_instance_id():
+            break
+        fresh_receipt = {}
+
+    var slot_id := StaticSectionInstallSessionScript.slot_id(world_id, selected_section)
+    var fresh_generation := int(fresh_candidate.get("generation", 0))
+    var fresh_manifest_digest := String(fresh_candidate.get("contentManifestDigest", ""))
+    var native_current := is_instance_valid(fresh_backend) and fresh_generation > 0 \
+        and not fresh_manifest_digest.is_empty() \
+        and bool(fresh_backend.call("receipt_installed", slot_id, fresh_generation,
+            "%s:%d" % [world_id, fresh_generation], fresh_manifest_digest))
+    var main_demand_after_reentry: Variant = main.get("static_section_owner_demand_cells")
+    var demand_reentered := main_demand_after_reentry is Dictionary \
+        and (main_demand_after_reentry as Dictionary).has(selected_owner_cell)
+    var replay_passed: bool = demand_reentered \
+        and is_instance_valid(fresh_owner) and fresh_owner.get_instance_id() != prior_owner_id \
+        and not fresh_receipt.is_empty() \
+        and fresh_receipt.get("ownerCell") == selected_owner_cell \
+        and int(fresh_receipt.get("chunkInstanceId", 0)) == fresh_owner.get_instance_id() \
+        and int(fresh_receipt.get("backendInstanceId", 0)) == fresh_backend.get_instance_id() \
+        and String(fresh_receipt.get("contentManifestDigest", "")) == fresh_manifest_digest \
+        and native_current
+    add_result("main_render_demand_reentry_installs_fresh_native_receipt", replay_passed,
+        JSON.stringify({"sectionKey":selected_section, "ownerCell":selected_owner_cell,
+            "mainDemandReentryObserved":demand_reentered,
+            "priorOwnerInstanceId":prior_owner_id,
+            "freshOwnerInstanceId":fresh_owner.get_instance_id() \
+                if is_instance_valid(fresh_owner) else 0,
+            "worldId":world_id, "previousGeneration":generation,
+            "freshGeneration":fresh_generation, "previousManifestDigest":manifest_digest,
+            "freshManifestDigest":fresh_manifest_digest, "receipt":fresh_receipt,
+            "nativeReceiptCurrent":native_current,
+            "evidenceScope":"preparatory owner-lifecycle evidence only: actual Main owner registry, demand-edge hooks, production coordinator and native backend; one installed section only; Stage 1 exit and full Stage 2 gate remain open; no gameplay/traversal/performance claim"}))
 
 func finish_playtest() -> void:
     mark_progress("saving_report")

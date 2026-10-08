@@ -18,15 +18,19 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 
 AutomatedTestOverlay="*res://scripts/testing/AutomatedTestOverlay.gd"
 
-[native_extensions]
-
-paths=["res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension", "res://addons/zylann.voxel/voxel.gdextension"]
-
 [display]
 
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
+
+[native_extensions]
+
+paths=["res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension", "res://addons/zylann.voxel/voxel.gdextension"]
+
+[rendering]
+
+environment/defaults/default_clear_color=Color(0.66, 0.84, 0.87, 1)
 
 [shader_globals]
 
@@ -54,10 +58,6 @@ environment_daylight={
 "type": "float",
 "value": 1.0
 }
-
-[rendering]
-
-environment/defaults/default_clear_color=Color(0.66, 0.84, 0.87, 1)
 
 [voxel]
 

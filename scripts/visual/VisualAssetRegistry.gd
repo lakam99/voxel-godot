@@ -6,6 +6,8 @@ const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeE
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const ActiveBiomeEnvironmentSnapshotScript := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const StaticRenderMeshFingerprintScript := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const StaticRenderMaterialFingerprintScript := preload("res://scripts/world/StaticRenderMaterialFingerprint.gd")
 const TREE_WIND_SHADER := preload("res://resources/visual/tree_wind_material.gdshader")
 const TREE_WIND_CULL_MARGIN := 1.25
 const INVALID_TREE_CELL := Vector2i(2147483647, 2147483647)
@@ -1236,6 +1238,17 @@ func _read_static_asset_descriptor(asset_id: String) -> Dictionary:
             result["status"] = "failed"
             result["reason"] = "mesh_has_no_surfaces:%s" % String(record["path"])
             return result
+        var mesh_fingerprint: Dictionary = StaticRenderMeshFingerprintScript.inspect(array_mesh)
+        if String(mesh_fingerprint.get("status", "")) != "ready":
+            result["status"] = "failed"
+            result["reason"] = "mesh_content_digest_unavailable:%s:%s" % [
+                String(record["path"]), String(mesh_fingerprint.get("reason", "unknown"))]
+            return result
+        var mesh_content_digest := String(mesh_fingerprint.get("contentDigest", ""))
+        if mesh_content_digest.length() != 64:
+            result["status"] = "failed"
+            result["reason"] = "mesh_content_digest_invalid:%s" % String(record["path"])
+            return result
         for surface_index in range(array_mesh.get_surface_count()):
             var material := properties.get("material_override") as Material
             if material == null:
@@ -1266,17 +1279,24 @@ func _read_static_asset_descriptor(asset_id: String) -> Dictionary:
             var member_bounds := _static_transform_aabb(mesh_bounds, member_transform)
             aggregate_bounds = member_bounds if not has_bounds else aggregate_bounds.merge(member_bounds)
             has_bounds = true
-            var mesh_digest := _static_descriptor_digest({
-                "primitive":array_mesh.surface_get_primitive_type(surface_index),
-                "format":array_mesh.surface_get_format(surface_index),
-                "arrays":surface_arrays
-            })
+            # The renderer binds the whole Mesh resource. Keep surface index
+            # in member identity and its material digest surface-specific, but
+            # attest geometry with the same complete-resource fingerprint the
+            # candidate assembler and native installer verify.
+            var mesh_digest := mesh_content_digest
             var material_content := _static_material_content(material, 0, {})
             if material_content.is_empty():
                 result["status"] = "failed"
                 result["reason"] = "material_content_unattested:%s:%d" % [String(record["path"]), surface_index]
                 return result
-            var material_digest := _static_descriptor_digest(material_content)
+            var material_fingerprint: Dictionary = StaticRenderMaterialFingerprintScript.inspect(material)
+            if String(material_fingerprint.get("status", "")) != "ready":
+                result["status"] = "failed"
+                result["reason"] = "material_render_fingerprint_unavailable:%s:%d:%s" % [
+                    String(record["path"]), surface_index,
+                    String(material_fingerprint.get("reason", "unknown"))]
+                return result
+            var material_digest := String(material_fingerprint.get("contentDigest", ""))
             var member_id := "%s:%s:surface:%d" % [asset_id, String(record["renderPath"]), surface_index]
             var member := {
                 "memberId":member_id, "status":"ready", "mesh":mesh,

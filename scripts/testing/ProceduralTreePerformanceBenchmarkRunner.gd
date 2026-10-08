@@ -6,6 +6,7 @@ extends SceneTree
 
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreePublicationQueueScript := preload("res://scripts/environment/TreePublicationQueue.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 # Every cold sample must have a distinct stable tree identity. Repeating one
 # request only measures TreeSpawnService's canonical-recipe cache, which is
 # useful separately but cannot represent a newly streamed tree.
@@ -178,20 +179,17 @@ func benchmark_requests() -> Array[Dictionary]:
 	]
 
 func request_for(id: String, architecture: String, grammar: String, biome: String, tier: String) -> Dictionary:
-	return {
+	return CertifiedRequestFixture.prepare_or_fail({
 		"treeId": id,
 		"worldSeed": "procedural-tree-performance",
 		"biome": biome,
 		"architecture": architecture,
 		"speciesGrammar": grammar,
 		"growthStage": 0.84,
-		"visualHeight": 22.0,
-		"trunkRadius": 1.0,
-		"canopyRadius": 9.0,
 		"canopyDensity": 0.84,
 		"renderLodTier": tier,
 		"presentation": "runtime"
-	}
+	})
 
 func timing_stats(raw: Array) -> Dictionary:
 	var samples: Array = raw.duplicate()

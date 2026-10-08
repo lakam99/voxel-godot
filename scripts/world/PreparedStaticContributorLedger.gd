@@ -34,7 +34,7 @@ func begin_boundary(boundary_id: String, declarations: Array, removals: Array) -
 	if boundary_id.is_empty() or not declarations.is_read_only() or not removals.is_read_only():
 		return _failed("invalid_boundary_header")
 	var declared: Dictionary = {}
-	var source_ids: Dictionary = {}
+	var source_revisions_by_id: Dictionary = {}
 	var staged_declarations: Dictionary = {}
 	var staged_removals: Dictionary = {}
 	for declaration_value: Variant in declarations:
@@ -52,10 +52,14 @@ func begin_boundary(boundary_id: String, declarations: Array, removals: Array) -
 				or not owner_cell_value is Vector2i \
 				or not segment_declarations is Array or not segment_declarations.is_read_only():
 			return _failed("invalid_source_declaration")
-		if declared.has(part_id) or source_ids.has(source_id):
-			return _failed("duplicate_boundary_source")
-		declared[part_id] = true
-		source_ids[source_id] = true
+		var identity_key := _source_part_identity_key(source_id, part_id)
+		if identity_key.is_empty() or declared.has(identity_key):
+			return _failed("duplicate_boundary_source_part")
+		if source_revisions_by_id.has(source_id) \
+				and String(source_revisions_by_id[source_id]) != revision:
+			return _failed("conflicting_source_revision_across_parts")
+		declared[identity_key] = true
+		source_revisions_by_id[source_id] = revision
 		var segments: Dictionary = {}
 		for segment_value: Variant in segment_declarations:
 			if not segment_value is Dictionary or not segment_value.is_read_only():
@@ -80,7 +84,7 @@ func begin_boundary(boundary_id: String, declarations: Array, removals: Array) -
 			"ownerCell":owner_cell_value,
 			"segments":segments, "declaredSegmentIds":segment_ids,
 			"receivedSegments":{}}
-		staged_declarations[part_id] = source_record
+		staged_declarations[identity_key] = source_record
 	for removal_value: Variant in removals:
 		if not removal_value is Dictionary or not removal_value.is_read_only():
 			return _failed("mutable_or_invalid_removal")
@@ -90,25 +94,29 @@ func begin_boundary(boundary_id: String, declarations: Array, removals: Array) -
 		var revision := String(removal.get("sourceRevision", ""))
 		if part_id.is_empty() or source_id.is_empty() or revision.is_empty():
 			return _failed("invalid_removal_declaration")
-		if not _committed.has(part_id) or String(_committed[part_id].sourceId) != source_id:
+		var identity_key := _source_part_identity_key(source_id, part_id)
+		if identity_key.is_empty() or not _committed.has(identity_key) \
+				or String(_committed[identity_key].sourceId) != source_id:
 			return _failed("removal_source_not_committed")
-		if declared.has(part_id) or source_ids.has(source_id):
-			return _failed("duplicate_boundary_source")
-		declared[part_id] = true
-		source_ids[source_id] = true
+		if declared.has(identity_key):
+			return _failed("duplicate_boundary_source_part")
+		if source_revisions_by_id.has(source_id) \
+				and String(source_revisions_by_id[source_id]) != revision:
+			return _failed("conflicting_source_revision_across_parts")
+		declared[identity_key] = true
+		source_revisions_by_id[source_id] = revision
 		var removal_record := {"sourcePartId":part_id, "sourceId":source_id,
 			"sourceRevision":revision, "remove":true}
 		removal_record.make_read_only()
-		staged_removals[part_id] = removal_record
+		staged_removals[identity_key] = removal_record
 	if declared.is_empty():
 		return _failed("empty_publication_boundary")
 	for committed_part_value: Variant in _committed:
 		var committed_part := String(committed_part_value)
 		if declared.has(committed_part):
 			continue
-		var committed_source_id := String(_committed[committed_part].sourceId)
-		if source_ids.has(committed_source_id):
-			return _failed("source_id_conflicts_with_unaffected_part")
+		# A source can retain unaffected members while another member is replaced;
+		# the pair key keeps that replay exact.
 	_pending = {"boundaryId":boundary_id, "declared":declared,
 		"declarations":staged_declarations, "removals":staged_removals, "open":true}
 	return {"status":"ready", "boundaryId":boundary_id,
@@ -154,7 +162,8 @@ func accept_prepared_segment(boundary_id: String, input: Dictionary) -> Dictiona
 	var compatibility := _validated_compatibility(input)
 	if compatibility.is_empty():
 		return _failed("invalid_prepared_segment_compatibility")
-	var declaration: Dictionary = _pending.get("declarations", {}).get(part_id, {})
+	var identity_key := _source_part_identity_key(source_id, part_id)
+	var declaration: Dictionary = _pending.get("declarations", {}).get(identity_key, {})
 	if declaration.is_empty():
 		return _failed("undeclared_source_part")
 	if declaration.sourceId != source_id or declaration.sourceRevision != revision:
@@ -203,23 +212,23 @@ func prepare_boundary(boundary_id: String, current_source_revisions: Dictionary,
 	var next_committed := _committed.duplicate(false)
 	var changed: Array[String] = []
 	for part_id_value: Variant in _pending.removals:
-		var part_id := String(part_id_value)
-		changed.append(part_id)
-		next_committed.erase(part_id)
+		var identity_key := String(part_id_value)
+		changed.append(identity_key)
+		next_committed.erase(identity_key)
 	for part_id_value: Variant in _pending.declarations:
-		var part_id := String(part_id_value)
-		var source_record: Dictionary = _pending.declarations[part_id]
+		var identity_key := String(part_id_value)
+		var source_record: Dictionary = _pending.declarations[identity_key]
 		var accepted_segments: Dictionary = source_record.receivedSegments
 		var frozen_segments := accepted_segments.duplicate(false)
 		frozen_segments.make_read_only()
-		var record := {"sourcePartId":part_id, "sourceId":source_record.sourceId,
+		var record := {"sourcePartId":source_record.sourcePartId, "sourceId":source_record.sourceId,
 			"sourceRevision":source_record.sourceRevision,
 			"sourceToWorld":source_record.sourceToWorld,
 			"ownerCell":source_record.ownerCell,
 			"segments":frozen_segments}
 		record.make_read_only()
-		next_committed[part_id] = record
-		changed.append(part_id)
+		next_committed[identity_key] = record
+		changed.append(identity_key)
 	changed.sort()
 	var inputs_result := _partition_inputs_for(next_committed)
 	if inputs_result.get("status") != "ready":
@@ -359,9 +368,28 @@ func committed_impacted_section_keys() -> Array[Vector3i]:
 
 func committed_source_part_ids() -> Array[String]:
 	var result: Array[String] = []
-	for part_id: Variant in _committed:
-		result.append(String(part_id))
+	for declaration_value: Variant in _committed.values():
+		if declaration_value is Dictionary:
+			result.append(String(declaration_value.get("sourcePartId", "")))
 	result.sort()
+	result.make_read_only()
+	return result
+
+
+func committed_source_parts() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for declaration_value: Variant in _committed.values():
+		if not declaration_value is Dictionary:
+			continue
+		var identity := {"sourceId":String(declaration_value.get("sourceId", "")),
+			"sourcePartId":String(declaration_value.get("sourcePartId", ""))}
+		if not String(identity.sourceId).is_empty() \
+				and not String(identity.sourcePartId).is_empty():
+			identity.make_read_only()
+			result.append(identity)
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return _source_part_identity_key(String(a.sourceId), String(a.sourcePartId)) \
+			< _source_part_identity_key(String(b.sourceId), String(b.sourcePartId)))
 	result.make_read_only()
 	return result
 
@@ -393,7 +421,7 @@ func _partition_inputs_for(declarations: Dictionary) -> Dictionary:
 			var received: Dictionary = accepted[segment_id]
 			var compatibility: Dictionary = received.compatibility
 			var partition_input := {"sourceId":declaration.sourceId,
-				"sourcePartId":part_id,
+				"sourcePartId":String(declaration.get("sourcePartId", "")),
 				"sourceRevision":declaration.sourceRevision,
 				"instanceAttributeLayout":String(received.get("instanceAttributeLayout", "")),
 				"sourceToWorld":declaration.sourceToWorld,
@@ -425,7 +453,8 @@ func _partition_inputs_for(declarations: Dictionary) -> Dictionary:
 		ordered_by_source[part_id] = inputs_by_source[part_id]
 	ordered_by_source.make_read_only()
 	compatibility_by_key.make_read_only()
-	return {"status":"ready", "inputs":inputs, "inputsBySourcePart":ordered_by_source,
+	return {"status":"ready", "inputs":inputs,
+		"inputsByContributorIdentity":ordered_by_source,
 		"compatibilityByKey":compatibility_by_key}
 
 
@@ -433,10 +462,14 @@ func _impacted_sections_for(partition_result: Dictionary, previous_partition: Di
 		changed_source_parts: Array[String]) -> Dictionary:
 	var sections: Dictionary = {}
 	for output: Dictionary in previous_partition.get("outputs", []):
-		if changed_source_parts.has(String(output.get("sourcePartId", ""))):
+		if changed_source_parts.has(_source_part_identity_key(
+				String(output.get("sourceId", "")),
+				String(output.get("sourcePartId", "")))):
 			sections[Vector3i(output.sectionKey)] = true
 	for output: Dictionary in partition_result.outputs:
-		if changed_source_parts.has(String(output.get("sourcePartId", ""))):
+		if changed_source_parts.has(_source_part_identity_key(
+				String(output.get("sourceId", "")),
+				String(output.get("sourcePartId", "")))):
 			sections[Vector3i(output.sectionKey)] = true
 	var result: Array[Vector3i] = []
 	for key: Variant in sections:
@@ -454,6 +487,11 @@ func _expected_revision(part_id: String) -> String:
 	return String(_pending.get("declarations", {}).get(part_id, {}).get("sourceRevision", ""))
 
 
+static func _source_part_identity_key(source_id: String, source_part_id: String) -> String:
+	if source_id.is_empty() or source_part_id.is_empty(): return ""
+	return "section-part:" + var_to_bytes([source_id, source_part_id]).hex_encode()
+
+
 func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var material_key := String(value.get("materialKey", ""))
 	var render_tier := String(value.get("renderTier", ""))
@@ -463,9 +501,11 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 	var pipeline_revision := String(value.get("pipelineRevision", ""))
 	var render_layer := String(value.get("renderLayer", ""))
 	var translucent_sort_policy := String(value.get("translucentSortPolicy", ""))
+	var translucent_sort_descriptor_value: Variant = value.get("translucentSortDescriptor", null)
 	var cast_shadows: Variant = value.get("castShadows")
 	var visibility_end: Variant = value.get("visibilityRangeEnd")
 	var fade_margin: Variant = value.get("fadeMargin")
+	var intended_visible: Variant = value.get("intendedVisible", true)
 	# Opaque and alpha-scissored batches are order-independent. Translucent
 	# content retains an explicit sort policy in the manifest; the native install
 	# session currently fails closed until its renderer sorting contract is wired.
@@ -477,7 +517,10 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 			or render_layer not in ["opaque", "cutout", "translucent"] \
 			or (render_layer in ["opaque", "cutout"] and translucent_sort_policy != "none") \
 			or (render_layer == "translucent" and translucent_sort_policy not in ["camera_depth", "weighted_oit"]) \
-			or not cast_shadows is bool or not visibility_end is float or not fade_margin is float \
+			or (value.has("translucentSortDescriptor") and (not translucent_sort_descriptor_value is Dictionary \
+				or not translucent_sort_descriptor_value.is_read_only())) \
+			or (render_layer != "translucent" and value.has("translucentSortDescriptor")) \
+			or not cast_shadows is bool or not intended_visible is bool or not visibility_end is float or not fade_margin is float \
 			or not is_finite(visibility_end) or not is_finite(fade_margin) \
 			or visibility_end < 0.0 or fade_margin < 0.0:
 		return {}
@@ -492,7 +535,7 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 		translucent_sort_policy, cast_shadows, visibility_end, fade_margin,
 		mesh_local_bounds.position.x, mesh_local_bounds.position.y,
 		mesh_local_bounds.position.z, mesh_local_bounds.size.x, mesh_local_bounds.size.y,
-		mesh_local_bounds.size.z])
+		mesh_local_bounds.size.z, intended_visible])
 	var batch_key := "section-batch:" + canonical.sha256_text()
 	var supplied := String(value.get("compatibilityKey", batch_key))
 	if supplied != batch_key:
@@ -505,7 +548,10 @@ func _validated_compatibility(value: Dictionary) -> Dictionary:
 		"pipelineRevision":pipeline_revision, "renderLayer":render_layer,
 		"translucentSortPolicy":translucent_sort_policy, "castShadows":cast_shadows,
 		"visibilityRangeEnd":visibility_end, "fadeMargin":fade_margin,
+		"intendedVisible":intended_visible,
 		"batchKey":batch_key, "compatibilityKey":batch_key}
+	if render_layer == "translucent":
+		result["translucentSortDescriptor"] = translucent_sort_descriptor_value
 	result.make_read_only()
 	return result
 

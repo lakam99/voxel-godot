@@ -6,6 +6,7 @@ class_name VisibleWorldDemandController
 const ReadinessScript := preload("res://scripts/world/VisibleWorldReadiness.gd")
 const TerrainManifestScript := preload("res://scripts/world/VoxelTerrainVisualManifest.gd")
 const StructureManifestScript := preload("res://scripts/world/GeneratedStructureVisualManifest.gd")
+const SupportLeaseBridgeScript := preload("res://scripts/world/VisibleSectionSupportLeaseBridge.gd")
 ## Begin the next all-direction source view before the old 24-cell rebase.
 ## This only schedules existing owners; it does not enlarge the rendered view.
 const REFRESH_DISTANCE_CELLS := 12.0
@@ -24,18 +25,75 @@ const STRUCTURE_PREFETCH_DEADLINE_RESERVE_USEC := 150
 
 var _owners: Dictionary = {}
 var _next_demand_revision := 0
+var _support_lease_bridge = SupportLeaseBridgeScript.new()
 
 
 func clear() -> void:
 	_owners.clear()
+	_support_lease_bridge.clear()
 
 
 func release(owner: String) -> void:
 	_owners.erase(owner)
+	_support_lease_bridge.release_view(owner)
 
 
 func has_owner(owner: String) -> bool:
 	return _owners.has(owner)
+
+
+## Queries each exact terrain section from the active view manifests. Every
+## support slot owns an independent certificate and replacement lifecycle.
+func refresh_support_owner_demands(owner: String, main: Object, world_id: String) -> Dictionary:
+	if not _owners.has(owner) or not is_instance_valid(main) or world_id.is_empty():
+		return {"status":"pending", "reason":"support_view_or_world_unavailable",
+			"retryable":true, "ownerCells":{}}
+	var provider: Object = main.get("ecology_static_section_provider") as Object
+	if not is_instance_valid(provider):
+		return {"status":"pending", "reason":"ecology_support_index_unavailable",
+			"retryable":true, "ownerCells":_support_lease_bridge.owner_demand_cells(owner)}
+	var state: Dictionary = _owners[owner]
+	var failures: Array[String] = []
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty(): view = state.get("current", {})
+	if view.is_empty() or not view.has("terrain"):
+		failures.append("visible_terrain_manifest_unavailable")
+	else:
+		var terrain_manifest: Object = view.terrain as Object
+		if not is_instance_valid(terrain_manifest) or not terrain_manifest.has_method("required_section_keys"):
+			failures.append("terrain_manifest_section_set_unavailable")
+		else:
+			var required: Dictionary = terrain_manifest.call("required_section_keys")
+			if required.get("status") != "ready":
+				failures.append(String(required.get("reason", "terrain_section_set_pending")))
+			else:
+				required = required.duplicate()
+				required["viewOwner"] = owner
+				required["worldId"] = world_id
+				required["demandRevision"] = int(view.get("demandRevision", 0))
+				var refreshed: Dictionary = _support_lease_bridge.reconcile_view(owner,
+					required, provider)
+				if refreshed.get("status") != "ready":
+					failures.append(String(refreshed.get("reason", "support_index_pending")))
+	var owner_cells: Dictionary = _support_lease_bridge.owner_demand_cells(owner)
+	var snapshots: Dictionary = _support_lease_bridge.required_section_snapshots(owner)
+	return {"status":"pending" if not failures.is_empty() else "ready",
+		"reason":failures[0] if not failures.is_empty() else "",
+		"retryable":not failures.is_empty(), "ownerCells":owner_cells,
+		"snapshots":snapshots}
+
+
+func promote_support_section(owner: String, section_key: Vector3i,
+		snapshot_digest: String) -> bool:
+	return _support_lease_bridge.promote_section(owner, section_key, snapshot_digest)
+
+
+func pending_support_section_snapshots(owner: String) -> Dictionary:
+	return _support_lease_bridge.required_section_snapshots(owner).get("pending", {})
+
+
+func active_support_section_keys(owner: String) -> Dictionary:
+	return _support_lease_bridge.active_section_keys(owner)
 
 
 func adopt(owner: String, request_id: int, seed: String, world_revision: String,
@@ -800,7 +858,8 @@ func _refresh_current_chunk(main: Object, state: Dictionary,
 
 
 func pending_representation_diagnostics(owner: String, request_id: int,
-		seed: String, world_revision: String, limit := 8) -> Array[Dictionary]:
+		seed: String, world_revision: String, limit := 8,
+		kind_filter := "", bounds_override := Rect2i()) -> Array[Dictionary]:
 	if not _owners.has(owner): return []
 	var state: Dictionary = _owners[owner]
 	var view: Dictionary = state.get("pending", {})
@@ -809,8 +868,45 @@ func pending_representation_diagnostics(owner: String, request_id: int,
 			or String(view.get("seed", "")) != seed \
 			or String(view.get("worldRevision", "")) != world_revision:
 		return []
+	var bounds: Rect2i = view.bounds
+	if bounds_override.has_area():
+		if not view.bounds.encloses(bounds_override) \
+				or not view.nearBounds.encloses(bounds_override):
+			return []
+		bounds = bounds_override
 	return (view.ledger as Object).call("pending_candidate_diagnostics", request_id,
-		seed, world_revision, int(view.viewRevision), view.bounds, limit)
+		seed, world_revision, int(view.viewRevision), bounds, limit, kind_filter)
+
+
+func pending_representation_diagnostic_snapshot(owner: String, request_id: int,
+		seed: String, world_revision: String, limit := 8,
+		kind_filter := "", bounds_override := Rect2i()) -> Dictionary:
+	var empty_snapshot := {"rows": [], "sourcesInspected": 0,
+		"candidatesInspected": 0, "truncated": false, "truncationReason": ""}
+	if not _owners.has(owner):
+		empty_snapshot["truncationReason"] = "visual_owner_missing"
+		return empty_snapshot
+	var state: Dictionary = _owners[owner]
+	var view: Dictionary = state.get("pending", {})
+	if view.is_empty(): view = state.get("current", {})
+	if view.is_empty() or int(view.get("requestId", 0)) != request_id \
+			or String(view.get("seed", "")) != seed \
+			or String(view.get("worldRevision", "")) != world_revision:
+		empty_snapshot["truncationReason"] = "visual_view_mismatch"
+		return empty_snapshot
+	var bounds: Rect2i = view.bounds
+	if bounds_override.has_area():
+		if not view.bounds.encloses(bounds_override) \
+				or not view.nearBounds.encloses(bounds_override):
+			empty_snapshot["truncationReason"] = "diagnostic_bounds_outside_view"
+			return empty_snapshot
+		bounds = bounds_override
+	var ledger: Object = view.ledger as Object
+	if ledger.has_method("pending_candidate_diagnostic_snapshot"):
+		return ledger.call("pending_candidate_diagnostic_snapshot", request_id,
+			seed, world_revision, int(view.viewRevision), bounds, limit, kind_filter)
+	empty_snapshot["reason"] = "bounded_diagnostic_api_unavailable"
+	return empty_snapshot
 
 
 static func _covers(view: Dictionary, center: Vector2, near_bounds: Rect2i,

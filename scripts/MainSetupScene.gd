@@ -106,7 +106,7 @@ func setup_materials() -> void:
     if water_material is BaseMaterial3D:
         (water_material as BaseMaterial3D).cull_mode = BaseMaterial3D.CULL_DISABLED
     materials["water"] = water_material
-    var lava_material := make_emissive_material(Color(1.0, 0.34, 0.08, 0.92), 0.95)
+    var lava_material := make_emissive_material(Color(1.0, 0.34, 0.08, 0.92), 0.95, true)
     lava_material.cull_mode = BaseMaterial3D.CULL_DISABLED
     materials["lava"] = lava_material
     materials["sunDisc"] = make_unshaded_material(Color(1.0, 0.82, 0.38))
@@ -150,8 +150,8 @@ func make_building_material(
     material.set_shader_parameter("grain_color", grain_color)
     return material
 
-func make_emissive_material(color: Color, energy: float) -> StandardMaterial3D:
-    var material := make_material(color, 0.48)
+func make_emissive_material(color: Color, energy: float, transparent: bool = false) -> StandardMaterial3D:
+    var material := make_material(color, 0.48, transparent)
     material.emission_enabled = true
     material.emission = color
     material.emission_energy_multiplier = energy

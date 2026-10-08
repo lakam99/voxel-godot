@@ -7,6 +7,9 @@ const SnapshotBuilder := preload("res://scripts/world/PreparedStaticSectionSnaps
 const VisualRecipe := preload("res://scripts/world/OrdinaryStructureBlockVisualRecipe.gd")
 const AssetRegistry := preload("res://scripts/visual/StaticItemAssetRegistry.gd")
 const MainChunkTerrainScript := preload("res://scripts/MainChunkTerrain.gd")
+const CitadelSiteField := preload("res://scripts/world/CitadelSiteField.gd")
+const CitadelTerrainAdmission := preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const StandaloneCandidate := preload("res://scripts/world/StandaloneStructureCandidate.gd")
 
 
 func _visual_recipe_input(block_type: String, options: Dictionary) -> Dictionary:
@@ -21,6 +24,11 @@ class FixtureWorld extends Node3D:
 	var CELL := 1.0
 	var blocks: Dictionary = {}
 	var seed_text := "ordinary-section-geometry-contract"
+	var TOWN_REGION_CELLS := 100000
+	var TOWN_RADIUS_CELLS := 24
+	var STRUCTURE_REGION_CELLS := 1000000
+	var STRUCTURE_SPAWN_CHANCE := 0.0
+	var town_region_cache: Dictionary = {}
 	var block_root: Node3D
 	var meshes: Dictionary = {}
 	var materials: Dictionary = {}
@@ -53,6 +61,31 @@ class FixtureWorld extends Node3D:
 
 	func block_collision_profile(_block_type: String) -> Dictionary:
 		return {"size":Vector3.ONE * CELL * 0.96, "offset":Vector3.ZERO}
+
+	func town_region(region_x: int, region_z: int) -> Dictionary:
+		var key := Vector2i(region_x, region_z)
+		if town_region_cache.has(key): return town_region_cache[key]
+		town_region_cache[key] = {}
+		return {}
+
+	func hash01(value: String) -> float:
+		return float(value.hash() & 0x7fffffff) / 2147483647.0
+
+	func hash_string(value: String) -> int:
+		return value.hash()
+
+class FixtureCitadelAdmission extends RefCounted:
+	var main_world: Object
+	var request_status := "ready"
+	var request_reason := ""
+	var generation := 3
+
+	func request_bounds(bounds: Rect2i) -> Dictionary:
+		return {"status":request_status, "reason":request_reason,
+			"generation":generation, "worldSeed":String(main_world.get("seed_text")), "bounds":bounds}
+
+	func source_state(_region: Vector2i) -> Dictionary:
+		return {"status":"absent", "reason":"source_not_requested"}
 
 var checks: Array[Dictionary] = []
 
@@ -433,11 +466,12 @@ func run() -> void:
 		changed_mesh.get("status") == "ready"
 		and collider.get_parent() == body and body.get_parent() == world,
 		{"status":changed_mesh.get("status", ""), "colliderPresent":collider.get_parent() == body})
+	_run_ecology_structure_dependency_checks()
 	var passed := true
 	for row: Dictionary in checks:
 		if not bool(row.passed): passed = false
 	var report := {"schema":"ordinary-structure-section-geometry-adapter-contract/v1",
-		"evidenceLevel":"synthetic_producer_value_and_partition_contract",
+		"evidenceLevel":"synthetic_producer_value_partition_and_local_structure_dependency_contract",
 		"complete":true, "passed":passed, "checkCount":checks.size(), "checks":checks}
 	var report_path := OS.get_environment("VOXEL_ORDINARY_SECTION_GEOMETRY_REPORT")
 	if not report_path.is_empty():
@@ -447,6 +481,177 @@ func run() -> void:
 			file.close()
 	world.free()
 	quit(0 if passed else 1)
+
+
+func _run_ecology_structure_dependency_checks() -> void:
+	var world := FixtureWorld.new()
+	root.add_child(world)
+	world.seed_text = _seed_without_local_citadel_site()
+	var structures = StructureSystemScript.new()
+	structures.main = world
+	structures.regional_source_generation = 7
+	var admission := FixtureCitadelAdmission.new()
+	admission.main_world = world
+	structures.citadel_terrain_admission = admission
+	var bounds := Rect2i(Vector2i(64, 64), Vector2i(8, 8))
+	var baseline: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("ecology_structure_dependency_capture_is_sealed_and_owned",
+		baseline.get("schema") == "ecology-structure-dependency-snapshot/v1"
+		and baseline.get("status") == "ready"
+		and String(baseline.get("contentDigest", "")).length() == 64
+		and baseline.is_read_only()
+		and (baseline.get("content", {}) as Dictionary).is_read_only(), baseline)
+	structures.generated_structures[Vector2i(300, -200)] = true
+	structures.regional_source_revision += 19
+	structures.pending_structure_ops.append({"type":"block", "cellX":500000,
+		"cellZ":-500000, "visualSourceId":"standalone:distant"})
+	structures.ordinary_visual_sources["town:distant"] = {"revision":4096,
+		"completed":true, "expected":{}, "failed":{}, "omitted":{}}
+	structures.natural_prop_exclusion_records["distant"] = {"id":"distant", "source":"tree",
+		"minX":500000, "maxX":500002, "minZ":-500000, "maxZ":-499998}
+	var after_distant_work: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("distant_structure_counts_and_queue_work_do_not_change_local_digest",
+		after_distant_work.get("contentDigest", "") == baseline.get("contentDigest", "")
+		and structures.ecology_structure_dependencies_are_current(baseline), after_distant_work)
+	structures.natural_prop_exclusion_records["local"] = {"id":"local", "source":"contract",
+		"minX":60, "maxX":61, "minZ":65, "maxZ":66}
+	var with_local_exclusion: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("post_draw_margin_captures_neighbor_exclusion_and_same_revision_mutation",
+		with_local_exclusion.get("status") == "ready"
+		and with_local_exclusion.get("contentDigest", "") != baseline.get("contentDigest", "")
+		and not structures.ecology_structure_dependencies_are_current(baseline), with_local_exclusion)
+	structures.natural_prop_exclusion_records["local"].maxX = 60
+	var same_revision_mutation: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("local_record_mutation_is_detected_without_revision_counter_change",
+		same_revision_mutation.get("contentDigest", "") != with_local_exclusion.get("contentDigest", "")
+		and not structures.ecology_structure_dependencies_are_current(with_local_exclusion), same_revision_mutation)
+	var replacement_world := FixtureWorld.new()
+	replacement_world.seed_text = world.seed_text
+	structures.main = replacement_world
+	check("replacement_world_invalidates_old_structure_lease",
+		not structures.ecology_structure_dependencies_are_current(same_revision_mutation), {})
+	structures.main = world
+	admission.request_status = "pending"
+	admission.request_reason = "preparing_contract_site"
+	var pending: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("local_citadel_admission_pending_blocks_capture",
+		pending.get("status") == "pending" and String(pending.get("reason", "")).contains("preparing"), pending)
+	admission.request_status = "failed"
+	admission.request_reason = "contract_site_rejected"
+	var failed: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("local_citadel_admission_failure_is_not_empty_success",
+		failed.get("status") == "failed" and failed.get("reason", "") == "contract_site_rejected", failed)
+	structures.natural_prop_exclusion_records["invalid"] = {"id":12, "source":"contract",
+		"minX":60, "maxX":61, "minZ":65, "maxZ":66}
+	admission.request_status = "ready"
+	var malformed: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 4, 6)
+	check("malformed_local_authority_record_fails_closed",
+		malformed.get("status") == "failed" and malformed.get("reason", "") == "invalid_local_structure_record", malformed)
+	var forged: Dictionary = {}
+	for key in same_revision_mutation.keys(): forged[key] = same_revision_mutation[key]
+	forged["content"] = {"forged":true}
+	check("forged_content_or_owner_epoch_cannot_reuse_receipt",
+		not structures.ecology_structure_dependencies_are_current(forged), {})
+	var forged_epoch: Dictionary = {}
+	for key in same_revision_mutation.keys(): forged_epoch[key] = same_revision_mutation[key]
+	forged_epoch["ownerGeneration"] = int(forged_epoch.get("ownerGeneration", 0)) + 1
+	check("forged_structure_owner_epoch_is_rejected",
+		not structures.ecology_structure_dependencies_are_current(forged_epoch), {})
+	var forged_owner: Dictionary = {}
+	for key in same_revision_mutation.keys(): forged_owner[key] = same_revision_mutation[key]
+	forged_owner["worldOwnerInstanceId"] = int(forged_owner.get("worldOwnerInstanceId", 0)) + 1
+	check("forged_world_owner_identity_is_rejected",
+		not structures.ecology_structure_dependencies_are_current(forged_owner), {})
+	_run_local_town_admission_checks()
+	structures.main = null
+	structures.citadel_terrain_admission = null
+	admission.main_world = null
+	replacement_world.free()
+	world.free()
+
+
+func _seed_without_local_citadel_site() -> String:
+	var bounds := Rect2i(Vector2i(64, 64), Vector2i(8, 8)).grow(6)
+	var region := CitadelSiteField.region_for_cell(bounds.position)
+	for attempt in range(1000):
+		var seed := "ecology-structure-contract-%d" % attempt
+		var candidate: Dictionary = CitadelSiteField.candidate_for_region(seed, region)
+		if not candidate.is_empty() and CitadelTerrainAdmission.declared_influence(candidate).intersects(bounds):
+			continue
+		var standalone_clear := true
+		for z in range(-1, 2):
+			for x in range(-1, 2):
+				var standalone := StandaloneCandidate.candidate_for_region(seed,
+					Vector2i(x, z), 1000000, 0.0)
+				if not standalone.is_empty() \
+					and (StandaloneCandidate.terrain_influence_for_candidate(standalone).influenceCells as Rect2i).intersects(bounds):
+					standalone_clear = false
+		if standalone_clear: return seed
+	return "ecology-structure-contract-fallback"
+
+
+func _run_local_town_admission_checks() -> void:
+	var world := FixtureWorld.new()
+	root.add_child(world)
+	world.seed_text = _seed_without_local_citadel_site()
+	world.town_region_cache[Vector2i.ZERO] = {"regionX":0, "regionZ":0,
+		"centerX":64, "centerZ":64, "radius":24, "level":12.0, "homeExclusionRings":[]}
+	var structures = StructureSystemScript.new()
+	structures.main = world
+	structures.regional_source_generation = 11
+	var admission := FixtureCitadelAdmission.new()
+	admission.main_world = world
+	structures.citadel_terrain_admission = admission
+	var bounds := Rect2i(Vector2i(60, 60), Vector2i(10, 10))
+	var pending: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	var source_id := "town:64,64"
+	check("future_local_town_layout_blocks_its_affected_area",
+		pending.get("status") == "pending"
+		and String(pending.get("reason", "")).contains("town_operations")
+		and not (pending.get("content", {}) as Dictionary).get("townSources", []).is_empty(), pending)
+	var old_digest := String(pending.get("contentDigest", ""))
+	structures.pending_structure_ops.append({"type":"block", "cellX":500000,
+		"cellZ":500000, "townKey":"64,64", "visualSourceId":source_id})
+	var with_distant_town_op: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	check("distant_write_in_same_town_does_not_churn_local_pending_digest",
+		with_distant_town_op.get("status") == "pending"
+		and with_distant_town_op.get("contentDigest", "") == old_digest, with_distant_town_op)
+	structures.pending_structure_ops.clear()
+	structures.pending_structure_retry_ops.clear()
+	structures.pending_structure_op_index = 0
+	structures.town_manifest_publish_states["64,64"] = {"status":"building",
+		"generationAttempts":1, "desiredHomeCount":4, "builtHomeCount":4, "failureReasons":[]}
+	structures.ordinary_visual_sources[source_id]["completed"] = true
+	var footprint := {"id":"town_home:65,65:8x8:12", "source":"town_home", "material":"stone",
+		"baseX":65, "baseZ":65, "width":8, "depth":8, "level":12.0, "floorY":12,
+		"clearanceCells":4, "minCell":Vector3i(64,9,64), "maxCell":Vector3i(74,12,74)}
+	structures.terrain_footprint_records[footprint.id] = footprint
+	var undeclared_phase: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	check("incomplete_town_without_phase_declaration_remains_pending",
+		undeclared_phase.get("status") == "pending"
+		and String(undeclared_phase.get("reason", "")).contains("town_operations"), undeclared_phase)
+	structures.pending_structure_ops.append({"type":"town_build_phase", "townKey":"64,64",
+		"state":{"phase":"publish", "townKey":"64,64", "sites":[], "homeSiteIndex":0,
+			"builtHomeCount":4, "desiredHomeCount":4}})
+	var local_complete: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	check("known_local_layout_with_nonlocal_publish_tail_is_ready",
+		local_complete.get("status") == "ready", local_complete)
+	structures.pending_structure_ops.append({"type":"block", "cellX":500001,
+		"cellZ":500001, "townKey":"64,64", "visualSourceId":source_id})
+	var unrelated_queued: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	check("completed_local_layout_does_not_wait_for_distant_town_tail",
+		structures.town_manifest_publish_states["64,64"].get("status") == "building"
+		and unrelated_queued.get("status") == "ready"
+		and unrelated_queued.get("contentDigest", "") == local_complete.get("contentDigest", ""), unrelated_queued)
+	structures.terrain_footprint_records[footprint.id].material = "wood"
+	var local_edit: Dictionary = structures.capture_ecology_structure_dependencies(bounds, 2, 3)
+	check("intersecting_terrain_footprint_edit_invalidates_local_receipt",
+		local_edit.get("contentDigest", "") != unrelated_queued.get("contentDigest", "")
+		and not structures.ecology_structure_dependencies_are_current(unrelated_queued), local_edit)
+	structures.main = null
+	structures.citadel_terrain_admission = null
+	admission.main_world = null
+	world.free()
 
 
 func _make_body(source_id: String, cell: Vector3i, block_type: String) -> StaticBody3D:

@@ -39,28 +39,32 @@ func hash01(text: String) -> float:
 	return float(abs(hash_string("%s:%s" % [seed_text, text])) % 100000) / 100000.0
 
 func tree_chance(biome: String) -> float:
-	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
-	return profile.tree_chance if profile != null else 0.02
+	var profile: Dictionary = biome_environment_catalog.profile_values_for_biome(biome) if biome_environment_catalog != null else {}
+	return float(profile.get("tree_chance", 0.02))
 
 func forage_for_biome(biome: String) -> Dictionary:
-	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
-	return profile.forage_spec() if profile != null else {
-		"material": "berryBush", "drop": "berries", "drop_min": 2, "drop_max": 4, "radius": 0.56
-	}
+	var profile: Dictionary = biome_environment_catalog.profile_values_for_biome(biome) if biome_environment_catalog != null else {}
+	if profile.is_empty():
+		return {"material": "berryBush", "drop": "berries", "drop_min": 2, "drop_max": 4, "radius": 0.56}
+	return {"material": String(profile.get("forage_material", "berryBush")),
+		"drop": String(profile.get("forage_drop", "berries")),
+		"drop_min": int(profile.get("forage_drop_min", 2)),
+		"drop_max": int(profile.get("forage_drop_max", 4)),
+		"radius": float(profile.get("forage_radius", 0.56))}
 
 func forage_chance(biome: String) -> float:
-	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
-	return profile.forage_chance if profile != null else 0.0
+	var profile: Dictionary = biome_environment_catalog.profile_values_for_biome(biome) if biome_environment_catalog != null else {}
+	return float(profile.get("forage_chance", 0.0))
 
 func wildlife_chance(biome: String, height: float) -> float:
 	if height > 70.0:
 		return 0.0
-	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
-	return profile.wildlife_chance if profile != null else 0.0
+	var profile: Dictionary = biome_environment_catalog.profile_values_for_biome(biome) if biome_environment_catalog != null else {}
+	return float(profile.get("wildlife_chance", 0.0))
 
 func rock_chance(biome: String, height: float) -> float:
-	var profile = biome_environment_catalog.profile_for_biome(biome) if biome_environment_catalog != null else null
-	var base: float = profile.rock_base_chance if profile != null else 0.08
+	var profile: Dictionary = biome_environment_catalog.profile_values_for_biome(biome) if biome_environment_catalog != null else {}
+	var base := float(profile.get("rock_base_chance", 0.08))
 	if height > 42.0:
 		base += 0.12
 	return base

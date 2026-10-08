@@ -4,10 +4,12 @@
 #include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/classes/mesh.hpp>
 #include <godot_cpp/classes/multi_mesh.hpp>
-#include <godot_cpp/classes/multi_mesh_instance3d.hpp>
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/visual_instance3d.hpp>
 #include <godot_cpp/variant/aabb.hpp>
 #include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/callable.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
@@ -18,6 +20,7 @@
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector4_array.hpp>
+#include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/variant.hpp>
@@ -64,6 +67,14 @@ class ChunkRenderPacketBackend : public Node3D {
 	struct LegacyVisual {
 		uint64_t id = 0, parent_id = 0;
 		bool was_visible = false;
+	};
+	struct OwnedRenderBatch {
+		RID mesh;
+		RID multimesh;
+		Ref<Material> override_material;
+		std::vector<Ref<Material>> surface_materials;
+		int64_t mesh_handle = 0;
+		int64_t multimesh_handle = 0;
 	};
 	struct AttachmentRoot {
 		String ownership_kind = "backend_owned_geometry";
@@ -162,10 +173,13 @@ class ChunkRenderPacketBackend : public Node3D {
 	std::map<std::string, PendingPresentation> _pending_presentations;
 	std::map<std::string, Dictionary> _owner_loss_cancellations;
 	int64_t _presentation_sequence = 0;
+	mutable int64_t _installed_receipt_validation_polls = 0;
 	int64_t _staged_payload_bytes = 0;
 	int64_t _retiring_roots = 0;
 	int64_t _retiring_payload_bytes = 0;
 	std::map<uint64_t, int64_t> _retiring_payload_by_root;
+	std::map<uint64_t, OwnedRenderBatch> _owned_render_batches;
+	int64_t _next_render_resource_handle = 0;
 
 	static std::string _key(const String &p_source_id);
 	Dictionary _status(const String &p_status, const String &p_reason = "") const;
@@ -184,6 +198,10 @@ class ChunkRenderPacketBackend : public Node3D {
 	bool _borrowed_root_claimed_elsewhere(uint64_t p_root_id, const String &p_source_id) const;
 	bool _attachment_motion_valid(const AttachmentRoot &p_attachment, Node3D *p_parent, Node3D *p_body) const;
 	void _on_attachment_owner_exiting(int64_t p_owner_id);
+	void _on_render_batch_retiring(int64_t p_instance_id);
+	void _release_render_batch(uint64_t p_instance_id);
+	bool _create_opaque_render_batch(const Batch &p_batch, StagedPacket &r_packet,
+		Node3D *p_staging_root, Dictionary &r_receipt);
 	bool _legacy_valid(const AttachmentRoot &p_attachment, const LegacyVisual &p_visual) const;
 	bool _legacy_identity_valid(const AttachmentRoot &p_attachment, const LegacyVisual &p_visual) const;
 	bool _legacy_hidden(const AttachmentRoots &p_roots) const;
@@ -217,7 +235,7 @@ class ChunkRenderPacketBackend : public Node3D {
 		double p_visibility_range, double p_fade_margin, const String &p_render_layer,
 		const String &p_attachment_key = "", bool p_intended_visible = true);
 	Dictionary _batch_snapshot(const Batch &p_batch, int32_t p_index,
-		MultiMeshInstance3D *p_instance) const;
+		VisualInstance3D *p_instance) const;
 	Dictionary _installed_snapshot(const InstalledPacket &p_packet,
 		bool p_allow_hidden_root = false) const;
 	Dictionary _pending_presentation_snapshot(const PendingPresentation &p_pending) const;

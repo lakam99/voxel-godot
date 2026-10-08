@@ -19,8 +19,8 @@ static func partition(inputs: Array) -> Dictionary:
 	if not inputs.is_read_only():
 		return _failed("mutable_input_list")
 	var source_revisions: Dictionary = {}
-	var source_parts: Dictionary = {}
 	var source_owner_cells: Dictionary = {}
+	var source_part_identities: Dictionary = {}
 	var identities: Dictionary = {}
 	var buckets: Dictionary = {}
 	var batch_bounds: Dictionary = {}
@@ -61,15 +61,20 @@ static func partition(inputs: Array) -> Dictionary:
 		for component_index in range(buffer_value.size()):
 			if not is_finite(float(buffer_value[component_index])):
 				return _failed("nonfinite_instance_buffer_value")
-		if source_revisions.has(source_id) and source_revisions[source_id] != source_revision:
-			return _failed("conflicting_source_revisions")
-		if source_parts.has(source_id) and (source_parts[source_id] != source_part_id \
-				or source_owner_cells[source_id] != owner_cell_value):
-			return _failed("conflicting_source_owner")
-		source_revisions[source_id] = source_revision
-		source_parts[source_id] = source_part_id
-		source_owner_cells[source_id] = owner_cell_value
-		var identity := source_id + "\n" + source_revision + "\n" + segment_id
+		var source_part_identity := _source_part_identity_key(source_id, source_part_id)
+		if source_part_identity.is_empty():
+			return _failed("invalid_source_part_identity")
+		if source_revisions.has(source_part_identity) \
+				and source_revisions[source_part_identity] != source_revision:
+			return _failed("conflicting_source_part_revisions")
+		if source_owner_cells.has(source_part_identity) \
+				and source_owner_cells[source_part_identity] != owner_cell_value:
+			return _failed("conflicting_source_part_owner")
+		source_revisions[source_part_identity] = source_revision
+		source_owner_cells[source_part_identity] = owner_cell_value
+		source_part_identities[source_part_identity] = {"sourceId":source_id,
+			"sourcePartId":source_part_id, "ownerCell":owner_cell_value}
+		var identity := var_to_bytes([source_id, source_part_id, source_revision, segment_id]).hex_encode()
 		if identities.has(identity):
 			return _failed("duplicate_source_segment")
 		identities[identity] = true
@@ -87,7 +92,16 @@ static func partition(inputs: Array) -> Dictionary:
 			if not _valid_bounds(world_bounds):
 				return _failed("invalid_transformed_mesh_bounds")
 			var world_center := world_bounds.position + world_bounds.size * 0.5
-			var section_key := Grid.key_for_world_position(world_center)
+			var anchor: Variant = input.get("compoundAnchor", null)
+			var policy := String(input.get("ownershipPolicy", "transformed_mesh_aabb_center/v1"))
+			if (anchor != null and policy != "compound_attachment_anchor/v1") \
+					or (anchor == null and policy != "transformed_mesh_aabb_center/v1"):
+				return _failed("compound_attachment_ownership_policy_mismatch")
+			if anchor != null and (not anchor is Dictionary or not anchor.is_read_only() \
+					or anchor.size() != 2 or String(anchor.get("key", "")).is_empty() \
+					or not anchor.get("worldPosition") is Vector3 or not anchor.worldPosition.is_finite()):
+				return _failed("invalid_compound_attachment_anchor")
+			var section_key := Grid.key_for_world_position(anchor.worldPosition if anchor != null else world_center)
 			var section_origin := Grid.origin_for_key(section_key)
 			var section_local_transform := Transform3D(Basis.IDENTITY, -section_origin) * world_transform
 			var local_bounds := section_local_transform * mesh_local_bounds
@@ -99,12 +113,15 @@ static func partition(inputs: Array) -> Dictionary:
 				float(buffer_value[offset + Attributes.COLOR_OFFSET + 3]))
 			var output_record := Attributes.encode_transform(section_local_transform,
 				buffer_value, offset, instance_color)
-			var bucket_key := _bucket_key(section_key, batch_key, source_id, source_revision)
+			var bucket_key := _bucket_key(section_key, batch_key, source_id,
+				source_part_id, source_revision)
 			if not buckets.has(bucket_key):
 				buckets[bucket_key] = {"sectionKey":section_key, "batchKey":batch_key,
 					"sourceId":source_id, "sourcePartId":source_part_id,
 					"ownerCell":owner_cell_value,
-					"sourceRevision":source_revision, "records":[]}
+					"sourceRevision":source_revision, "records":[], "compoundAnchor":anchor}
+			elif buckets[bucket_key].compoundAnchor != anchor:
+				return _failed("mixed_compound_attachment_anchor")
 			buckets[bucket_key].records.append({
 				"sourceId":source_id,
 				"sourcePartId":source_part_id,
@@ -160,7 +177,10 @@ static func partition(inputs: Array) -> Dictionary:
 				"outputFirstInstance":record_index - cursor,
 				"instanceCount":1,
 				"ownedSectionKey":bucket.sectionKey,
-				"ownershipPolicy":"transformed_mesh_aabb_center/v1"}
+					"ownershipPolicy":"transformed_mesh_aabb_center/v1"}
+				if bucket.compoundAnchor != null:
+					mapping["ownershipPolicy"] = "compound_attachment_anchor/v1"
+					mapping["compoundAnchor"] = bucket.compoundAnchor
 				mapping.make_read_only()
 				source_ranges.append(mapping)
 				all_source_mappings.append({
@@ -197,6 +217,9 @@ static func partition(inputs: Array) -> Dictionary:
 				"bounds":output_bounds,
 				"worldBounds":output_world_bounds,
 				"streamChunkDependencies":dependencies}
+			if bucket.compoundAnchor != null:
+				segment["ownershipPolicy"] = "compound_attachment_anchor/v1"
+				segment["compoundAnchor"] = bucket.compoundAnchor
 			segment.make_read_only()
 			outputs.append({"instanceAttributeLayout":INSTANCE_ATTRIBUTE_LAYOUT,
 				"sectionKey":bucket.sectionKey,
@@ -214,20 +237,24 @@ static func partition(inputs: Array) -> Dictionary:
 	for index in range(outputs.size()):
 		outputs[index].make_read_only()
 	outputs.make_read_only()
-	var mapping_by_source: Dictionary = {}
+	var mapping_by_source_part: Dictionary = {}
 	for row_value: Variant in all_source_mappings:
 		var row: Dictionary = row_value
-		var source_key := String(row.sourceId)
-		if not mapping_by_source.has(source_key):
-			mapping_by_source[source_key] = []
-		mapping_by_source[source_key].append(row)
+		var source_key := _source_part_identity_key(String(row.sourceId),
+			String(row.sourcePartId))
+		if not mapping_by_source_part.has(source_key):
+			mapping_by_source_part[source_key] = []
+		mapping_by_source_part[source_key].append(row)
 	var source_manifest: Array[Dictionary] = []
-	var source_ids: Array[String] = []
-	for source_id_value: Variant in source_revisions:
-		source_ids.append(String(source_id_value))
-	source_ids.sort()
-	for source_id: String in source_ids:
-		var rows: Array = mapping_by_source.get(source_id, [])
+	var source_part_keys: Array[String] = []
+	for source_part_key_value: Variant in source_part_identities:
+		source_part_keys.append(String(source_part_key_value))
+	source_part_keys.sort()
+	for source_part_key: String in source_part_keys:
+		var identity_value: Dictionary = source_part_identities[source_part_key]
+		var source_id := String(identity_value.sourceId)
+		var source_part_id := String(identity_value.sourcePartId)
+		var rows: Array = mapping_by_source_part.get(source_part_key, [])
 		rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 			if Vector3i(a.sectionKey) != Vector3i(b.sectionKey):
 				return _vector3i_less(a.sectionKey, b.sectionKey)
@@ -239,15 +266,11 @@ static func partition(inputs: Array) -> Dictionary:
 		for row: Dictionary in rows:
 			row.make_read_only()
 		rows.make_read_only()
-		var source_part_id := ""
-		var owner_cell := Vector2i.ZERO
-		if not rows.is_empty():
-			source_part_id = String(rows[0].sourcePartId)
-			owner_cell = Vector2i(rows[0].ownerCell)
+		var owner_cell := Vector2i(identity_value.ownerCell)
 		var manifest := {"sourceId":source_id,
 			"sourcePartId":source_part_id,
 			"ownerCell":owner_cell,
-			"sourceRevision":source_revisions[source_id],
+			"sourceRevision":source_revisions[source_part_key],
 			"instanceCount":rows.size(),
 			"instances":rows}
 		manifest.make_read_only()
@@ -309,9 +332,14 @@ static func _ceil_index(value: float, size: float) -> int:
 
 
 static func _bucket_key(section_key: Vector3i, batch_key: String,
-		source_id: String, source_revision: String) -> String:
-	return "%d,%d,%d\n%s\n%s\n%s" % [section_key.x, section_key.y,
-		section_key.z, batch_key, source_id, source_revision]
+		source_id: String, source_part_id: String, source_revision: String) -> String:
+	return "section-bucket:" + var_to_bytes([section_key, batch_key, source_id,
+		source_part_id, source_revision]).hex_encode()
+
+
+static func _source_part_identity_key(source_id: String, source_part_id: String) -> String:
+	if source_id.is_empty() or source_part_id.is_empty(): return ""
+	return "section-part:" + var_to_bytes([source_id, source_part_id]).hex_encode()
 
 
 static func _vector3i_less(a: Vector3i, b: Vector3i) -> bool:
@@ -333,7 +361,8 @@ static func _distinct_batch_count(outputs: Array) -> int:
 	var values: Dictionary = {}
 	for output: Dictionary in outputs:
 		values[_bucket_key(output.sectionKey, String(output.batchKey),
-			String(output.sourceId), String(output.sourceRevision))] = true
+			String(output.sourceId), String(output.sourcePartId),
+			String(output.sourceRevision))] = true
 	return values.size()
 
 

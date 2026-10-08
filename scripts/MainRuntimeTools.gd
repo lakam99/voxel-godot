@@ -7,6 +7,8 @@ const StaticRenderSectionGridScript := preload("res://scripts/world/StaticRender
 
 var chunk_prop_spawn_queue_turn := 0
 var last_chunk_prop_spawn_key: Variant = null
+var ecology_source_capture_service_frame := -1
+var ecology_source_capture_service_count := 0
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
 const STREAMING_CHUNK_RETIREMENTS_PER_FRAME := 1
@@ -23,6 +25,7 @@ const STREAMING_TERRAIN_MESH_GAMEPLAY_FRAME_BUDGET_MS := 1.5
 # timer check that follows each sampled cell.
 const STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS := 64
 const STREAMING_TERRAIN_MESH_LOADING_MAX_CELLS := 192
+const VISIBLE_SUPPORT_TERRAIN_CAPTURE_BUDGET := 2
 const GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC := 6000
 const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
 const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
@@ -67,6 +70,201 @@ func sync_static_section_render_owner_demands(retained_owner_cells: Dictionary) 
         entered += 1
     static_section_owner_demand_cells = next_owner_cells
     return entered
+
+
+## Static render ownership follows the visible terrain section set plus ecology
+## geometry-owner leases. Leases never enter the gameplay chunk/simulation set.
+func advance_visible_support_lease_demands(runtime: Object, world_id: String) -> Dictionary:
+    if not is_instance_valid(runtime) or world_id.is_empty():
+        return {"status":"pending", "reason":"support_lease_runtime_unavailable",
+            "retryable":true, "ownerCells":{}}
+    var controller: Object = get("visible_world_demand_controller") as Object
+    var coordinator: Object = get("world_static_section_coordinator") as Object
+    var ordinary_owner_cells: Dictionary = {}
+    var ordinary_support_state: Dictionary = {"status":"idle", "ownerCells":{}}
+    if is_instance_valid(coordinator) and coordinator.has_method(
+            "reconcile_ordinary_geometry_support_owner_demands"):
+        ordinary_support_state = coordinator.call(
+            "reconcile_ordinary_geometry_support_owner_demands")
+        ordinary_owner_cells = ordinary_support_state.get("ownerCells", {})
+    if not is_instance_valid(controller) or not controller.has_method("refresh_support_owner_demands") \
+            or not is_instance_valid(coordinator) \
+            or not coordinator.has_method("request_support_section_candidate"):
+        if String(ordinary_support_state.get("status", "")) == "ready":
+            return {"status":"ready", "reason":"", "retryable":false,
+                "ownerCells":ordinary_owner_cells, "supportDemandCount":0,
+                "ordinarySupportDemandCount":int(ordinary_support_state.get(
+                    "retainedDemandCount", 0)), "pendingSupportSections":0,
+                "supportOwnerSections":ordinary_support_state.get("ownerSections", {}).size()}
+        return {"status":"pending", "reason":"support_lease_owner_unavailable",
+            "retryable":true, "ownerCells":ordinary_owner_cells}
+    var refreshed: Dictionary = controller.call("refresh_support_owner_demands",
+        "player", self, world_id)
+    var snapshots: Dictionary = refreshed.get("snapshots", {})
+    var pending: Dictionary = snapshots.get("pending", {})
+    var owner_sections: Dictionary = snapshots.get("ownerSections", {})
+    var provider: Object = get("ecology_static_section_provider") as Object
+    var priority_origin := player.global_position if player != null else Vector3.ZERO
+    if player != null and player.camera != null:
+        priority_origin = player.camera.global_position
+    var demanded := 0
+    var terrain_captures := 0
+    var active_support_sections: Dictionary = controller.call(
+        "active_support_section_keys", "player")
+    if coordinator.has_method("release_support_section_demand") \
+            and coordinator.has_method("support_demand_section_keys"):
+        var retained_support_demands: Dictionary = coordinator.call(
+            "support_demand_section_keys", "player")
+        for section_value: Variant in retained_support_demands:
+            if section_value is Vector3i and not active_support_sections.has(section_value):
+                coordinator.call("release_support_section_demand", "player", Vector3i(section_value))
+    for set_name: String in ["ownerSections", "pending"]:
+        var candidates: Dictionary = pending if set_name == "pending" else owner_sections
+        for snapshot_value: Variant in candidates.values():
+            if not snapshot_value is Dictionary:
+                continue
+            var snapshot: Dictionary = snapshot_value
+            if coordinator.has_method("support_section_demand_matches") \
+                    and bool(coordinator.call("support_section_demand_matches", "player", snapshot)):
+                continue
+            if terrain_captures >= VISIBLE_SUPPORT_TERRAIN_CAPTURE_BUDGET:
+                break
+            var section_key: Vector3i = snapshot.get("supportSectionKey", Vector3i.ZERO)
+            terrain_captures += 1
+            var terrain_capture: Dictionary = runtime.call(
+                "capture_static_section_sources", world_id, [section_key])
+            if terrain_capture.get("status") != "complete":
+                continue
+            var section_rows: Dictionary = terrain_capture.get("sections", {})
+            var terrain_revisions: Dictionary = terrain_capture.get("sourceRevisions", {})
+            var section_row: Dictionary = section_rows.get(section_key, {})
+            if section_row.get("status") != "complete":
+                continue
+            var exact_revisions: Array[String] = []
+            for source_value: Variant in section_row.get("sourcePartIds", []):
+                var source_id := String(source_value)
+                var source_revision := String(terrain_revisions.get(source_id, ""))
+                if source_id.begins_with("terrain") and not source_revision.is_empty():
+                    exact_revisions.append(source_revision)
+            if exact_revisions.size() != 1:
+                continue
+            var center := StaticRenderSectionGridScript.origin_for_key(section_key) \
+                + Vector3.ONE * (StaticRenderSectionGridScript.SECTION_SIZE_METERS * 0.5)
+            var queued: Dictionary = coordinator.call("request_support_section_candidate",
+                "player", snapshot, exact_revisions[0], priority_origin.distance_squared_to(center))
+            if queued.get("status") in ["queued", "tracked"]:
+                demanded += 1
+
+    # Promote each section independently, only after its complete support output
+    # and every exact canonical geometry-owner receipt are current.
+    if is_instance_valid(provider) and provider.has_method("acknowledge_section_receipt") \
+            and coordinator.has_method("support_section_receipt_matches") \
+            and coordinator.has_method("installed_section_contains_member") \
+            and coordinator.has_method("installed_section_member_absent"):
+        for snapshot_value: Variant in pending.values():
+            if not snapshot_value is Dictionary:
+                continue
+            var snapshot: Dictionary = snapshot_value
+            var support_receipt: Dictionary = coordinator.call(
+                "support_section_receipt_matches", snapshot)
+            if support_receipt.get("status") != "ready":
+                continue
+            var owners_current := true
+            var installed_member_receipts: Array[Dictionary] = []
+            var verified_absent_member_receipts: Array[Dictionary] = []
+            for lease_value: Variant in snapshot.get("supportOwnerDemands", []):
+                if not lease_value is Dictionary:
+                    owners_current = false
+                    break
+                var owner_key: Vector3i = lease_value.get("ownerSectionKey", Vector3i.ZERO)
+                var lease_state := String(lease_value.get("state", ""))
+                var source_id := String(lease_value.get("sourceId", ""))
+                var source_revision := String(lease_value.get("sourceRevision", ""))
+                var member_id := String(lease_value.get("memberId", ""))
+                var lease_token := String(lease_value.get("supportLeaseToken", ""))
+                if int(lease_value.get("sourceIndexRevision", -1)) \
+                        != int(support_receipt.get("sourceIndexRevision", -2)) \
+                        or String(lease_value.get("coverageDigest", "")) \
+                        != String(support_receipt.get("coverageDigest", "")):
+                    owners_current = false
+                    break
+                var member_is_current := bool(coordinator.call(
+                    "installed_section_contains_member", owner_key, lease_value))
+                var member_is_absent := bool(coordinator.call(
+                    "installed_section_member_absent", owner_key, lease_value))
+                if lease_state == "compiled" and member_is_current:
+                    var member_receipt := {"sourceId":source_id,
+                        "sourceRevision":source_revision, "memberId":member_id,
+                        "ownerSectionKey":owner_key, "supportLeaseToken":lease_token,
+                        "sourceIndexRevision":int(lease_value.get("sourceIndexRevision", -1)),
+                        "coverageDigest":String(lease_value.get("coverageDigest", "")),
+                        "certifiedEnvelopeDigest":String(lease_value.get(
+                            "certifiedEnvelopeDigest", "")),
+                        "sourceDomainRevision":String(lease_value.get(
+                            "sourceDomainRevision", "")),
+                        "producerSnapshotRevision":String(lease_value.get(
+                            "producerSnapshotRevision", "")),
+                        "recipeArtifactGeneration":int(lease_value.get(
+                            "recipeArtifactGeneration", 0))}
+                    member_receipt.make_read_only()
+                    installed_member_receipts.append(member_receipt)
+                elif lease_state == "tombstoned" and member_is_absent:
+                    var absent_member_receipt := {"sourceId":source_id,
+                        "sourceRevision":source_revision, "memberId":member_id,
+                        "ownerSectionKey":owner_key, "supportLeaseToken":lease_token,
+                        "sourceIndexRevision":int(lease_value.get("sourceIndexRevision", -1)),
+                        "coverageDigest":String(lease_value.get("coverageDigest", "")),
+                        "certifiedEnvelopeDigest":String(lease_value.get(
+                            "certifiedEnvelopeDigest", "")),
+                        "sourceDomainRevision":String(lease_value.get(
+                            "sourceDomainRevision", "")),
+                        "producerSnapshotRevision":String(lease_value.get(
+                            "producerSnapshotRevision", "")),
+                        "recipeArtifactGeneration":int(lease_value.get(
+                            "recipeArtifactGeneration", 0))}
+                    absent_member_receipt.make_read_only()
+                    verified_absent_member_receipts.append(absent_member_receipt)
+                else:
+                    owners_current = false
+                    break
+            if not owners_current:
+                continue
+            installed_member_receipts.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+                return String(a.get("supportLeaseToken", "")) \
+                    < String(b.get("supportLeaseToken", "")))
+            installed_member_receipts.make_read_only()
+            verified_absent_member_receipts.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+                return String(a.get("supportLeaseToken", "")) \
+                    < String(b.get("supportLeaseToken", "")))
+            verified_absent_member_receipts.make_read_only()
+            var install_evidence := {"schema":"ecology-support-section-install-receipt/v1",
+                "sectionKey":snapshot.supportSectionKey,
+                "sourceIndexRevision":int(snapshot.sourceIndexRevision),
+                "coverageDigest":String(snapshot.coverageDigest),
+                "supportCoverageIdentities":support_receipt.get(
+                    "supportCoverageIdentities", []),
+                "nativeReceipt":support_receipt.receipt,
+                "installedMemberReceipts":installed_member_receipts,
+                "verifiedAbsentMemberReceipts":verified_absent_member_receipts}
+            install_evidence.make_read_only()
+            var acknowledged: Dictionary = provider.call("acknowledge_section_receipt",
+                snapshot.supportSectionKey, int(snapshot.sourceIndexRevision),
+                install_evidence)
+            if acknowledged.get("status") == "ready":
+                controller.call("promote_support_section", "player",
+                    snapshot.supportSectionKey, String(snapshot.snapshotDigest))
+    var owner_cells: Dictionary = refreshed.get("ownerCells", {}).duplicate()
+    for owner_cell_value: Variant in ordinary_owner_cells:
+        owner_cells[Vector2i(owner_cell_value)] = true
+    return {"status":String(refreshed.get("status", "pending")),
+        "reason":String(refreshed.get("reason", "")),
+        "retryable":bool(refreshed.get("retryable", true)),
+        "ownerCells":owner_cells, "supportDemandCount":demanded,
+        "ordinarySupportDemandCount":int(ordinary_support_state.get(
+            "retainedDemandCount", 0)),
+        "pendingSupportSections":pending.size(),
+        "supportOwnerSections":owner_sections.size() + int(
+            ordinary_support_state.get("ownerSections", {}).size())}
 
 ## Static render-section owners live beside gameplay chunks and are retired by
 ## render demand. A section can cross several gameplay chunks; its immutable
@@ -473,20 +671,30 @@ func advance_loading_visible_section_publication() -> Dictionary:
     if coordinator == null or not is_instance_valid(coordinator):
         return {"status":"pending", "reason":"world_static_section_coordinator_unavailable",
             "pendingDemandCount":0, "pendingCandidateJobCount":0}
+    var service_started := Time.get_ticks_usec()
+    var source_capture: Dictionary = advance_ecology_source_capture_jobs(4)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("ecology_source_queue_service", service_started)
     if coordinator.has_method("refresh_visible_section_demand_priorities"):
         var priority_origin := player.global_position if player != null \
             and is_instance_valid(player) else Vector3.ZERO
         if player != null and is_instance_valid(player) and player.camera != null:
             priority_origin = player.camera.global_position
         coordinator.call("refresh_visible_section_demand_priorities", priority_origin, 16)
+    var admission_started := Time.get_ticks_usec()
     var admission: Dictionary = coordinator.call(
         "advance_visible_section_candidate_demands", 1) \
         if coordinator.has_method("advance_visible_section_candidate_demands") \
         else {"status":"pending", "reason":"visible_section_admission_api_unavailable"}
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("ecology_section_admission", admission_started)
+    var install_started := Time.get_ticks_usec()
     var installation: Dictionary = coordinator.call(
         "advance_queued_complete_section_candidates", 1, 1) \
         if coordinator.has_method("advance_queued_complete_section_candidates") \
         else {"status":"pending", "reason":"visible_section_install_api_unavailable"}
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.end_section("ecology_section_install_service", install_started)
     var demands_value = coordinator.get("_visible_section_demands")
     var demands: Dictionary = demands_value if demands_value is Dictionary else {}
     var jobs_value = coordinator.get("_production_candidate_jobs")
@@ -507,7 +715,8 @@ func advance_loading_visible_section_publication() -> Dictionary:
                     "reason":String(detail.get("reason", "")),
                     "providerId":String(detail.get("providerId", "")),
                     "providerReason":String(detail.get("providerReason", "")),
-                    "providerDetails":detail.get("providerDetails", {})}
+                    "providerDetails":detail.get("providerDetails", {}),
+                    "phaseUsec":detail.get("phaseUsec", {})}
     return {"status":"advanced" if int(admission.get("attemptCount", 0)) > 0 \
             or int(installation.get("sectionCount", 0)) > 0 \
             or int(installation.get("acknowledgementCount", 0)) > 0 else "pending",
@@ -519,8 +728,37 @@ func advance_loading_visible_section_publication() -> Dictionary:
         "installAdvances":int(installation.get("sectionCount", 0)),
         "pendingCandidateJobCount":jobs.size(),
         "pendingSourceAcknowledgementCount":pending_ack_count,
+        "ecologySourceCapture":source_capture,
         "sourceAcknowledgementResults":installation.get("acknowledgements", []),
         "coordinatorStatus":coordinator_state.get("status", "unknown")}
+
+
+func advance_ecology_source_capture_jobs(max_jobs := 1) -> Dictionary:
+    var provider: Object = get("ecology_static_section_provider") as Object
+    if not is_instance_valid(provider) or not provider.has_method(
+            "advance_source_domain_captures"):
+        return {"status":"idle", "reason":"ecology_source_capture_queue_unavailable",
+            "advancedCount":0, "pendingJobCount":0}
+    var frame := Engine.get_process_frames()
+    if ecology_source_capture_service_frame != frame:
+        ecology_source_capture_service_frame = frame
+        ecology_source_capture_service_count = 0
+    var remaining := mini(max_jobs, maxi(0, 4 - ecology_source_capture_service_count))
+    if remaining <= 0:
+        return {"status":"deferred", "reason":"ecology_source_capture_frame_budget_reached",
+            "advancedCount":0, "pendingJobCount":int(provider.call(
+                "source_domain_capture_pending_count"))}
+    var camera_position := Vector3.ZERO
+    var player_value: Variant = get("player")
+    if is_instance_valid(player_value) and player_value is Node3D:
+        camera_position = (player_value as Node3D).global_position
+        var camera_value: Variant = player_value.get("camera")
+        if is_instance_valid(camera_value) and camera_value is Node3D:
+            camera_position = (camera_value as Node3D).global_position
+    var result: Dictionary = provider.call("advance_source_domain_captures", remaining,
+        camera_position)
+    ecology_source_capture_service_count += int(result.get("advancedCount", 0))
+    return result
 
 func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
     var monitor = runtime_perf_monitor
@@ -779,11 +1017,20 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 create_chunk(chunk_key.x, chunk_key.y)
             else:
                 queue_chunk_load(chunk_key)
+    var support_owner_cells: Dictionary = {}
+    if world_static_section_coordinator != null \
+            and world_static_section_coordinator.has_method("world_identity"):
+        var support_state: Dictionary = advance_visible_support_lease_demands(
+            voxel_terrain_runtime, String(world_static_section_coordinator.call("world_identity")))
+        support_owner_cells = support_state.get("ownerCells", {})
+    var static_render_owner_demands := needed.duplicate()
+    for owner_cell_value: Variant in support_owner_cells:
+        static_render_owner_demands[Vector2i(owner_cell_value)] = true
     # Stream-owner demand is independent of gameplay chunk construction. On a
     # re-entry edge this queues retained section candidates before any install
     # job lazily creates the new render owner.
-    sync_static_section_render_owner_demands(needed)
-    prune_static_section_render_owners(needed)
+    sync_static_section_render_owner_demands(static_render_owner_demands)
+    prune_static_section_render_owners(static_render_owner_demands)
     for chunk_key: Vector2i in needed:
         if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
     if monitor != null:
@@ -842,6 +1089,14 @@ func update_voxel_authority_chunks(force: bool) -> void:
     elif structure_system != null:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         structure_system.update_around(center_cell)
+    if not force and deferred_time_available:
+        var ecology_capture_started := Time.get_ticks_usec()
+        var ecology_capture := advance_ecology_source_capture_jobs(1)
+        if monitor != null:
+            monitor.observe_external_duration("ecology_source_domain_capture_dispatch",
+                float(Time.get_ticks_usec() - ecology_capture_started) / 1000.0)
+            monitor.observe_gauge("ecology_source_domain_capture_pending_jobs",
+                int(ecology_capture.get("pendingJobCount", 0)))
     if not force and world_static_section_coordinator != null \
             and world_static_section_coordinator.has_method("refresh_visible_section_demand_priorities"):
         var priority_origin := player.global_position if player != null else Vector3.ZERO

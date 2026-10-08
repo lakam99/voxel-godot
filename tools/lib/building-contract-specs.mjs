@@ -61,6 +61,9 @@ export const specs = {
     "prefix": "publication-preparation-",
     "timeout": 120,
     "files": [
+      "scripts/buildings/BuildingSourceRecordBinding.gd",
+      "scripts/buildings/BuildingSourceRecordBinding.gd.uid",
+      "scripts/world/CitadelPublicationPlan.gd",
       "scripts/buildings/BuildingPublicationSource.gd",
       "scripts/buildings/BuildingPublicationPreparation.gd",
       "scripts/buildings/BuildingPartPublisher.gd",

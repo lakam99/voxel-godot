@@ -243,9 +243,224 @@ func _launch_seeded_main_diagnostic() -> bool:
             await get_tree().physics_frame
             return String(main.get("seed_text")) == diagnostic_replay_seed
         if frame % 120 == 0:
-            write_progress("diagnostic_seeded_main_waiting frame=%d" % frame)
+            write_progress("diagnostic_seeded_main_waiting frame=%d startup=%s" % [
+                frame, _diagnostic_startup_progress_summary()])
     startup_loading_failure = "Diagnostic seeded Main loading timed out"
     return false
+
+
+func _diagnostic_startup_progress_summary() -> String:
+    if not is_instance_valid(main):
+        return "main_missing"
+    var timeline_value = main.get("startup_loading_timeline")
+    if not timeline_value is Array or (timeline_value as Array).is_empty():
+        return "loading_step_missing"
+    var timeline: Array = timeline_value
+    var row_value = timeline.back()
+    if not row_value is Dictionary:
+        return "loading_step_invalid"
+    var row: Dictionary = row_value
+    var metrics_value = row.get("metrics", {})
+    var metrics: Dictionary = metrics_value if metrics_value is Dictionary else {}
+    var summary := {"domain": String(row.get("domain", "")),
+        "message": String(row.get("message", "")),
+        "status": String(row.get("status", ""))}
+    for key in ["reason", "candidateCount", "representedCount", "pendingCount",
+            "coverageGaps", "startupPropSourcesComplete", "startupPropSourcesExpected",
+            "pendingChunkLoads", "pendingNativeTerrainTasks", "elapsedSeconds",
+            "domains", "queue", "visibleSectionPublication"]:
+        if metrics.has(key):
+            summary[key] = metrics[key]
+    var demand_controller := main.get("visible_world_demand_controller") as Object
+    var runtime := main.get("voxel_terrain_runtime") as Object
+    var requests_value = main.get("streaming_requests")
+    var requests: Dictionary = requests_value if requests_value is Dictionary else {}
+    var request_id := int(requests.get("player", 0))
+    var world_revision := String(runtime.call("visible_mesh_world_revision")) \
+        if is_instance_valid(runtime) and runtime.has_method("visible_mesh_world_revision") else ""
+    if is_instance_valid(demand_controller) and demand_controller.has_method(
+            "pending_representation_diagnostics") and request_id > 0 and not world_revision.is_empty():
+        var pending_visuals: Array = demand_controller.call(
+            "pending_representation_diagnostics", "player", request_id,
+            String(main.get("seed_text")), world_revision, 8)
+        summary["pendingVisualCandidates"] = pending_visuals
+        var tree_queue_rows: Array[Dictionary] = []
+        for pending_value: Variant in pending_visuals:
+            if not pending_value is Dictionary \
+                    or String(pending_value.get("kind", "")) != "trees_foliage":
+                continue
+            tree_queue_rows.append(_tree_candidate_queue_snapshot(pending_value,
+                String(main.get("seed_text"))))
+        if not tree_queue_rows.is_empty():
+            var sample := {"frame":Engine.get_process_frames(),
+                "elapsedSeconds":float(metrics.get("elapsedSeconds", 0.0)),
+                "candidateCount":int(metrics.get("candidateCount", 0)),
+                "representedCount":int(metrics.get("representedCount", 0)),
+                "pendingCount":int(metrics.get("pendingCount", 0)),
+                "treeQueueRows":tree_queue_rows}
+            summary["treeQueueSample"] = sample
+            _append_tree_queue_sample(sample)
+    var publication_value = main.get("visible_world_demand_last_advance")
+    if publication_value is Dictionary:
+        summary["visualPublication"] = (publication_value as Dictionary).duplicate(true)
+    var coordinator := main.get("world_static_section_coordinator") as Object
+    if is_instance_valid(coordinator):
+        var demands_value = coordinator.get("_visible_section_demands")
+        var demands: Dictionary = demands_value if demands_value is Dictionary else {}
+        var stage_counts: Dictionary = {}
+        var reasons: Array[Dictionary] = []
+        for section_value: Variant in demands:
+            var demand: Dictionary = demands[section_value] if demands[section_value] is Dictionary else {}
+            var stage := String(demand.get("stage", ""))
+            stage_counts[stage] = int(stage_counts.get(stage, 0)) + 1
+            if reasons.size() < 8:
+                reasons.append({"section":section_value, "stage":stage,
+                    "lastStatus":String(demand.get("lastStatus", "")),
+                    "lastReason":String(demand.get("lastReason", "")),
+                    "blockedReason":String(demand.get("blockedReason", "")),
+                    "lastAdmissionDetails":demand.get("lastAdmissionDetails", {})})
+        summary["sectionPublication"] = {"demandCount":demands.size(),
+            "stageCounts":stage_counts,
+            "attempts":int(coordinator.get("_visible_section_demand_attempts")),
+            "candidateJobs":(coordinator.get("_production_candidate_jobs") as Dictionary).size(),
+            "demands":reasons}
+    var ordinary_provider := main.get("ordinary_static_section_provider") as Object
+    if is_instance_valid(ordinary_provider):
+        var ordinary_context: Dictionary = ordinary_provider.call("_context",
+            String(ordinary_provider.get("_world_id")))
+        if ordinary_provider.has_method("membership_census_stats"):
+            summary["ordinaryProviderStats"] = ordinary_provider.call(
+                "membership_census_stats")
+        var census_jobs_value: Variant = ordinary_provider.get("_membership_census_jobs")
+        var census_jobs: Dictionary = census_jobs_value if census_jobs_value is Dictionary else {}
+        var census_job_rows: Array[Dictionary] = []
+        for census_key_value: Variant in census_jobs:
+            var census_job: Dictionary = census_jobs[census_key_value]
+            var census_capture := census_job.get("capture") as Object
+            census_job_rows.append({"window":census_job.get("window"),
+                "lastUse":int(census_job.get("lastUse", 0)),
+                "stage":String(census_capture.get("_stage")) \
+                    if is_instance_valid(census_capture) else "",
+                "regionCursor":census_capture.get("_region_cursor") \
+                    if is_instance_valid(census_capture) else null,
+                "sourceIndex":int(census_capture.get("_source_index")) \
+                    if is_instance_valid(census_capture) else -1,
+                "cellCursor":int(census_capture.get("_cell_cursor")) \
+                    if is_instance_valid(census_capture) else -1})
+        summary["ordinaryMembershipCensusJobs"] = census_job_rows
+        var jobs_value: Variant = ordinary_provider.get("_jobs")
+        var jobs: Dictionary = jobs_value if jobs_value is Dictionary else {}
+        var job_rows: Array[Dictionary] = []
+        for section_id_value: Variant in jobs:
+            var job_value: Variant = jobs[section_id_value]
+            if not job_value is Dictionary:
+                continue
+            var job: Dictionary = job_value
+            var capture := job.get("capture") as Object
+            var candidate_rows: Variant = job.get("candidates", [])
+            job_rows.append({"sectionId":String(section_id_value),
+                "phase":String(job.get("phase", "")),
+                "candidateIndex":int(job.get("candidateIndex", 0)),
+                "candidateCount":(candidate_rows as Array).size() if candidate_rows is Array else -1,
+                "current":bool(ordinary_provider.call("_job_is_current", job,
+                    ordinary_context)) if not ordinary_context.is_empty() else false,
+                "captureStage":String(capture.get("_stage")) if is_instance_valid(capture) else "",
+                "captureSourceIndex":int(capture.get("_source_index")) if is_instance_valid(capture) else -1,
+                "captureCellCursor":int(capture.get("_cell_cursor")) if is_instance_valid(capture) else -1,
+                "captureValidationCursor":int(capture.get("_validation_cursor")) if is_instance_valid(capture) else -1,
+                "captureResultStatus":String(capture.get("_result").get("status", "")) \
+                    if is_instance_valid(capture) and capture.get("_result") is Dictionary else ""})
+            if job_rows.size() >= 8:
+                break
+        summary["ordinarySectionJobs"] = {"count":jobs.size(), "sample":job_rows}
+    if summary.get("visibleSectionPublication", {}) is Dictionary:
+        var admission_value: Variant = (summary["visibleSectionPublication"] as Dictionary).get(
+            "lastAdmission", {})
+        summary["sectionAdmission"] = admission_value
+        if admission_value is Dictionary:
+            var admission: Dictionary = admission_value
+            var details_value: Variant = admission.get("providerDetails", {})
+            if details_value is Dictionary:
+                var details: Dictionary = details_value
+                var tree_source_id := String(details.get("sourceId", ""))
+                var tree_source_marker := "%s:tree:" % String(main.get("seed_text"))
+                var chunk_value: Variant = details.get("chunk", null)
+                if tree_source_id.begins_with(tree_source_marker) \
+                        and chunk_value is Vector2i:
+                    var blocker_id := tree_source_id.substr(tree_source_marker.length())
+                    var chunk := chunk_value as Vector2i
+                    var blocker := _tree_candidate_queue_snapshot({
+                        "candidateId":blocker_id,
+                        "sourceId":"chunk-props:%s:%d,%d:trees_foliage" % [
+                            String(main.get("seed_text")), chunk.x, chunk.y],
+                        "receiptMissing":true, "representationId":0},
+                        String(main.get("seed_text")))
+                    var sample := {"frame":Engine.get_process_frames(),
+                        "elapsedSeconds":float(metrics.get("elapsedSeconds", 0.0)),
+                        "sectionKey":admission.get("sectionKey", null),
+                        "providerReason":String(admission.get("providerReason", "")),
+                        "blocker":blocker}
+                    summary["blockingTreeQueue"] = sample
+                    _append_tree_queue_sample(sample)
+    return JSON.stringify(summary)
+
+
+func _append_tree_queue_sample(sample: Dictionary) -> void:
+    if progress_path.strip_edges().is_empty():
+        return
+    var sample_path := progress_path + ".tree-queue.jsonl"
+    var file := FileAccess.open(sample_path, FileAccess.READ_WRITE)
+    if file == null:
+        var created := FileAccess.open(sample_path, FileAccess.WRITE)
+        if created == null:
+            return
+        created.close()
+        file = FileAccess.open(sample_path, FileAccess.READ_WRITE)
+    if file == null:
+        return
+    file.seek_end()
+    file.store_line(JSON.stringify(sample))
+    file.close()
+
+
+func _tree_candidate_queue_snapshot(row: Dictionary, seed: String) -> Dictionary:
+    var candidate_id := String(row.get("candidateId", ""))
+    var source_id := String(row.get("sourceId", ""))
+    var result := {"candidateId":candidate_id, "sourceId":source_id,
+        "receiptMissing":bool(row.get("receiptMissing", false)),
+        "representationId":int(row.get("representationId", 0)),
+        "queueContainer":"", "renderStage":"", "enqueueSequence":0,
+        "ageMs":0.0, "preparedSectionArtifact":false, "artifactGeneration":0}
+    var prefix := "chunk-props:%s:" % seed
+    var suffix := ":trees_foliage"
+    if not source_id.begins_with(prefix) or not source_id.ends_with(suffix):
+        result["reason"] = "tree_source_identity_unrecognized"
+        return result
+    var coordinates := source_id.substr(prefix.length(),
+        source_id.length() - prefix.length() - suffix.length()).split(",")
+    if coordinates.size() != 2 or not coordinates[0].is_valid_int() \
+            or not coordinates[1].is_valid_int():
+        result["reason"] = "tree_chunk_coordinates_invalid"
+        return result
+    var key := Vector2i(int(coordinates[0]), int(coordinates[1]))
+    var chunks_value = main.get("chunks")
+    var chunks: Dictionary = chunks_value if chunks_value is Dictionary else {}
+    var physical_root := chunks.get(key) as Node if is_instance_valid(chunks.get(key)) else null
+    var physical := _tree_timeout_node(physical_root, candidate_id)
+    result["treeVisualState"] = String(physical.get("treeVisualState", ""))
+    var body := _find_tree_body(physical_root, candidate_id)
+    var body_id := body.get_instance_id() if is_instance_valid(body) else 0
+    var queue := main.get("tree_publication_queue") as Object
+    if is_instance_valid(queue):
+        var task: Dictionary = _tree_timeout_queue_task(queue, body_id)
+        for key_name in ["container", "renderStage", "enqueueSequence", "ageMs"]:
+            if task.has(key_name):
+                result[key_name if key_name != "container" else "queueContainer"] = task[key_name]
+        if is_instance_valid(body) and queue.has_method("prepared_section_value_record_for_body"):
+            var record: Dictionary = queue.call("prepared_section_value_record_for_body", body)
+            result["preparedSectionArtifact"] = not record.is_empty()
+            result["artifactGeneration"] = int(record.get("artifactGeneration", 0))
+    return result
 
 
 func _initial_region_prop_timeout_diagnostics() -> Dictionary:
@@ -406,6 +621,46 @@ func _tree_timeout_producer(row: Dictionary, seed: String) -> Dictionary:
             "queued": int(metrics.get("queued", 0)),
             "published": int(metrics.get("published", 0)),
             "failed": int(metrics.get("failed", 0))}
+        var prepared_records_value: Variant = queue.get("prepared_section_value_records")
+        var prepared_records: Array = prepared_records_value if prepared_records_value is Array else []
+        result["sectionCapture"] = {"enabled":bool(queue.get(
+                "section_owned_publication_enabled")),
+            "preparedRecordCount":prepared_records.size(), "candidateRecord":{}}
+        var prepared_value: Variant = queue.call("prepared_section_value_record_for_body",
+            _find_tree_body(physical_root, candidate_id)) \
+            if queue.has_method("prepared_section_value_record_for_body") else {}
+        if prepared_value is Dictionary and not prepared_value.is_empty():
+            result.sectionCapture.candidateRecord = {"found":true,
+                "propId":String(prepared_value.get("propId", "")),
+                "artifactGeneration":int(prepared_value.get("artifactGeneration", 0)),
+                "schema":String(prepared_value.get("schema", "")),
+                "sectionValueMemberCount":(prepared_value.get("sectionValueMembers", []) as Array).size(),
+                "recipeSignature":String(prepared_value.get("recipeSignature", "")),
+                "sectionOwned":bool(prepared_value.get("sectionOwned", false))}
+            var body := _find_tree_body(physical_root, candidate_id)
+            var candidate := _find_tree_source_candidate(physical_root, candidate_id)
+            var provider := main.get("ecology_static_section_provider") as Object
+            if is_instance_valid(provider) and is_instance_valid(body) and not candidate.is_empty():
+                var publication := {"record":prepared_value, "body":body, "prepared":true}
+                var census_revision := String(provider.call("_tree_census_source_revision",
+                    candidate, publication))
+                var section_keys: Array = provider.call("_tree_census_section_keys", publication)
+                result.sectionCapture.censusProbe = {"candidateFound":true,
+                    "sourceRevisionReady":not census_revision.is_empty(),
+                    "sectionKeyCount":section_keys.size(),
+                    "candidatePropId":String(candidate.get("propId", "")),
+                    "requestPosition":prepared_value.get("request", {}).get(
+                        "treeWorldPosition", Vector3.INF),
+                    "bodyPosition":body.global_position,
+                    "requestTier":String(prepared_value.get("request", {}).get(
+                        "renderLodTier", "")),
+                    "recordTier":String(prepared_value.get("tier", "")),
+                    "memberLayout":_tree_member_layout_summary(
+                        prepared_value.get("sectionValueMembers", []))}
+            else:
+                result.sectionCapture.censusProbe = {"candidateFound":not candidate.is_empty(),
+                    "providerValid":is_instance_valid(provider),
+                    "bodyValid":is_instance_valid(body)}
         var priority_value = metrics.get("priorityScheduling", {})
         var priority: Dictionary = priority_value if priority_value is Dictionary else {}
         result["publicationPriority"] = {"selectionCount": int(priority.get("selectionCount", 0)),
@@ -423,6 +678,50 @@ func _tree_timeout_producer(row: Dictionary, seed: String) -> Dictionary:
         if body_id <= 0: body_id = int(result["horizon"].get("bodyInstanceId", 0))
         result["exactQueueTask"] = _tree_timeout_queue_task(queue, body_id)
     return result
+
+
+func _find_tree_body(root: Node, prop_id: String) -> StaticBody3D:
+    if not is_instance_valid(root) or prop_id.is_empty():
+        return null
+    if root is StaticBody3D and String(root.get_meta("prop_id", "")) == prop_id:
+        return root as StaticBody3D
+    for child: Node in root.get_children():
+        var found := _find_tree_body(child, prop_id)
+        if is_instance_valid(found):
+            return found
+    return null
+
+
+func _find_tree_source_candidate(root: Node, prop_id: String) -> Dictionary:
+    if not is_instance_valid(root) or prop_id.is_empty():
+        return {}
+    var snapshot_value: Variant = root.get_meta("static_ecology_source_value_snapshot", {})
+    if snapshot_value is Dictionary:
+        for candidate_value: Variant in snapshot_value.get("candidates", []):
+            if candidate_value is Dictionary \
+                    and String(candidate_value.get("propId", "")) == prop_id:
+                return candidate_value
+    return {}
+
+
+func _tree_member_layout_summary(members_value: Variant) -> Array[Dictionary]:
+    var summary: Array[Dictionary] = []
+    if not members_value is Array:
+        return summary
+    for member_value: Variant in members_value:
+        if not member_value is Dictionary:
+            summary.append({"valid":false})
+            continue
+        var member: Dictionary = member_value
+        summary.append({"role":String(member.get("role", "")),
+            "memberReadOnly":member.is_read_only(),
+            "meshValid":member.get("mesh", null) is Mesh,
+            "transformsReadOnly":member.get("transforms", null) is Array \
+                and (member.get("transforms") as Array).is_read_only(),
+            "transformCount":(member.get("transforms", []) as Array).size(),
+            "colorsCount":(member.get("colors", []) as Array).size(),
+            "customDataCount":(member.get("customData", []) as Array).size()})
+    return summary
 
 
 func _tree_timeout_queue_task(queue: Object, body_id: int) -> Dictionary:

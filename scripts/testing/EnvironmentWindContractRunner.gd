@@ -4,6 +4,7 @@ const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalo
 const WindSystemScript := preload("res://scripts/environment/EnvironmentWindSystem.gd")
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 var report_path := ""
 var results: Array[Dictionary] = []
@@ -222,19 +223,16 @@ func tree_margins_at_least(node: Node, minimum: float) -> bool:
     return true
 
 func procedural_tree_request(tree_id: String, biome: String, architecture: String, grammar: String) -> Dictionary:
-    return {
+    return CertifiedRequestFixture.prepare_or_fail({
         "treeId": tree_id,
         "worldSeed": "wind-contract-world",
         "biome": biome,
         "architecture": architecture,
         "speciesGrammar": grammar,
         "growthStage": 0.82,
-        "visualHeight": 20.0,
-        "trunkRadius": 1.05,
-        "canopyRadius": 9.4,
         "canopyDensity": 0.86,
         "presentation": "runtime"
-    }
+    })
 
 func snapshots_match(first: Dictionary, second: Dictionary) -> bool:
     return (first.direction as Vector3).is_equal_approx(second.direction as Vector3) \

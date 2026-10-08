@@ -63,8 +63,8 @@ func update_wind(delta: float, weather: Dictionary, biome: String) -> Dictionary
     weather_kind = String(weather.get("kind", "clear"))
     var precipitation := clampf(float(weather.get("intensity", 0.0)), 0.0, 1.0)
     var clouds := clampf(float(weather.get("cloudCover", 0.28)), 0.0, 1.0)
-    var profile = environment_catalog.profile_for_biome(observer_biome) if environment_catalog != null else null
-    biome_response = clampf(float(profile.wind_response) if profile != null else 1.0, 0.0, 2.0)
+    var profile := environment_catalog.profile_values_for_biome(observer_biome) if environment_catalog != null else {}
+    biome_response = clampf(float(profile.get("wind_response", 1.0)), 0.0, 2.0)
 
     var weather_boost := precipitation * (0.48 if weather_kind == "rain" else 0.38)
     if weather_kind == "snow":

@@ -8,6 +8,11 @@ const LandmarkBuildingBlueprintBuilderScript := preload("res://scripts/buildings
 const LandmarkFurnishingPlannerScript := preload("res://scripts/buildings/LandmarkFurnishingPlanner.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 const FurnishingArchetypeCatalogScript := preload("res://scripts/buildings/FurnishingArchetypeCatalog.gd")
+const FurnishingPublisherScript = preload("res://scripts/buildings/FurnishingPublisher.gd")
+const FurnishingRecipeScript = preload("res://scripts/buildings/FurnishingVisualRecipe.gd")
+const FurnishingPartScript = preload("res://scripts/buildings/FurnishingPart.gd")
+const SourceBinding = preload("res://scripts/buildings/BuildingSourceRecordBinding.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 
 const SEEDS: Array[int] = [208154, 208155, 306701, 420901]
 
@@ -25,6 +30,7 @@ func run_contract() -> void:
 	if report_path.is_empty():
 		report_path = ProjectSettings.globalize_path("res://artifacts/buildings/landmark-furnishing-contract.json")
 	var rows: Array[Dictionary] = []
+	var publication_rows := verify_section_publication()
 	for catalog_id in ["bench", "sideboard", "lectern", "map_table", "workbench", "crate_stack", "barrel_stack", "display_plinth", "dais", "civic_rug", "aisle_runner", "coat_rack", "planter", "wall_sconce", "wall_banner"]:
 		check(FurnishingArchetypeCatalogScript.is_known(catalog_id), "Furnishing catalogue lacks reusable archetype %s" % catalog_id)
 	for style in ["timber", "masonry"]:
@@ -40,11 +46,113 @@ func run_contract() -> void:
 		"observedLayouts": observed_layouts.keys(),
 		"passed": failures.is_empty(),
 		"styles": rows,
+		"sectionPublication": publication_rows,
 		"failures": failures
 	}
 	write_report(report)
 	print(JSON.stringify(report))
 	quit(0 if failures.is_empty() else 1)
+
+
+func verify_section_publication() -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	var scene := Node3D.new()
+	root.add_child(scene)
+	scene.position = Vector3(-43.3,12.0,86.4)
+	scene.rotation.y = 0.37
+	var publisher := FurnishingPublisherScript.new()
+	publisher.publication_site_id = "furnishing-contract"
+	publisher.source_blueprint_id = "furnishing-contract-plan"
+	var baseline_path := OS.get_environment("FURNISHING_ORIGINAL_PUBLISHER").strip_edges()
+	var baseline = load(baseline_path).new() if not baseline_path.is_empty() else null
+	var old_scene := Node3D.new()
+	root.add_child(old_scene)
+	old_scene.transform = scene.transform
+	for archetype: String in ["bed","table","chair","bench","sideboard","lectern","map_table",
+			"workbench","crate_stack","barrel_stack","display_plinth","dais","coat_rack",
+			"planter","wall_sconce","wall_banner","cabinet","hearth","rug","shelf","chest",
+			"candle","pot_plant","wall_art","unknown"]:
+		var part = FurnishingPartScript.new({"id":"recipe-"+archetype,"archetype":archetype,
+			"occupiedSize":Vector3(1.32,1.73,0.94),"position":Vector3(0.3,0.0,-0.2),
+			"rotation":Vector3(0.0,-0.23,0.0),"recipe":{"variation":0.27,"mountHeight":2.31}})
+		var recipe: Dictionary = FurnishingRecipeScript.build(part)
+		check(recipe==FurnishingRecipeScript.build(part.snapshot()),archetype+" snapshot recipe parity")
+		check(recipe.is_read_only() and recipe.pieces.is_read_only() and recipe.lights.is_read_only(),
+			archetype+" sealed recipe")
+		var body := publisher.publish_part(part,scene)
+		var collision: CollisionShape3D = body.get_child(0)
+		check(collision.shape is BoxShape3D and collision.shape.size==part.occupied_size
+			and collision.position==Vector3(0,part.occupied_size.y*0.5,0),archetype+" original physical occupied volume")
+		var revision := SourceBinding.encode(part.snapshot())
+		var capture := publisher.capture_committed_static_visual_source(part.id,revision)
+		check(capture.get("status")=="ready",archetype+" committed capture: "+str(capture.get("reason","")))
+		if capture.get("status")!="ready": continue
+		check(capture.is_read_only() and capture.groups.is_read_only(),archetype+" capture sealed")
+		var meshes: Array[MeshInstance3D] = []
+		for child: Node in body.get_children():
+			if child is MeshInstance3D: meshes.append(child)
+		check(meshes.size()==recipe.pieces.size() and meshes.size()==capture.groups.size(),archetype+" complete primitive roster")
+		for index in meshes.size():
+			var visual := meshes[index]
+			var group: Dictionary = capture.groups[index]
+			var decoded := Attributes.decode_transform(group.segments[0].buffer,0)
+			check(decoded.is_equal_approx(body.transform*visual.transform),archetype+" exact captured transform")
+			check(recipe.visualSupportBounds.grow(0.0001).encloses(visual.transform*visual.mesh.get_aabb()),archetype+" support encloses geometry")
+		check(capture.presentationMounts.size()==recipe.lights.size(),archetype+" complete practical light roster")
+		if baseline!=null:
+			var old_body: StaticBody3D = baseline.publish_part(part,old_scene)
+			var old_meshes: Array[MeshInstance3D] = []
+			for child: Node in old_body.get_children():
+				if child is MeshInstance3D: old_meshes.append(child)
+			check(old_meshes.size()==meshes.size(),archetype+" baseline count")
+			for index in mini(old_meshes.size(),meshes.size()):
+				check(old_meshes[index].transform.is_equal_approx(meshes[index].transform),archetype+" baseline pose")
+				check(old_meshes[index].mesh.get_aabb()==meshes[index].mesh.get_aabb(),archetype+" baseline shape")
+				check(FurnishingPublisherScript.GeometryAdapter._material_identity(old_meshes[index].material_override)==FurnishingPublisherScript.GeometryAdapter._material_identity(meshes[index].material_override),
+					archetype+" baseline material")
+			var old_lights: Array[OmniLight3D] = []
+			for child: Node in old_body.get_children():
+				if child is OmniLight3D: old_lights.append(child)
+			check(old_lights.size()==capture.presentationMounts.size(),archetype+" baseline practical light count")
+			for index in old_lights.size():
+				var binding: Dictionary = capture.presentationBindings.values()[index]
+				var light: OmniLight3D = binding.light.get_ref()
+				check(light.global_transform.is_equal_approx(old_lights[index].global_transform)
+					and light.light_energy==old_lights[index].light_energy
+					and light.light_color==old_lights[index].light_color
+					and light.omni_range==old_lights[index].omni_range
+					and light.shadow_enabled==old_lights[index].shadow_enabled,archetype+" baseline light properties")
+			old_body.free()
+		var original_transform := body.transform
+		body.position.x += 0.5
+		check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="pending",archetype+" moved owner rejected")
+		body.transform = original_transform
+		var before_epoch := publisher.source_part_publication_epoch(part.id)
+		body.set_meta("section_attachment_publication_epoch",before_epoch+1)
+		check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="pending",archetype+" stale epoch rejected")
+		body.set_meta("section_attachment_publication_epoch",before_epoch)
+		var original_size := publisher.unit_box.size
+		if archetype=="bed":
+			publisher.unit_box.size += Vector3.ONE
+			check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="pending",archetype+" changed mesh rejected")
+			publisher.unit_box.size = original_size
+		if not recipe.lights.is_empty():
+			var light_binding: Dictionary = capture.presentationBindings.values()[0]
+			var light: OmniLight3D = light_binding.light.get_ref()
+			light.light_energy += 1.0
+			check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="pending",archetype+" changed light rejected")
+			light.light_energy = light_binding.lightEnergy
+		body.free()
+		check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="pending",archetype+" unloaded body rejected")
+		var replay := publisher.publish_part(part,scene)
+		check(publisher.source_part_publication_epoch(part.id)>before_epoch,archetype+" replacement epoch advances")
+		check(publisher.capture_committed_static_visual_source(part.id,revision).get("status")=="ready",archetype+" replay captured")
+		rows.append({"archetype":archetype,"pieces":meshes.size(),"lights":recipe.lights.size(),
+			"baselineCompared":baseline!=null,"revisionReplayed":true})
+		replay.free()
+	scene.free()
+	old_scene.free()
+	return rows
 
 
 func verify_style_seed(style: String, seed: int) -> Dictionary:

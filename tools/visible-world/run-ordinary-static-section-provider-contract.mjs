@@ -26,6 +26,7 @@ cli(async () => {
     'scripts/world/StandaloneStructureCandidate.gd',
     'scripts/world/StaticSectionSourceRoster.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
+    'scripts/world/StaticSectionPresentationMembers.gd',
     'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderMeshFingerprint.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',

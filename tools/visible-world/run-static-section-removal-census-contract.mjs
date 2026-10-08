@@ -30,7 +30,7 @@ cli(async () => {
     complete: true,
     passed: true
   });
-  demand(report.checkCount === 5, 'static removal census assertions did not all run');
+  demand(report.checkCount === 9, 'static removal census assertions did not all run');
   return {
     reportPath: path.join(c.run, 'report.json'),
     checkCount: report.checkCount,

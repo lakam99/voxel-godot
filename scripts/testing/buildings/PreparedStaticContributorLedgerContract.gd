@@ -6,6 +6,7 @@ const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd
 const TEST_MESH_DIGEST := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 var checks: Dictionary = {}
+var source_id_by_part: Dictionary = {}
 
 
 func _initialize() -> void:
@@ -97,16 +98,23 @@ func _run() -> void:
 		premature_commit.get("reason") == "installed_section_set_mismatch" \
 		and digest_mismatch_commit.get("reason") == "section_receipt_does_not_match_candidate" \
 		and no_promotion_before_full_install \
-		and ledger.committed_source_part_ids() == ["part-a", "part-b"]
+		and _committed_identity_keys(ledger) == _sorted_ids([_identity("source-a", "part-a"),
+			_identity("source-b", "part-b")])
 	var committed_inputs: Dictionary = ledger.committed_partition_inputs()
 	checks["partition_inputs_are_grouped_by_source_and_keep_stable_compatibility"] = \
 		committed_inputs.get("status") == "ready" \
-		and committed_inputs.inputsBySourcePart.keys() == ["part-a", "part-b"] \
-		and committed_inputs.inputsBySourcePart["part-a"].size() == 1 \
-		and committed_inputs.inputsBySourcePart["part-a"][0].batchKey == _compatibility_key() \
+		and committed_inputs.inputsByContributorIdentity.keys() == _sorted_ids([_identity("source-a", "part-a"),
+			_identity("source-b", "part-b")]) \
+		and committed_inputs.inputsByContributorIdentity[_identity("source-a", "part-a")].size() == 1 \
+		and committed_inputs.inputsByContributorIdentity[_identity("source-a", "part-a")][0].batchKey == _compatibility_key() \
 		and committed_inputs.compatibilityByKey.has(_compatibility_key()) \
 		and committed_inputs.inputs.is_read_only() \
-		and committed_inputs.inputsBySourcePart["part-a"].is_read_only()
+		and committed_inputs.inputsByContributorIdentity[_identity("source-a", "part-a")].is_read_only()
+	checks["contributor_identity_api_preserves_legacy_part_ids_and_exposes_source_parts"] = \
+		ledger.committed_source_part_ids() == ["part-a", "part-b"] \
+		and ledger.committed_source_parts() == _source_parts([
+			{"sourceId":"source-a", "sourcePartId":"part-a"},
+			{"sourceId":"source-b", "sourcePartId":"part-b"}])
 	checks["committed_revision_and_world_transform_reach_partitioner"] = \
 		committed_inputs.inputs[0].sourceRevision == "rev-1" \
 		and committed_inputs.inputs[0].sourceToWorld.origin == Vector3(2.0, 1.0, 2.0) \
@@ -127,11 +135,13 @@ func _run() -> void:
 	checks["stale_revision_rejects_whole_replace_remove_transaction"] = \
 		begun_replace.get("status") == "ready" and accepted_new.get("status") == "accepted" \
 		and stale_result.get("reason") == "stale_source_revision" \
-		and ledger.committed_source_part_ids() == ["part-a", "part-b"] \
+		and _committed_identity_keys(ledger) == _sorted_ids([_identity("source-a", "part-a"),
+			_identity("source-b", "part-b")]) \
 		and ledger.committed_partition_inputs().inputs[0].sourceRevision == "rev-1"
 	var aborted: Dictionary = ledger.abort_boundary("boundary-2")
 	checks["cancel_preserves_previous_committed_ledger"] = aborted.get("status") == "aborted" \
-		and ledger.committed_source_part_ids() == ["part-a", "part-b"] \
+		and _committed_identity_keys(ledger) == _sorted_ids([_identity("source-a", "part-a"),
+			_identity("source-b", "part-b")]) \
 		and ledger.committed_impacted_section_keys() == [Vector3i(0, 0, 0), Vector3i(1, 0, 0)]
 
 	var begun_replace_again: Dictionary = ledger.begin_boundary("boundary-3", _array([replacement]), _array([removal]))
@@ -142,7 +152,8 @@ func _run() -> void:
 	var stale_install_current := _revisions({"part-a":"rev-2", "part-b":"rev-1"})
 	var stale_install: Dictionary = _accept_mock_install(ledger,
 		replace_remove_prepared, stale_install_current)
-	var prior_ledger_survives_stale_install := ledger.committed_source_part_ids() == ["part-a", "part-b"]
+	var prior_ledger_survives_stale_install := _committed_identity_keys(ledger) == \
+		_sorted_ids([_identity("source-a", "part-a"), _identity("source-b", "part-b")])
 	var commit_replace_remove: Dictionary = _accept_mock_install(ledger,
 		replace_remove_prepared, proper_current)
 	checks["complete_replace_and_removal_commit_atomically"] = \
@@ -150,7 +161,7 @@ func _run() -> void:
 		and stale_install.get("reason") == "stale_source_revision" \
 		and prior_ledger_survives_stale_install \
 		and commit_replace_remove.get("status") == "committed" \
-		and ledger.committed_source_part_ids() == ["part-a"] \
+		and _committed_identity_keys(ledger) == [_identity("source-a", "part-a")] \
 		and commit_replace_remove.partition.outputInstanceCount == 1 \
 		and commit_replace_remove.impactedSectionKeys == [Vector3i(0, 0, 0), Vector3i(1, 0, 0), Vector3i(2, 0, 0)]
 	checks["impacts_include_old_new_and_removed_source_sections"] = \
@@ -161,10 +172,14 @@ func _run() -> void:
 	var reidentified_part := _declaration("part-a", "source-a-recreated", "rev-3",
 		Vector3(70.0, 1.0, 2.0), ["seg-recreated"])
 	var reidentify_begin: Dictionary = ledger.begin_boundary("boundary-4",
-		_array([reidentified_part]), _array([]))
+		_array([reidentified_part]), _array([_removal("part-a", "source-a", "rev-3")]))
 	ledger.accept_prepared_segment("boundary-4",
 		_segment("part-a", "source-a-recreated", "rev-3", "seg-recreated", [0.0]))
-	var reidentify_current := _revisions({"part-a":"rev-3"})
+	# Different sources may share a local part ID; replacement explicitly retires
+	# the previous source rather than treating that local ID as global authority.
+	var reidentify_current := {_identity("source-a", "part-a"):"rev-3",
+		_identity("source-a-recreated", "part-a"):"rev-3"}
+	reidentify_current.make_read_only()
 	var reidentify_prepared: Dictionary = ledger.prepare_boundary("boundary-4", reidentify_current,
 		"ledger-contract-world", 3)
 	var reidentify_commit: Dictionary = _accept_mock_install(ledger,
@@ -179,11 +194,15 @@ func _run() -> void:
 	checks["mutable_inputs_and_stale_boundary_token_are_rejected"] = _readonly_and_token_rejected(ledger)
 	checks["failed_begin_does_not_leave_partial_transaction_open"] = _failed_begin_does_not_poison(ledger)
 	checks["section_generations_increase_and_world_epoch_stays_bound"] = _generation_and_world_binding_rejected()
+	checks["same_producer_local_part_under_two_sources_has_distinct_replay_receipts"] = \
+		_multiple_sources_can_own_same_local_part_id()
+	checks["hidden_source_visibility_survives_ledger_and_section_preparation"] = _hidden_visibility_contract()
 
 	var report := {"schema":"prepared-static-contributor-ledger-contract/v1",
 		"checks":checks, "passed":not checks.values().has(false),
 		"evidence":"pure revisioned prepared-segment ledger transaction and section partition contract; no BuildingPartPublisher wiring, section backend install, worker scheduling, collision, or live gameplay acceptance",
-		"committedSourceParts":ledger.committed_source_part_ids(),
+		"committedSourcePartIds":ledger.committed_source_part_ids(),
+		"committedSourceParts":ledger.committed_source_parts(),
 		"committedImpactedSections":ledger.committed_impacted_section_keys(),
 		"resourceObjectsRetained":false}
 	var report_path := OS.get_environment("PREPARED_STATIC_CONTRIBUTOR_LEDGER_REPORT")
@@ -198,6 +217,7 @@ func _run() -> void:
 
 func _declaration(part_id: String, source_id: String, revision: String,
 		origin: Vector3, segment_ids: Array) -> Dictionary:
+	source_id_by_part[part_id] = source_id
 	var segments: Array[Dictionary] = []
 	for segment_id: String in segment_ids:
 		var segment := {"segmentId":segment_id, "materialKey":"wood_oak",
@@ -222,6 +242,7 @@ func _declaration(part_id: String, source_id: String, revision: String,
 
 
 func _removal(part_id: String, source_id: String, revision: String) -> Dictionary:
+	source_id_by_part[part_id] = source_id
 	var removal := {"sourcePartId":part_id, "sourceId":source_id, "sourceRevision":revision}
 	removal.make_read_only()
 	return removal
@@ -257,11 +278,39 @@ func _encode(transform: Transform3D) -> Array[float]:
 
 
 func _compatibility_key(pipeline_revision := "building-static-v1",
-		render_layer := "opaque", sort_policy := "none") -> String:
+		render_layer := "opaque", sort_policy := "none", intended_visible := true) -> String:
 	return "section-batch:" + JSON.stringify([Attributes.LAYOUT_SCHEMA,
 		"wood_oak", "structural", "unit-box-v1", TEST_MESH_DIGEST,
 		pipeline_revision, render_layer, sort_policy, true, 240.0, 18.0,
-		-0.5, -0.5, -0.5, 1.0, 1.0, 1.0]).sha256_text()
+		-0.5, -0.5, -0.5, 1.0, 1.0, 1.0, intended_visible]).sha256_text()
+
+
+func _hidden_visibility_contract() -> bool:
+	var ledger = Ledger.new()
+	var declaration := _declaration("hidden", "hidden-source", "rev", Vector3(2, 2, 2), ["seg"]).duplicate(false)
+	var declared_segment: Dictionary = declaration.segments[0].duplicate(false)
+	declared_segment["intendedVisible"] = false
+	declared_segment["compatibilityKey"] = _compatibility_key("building-static-v1", "opaque", "none", false)
+	declared_segment.make_read_only()
+	declaration["segments"] = _array([declared_segment])
+	declaration.make_read_only()
+	if ledger.begin_boundary("hidden", _array([declaration]), _array([])).get("status") != "ready": return false
+	var visible := _segment("hidden", "hidden-source", "rev", "seg", [0.0])
+	var rejected: Dictionary = ledger.accept_prepared_segment("hidden", visible)
+	if rejected.get("status") != "failed": return false
+	var hidden := visible.duplicate(false)
+	hidden["intendedVisible"] = false
+	hidden["compatibilityKey"] = declared_segment.compatibilityKey
+	hidden.make_read_only()
+	if ledger.accept_prepared_segment("hidden", hidden).get("status") != "accepted": return false
+	var prepared: Dictionary = ledger.prepare_boundary("hidden", _revisions({"hidden":"rev"}), "visibility-world", 1)
+	if prepared.get("status") != "prepared" or prepared.replacements.is_empty(): return false
+	var count := 0
+	for replacement: Dictionary in prepared.replacements:
+		for batch: Dictionary in replacement.snapshot.batches.values():
+			if batch.get("intendedVisible", true) != false: return false
+			count += 1
+	return count > 0
 
 
 func _unit_box_bounds() -> AABB:
@@ -274,7 +323,46 @@ func _array(values: Array) -> Array:
 
 
 func _revisions(values: Dictionary) -> Dictionary:
-	values.make_read_only()
+	var identities: Dictionary = {}
+	for part_value: Variant in values:
+		var part_id := String(part_value)
+		var source_id := String(source_id_by_part.get(part_id, part_id))
+		identities[_identity(source_id, part_id)] = values[part_value]
+	identities.make_read_only()
+	return identities
+
+
+func _identity(source_id: String, part_id: String) -> String:
+	return "section-part:" + var_to_bytes([source_id, part_id]).hex_encode()
+
+
+func _committed_identity_keys(ledger) -> Array[String]:
+	var result: Array[String] = []
+	for identity_value: Variant in ledger.committed_source_parts():
+		if identity_value is Dictionary:
+			result.append(_identity(String(identity_value.get("sourceId", "")),
+				String(identity_value.get("sourcePartId", ""))))
+	result.sort()
+	return result
+
+
+func _source_parts(values: Array) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for value: Variant in values:
+		if value is Dictionary:
+			var identity := {"sourceId":String(value.get("sourceId", "")),
+				"sourcePartId":String(value.get("sourcePartId", ""))}
+			identity.make_read_only()
+			result.append(identity)
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return _identity(String(a.sourceId), String(a.sourcePartId)) \
+			< _identity(String(b.sourceId), String(b.sourcePartId)))
+	result.make_read_only()
+	return result
+
+
+func _sorted_ids(values: Array[String]) -> Array[String]:
+	values.sort()
 	return values
 
 
@@ -350,7 +438,7 @@ func _layer_policy_contract() -> bool:
 
 
 func _incomplete_preserves(ledger) -> bool:
-	var before_ids: Array[String] = ledger.committed_source_part_ids()
+	var before_ids: Array[String] = _committed_identity_keys(ledger)
 	var before_inputs: Dictionary = ledger.committed_partition_inputs()
 	var declaration := _declaration("part-a", "source-a", "rev-3", Vector3(70.0, 1.0, 2.0), ["one", "two"])
 	if ledger.begin_boundary("incomplete", _array([declaration]), _array([])).status != "ready":
@@ -361,9 +449,38 @@ func _incomplete_preserves(ledger) -> bool:
 	var after_inputs: Dictionary = ledger.committed_partition_inputs()
 	ledger.abort_boundary("incomplete")
 	return result.get("reason") == "boundary_incomplete" \
-		and ledger.committed_source_part_ids() == before_ids \
+		and _committed_identity_keys(ledger) == before_ids \
 		and after_inputs.inputs.size() == before_inputs.inputs.size() \
 		and after_inputs.inputs[0].sourceRevision == before_inputs.inputs[0].sourceRevision
+
+
+func _multiple_sources_can_own_same_local_part_id() -> bool:
+	var ledger = Ledger.new()
+	var first := _declaration("foliage:00000000", "tree-a", "rev-a",
+		Vector3(2.0, 2.0, 2.0), ["seg-a"])
+	var second := _declaration("foliage:00000000", "tree-b", "rev-b",
+		Vector3(4.0, 2.0, 2.0), ["seg-b"])
+	var begun: Dictionary = ledger.begin_boundary("same-local-part", _array([first, second]), _array([]))
+	if begun.get("status") != "ready": return false
+	var accepted_a: Dictionary = ledger.accept_prepared_segment("same-local-part",
+		_segment("foliage:00000000", "tree-a", "rev-a", "seg-a", [0.0]))
+	var accepted_b: Dictionary = ledger.accept_prepared_segment("same-local-part",
+		_segment("foliage:00000000", "tree-b", "rev-b", "seg-b", [0.0]))
+	var revisions: Dictionary = {_identity("tree-a", "foliage:00000000"):"rev-a",
+		_identity("tree-b", "foliage:00000000"):"rev-b"}
+	revisions.make_read_only()
+	var prepared: Dictionary = ledger.prepare_boundary("same-local-part", revisions,
+		"ledger-contract-world", 1)
+	if prepared.get("status") != "prepared": return false
+	var installed := _accept_mock_install(ledger, prepared, revisions)
+	return accepted_a.get("status") == "accepted" and accepted_b.get("status") == "accepted" \
+		and installed.get("status") == "committed" \
+		and _committed_identity_keys(ledger) == _sorted_ids([
+			_identity("tree-a", "foliage:00000000"), _identity("tree-b", "foliage:00000000")]) \
+		and ledger.committed_source_part_ids() == ["foliage:00000000", "foliage:00000000"] \
+		and ledger.committed_source_parts() == _source_parts([
+			{"sourceId":"tree-a", "sourcePartId":"foliage:00000000"},
+			{"sourceId":"tree-b", "sourcePartId":"foliage:00000000"}])
 
 
 func _exact_segment_set_rejected(ledger) -> bool:

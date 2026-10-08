@@ -6,6 +6,7 @@ const BuildingInteriorProgramScript := preload("res://scripts/buildings/Building
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const CertifiedTreeRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 const MIN_REVIEW_SUBJECT_FRAME_FRACTION := 0.18
 const MAX_REVIEW_SUBJECT_FRAME_FRACTION := 0.82
 const MAX_NEAR_FIELD_BLOCKED_SAMPLES := 4
@@ -145,6 +146,9 @@ func install_generated_city_trees(result) -> void:
 			request["presentation"] = "runtime"
 			request["worldPosition"] = tree_position
 			request["worldRotationY"] = float(placement.get("rotationY", 0.0))
+		request = CertifiedTreeRequestFixture.prepare_or_fail(request)
+		if request.is_empty():
+			continue
 		var tree_recipe: Dictionary = tree_service.build_recipe(request)
 		if tree_recipe.is_empty():
 			continue

@@ -62,6 +62,7 @@ var regional_source_generation := 0
 var regional_requirements_cache := {}
 var regional_standalone_requests := {}
 var standalone_admission_states := {}
+var standalone_admission_terminal_states := {}
 
 func setup(main_node) -> void:
     regional_source_generation += 1
@@ -322,6 +323,29 @@ func _record_ordinary_visual_block(cell: Vector3i, block_type: String, output: N
             expected[cell]=actual_type
             source.revision=int(source.get("revision",0))+1
             ordinary_visual_revision+=1
+        if block_type != actual_type:
+            # create_block may return an existing same-source body for an
+            # overlapping structure write. That body is still the cell's
+            # authority; never bind the later request's recipe to its mesh.
+            var actual_recipe: Dictionary = recipe_inputs.get(cell, {})
+            var actual_options_value: Variant = actual_recipe.get("options", null)
+            var actual_options: Dictionary = actual_options_value \
+                if actual_options_value is Dictionary else {}
+            var actual_digest := String(actual_recipe.get("digest", ""))
+            var actual_recipe_is_current: bool = actual_recipe.get("schema", "") \
+                == "ordinary-structure-visual-recipe-input/v1" \
+                and String(actual_recipe.get("blockType", "")) == actual_type \
+                and actual_options_value is Dictionary and actual_options.is_read_only() \
+                and not actual_digest.is_empty() \
+                and actual_digest == _ordinary_visual_recipe_digest(actual_type, actual_options)
+            if actual_recipe_is_current:
+                omitted.erase(key)
+                failed.erase(key)
+            elif not failed.has(key):
+                failed[key] = true
+                source.revision=int(source.get("revision",0))+1
+                ordinary_visual_revision+=1
+            return
         if recipe_digest.is_empty():
             failed[key] = true
             return
@@ -405,7 +429,7 @@ func _ordinary_visual_block_world_bounds(body: Node3D) -> AABB:
         var mesh_node := node_value as MeshInstance3D
         if mesh_node == null or mesh_node.mesh == null:
             continue
-        var mesh_bounds := mesh_node.get_aabb() * mesh_node.global_transform
+        var mesh_bounds := mesh_node.global_transform * mesh_node.get_aabb()
         if mesh_bounds.size.is_finite() and mesh_bounds.size.x >= 0.0 \
                 and mesh_bounds.size.y >= 0.0 and mesh_bounds.size.z >= 0.0:
             bounds = mesh_bounds if not have_bounds else bounds.merge(mesh_bounds)
@@ -443,6 +467,597 @@ func navigation_tile_sources(tile: Vector2i) -> Dictionary:
 
 func navigation_tile_source_identity(tile: Vector2i) -> Dictionary:
     return citadel_publication.navigation_tile_source_identity(tile)
+
+func capture_ecology_structure_dependencies(
+    source_bounds: Rect2i, natural_margin_cells: int, structure_margin_cells: int
+) -> Dictionary:
+    const MAX_ECOLOGY_MARGIN_CELLS := 4096
+    if not is_instance_valid(main) or not CitadelPublicationServiceScript._bounded_region_rectangle(source_bounds):
+        return _seal_ecology_structure_dependency_snapshot(source_bounds, natural_margin_cells,
+            structure_margin_cells, Rect2i(), "failed", "invalid_source_bounds", {})
+    if natural_margin_cells < 0 or structure_margin_cells < 0 \
+        or natural_margin_cells > MAX_ECOLOGY_MARGIN_CELLS \
+        or structure_margin_cells > MAX_ECOLOGY_MARGIN_CELLS:
+        return _seal_ecology_structure_dependency_snapshot(source_bounds, natural_margin_cells,
+            structure_margin_cells, Rect2i(), "failed", "invalid_ecology_margins", {})
+    var town_size := int(main.get("TOWN_REGION_CELLS"))
+    var structure_size := int(main.get("STRUCTURE_REGION_CELLS"))
+    if town_size <= 0 or structure_size <= 0:
+        return _seal_ecology_structure_dependency_snapshot(source_bounds, natural_margin_cells,
+            structure_margin_cells, Rect2i(), "failed", "invalid_ordinary_structure_grid", {})
+    var coverage_bounds := source_bounds.grow(maxi(natural_margin_cells, structure_margin_cells))
+    if not CitadelPublicationServiceScript._bounded_region_rectangle(coverage_bounds):
+        return _seal_ecology_structure_dependency_snapshot(source_bounds, natural_margin_cells,
+            structure_margin_cells, coverage_bounds, "failed", "ecology_coverage_bounds_limit", {})
+
+    var content := {
+        "worldInputs": [String(main.seed_text), town_size, structure_size,
+            float(main.get("STRUCTURE_SPAWN_CHANCE")), int(main.get("TOWN_RADIUS_CELLS"))],
+        "naturalExclusions": _ecology_local_natural_exclusions(coverage_bounds),
+        "terrainFootprints": _ecology_local_terrain_footprints(coverage_bounds),
+        "townSources": [],
+        "standaloneSources": [],
+        "citadelAdmission": _ecology_citadel_admission(coverage_bounds)
+    }
+    var status := "ready"
+    var reason := ""
+    if _ecology_rows_have_invalid(content.naturalExclusions) \
+        or _ecology_rows_have_invalid(content.terrainFootprints):
+        status = "failed"
+        reason = "invalid_local_structure_record"
+    var town_result := _ecology_local_town_sources(coverage_bounds)
+    content.townSources = town_result.rows
+    if _ecology_contains_invalid(content.townSources):
+        status = "failed"
+        reason = "invalid_local_town_source_input"
+    if town_result.status == "failed":
+        status = "failed"
+        reason = String(town_result.get("reason", "local_town_source_failed"))
+    elif town_result.status == "pending" and status == "ready":
+        status = "pending"
+        reason = String(town_result.get("reason", "local_town_source_pending"))
+    var standalone_result := _ecology_local_standalone_sources(coverage_bounds)
+    content.standaloneSources = standalone_result.rows
+    if standalone_result.status == "failed":
+        status = "failed"
+        reason = String(standalone_result.get("reason", "local_standalone_source_failed"))
+    elif standalone_result.status == "pending" and status == "ready":
+        status = "pending"
+        reason = String(standalone_result.get("reason", "local_standalone_source_pending"))
+    var citadel: Dictionary = content.citadelAdmission
+    if citadel.get("status") == "failed":
+        status = "failed"
+        reason = String(citadel.get("reason", "local_citadel_admission_failed"))
+    elif citadel.get("status") != "ready" and status == "ready":
+        status = "pending"
+        reason = String(citadel.get("reason", "local_citadel_admission_pending"))
+    return _seal_ecology_structure_dependency_snapshot(source_bounds, natural_margin_cells,
+        structure_margin_cells, coverage_bounds, status, reason, content)
+
+func ecology_structure_dependencies_are_current(snapshot: Dictionary) -> bool:
+    if snapshot.get("schema") != "ecology-structure-dependency-snapshot/v1" \
+        or int(snapshot.get("ownerInstanceId", -1)) != get_instance_id() \
+        or int(snapshot.get("ownerGeneration", -1)) != regional_source_generation \
+        or not is_instance_valid(main) \
+        or int(snapshot.get("worldOwnerInstanceId", -1)) != main.get_instance_id() \
+        or String(snapshot.get("worldSeed", "")) != String(main.seed_text) \
+        or not (snapshot.get("sourceBounds") is Rect2i):
+        return false
+    var expected_digest := _ecology_structure_dependency_digest(
+        String(snapshot.get("status", "")), String(snapshot.get("reason", "")),
+        String(snapshot.get("worldSeed", "")), snapshot.get("sourceBounds", Rect2i()),
+        int(snapshot.get("naturalMarginCells", -1)), int(snapshot.get("structureMarginCells", -1)),
+        snapshot.get("coverageBounds", Rect2i()), snapshot.get("content", {}))
+    if expected_digest.is_empty() or expected_digest != snapshot.get("contentDigest", ""):
+        return false
+    var current := capture_ecology_structure_dependencies(
+        snapshot.sourceBounds,
+        int(snapshot.get("naturalMarginCells", -1)),
+        int(snapshot.get("structureMarginCells", -1)))
+    return current.get("schema") == snapshot.get("schema") \
+        and current.get("status") == snapshot.get("status") \
+        and current.get("worldSeed") == snapshot.get("worldSeed") \
+        and current.get("sourceBounds") == snapshot.get("sourceBounds") \
+        and current.get("naturalMarginCells") == snapshot.get("naturalMarginCells") \
+        and current.get("structureMarginCells") == snapshot.get("structureMarginCells") \
+        and current.get("coverageBounds") == snapshot.get("coverageBounds") \
+        and current.get("content") == snapshot.get("content") \
+        and current.get("contentDigest") == snapshot.get("contentDigest")
+
+func _seal_ecology_structure_dependency_snapshot(
+    source_bounds: Rect2i, natural_margin_cells: int, structure_margin_cells: int,
+    coverage_bounds: Rect2i, status: String, reason: String, content: Dictionary
+) -> Dictionary:
+    var canonical_content := content.duplicate(true)
+    var digest := _ecology_structure_dependency_digest(status, reason,
+        String(main.seed_text) if is_instance_valid(main) else "", source_bounds,
+        natural_margin_cells, structure_margin_cells, coverage_bounds, canonical_content)
+    var snapshot := {
+        "schema": "ecology-structure-dependency-snapshot/v1",
+        "status": status,
+        "reason": reason,
+        "worldSeed": String(main.seed_text) if is_instance_valid(main) else "",
+        "sourceBounds": source_bounds,
+        "naturalMarginCells": natural_margin_cells,
+        "structureMarginCells": structure_margin_cells,
+        "coverageBounds": coverage_bounds,
+        "content": canonical_content,
+        "contentDigest": digest,
+        "ownerInstanceId": get_instance_id(),
+        "ownerGeneration": regional_source_generation,
+        "worldOwnerInstanceId": main.get_instance_id() if is_instance_valid(main) else 0
+    }
+    _ecology_freeze_value(snapshot)
+    return snapshot
+
+func _ecology_structure_dependency_digest(
+    status: String, reason: String, world_seed: String, source_bounds: Variant,
+    natural_margin_cells: int, structure_margin_cells: int, coverage_bounds: Variant,
+    content: Variant
+) -> String:
+    if not (source_bounds is Rect2i) or not (coverage_bounds is Rect2i) or not (content is Dictionary):
+        return ""
+    return Marshalls.raw_to_base64(var_to_bytes(["ecology-structure-dependency-snapshot/v1",
+        status, reason, world_seed, source_bounds, natural_margin_cells,
+        structure_margin_cells, coverage_bounds, content])).sha256_text()
+
+func _ecology_rows_have_invalid(rows: Array) -> bool:
+    for row_value in rows:
+        if row_value is Dictionary and bool((row_value as Dictionary).get("invalid", false)):
+            return true
+    return false
+
+func _ecology_contains_invalid(value: Variant) -> bool:
+    if value is Dictionary:
+        var dictionary: Dictionary = value
+        if bool(dictionary.get("invalid", false)): return true
+        for nested in dictionary.values():
+            if _ecology_contains_invalid(nested): return true
+    elif value is Array:
+        for nested in value:
+            if _ecology_contains_invalid(nested): return true
+    return false
+
+func _ecology_freeze_value(value: Variant) -> void:
+    if value is Dictionary:
+        var dictionary: Dictionary = value
+        for key in dictionary.keys(): _ecology_freeze_value(dictionary[key])
+        dictionary.make_read_only()
+    elif value is Array:
+        var array: Array = value
+        for index in range(array.size()): _ecology_freeze_value(array[index])
+        array.make_read_only()
+
+func _ecology_local_natural_exclusions(bounds: Rect2i) -> Array:
+    var rows: Array = []
+    for value in natural_prop_exclusion_records.values():
+        if not (value is Dictionary):
+            rows.append({"invalid": true})
+            continue
+        var row: Dictionary = value
+        if not (row.get("minX") is int) or not (row.get("maxX") is int) \
+            or not (row.get("minZ") is int) or not (row.get("maxZ") is int) \
+            or int(row.minX) > int(row.maxX) or int(row.minZ) > int(row.maxZ):
+            rows.append({"invalid": true})
+            continue
+        var record_bounds := Rect2i(Vector2i(int(row.minX), int(row.minZ)),
+            Vector2i(int(row.maxX) - int(row.minX) + 1, int(row.maxZ) - int(row.minZ) + 1))
+        if record_bounds.intersects(bounds):
+            if not (row.get("id") is String) or not (row.get("source") is String) or String(row.id).is_empty():
+                rows.append({"invalid": true})
+                continue
+            rows.append({"id":String(row.id), "source":String(row.source),
+                "minX":int(row.minX), "maxX":int(row.maxX),
+                "minZ":int(row.minZ), "maxZ":int(row.maxZ)})
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("id", "")) < String(b.get("id", "")))
+    return rows
+
+func _ecology_local_terrain_footprints(bounds: Rect2i) -> Array:
+    var rows: Array = []
+    for value in terrain_footprint_records.values():
+        if not (value is Dictionary):
+            rows.append({"invalid": true})
+            continue
+        var row: Dictionary = value
+        var low_value: Variant = row.get("minCell", null)
+        var high_value: Variant = row.get("maxCell", null)
+        if not (low_value is Vector3i) or not (high_value is Vector3i):
+            rows.append({"invalid": true})
+            continue
+        var low: Vector3i = low_value
+        var high: Vector3i = high_value
+        if low.x > high.x or low.z > high.z:
+            rows.append({"invalid": true})
+            continue
+        var record_bounds := Rect2i(Vector2i(low.x, low.z), Vector2i(high.x-low.x+1, high.z-low.z+1))
+        if record_bounds.intersects(bounds):
+            if not (row.get("id") is String) or not (row.get("source") is String) \
+                or not (row.get("material") is String) or not (row.get("baseX") is int) \
+                or not (row.get("baseZ") is int) or not (row.get("width") is int) \
+                or not (row.get("depth") is int) or not (row.get("floorY") is int) \
+                or not (row.get("clearanceCells") is int) \
+                or not ((row.get("level") is float or row.get("level") is int) \
+                    and is_finite(float(row.get("level")))):
+                rows.append({"invalid": true})
+                continue
+            rows.append({"id":String(row.id), "source":String(row.source),
+                "material":String(row.material), "baseX":int(row.baseX), "baseZ":int(row.baseZ),
+                "width":int(row.width), "depth":int(row.depth), "level":float(row.level),
+                "floorY":int(row.floorY), "clearanceCells":int(row.clearanceCells),
+                "minCell":low, "maxCell":high})
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("id", "")) < String(b.get("id", "")))
+    return rows
+
+func _ecology_local_town_sources(bounds: Rect2i) -> Dictionary:
+    var town_size := int(main.get("TOWN_REGION_CELLS"))
+    var low := Vector2i(floori(float(bounds.position.x) / town_size), floori(float(bounds.position.y) / town_size)) - Vector2i.ONE
+    var high := Vector2i(floori(float(bounds.end.x - 1) / town_size), floori(float(bounds.end.y - 1) / town_size)) + Vector2i.ONE
+    if (high.x-low.x+1)*(high.y-low.y+1) > 256:
+        return {"status":"failed", "reason":"ecology_town_region_limit", "rows":[]}
+    var rows: Array = []
+    var result_status := "ready"
+    var result_reason := ""
+    for z in range(low.y, high.y + 1):
+        for x in range(low.x, high.x + 1):
+            var region := Vector2i(x, z)
+            var town: Dictionary = main.town_region(x, z)
+            var input_row := {"region":region, "town":_ecology_town_input(town)}
+            if town.is_empty():
+                rows.append(input_row)
+                continue
+            var town_bounds := _regional_town_bounds(town)
+            if not town_bounds.intersects(bounds):
+                continue
+            var town_key := town_key_for(town)
+            var source_id := "town:" + town_key
+            var state_value: Variant = town_manifest_publish_states.get(town_key, {})
+            var state: Dictionary = state_value if state_value is Dictionary else {}
+            if state.is_empty() or int(state.get("generationAttempts", 0)) == 0:
+                enqueue_deferred_town_build(town)
+                state = town_manifest_publish_states.get(town_key, {})
+            var phase_rows := _ecology_pending_town_operations(town_key, town, state, bounds)
+            var visual_source_value: Variant = ordinary_visual_sources.get(source_id, {})
+            var visual_source: Dictionary = visual_source_value if visual_source_value is Dictionary else {}
+            var local_visual_state := _ecology_local_visual_source_state(visual_source, bounds)
+            var town_status := String(state.get("status", "unrequested"))
+            var town_reason := ""
+            if town_status == "failed":
+                var failed_layout_state := {"phase":"paths", "sites":town_home_sites(town, null),
+                    "homeSiteIndex":0, "builtHomeCount":int(state.get("builtHomeCount", 0)),
+                    "desiredHomeCount":town_home_count(town)}
+                if _ecology_town_future_phase_intersects(town, failed_layout_state, bounds):
+                    town_reason = "local_town_source_failed"
+                    result_status = "failed"
+                    result_reason = town_reason
+            if local_visual_state.status == "failed":
+                town_reason = "local_town_source_failed"
+                result_status = "failed"
+                result_reason = town_reason
+            elif town_status != "published" and not phase_rows.is_empty():
+                if result_status == "ready":
+                    result_status = "pending"
+                    result_reason = "local_town_operations_pending"
+            var local_manifest := {"localState":"pending" if not phase_rows.is_empty() else "settled",
+                "localFailure":local_visual_state.status == "failed"}
+            rows.append({"region":region, "town":_ecology_town_input(town),
+                "sourceId":source_id, "townBounds":town_bounds,
+                "manifest":local_manifest,
+                "localPendingOperations":phase_rows, "localVisualSource":local_visual_state})
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        var ar: Vector2i = a.get("region", Vector2i.ZERO)
+        var br: Vector2i = b.get("region", Vector2i.ZERO)
+        return ar.y < br.y if ar.y != br.y else ar.x < br.x)
+    return {"status":result_status, "reason":result_reason, "rows":rows}
+
+func _ecology_local_standalone_sources(bounds: Rect2i) -> Dictionary:
+    var structure_size := int(main.get("STRUCTURE_REGION_CELLS"))
+    var low := Vector2i(floori(float(bounds.position.x) / structure_size), floori(float(bounds.position.y) / structure_size)) - Vector2i.ONE
+    var high := Vector2i(floori(float(bounds.end.x - 1) / structure_size), floori(float(bounds.end.y - 1) / structure_size)) + Vector2i.ONE
+    if (high.x-low.x+1)*(high.y-low.y+1) > 256:
+        return {"status":"failed", "reason":"ecology_standalone_region_limit", "rows":[]}
+    var rows: Array = []
+    var result_status := "ready"
+    var result_reason := ""
+    for z in range(low.y, high.y + 1):
+        for x in range(low.x, high.x + 1):
+            var region := Vector2i(x, z)
+            var candidate: Dictionary = StandaloneSourceScript.candidate_for_region(
+                String(main.seed_text), region, structure_size, float(main.get("STRUCTURE_SPAWN_CHANCE")))
+            if candidate.is_empty():
+                rows.append({"region":region, "candidate":{}, "state":"absent"})
+                continue
+            var influence: Dictionary = StandaloneSourceScript.terrain_influence_for_candidate(candidate)
+            if not bool(influence.get("bounded", false)):
+                return {"status":"failed", "reason":"standalone_dependency_bounds_missing", "rows":rows}
+            var source_bounds: Rect2i = influence.get("influenceCells", Rect2i())
+            if not source_bounds.intersects(bounds): continue
+            if not generated_structures.has(region):
+                if not regional_standalone_requests.has(region):
+                    regional_standalone_requests[region] = true
+                    enqueue_structure_op({"type":"regional_standalone_source", "region":region})
+                if result_status == "ready":
+                    result_status = "pending"
+                    result_reason = "local_standalone_admission_pending"
+            var state_name := "pending"
+            var terminal_value: Variant = standalone_admission_terminal_states.get(region, {})
+            var terminal: Dictionary = terminal_value if terminal_value is Dictionary else {}
+            var sample_value: Variant = standalone_admission_states.get(region, {})
+            var sampling: Dictionary = sample_value if sample_value is Dictionary else {}
+            var operations := _ecology_pending_source_operations("standalone:%d,%d" % [x, z], bounds)
+            var visual_value: Variant = ordinary_visual_sources.get("standalone:%d,%d" % [x, z], {})
+            var visual_source: Dictionary = visual_value if visual_value is Dictionary else {}
+            var local_visual_state := _ecology_local_visual_source_state(visual_source, bounds)
+            var footprint_rows := _ecology_candidate_footprints(candidate)
+            if not generated_structures.has(region):
+                state_name = "unresolved"
+            elif not bool(generated_structures.get(region, false)):
+                state_name = String(terminal.get("status", "rejected"))
+            else:
+                state_name = "admitted"
+            if state_name == "failed":
+                result_status = "failed"
+                result_reason = String(terminal.get("reason", "standalone_admission_failed"))
+            if local_visual_state.status == "failed":
+                result_status = "failed"
+                result_reason = String(local_visual_state.get("reason", "local_standalone_source_failed"))
+            elif (not operations.is_empty() or state_name == "unresolved" \
+                or (state_name == "admitted" and footprint_rows.is_empty())) and result_status == "ready":
+                result_status = "pending"
+                result_reason = "local_standalone_operations_pending"
+            if state_name == "admitted" and footprint_rows.is_empty() and operations.is_empty():
+                result_status = "failed"
+                result_reason = "standalone_physical_source_receipt_missing"
+            var admission_input := {"status":String(terminal.get("status", state_name)),
+                "reason":String(terminal.get("reason", "")),
+                "revision":standalone_admission_revision(candidate),
+                "sampleCount":int(terminal.get("sampleCount", 0))}
+            rows.append({"region":region, "candidate":candidate, "influence":source_bounds,
+                "state":state_name, "admission":admission_input,
+                "sampling":_ecology_standalone_sampling_input(sampling, candidate),
+                "localPendingOperations":operations, "localVisualSource":local_visual_state,
+                "footprints":footprint_rows})
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        var ar: Vector2i = a.get("region", Vector2i.ZERO)
+        var br: Vector2i = b.get("region", Vector2i.ZERO)
+        return ar.y < br.y if ar.y != br.y else ar.x < br.x)
+    return {"status":result_status, "reason":result_reason, "rows":rows}
+
+func _ecology_citadel_admission(bounds: Rect2i) -> Dictionary:
+    var request: Dictionary = citadel_terrain_admission.request_bounds(bounds)
+    var low := CitadelSiteFieldScript.region_for_cell(bounds.position)
+    var high := CitadelSiteFieldScript.region_for_cell(bounds.end - Vector2i.ONE)
+    var rows: Array = []
+    for z in range(low.y, high.y + 1):
+        for x in range(low.x, high.x + 1):
+            var region := Vector2i(x, z)
+            var candidate: Dictionary = CitadelSiteFieldScript.candidate_for_region(String(main.seed_text), region)
+            if candidate.is_empty() or not CitadelTerrainAdmissionScript.declared_influence(candidate).intersects(bounds):
+                continue
+            var state: Dictionary = citadel_terrain_admission.source_state(region)
+            var binding_value: Variant = state.get("binding", {})
+            var binding: Dictionary = binding_value if binding_value is Dictionary else {}
+            var reservation_value: Variant = state.get("reservationCells", Rect2i())
+            var valid_binding := binding.get("siteId", "") is String \
+                and binding.get("sourceKey", "") is String \
+                and binding.get("generation", -1) is int
+            if String(state.get("status", "")) in ["ready", "prepared"] \
+                and (not valid_binding or not (reservation_value is Rect2i) \
+                    or not (state.get("sourceSignature", "") is String) \
+                    or String(state.get("sourceSignature", "")).is_empty()):
+                return {"status":"failed", "reason":"invalid_local_citadel_source_receipt",
+                    "generation":int(request.get("generation", -1)),
+                    "worldSeed":String(request.get("worldSeed", "")), "bounds":bounds, "sources":rows}
+            rows.append({"region":region, "status":String(state.get("status", "")),
+                "reason":String(state.get("reason", "")),
+                "binding":{"siteId":String(binding.get("siteId", "")),
+                    "sourceKey":String(binding.get("sourceKey", "")),
+                    "generation":int(binding.get("generation", -1))} if valid_binding else {},
+                "sourceSignature":String(state.get("sourceSignature", "")),
+                "reservationCells":reservation_value if reservation_value is Rect2i else Rect2i()})
+    return {"status":String(request.get("status", "failed")),
+        "reason":String(request.get("reason", "citadel_admission_status_missing")),
+        "generation":int(request.get("generation", -1)),
+        "worldSeed":String(request.get("worldSeed", "")),
+        "bounds":bounds, "sources":rows}
+
+func _ecology_town_input(town: Dictionary) -> Dictionary:
+    if town.is_empty(): return {}
+    for key in ["regionX", "regionZ", "centerX", "centerZ", "radius"]:
+        if not (town.get(key, null) is int): return {"invalid":true}
+    var level_value: Variant = town.get("level", null)
+    if not (level_value is float or level_value is int) or not is_finite(float(level_value)):
+        return {"invalid":true}
+    var rings: Array = []
+    var rings_value: Variant = town.get("homeExclusionRings", [])
+    if rings_value is Array:
+        for ring_value in rings_value:
+            if not (ring_value is Dictionary):
+                rings.append({"invalid":true})
+                continue
+            var ring: Dictionary = ring_value
+            if not (ring.get("radius", null) is int) or not (ring.get("margin", 0) is int):
+                rings.append({"invalid":true})
+                continue
+            rings.append({"radius":int(ring.get("radius", 0)), "margin":int(ring.get("margin", 0))})
+    else:
+        rings.append({"invalid":true})
+    return {"regionX":int(town.get("regionX", 0)), "regionZ":int(town.get("regionZ", 0)),
+        "centerX":int(town.get("centerX", 0)), "centerZ":int(town.get("centerZ", 0)),
+        "radius":int(town.get("radius", 0)), "level":float(level_value),
+        "homeExclusionRings":rings}
+
+func _ecology_standalone_sampling_input(state: Dictionary, candidate: Dictionary) -> Dictionary:
+    return {"active":not state.is_empty(), "failed":bool(state.get("failed", false)),
+        "revision":standalone_admission_revision(candidate)}
+
+func _ecology_candidate_footprints(candidate: Dictionary) -> Array:
+    var base: Vector2i = candidate.get("baseCell", Vector2i.ZERO)
+    var rows: Array[String] = []
+    for value in terrain_footprint_records.values():
+        if value is Dictionary and int(value.get("baseX", 2147483647)) == base.x \
+            and int(value.get("baseZ", 2147483647)) == base.y:
+            var footprint: Dictionary = value
+            if footprint.get("id", "") is String:
+                rows.append(String(footprint.get("id", "")))
+            else:
+                rows.append("invalid-footprint-id")
+    rows.sort_custom(func(a: String, b: String) -> bool:
+        return a < b)
+    return rows
+
+func _ecology_local_visual_source_state(source: Dictionary, bounds: Rect2i) -> Dictionary:
+    if source.is_empty(): return {"status":"missing", "revision":0, "localExpected":[], "localFailed":[]}
+    var expected_value: Variant = source.get("expected", {})
+    var failed_value: Variant = source.get("failed", {})
+    if not (expected_value is Dictionary) or not (failed_value is Dictionary):
+        return {"status":"failed", "reason":"invalid_local_visual_source"}
+    var expected: Dictionary = expected_value
+    var failed: Dictionary = failed_value
+    var local_expected: Array = []
+    var local_failed: Array = []
+    for cell_value in expected.keys():
+        if not (cell_value is Vector3i):
+            return {"status":"failed", "reason":"invalid_visual_source_cell_key"}
+        var cell: Vector3i = cell_value
+        if bounds.has_point(Vector2i(cell.x, cell.z)):
+            if not (expected[cell_value] is String):
+                return {"status":"failed", "reason":"invalid_visual_source_cell_value"}
+            local_expected.append([cell, String(expected[cell_value])])
+    for cell_value in failed.keys():
+        if not (cell_value is Vector3i):
+            return {"status":"failed", "reason":"invalid_visual_source_failure_key"}
+        var cell: Vector3i = cell_value
+        if bounds.has_point(Vector2i(cell.x, cell.z)):
+            if not (failed[cell_value] is bool):
+                return {"status":"failed", "reason":"invalid_visual_source_failure_value"}
+            local_failed.append(cell)
+    local_expected.sort_custom(func(a: Array, b: Array) -> bool:
+        var ac: Vector3i = a[0]; var bc: Vector3i = b[0]
+        return ac.y < bc.y if ac.y != bc.y else (ac.z < bc.z if ac.z != bc.z else ac.x < bc.x))
+    local_failed.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+        return a.y < b.y if a.y != b.y else (a.z < b.z if a.z != b.z else a.x < b.x))
+    var status := "failed" if not local_failed.is_empty() else "ready"
+    return {"status":status, "localExpected":local_expected, "localFailed":local_failed}
+
+func _ecology_pending_town_operations(town_key: String, town: Dictionary, state: Dictionary, bounds: Rect2i) -> Array:
+    var rows: Array = _ecology_pending_source_operations("town:" + town_key, bounds)
+    var phase_declared := false
+    var queues: Array = [pending_structure_ops, pending_structure_retry_ops]
+    for queue_index in range(queues.size()):
+        var queue: Array = queues[queue_index]
+        var start := pending_structure_op_index if queue_index == 0 else 0
+        for index in range(start, queue.size()):
+            var op_value = queue[index]
+            if not (op_value is Dictionary): continue
+            var op: Dictionary = op_value
+            if String(op.get("townKey", "")) != town_key: continue
+            if String(op.get("type", "")) == "publish_town_home_records":
+                phase_declared = true
+                continue
+            if String(op.get("type", "")) != "town_build_phase": continue
+            var phase_state: Dictionary = op.get("state", {}) if op.get("state", {}) is Dictionary else {}
+            var phase_name := String(phase_state.get("phase", ""))
+            if phase_name in ["paths", "perimeter", "homes", "market", "utilities", "publish"]:
+                phase_declared = true
+            if not _ecology_town_future_phase_intersects(town, phase_state, bounds): continue
+            rows.append({"type":"town_build_phase", "townKey":town_key,
+                "phase":phase_name,
+                "homeSiteIndex":int(phase_state.get("homeSiteIndex", 0)),
+                "builtHomeCount":int(phase_state.get("builtHomeCount", 0)),
+                "desiredHomeCount":int(phase_state.get("desiredHomeCount", town_home_count(town)))})
+    if String(state.get("status", "")) in ["queued", "building"] and not phase_declared:
+        rows.append({"type":"town_phase_unresolved", "townKey":town_key})
+    # A present phase carries its exact next layout step. An empty local row
+    # set means the queued tail has no effect inside these bounds; global town
+    # status and unrelated work do not block this local dependency.
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return String(a.get("type", "")) + String(a.get("phase", "")) + str(a.get("cell", Vector2i.ZERO)) \
+            < String(b.get("type", "")) + String(b.get("phase", "")) + str(b.get("cell", Vector2i.ZERO)))
+    return rows
+
+func _ecology_town_future_phase_intersects(town: Dictionary, state: Dictionary, bounds: Rect2i) -> bool:
+    var phases := ["paths", "perimeter", "homes", "market", "utilities", "publish"]
+    var current := String(state.get("phase", "paths"))
+    var start := phases.find(current)
+    if start < 0: return true
+    var center := Vector2i(int(town.get("centerX", 0)), int(town.get("centerZ", 0)))
+    var radius := int(town.get("radius", 0))
+    for phase_index in range(start, phases.size()):
+        var phase := String(phases[phase_index])
+        if phase == "paths":
+            var span := maxi(10, radius - 2)
+            for offset in range(-span, span + 1):
+                for cell in [center + Vector2i(offset, 0), center + Vector2i(0, offset)]:
+                    if bounds.has_point(cell): return true
+                if offset % 4 == 0 and (bounds.has_point(center + Vector2i(offset, 1)) \
+                    or bounds.has_point(center + Vector2i(1, offset))): return true
+        elif phase == "perimeter":
+            for offset in range(-radius, radius + 1):
+                if bounds.has_point(center + Vector2i(offset, -radius)) \
+                    or bounds.has_point(center + Vector2i(offset, radius)) \
+                    or bounds.has_point(center + Vector2i(-radius, offset)) \
+                    or bounds.has_point(center + Vector2i(radius, offset)): return true
+        elif phase == "homes":
+            var sites: Array = state.get("sites", []) if state.get("sites", []) is Array else town_home_sites(town, null)
+            var index := int(state.get("homeSiteIndex", 0))
+            var remaining := maxi(0, int(state.get("desiredHomeCount", town_home_count(town))) \
+                - int(state.get("builtHomeCount", 0)))
+            while index < sites.size() and remaining > 0:
+                var site_value = sites[index]
+                index += 1
+                if not (site_value is Dictionary): continue
+                var site: Dictionary = site_value
+                var base := center + Vector2i(int(site.get("dx", 0)), int(site.get("dz", 0)))
+                if town_home_site_excluded(town, base.x, base.y, 10, 10, int(site.get("side", 0))):
+                    continue
+                var possible_home := Rect2i(base - Vector2i.ONE, Vector2i(12, 12))
+                if possible_home.intersects(bounds): return true
+                remaining -= 1
+        elif phase in ["market", "utilities"]:
+            if Rect2i(center - Vector2i(8, 8), Vector2i(17, 17)).intersects(bounds): return true
+    return false
+
+func _ecology_pending_source_operations(source_id: String, bounds: Rect2i) -> Array:
+    var rows: Array = []
+    var queues: Array = [pending_structure_ops, pending_structure_retry_ops]
+    for queue_index in range(queues.size()):
+        var queue: Array = queues[queue_index]
+        for index in range(pending_structure_op_index if queue_index == 0 else 0, queue.size()):
+            var op_value = queue[index]
+            if not (op_value is Dictionary): continue
+            var op: Dictionary = op_value
+            if String(op.get("visualSourceId", "")) != source_id and String(op.get("townKey", "")) != source_id.trim_prefix("town:"):
+                continue
+            var op_bounds: Variant = _ecology_structure_operation_bounds(op)
+            if op_bounds == null or not (op_bounds as Rect2i).intersects(bounds): continue
+            rows.append(_ecology_structure_operation_input(op))
+    rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return var_to_bytes(a).hex_encode() < var_to_bytes(b).hex_encode())
+    return rows
+
+func _ecology_structure_operation_bounds(op: Dictionary) -> Variant:
+    var kind := String(op.get("type", ""))
+    if kind in ["block", "path", "utility", "door"]:
+        return Rect2i(Vector2i(int(op.get("cellX", 0)), int(op.get("cellZ", 0))), Vector2i.ONE)
+    if kind == "terrain_footprint":
+        var x := int(op.get("baseX", 0)); var z := int(op.get("baseZ", 0))
+        return Rect2i(Vector2i(x - 1, z - 1), Vector2i(int(op.get("width", 0)) + 2, int(op.get("depth", 0)) + 2))
+    return null
+
+func _ecology_structure_operation_input(op: Dictionary) -> Dictionary:
+    var row := {"type":String(op.get("type", "")),
+        "visualSourceId":String(op.get("visualSourceId", "")),
+        "townKey":String(op.get("townKey", ""))}
+    var op_bounds: Variant = _ecology_structure_operation_bounds(op)
+    if op_bounds is Rect2i: row["bounds"] = op_bounds
+    if op.has("cellX"): row["cell"] = Vector2i(int(op.get("cellX", 0)), int(op.get("cellZ", 0)))
+    if op.has("blockType"): row["blockType"] = String(op.get("blockType", ""))
+    if op.has("baseX"): row["base"] = Vector2i(int(op.get("baseX", 0)), int(op.get("baseZ", 0)))
+    if op.has("width"): row["width"] = int(op.get("width", 0))
+    if op.has("depth"): row["depth"] = int(op.get("depth", 0))
+    return row
 
 func region_dependency_revision(bounds: Rect2i) -> String:
     # No source compilation, town generation, home copies or queue scans here.
@@ -790,6 +1405,7 @@ static func _regional_problem(result: Dictionary, status: String, reason: String
 func reset() -> void:
     regional_standalone_requests.clear()
     standalone_admission_states.clear()
+    standalone_admission_terminal_states.clear()
     regional_requirements_cache.clear()
     regional_source_generation += 1
     regional_source_revision += 1
@@ -919,6 +1535,7 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
             var candidate := Candidate.candidate_for_region(main.seed_text, key, main.STRUCTURE_REGION_CELLS, main.STRUCTURE_SPAWN_CHANCE)
             if candidate.is_empty():
                 generated_structures[key] = false
+                standalone_admission_terminal_states[key] = {"status":"absent", "reason":"no_candidate"}
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
@@ -933,12 +1550,22 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
                 continue
             if admission.status!="ready":
                 generated_structures[key] = false
+                var admission_reason := String(admission.get("reason", "standalone_admission_rejected"))
+                standalone_admission_terminal_states[key] = {
+                    "status":"failed" if String(admission.get("status", "")) == "failed" \
+                        or admission_reason in ["standalone_surface_missing", "invalid_standalone_candidate"] else "rejected",
+                    "reason":admission_reason,
+                    "revision":admission.get("revision", standalone_admission_revision(candidate))
+                }
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
             var level := float(admission.level)
             var rng := Candidate.continuation_rng(candidate)
             generated_structures[key] = true
+            standalone_admission_terminal_states[key] = {"status":"admitted",
+                "reason":"", "revision":admission.get("revision", []),
+                "sampleCount":int(admission.get("sampleCount", 0))}
             var visual_source_id := "standalone:%d,%d" % [key.x,key.y]
             _begin_ordinary_visual_source(visual_source_id)
             if defer_builds:

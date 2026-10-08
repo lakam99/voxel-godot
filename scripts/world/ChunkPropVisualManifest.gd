@@ -403,7 +403,7 @@ func _capture_batch_instance() -> Dictionary:
 
 func _capture_add_candidate(candidate: Dictionary) -> void:
 	var sealed := candidate.duplicate()
-	for field in ["owner", "representation", "detailPublisher", "horizonPublisher",
+	for field in ["owner", "representation", "detailPublisher", "horizonPublisher", "treePublisher",
 			"horizonOrdinaryPublisher"]:
 		if sealed.has(field):
 			var object := sealed[field] as Object
@@ -423,7 +423,7 @@ func _capture_add_candidate(candidate: Dictionary) -> void:
 
 func _capture_materialize(sealed: Dictionary) -> Dictionary:
 	var candidate := sealed.duplicate()
-	for field in ["owner", "representation", "detailPublisher", "horizonPublisher",
+	for field in ["owner", "representation", "detailPublisher", "horizonPublisher", "treePublisher",
 			"horizonOrdinaryPublisher"]:
 		if not candidate.has(field): continue
 		var ref := candidate[field] as WeakRef
@@ -473,6 +473,8 @@ func _capture_materialize(sealed: Dictionary) -> Dictionary:
 				or Vector2(position.x / float(_capture.cellScale),
 					position.z / float(_capture.cellScale)) != candidate.positionXZ:
 			return {}
+	if body.has_meta("tree_visual_state"):
+		_refresh_tree_candidate(candidate, body)
 	return candidate
 
 
@@ -569,6 +571,7 @@ static func refresh_cached(snapshot: Dictionary, chunk: Node3D) -> Dictionary:
 			candidate.treeVisualState = String(body.get_meta("tree_visual_state", ""))
 			candidate.treeRenderLodTier = String(body.get_meta("tree_render_lod_tier", ""))
 			candidate.treeRecipeSignature = String(body.get_meta("tree_recipe_signature", ""))
+			if is_tree: _refresh_tree_candidate(candidate, body)
 		candidates.append(candidate)
 		var counts: Dictionary = by_kind[kind]
 		counts.candidateCount = int(counts.candidateCount) + 1
@@ -658,6 +661,10 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 			"sourceCandidateRenderable": bool(candidate.get("renderable", false)),
 			"sourceCandidateTreeVisualState": String(candidate.get("treeVisualState", "")),
 			"sourceCandidateTreeLodTier": String(candidate.get("treeRenderLodTier", ""))}
+		if candidate.has("treePublisher"):
+			var tree_owner: Variant = candidate.get("owner")
+			metadata.merge({"candidateBodyInstanceId":tree_owner.get_instance_id() if is_instance_valid(tree_owner) else 0,
+				"treeRecipeSignature":String(candidate.get("treeRecipeSignature", ""))})
 		if candidate.has("horizonSnapshot"):
 			var horizon: Dictionary = candidate.horizonSnapshot
 			metadata.merge({"horizonBodyInstanceId": horizon.get("bodyInstanceId", 0),
@@ -714,7 +721,11 @@ static func submit(manifest: Dictionary, readiness: Object, view_revision: int,
 				counts.pendingIds.append(candidate_id)
 				continue
 			var receipt: Dictionary
-			if candidate.has("detailType"):
+			if candidate.has("treePublisher"):
+				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
+					candidate_id + ":tree-publication", required_tier, source_identity,
+					source_revision, view_revision, candidate.treePublisher, &"visual_receipt_installed")
+			elif candidate.has("detailType"):
 				var publisher := candidate.get("detailPublisher") as Object
 				receipt = readiness.call("accept_publisher_receipt", source_id, candidate_id,
 					"%s:installed" % candidate_id, required_tier,
@@ -886,6 +897,7 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 			candidate["horizonOrdinaryPublisher"] = current.get_meta("horizon_ordinary_visual_publisher")
 			candidate["horizonOrdinaryBodyId"] = current.get_instance_id()
 			candidate["horizonOrdinaryRootId"] = owner.get_instance_id()
+		if is_tree: _refresh_tree_candidate(candidate, body)
 		candidates.append(candidate)
 	for child in current.get_children():
 		if child is Node:
@@ -893,6 +905,25 @@ static func _collect_candidates(owner: Node, current: Node, chunk_key: Vector2i,
 				overflow, source_issue, detail_ordinals, observed_detail_batches, surface_only)
 			if overflow[0] or not String(source_issue[0]).is_empty(): return
 
+
+static func _refresh_tree_candidate(candidate: Dictionary, body: Node3D) -> void:
+	# A placeholder is not a completed recipe. Every tree representation uses
+	# the queue's actual accepted installation, including external native roots.
+	candidate.erase("horizonPublisher")
+	candidate.erase("horizonSnapshot")
+	candidate.erase("treePublisher")
+	candidate["renderable"] = false
+	candidate["representation"] = null
+	var reference: Variant = body.get_meta("tree_publication_owner", null)
+	var publisher: Variant = reference.get_ref() if reference is WeakRef else null
+	if not is_instance_valid(publisher) or not publisher.has_method("tree_publication_proof"): return
+	var proof: Dictionary = publisher.call("tree_publication_proof", body)
+	if int(proof.get("bodyInstanceId", 0)) != body.get_instance_id(): return
+	candidate["treePublisher"] = publisher
+	candidate["renderable"] = bool(proof.get("installed", false))
+	candidate["representation"] = body if candidate.renderable else null
+	candidate["treeRenderLodTier"] = String(proof.get("tier", ""))
+	candidate["treeRecipeSignature"] = String(proof.get("recipeSignature", ""))
 
 static func _detail_candidate_record(batch: MultiMeshInstance3D, publisher: Object,
 		chunk_key: Vector2i, seed: String, cell_scale: float,

@@ -129,6 +129,35 @@ func publish_tree(parent: Node3D, prop_id: String, position: Vector3, biome: Str
 	# must capture and retire it even if its owner cancels during publication.
 	return _main.get_ref().make_tree_from_runtime_request(parent, prop_id, position, biome, tree_request, rotation_y)
 
+func tree_publication_proof(body: Variant, include_installed := true) -> Dictionary:
+	if not available(): return _unavailable()
+	var owner: Variant = _main.get_ref()
+	if not owner.has_method("tree_publication_proof"):
+		return {"status":"failed", "reason":"tree_publication_proof_contract_missing"}
+	var proof: Dictionary = owner.call("tree_publication_proof", body, include_installed)
+	return proof if available() and _main.get_ref() == owner else _unavailable()
+
+func capture_tree_section_source(body: Variant) -> Dictionary:
+	if not available(): return _unavailable()
+	var owner: Variant = _main.get_ref()
+	if not owner.has_method("capture_tree_section_source"):
+		return {"status":"failed", "reason":"tree_source_capture_contract_missing"}
+	var captured: Dictionary = owner.call("capture_tree_section_source", body)
+	return captured if available() and _main.get_ref() == owner else _unavailable()
+
+func tree_source_is_durably_removed(prop_id: String) -> bool:
+	if not available(): return false
+	var owner: Variant = _main.get_ref()
+	return owner.has_method("tree_source_is_durably_removed") \
+		and bool(owner.call("tree_source_is_durably_removed", prop_id)) \
+		and available() and _main.get_ref() == owner
+
+func invalidate_tree_section_source(body: Variant) -> void:
+	if not available(): return
+	var owner: Variant = _main.get_ref()
+	if owner.has_method("invalidate_tree_section_source"):
+		owner.call("invalidate_tree_section_source", body)
+
 func retire_tree(prop_id: String, body) -> Dictionary:
 	if not available(): return _unavailable()
 	if prop_id.is_empty(): return {"status":"failed", "reason":"invalid_tree"}
@@ -146,6 +175,9 @@ func retire_tree(prop_id: String, body) -> Dictionary:
 		return {"status":"failed", "reason":"invalid_tree"}
 	if registration != null and is_instance_valid(registration.node) and not is_same(registration.node, body):
 		return {"status":"failed", "reason":"object_binding_mismatch", "objectId":"prop:"+prop_id}
+	# Invalidate the actual render provider before cancelling/freeing the source.
+	# Existing scene retirement still owns collision/navigation unregistration.
+	invalidate_tree_section_source(body)
 	var queue = _main.get_ref().get("tree_publication_queue")
 	if queue == null:
 		# Explicitly unqueued synthetic/ordinary bodies need no publication drain.

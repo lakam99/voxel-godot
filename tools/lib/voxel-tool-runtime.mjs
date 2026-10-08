@@ -288,6 +288,7 @@ const scriptTools = {
   'run-town-runtime-manifest-contract-tests': ['res://scripts/testing/TownRuntimeManifestContractRunner.gd', 'VOXEL_TOWN_MANIFEST_CONTRACT_REPORT'],
   'run-tree-chunk-batch-prototype': ['res://scripts/testing/TreeChunkBatchRendererPrototypeRunner.gd', 'VOXEL_TREE_CHUNK_BATCH_REPORT'],
   'run-tree-publication-queue-contract': ['res://scripts/testing/TreePublicationQueueContractRunner.gd', ''],
+  'run-tree-recipe-copy-ownership-contract': ['res://scripts/testing/TreeRecipeCopyOwnershipContractRunner.gd', 'VOXEL_TREE_RECIPE_COPY_OWNERSHIP_REPORT'],
   'run-tree-spawn-performance': ['res://scripts/testing/TreeSpawnPerformanceRunner.gd', 'VOXEL_TREE_SPAWN_PERFORMANCE_REPORT'],
   'run-tutorial-actor-registration-contract-tests': ['res://scripts/testing/TutorialActorRegistrationContractRunner.gd', 'VOXEL_TUTORIAL_ACTOR_REGISTRATION_CONTRACT_REPORT'],
   'run-tutorial-generic-order-contract-tests': ['res://scripts/testing/TutorialGenericOrderContractRunner.gd', 'VOXEL_TUTORIAL_GENERIC_ORDER_CONTRACT_REPORT'],
@@ -471,7 +472,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
   if (toolId === 'run-main-menu-continue-readiness-smoke') environment.VOXEL_MAIN_MENU_STARTUP_SMOKE_MODE = 'continue';
   const godot = await findGodot(parsed.options.godotExe);
   const godotArguments = [];
-  if (isScript || asBoolean(parsed.options.headless)) godotArguments.push('--headless');
+  if ((isScript && !asBoolean(parsed.options.visible)) || asBoolean(parsed.options.headless)) godotArguments.push('--headless');
   if (isVisual) godotArguments.push('--fixed-fps', '60', '--resolution', '1280x720');
   godotArguments.push('--path', projectRoot, isScript ? '--script' : '--scene', target);
   if (!isScript && parsed.passthrough.length) godotArguments.push('--', ...parsed.passthrough);

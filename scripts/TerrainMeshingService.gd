@@ -1658,6 +1658,43 @@ func collision_shape_for_mesh(mesh: Mesh):
 		(shape as ConcavePolygonShape3D).backface_collision = true
 	return shape
 
+
+func build_section_fluid_surface_data(payload: Dictionary, section_key: Vector3i,
+		camera_position_local: Vector3) -> Dictionary:
+	if backend == null or not backend.has_method("build_section_fluid_surface_data_from_sections"):
+		return {"status":"failed", "reason":"native_section_fluid_mesher_unavailable"}
+	return backend.call("build_section_fluid_surface_data_from_sections",
+		payload, section_key, camera_position_local)
+
+
+func sort_section_fluid_surface_data(canonical_data: Dictionary,
+		camera_position_local: Vector3) -> Dictionary:
+	if backend == null or not backend.has_method("sort_section_fluid_surface_data"):
+		return {"status":"failed", "reason":"native_section_fluid_sorter_unavailable"}
+	return backend.call("sort_section_fluid_surface_data", canonical_data,
+		camera_position_local)
+
+
+func section_fluid_mesh_from_surface_data(data: Dictionary, fluid_kind: String) -> ArrayMesh:
+	if String(data.get("status", "")) != "ready" or fluid_kind not in ["water", "lava"]:
+		return null
+	var vertices_value: Variant = data.get("%sVertices" % fluid_kind, null)
+	var normals_value: Variant = data.get("%sNormals" % fluid_kind, null)
+	var colors_value: Variant = data.get("%sColors" % fluid_kind, null)
+	if not vertices_value is PackedVector3Array or not normals_value is PackedVector3Array \
+			or not colors_value is PackedColorArray or (vertices_value as PackedVector3Array).is_empty():
+		return null
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices_value
+	arrays[Mesh.ARRAY_NORMAL] = normals_value
+	arrays[Mesh.ARRAY_COLOR] = colors_value
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.set_meta("terrainFluidSurfaceOrder", PackedStringArray([fluid_kind]))
+	apply_fluid_materials(mesh)
+	return mesh
+
 func array_mesh_indices_are_valid(array_mesh: ArrayMesh) -> bool:
 	if array_mesh == null:
 		return false

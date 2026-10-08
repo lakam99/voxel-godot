@@ -53,7 +53,7 @@ func _run() -> void:
 					var material_key := "masonry_repair:%s:%0.3f" % [geometry.surfaceMaterialId, publisher.masonry_family_variation(part)]
 					targets.append({"partId": part.id, "key": material_key, "repairCount": geometry.repairTransforms.size(), "origin": origins.get(material_key, {})})
 				parent.free()
-				publisher.published_nodes.clear()
+				publisher.clear_published_node_roster()
 				count += 1
 				if targets.size() == 2: break
 				if count % 16 == 0: await process_frame

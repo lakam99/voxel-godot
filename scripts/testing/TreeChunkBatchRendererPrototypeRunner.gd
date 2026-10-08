@@ -8,6 +8,7 @@ extends SceneTree
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const VisualFactoryScript := preload("res://scripts/visual/ProceduralTreeVisualFactory.gd")
 const TreeChunkBatchRendererScript := preload("res://scripts/visual/TreeChunkBatchRenderer.gd")
+const CertifiedRequestFixture := preload("res://scripts/testing/CertifiedTreeRequestFixture.gd")
 
 var report_path := ""
 var results: Array[Dictionary] = []
@@ -112,7 +113,7 @@ func build_fixture_recipes(service) -> Array[Dictionary]:
 		for family_index in range(int(family.get("count", 0))):
 			ordinal += 1
 			var tree_id := "prototype-%s-%02d" % [String(family.get("architecture", "tree")), family_index + 1]
-			var request := {
+			var request := CertifiedRequestFixture.prepare_or_fail({
 				"treeId": tree_id,
 				"worldSeed": "vox134-chunk-batch-prototype",
 				"geneticSeed": 18011 + ordinal * 7919,
@@ -120,13 +121,10 @@ func build_fixture_recipes(service) -> Array[Dictionary]:
 				"architecture": String(family.get("architecture", "broadleaf")),
 				"speciesGrammar": String(family.get("grammar", "bushy_oak")),
 				"growthStage": 0.82,
-				"visualHeight": 21.0,
-				"trunkRadius": 0.94,
-				"canopyRadius": 8.7,
 				"canopyDensity": 0.84,
 				"renderLodTier": "near",
 				"presentation": "runtime"
-			}
+			})
 			entries.append({
 				"treeId": tree_id,
 				"biome": String(family.get("biome", "forest")),

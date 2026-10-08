@@ -5,6 +5,20 @@ class_name FurnishingPublisher
 ## intentionally children of that record: a chair's legs or a bed's pillows
 ## never become separate collision, save, or placement authorities.
 
+const Recipe = preload("res://scripts/buildings/FurnishingVisualRecipe.gd")
+const Binding = preload("res://scripts/buildings/BuildingSourceRecordBinding.gd")
+const MeshFingerprint = preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const GeometryAdapter = preload("res://scripts/world/OrdinaryStructureSectionGeometryAdapter.gd")
+const SectionAdapter = preload("res://scripts/world/CitadelSectionGeometryAdapter.gd")
+const Attributes = preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
+var publication_site_id := ""
+var source_blueprint_id := ""
+var _scene_parent: WeakRef
+var _sources: Dictionary = {}
+var _publication_epoch := 0
+var published_nodes: Array:
+	get: return published_parts
+
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 
 var unit_box: BoxMesh
@@ -12,6 +26,7 @@ var unit_cylinder: CylinderMesh
 var unit_sphere: SphereMesh
 var material_cache: Dictionary = {}
 var published_parts: Array = []
+var _section_lifetime_owner: WeakRef
 var collision_count := 0
 var visual_piece_count := 0
 var publication_usec := 0
@@ -56,9 +71,13 @@ func publish_incremental(plan, parent: Node3D, parts_per_frame := 5) -> Dictiona
 
 
 func begin_publication(plan, parent: Node3D) -> bool:
+	if _has_retained_section_sources(): return false
 	clear_published()
 	if plan == null or parent == null:
 		return false
+	if source_blueprint_id.is_empty():
+		source_blueprint_id = String(plan.id)
+	_scene_parent = weakref(parent)
 	active_publication_started_usec = Time.get_ticks_usec()
 	return true
 
@@ -86,14 +105,28 @@ func finish_publication(plan, parent: Node3D) -> Dictionary:
 
 
 func clear_published() -> void:
+	if _has_retained_section_sources(): return
 	for node in published_parts:
 		if node != null and is_instance_valid(node):
 			node.queue_free()
 	published_parts.clear()
+	_sources.clear()
 	collision_count = 0
 	visual_piece_count = 0
 	publication_usec = 0
 	active_publication_started_usec = 0
+
+
+func bind_section_lifetime_owner(owner: Object) -> void:
+	_section_lifetime_owner = weakref(owner)
+
+
+func _has_retained_section_sources() -> bool:
+	if _section_lifetime_owner == null: return false
+	var owner: Variant = _section_lifetime_owner.get_ref()
+	# Losing an admitted lifetime owner cannot grant permission to clear its
+	# source bodies. The scene job still owns the normal retirement path.
+	return not is_instance_valid(owner) or bool(owner.call("furnishing_publisher_has_retained_sources", get_instance_id()))
 
 
 func publish_part(part, parent: Node3D) -> StaticBody3D:
@@ -117,333 +150,221 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		collision.position = Vector3(0.0, part.occupied_size.y * 0.5, 0.0)
 		body.add_child(collision)
 		collision_count += 1
+	_scene_parent = weakref(parent)
+	_publication_epoch += 1
 	publish_visual(part, body)
+	_seal_source(part, body, parent)
 	return body
 
 
 func publish_visual(part, parent: Node3D) -> void:
-	match String(part.archetype):
-		"bed":
-			publish_bed(part, parent)
-		"table":
-			publish_table(part, parent)
-		"chair":
-			publish_chair(part, parent)
-		"bench":
-			publish_bench(part, parent)
-		"sideboard":
-			publish_sideboard(part, parent)
-		"lectern":
-			publish_lectern(part, parent)
-		"map_table":
-			publish_map_table(part, parent)
-		"workbench":
-			publish_workbench(part, parent)
-		"crate_stack":
-			publish_crate_stack(part, parent)
-		"barrel_stack":
-			publish_barrel_stack(part, parent)
-		"display_plinth":
-			publish_display_plinth(part, parent)
-		"dais":
-			publish_dais(part, parent)
-		"coat_rack":
-			publish_coat_rack(part, parent)
-		"planter":
-			publish_planter(part, parent)
-		"wall_sconce":
-			publish_wall_sconce(part, parent)
-		"wall_banner":
-			publish_wall_banner(part, parent)
-		"cabinet":
-			publish_cabinet(part, parent)
-		"hearth":
-			publish_hearth(part, parent)
-		"rug":
-			publish_rug(part, parent)
-		"shelf":
-			publish_shelf(part, parent)
-		"chest":
-			publish_chest(part, parent)
-		"candle":
-			publish_candle(part, parent)
-		"pot_plant":
-			publish_pot_plant(part, parent)
-		"wall_art":
-			publish_wall_art(part, parent)
-		_:
-			add_box(parent, part.occupied_size, Vector3(0.0, part.occupied_size.y * 0.5, 0.0), material_for(part.material_id, part), "Visual")
-
-
-func publish_bed(part, parent: Node3D) -> void:
-	var blanket := String(part.recipe.get("blanket", "wool_rust"))
-	add_box(parent, Vector3(2.22, 0.14, 1.26), Vector3(0.0, 0.30, 0.0), material_for("timber_beam", part), "BedFrame")
-	for x in [-0.94, 0.94]:
-		for z in [-0.50, 0.50]:
-			add_box(parent, Vector3(0.13, 0.56, 0.13), Vector3(float(x), 0.28, float(z)), material_for("timber_beam", part), "BedLeg")
-	add_box(parent, Vector3(0.16, 1.04, 1.34), Vector3(-1.02, 0.62, 0.0), material_for("timber_beam", part), "Headboard")
-	add_box(parent, Vector3(2.04, 0.23, 1.12), Vector3(0.03, 0.51, 0.0), material_for("linen", part), "Mattress")
-	add_box(parent, Vector3(1.16, 0.17, 1.14), Vector3(0.45, 0.67, 0.0), material_for(blanket, part), "Blanket")
-	add_box(parent, Vector3(0.48, 0.12, 0.96), Vector3(-0.67, 0.69, 0.0), material_for("linen", part), "Pillow")
-
-
-func publish_table(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, 0.14, depth), Vector3(0.0, 0.78, 0.0), material_for("timber_board", part), "TableTop")
-	for x in [-maxf(0.16, width * 0.5 - 0.17), maxf(0.16, width * 0.5 - 0.17)]:
-		for z in [-maxf(0.14, depth * 0.5 - 0.16), maxf(0.14, depth * 0.5 - 0.16)]:
-			add_box(parent, Vector3(0.13, 0.76, 0.13), Vector3(float(x), 0.38, float(z)), material_for("timber_beam", part), "TableLeg")
-	add_box(parent, Vector3(maxf(0.32, width - 0.24), 0.10, 0.11), Vector3(0.0, 0.37, 0.0), material_for("timber_beam", part), "TableStretcher")
-
-
-func publish_bench(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, 0.12, depth), Vector3(0.0, 0.50, 0.0), material_for("timber_board", part), "BenchSeat")
-	for x in [-maxf(0.18, width * 0.5 - 0.18), maxf(0.18, width * 0.5 - 0.18)]:
-		add_box(parent, Vector3(0.13, 0.52, 0.13), Vector3(float(x), 0.26, 0.0), material_for("timber_beam", part), "BenchLeg")
-	add_box(parent, Vector3(maxf(0.32, width - 0.22), 0.09, 0.10), Vector3(0.0, 0.26, 0.0), material_for("timber_beam", part), "BenchStretcher")
-
-
-func publish_sideboard(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, height * 0.78, depth), Vector3(0.0, height * 0.39, 0.0), material_for(part.material_id, part), "SideboardBody")
-	add_box(parent, Vector3(width * 0.90, height * 0.19, 0.05), Vector3(0.0, height * 0.55, -depth * 0.53), material_for("timber_board", part), "SideboardDrawer")
-	add_box(parent, Vector3(width * 1.06, 0.10, depth * 1.12), Vector3(0.0, height * 0.82, 0.0), material_for("timber_beam", part), "SideboardTop")
-	for x in [-width * 0.25, width * 0.25]:
-		add_sphere(parent, 0.055, Vector3(float(x), height * 0.54, -depth * 0.57), material_for("brass", part), "SideboardPull")
-
-
-func publish_lectern(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	add_box(parent, Vector3(width * 0.86, 0.12, 0.50), Vector3(0.0, height * 0.87, -0.05), material_for("timber_board", part), "LecternTop", Vector3(deg_to_rad(-22.0), 0.0, 0.0))
-	add_box(parent, Vector3(0.22, height * 0.74, 0.22), Vector3(0.0, height * 0.40, 0.0), material_for("timber_beam", part), "LecternStem")
-	add_box(parent, Vector3(width, 0.12, 0.54), Vector3(0.0, 0.06, 0.0), material_for("timber_beam", part), "LecternBase")
-	add_box(parent, Vector3(width * 0.62, 0.02, 0.34), Vector3(0.0, height * 0.92, -0.10), material_for("linen", part), "LecternBook")
-
-
-func publish_map_table(part, parent: Node3D) -> void:
-	publish_table(part, parent)
-	var width: float = float(part.occupied_size.x)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width * 0.78, 0.018, depth * 0.68), Vector3(0.0, 0.858, 0.0), material_for("linen", part), "MapSheet")
-	add_sphere(parent, 0.07, Vector3(width * 0.29, 0.90, -depth * 0.22), material_for("brass", part), "MapCompass")
-
-
-func publish_workbench(part, parent: Node3D) -> void:
-	publish_table(part, parent)
-	var width: float = float(part.occupied_size.x)
-	add_box(parent, Vector3(width * 0.20, 0.10, 0.16), Vector3(-width * 0.23, 0.89, -0.10), material_for("brass", part), "WorkbenchPlane")
-	add_box(parent, Vector3(width * 0.16, 0.14, 0.12), Vector3(width * 0.17, 0.91, 0.12), material_for("timber_beam", part), "WorkbenchToolBlock")
-
-
-func publish_crate_stack(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, height * 0.52, depth), Vector3(0.0, height * 0.26, 0.0), material_for("timber_board", part), "CrateLower")
-	add_box(parent, Vector3(width * 0.76, height * 0.42, depth * 0.78), Vector3(-width * 0.08, height * 0.73, depth * 0.06), material_for("timber_beam", part), "CrateUpper")
-
-
-func publish_barrel_stack(part, parent: Node3D) -> void:
-	var radius := float(part.occupied_size.x) * 0.29
-	add_cylinder(parent, radius, float(part.occupied_size.y) * 0.54, Vector3(-radius * 0.56, float(part.occupied_size.y) * 0.27, 0.0), material_for("timber_board", part), "BarrelLower")
-	add_cylinder(parent, radius * 0.84, float(part.occupied_size.y) * 0.42, Vector3(radius * 0.30, float(part.occupied_size.y) * 0.70, 0.04), material_for("timber_beam", part), "BarrelUpper")
-
-
-func publish_display_plinth(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	add_box(parent, Vector3(width, height * 0.18, width), Vector3(0.0, height * 0.09, 0.0), material_for("stone_foundation", part), "PlinthBase")
-	add_box(parent, Vector3(width * 0.54, height * 0.72, width * 0.54), Vector3(0.0, height * 0.50, 0.0), material_for(part.material_id, part), "PlinthColumn")
-	add_sphere(parent, width * 0.24, Vector3(0.0, height * 0.95, 0.0), material_for("brass", part), "PlinthCivicSeal", Vector3(1.0, 0.38, 1.0))
-
-
-func publish_dais(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, height * 0.68, depth), Vector3(0.0, height * 0.34, 0.0), material_for(part.material_id, part), "DaisBody")
-	add_box(parent, Vector3(width * 1.06, 0.12, depth * 1.10), Vector3(0.0, height * 0.72, 0.0), material_for("timber_board", part), "DaisTop")
-	add_box(parent, Vector3(width * 0.42, height * 0.22, 0.34), Vector3(0.0, height * 0.15, -depth * 0.58), material_for("timber_beam", part), "DaisStep")
-
-
-func publish_coat_rack(part, parent: Node3D) -> void:
-	var height: float = float(part.occupied_size.y)
-	add_cylinder(parent, 0.08, height * 0.86, Vector3(0.0, height * 0.43, 0.0), material_for(part.material_id, part), "CoatRackStem")
-	add_cylinder(parent, 0.22, 0.08, Vector3(0.0, 0.04, 0.0), material_for("timber_board", part), "CoatRackBase")
-	for angle in [0.0, PI * 0.5, PI, PI * 1.5]:
-		add_box(parent, Vector3(0.28, 0.07, 0.07), Vector3(cos(angle) * 0.12, height * 0.78, sin(angle) * 0.12), material_for("timber_beam", part), "CoatRackHook", Vector3(0.0, angle, 0.0))
-
-
-func publish_planter(part, parent: Node3D) -> void:
-	var height: float = float(part.occupied_size.y)
-	add_cylinder(parent, float(part.occupied_size.x) * 0.35, height * 0.46, Vector3(0.0, height * 0.23, 0.0), material_for(part.material_id, part), "PlanterPot")
-	for angle in [0.0, 1.57, 3.14, 4.71]:
-		var leaf := MeshInstance3D.new()
-		leaf.name = "PlanterLeaf"
-		leaf.mesh = unit_sphere
-		leaf.scale = Vector3(0.16, 0.44, 0.09)
-		leaf.position = Vector3(cos(angle) * 0.14, height * 0.72, sin(angle) * 0.14)
-		leaf.rotation = Vector3(sin(angle) * 0.38, 0.0, -cos(angle) * 0.50)
-		leaf.material_override = material_for("wool_moss", part)
-		leaf.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		parent.add_child(leaf)
+	var recipe: Dictionary = Recipe.build(part)
+	for piece: Dictionary in recipe.pieces:
+		var visual := MeshInstance3D.new()
+		visual.name = piece.name
+		visual.mesh = {"box":unit_box,"cylinder":unit_cylinder,"sphere":unit_sphere}[piece.primitive]
+		visual.transform = piece.transform
+		visual.material_override = material_for(piece.materialId,part)
+		visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		visual.set_meta("section_source_member_id","furnishing:"+String(part.id))
+		visual.set_meta("building_source_part_id",String(part.id))
+		parent.add_child(visual)
 		visual_piece_count += 1
+	for value: Dictionary in recipe.lights:
+		var mount := Node3D.new()
+		mount.name = "FurnishingPracticalLightMount"
+		mount.position = value.position
+		parent.add_child(mount)
+		var light := OmniLight3D.new()
+		light.light_color = value.color
+		light.light_energy = value.energy
+		light.omni_range = value.range
+		light.shadow_enabled = false
+		mount.add_child(light)
 
 
-func publish_wall_sconce(part, parent: Node3D) -> void:
-	var mount_height := float(part.recipe.get("mountHeight", 2.12))
-	add_box(parent, Vector3(0.12, 0.25, 0.14), Vector3(0.0, mount_height, -0.05), material_for("brass", part), "SconceArm")
-	add_cylinder(parent, 0.07, 0.24, Vector3(0.0, mount_height + 0.12, -0.12), material_for("candle_wax", part), "SconceWax")
-	add_sphere(parent, 0.065, Vector3(0.0, mount_height + 0.29, -0.12), material_for("candle_flame", part), "SconceFlame", Vector3(0.58, 1.28, 0.58))
+func _seal_source(part, body: StaticBody3D, parent: Node3D) -> void:
+	var id := String(part.id)
+	var revision := Binding.encode(part.snapshot())
+	var groups: Array[Dictionary] = []
+	var mounts: Array[Dictionary] = []
+	var bindings: Dictionary = {}
+	var site := publication_site_id if not publication_site_id.is_empty() else source_blueprint_id
+	body.set_meta("section_source_member_id","furnishing:"+id)
+	body.set_meta("section_attachment_source_revision",revision)
+	body.set_meta("section_attachment_publication_epoch",_publication_epoch)
+	body.set_meta("section_attachment_publisher_instance_id",get_instance_id())
+	for child: Node in body.get_children():
+		if child is MeshInstance3D:
+			var visual := child as MeshInstance3D
+			var transform := body.transform * visual.transform
+			var local_bounds := transform * visual.mesh.get_aabb()
+			var values: Array[float] = []
+			values.assign(Attributes.encode(transform,Color(0,0,0,0)))
+			values.make_read_only()
+			var segment := {"segmentId":"segment:000000","instanceCount":1,
+				"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,"bounds":local_bounds,"buffer":values}
+			segment["contentDigest"] = _digest([segment.segmentId,1,local_bounds,values])
+			segment.make_read_only()
+			var segments: Array[Dictionary] = [segment]
+			segments.make_read_only()
+			var mesh_identity: Dictionary = MeshFingerprint.inspect(visual.mesh)
+			var material_identity: Dictionary = GeometryAdapter._material_identity(visual.material_override)
+			var resources := {"mesh":visual.mesh,"material":visual.material_override}
+			resources.make_read_only()
+			var layer := "opaque"
+			var sort_policy := "none"
+			if visual.material_override is BaseMaterial3D:
+				var transparency := (visual.material_override as BaseMaterial3D).transparency
+				if transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+					layer = "cutout"
+				elif transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
+					layer = "translucent"
+					sort_policy = "camera_depth"
+			var cell := Vector2i(floori(body.global_position.x/43.2),floori(body.global_position.z/43.2))
+			var group := {"schema":"building-static-transform-section-artifact/v1",
+				"sourcePartId":id,"sourceRevision":revision,"ownerCell":cell,"renderChunkKey":cell,
+				"renderTier":"detail","materialKey":_material_key(visual.material_override),
+				"renderLayer":layer,"transparencySortPolicy":sort_policy,
+				"materialContentDigest":String(material_identity.get("digest","")),
+				"meshKey":"building-mesh:"+String(mesh_identity.get("contentDigest","")),
+				"meshContentDigest":String(mesh_identity.get("contentDigest","")),
+				"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,"localBounds":local_bounds,
+				"worldBounds":parent.global_transform*local_bounds,"sourceToWorld":parent.global_transform,
+				"instanceCount":1,"segments":segments,"resourceBindings":resources}
+			group["contentDigest"] = SectionAdapter._transform_artifact_content_digest(group)
+			group["sourceId"] = "furnishing-transform:%s:%s:%s" % [site,id,String(group.contentDigest).substr(0,24)]
+			group.make_read_only()
+			groups.append(group)
+		elif child is Node3D and child.get_child_count()==1 and child.get_child(0) is OmniLight3D:
+			var mount := child as Node3D
+			var light := mount.get_child(0) as OmniLight3D
+			var key := "furnishing-practical-light:%s:%s" % [site,id]
+			var member_id := "furnishing-light:%s:%s" % [site,id]
+			mount.set_meta("section_attachment_presentation_member_id",member_id)
+			var motion := {"kind":"static","closedParentToBody":Transform3D.IDENTITY,"raiseOffset":Vector3.ZERO,"swing":0.0}
+			motion.make_read_only()
+			var bounds := AABB(light.global_position-Vector3.ONE*light.omni_range,Vector3.ONE*light.omni_range*2.0)
+			var row := {"sourcePartId":id,"sourceRevision":revision,"producerSourceRevision":revision,
+				"presentationMemberId":member_id,"attachmentKey":key,"ownershipKind":"borrowed_presentation",
+				"intendedVisible":true,"neutralParentToWorld":body.global_transform,"sweptWorldBounds":bounds,"motion":motion}
+			row.make_read_only()
+			mounts.append(row)
+			var empty: Array = []
+			empty.make_read_only()
+			var binding := row.duplicate(false)
+			binding.merge({"mount":weakref(mount),"mountInstanceId":mount.get_instance_id(),
+				"parent":weakref(body),"parentInstanceId":body.get_instance_id(),"body":weakref(body),
+				"bodyInstanceId":body.get_instance_id(),"mountLocalTransform":mount.transform,
+				"bodyToWorld":body.global_transform,"legacyVisuals":empty,"publisherInstanceId":get_instance_id(),
+				"publicationEpoch":_publication_epoch,"light":weakref(light),"lightInstanceId":light.get_instance_id(),
+				"lightEnergy":light.light_energy,"lightRange":light.omni_range,
+				"lightColor":light.light_color,"shadowEnabled":light.shadow_enabled})
+			binding.make_read_only()
+			bindings[key] = binding
+	groups.make_read_only()
+	mounts.make_read_only()
+	bindings.make_read_only()
+	var source := {"body":weakref(body),"parent":weakref(parent),"bodyTransform":body.transform,
+		"sourceToWorld":parent.global_transform,"revision":revision,"epoch":_publication_epoch,
+		"groups":groups,"mounts":mounts,"bindings":bindings,
+		"bodyInstanceId":body.get_instance_id(),"parentInstanceId":parent.get_instance_id()}
+	source.make_read_only()
+	_sources[id] = source
 
 
-func publish_wall_banner(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	var mount_height := float(part.recipe.get("mountHeight", 2.54))
-	add_box(parent, Vector3(width * 1.18, 0.07, 0.10), Vector3(0.0, mount_height + height * 0.54, -0.02), material_for("timber_beam", part), "BannerTopRail")
-	add_box(parent, Vector3(width * 1.18, 0.07, 0.10), Vector3(0.0, mount_height - height * 0.54, -0.02), material_for("timber_beam", part), "BannerBottomRail")
-	add_box(parent, Vector3(width, height, 0.045), Vector3(0.0, mount_height, -0.07), material_for(part.material_id, part), "BannerCloth")
-	add_sphere(parent, width * 0.16, Vector3(0.0, mount_height + height * 0.06, -0.115), material_for("brass", part), "BannerSeal", Vector3(1.0, 0.72, 0.20))
+func _material_key(material: Material) -> String:
+	for key: String in material_cache:
+		if material_cache[key]==material: return key
+	return ""
 
 
-func publish_chair(part, parent: Node3D) -> void:
-	add_box(parent, Vector3(0.56, 0.12, 0.56), Vector3(0.0, 0.49, 0.0), material_for("timber_board", part), "ChairSeat")
-	for x in [-0.20, 0.20]:
-		for z in [-0.20, 0.20]:
-			add_box(parent, Vector3(0.10, 0.50, 0.10), Vector3(float(x), 0.25, float(z)), material_for("timber_beam", part), "ChairLeg")
-	add_box(parent, Vector3(0.54, 0.48, 0.10), Vector3(0.0, 0.76, 0.23), material_for("timber_beam", part), "ChairBack")
+static func _digest(value: Variant) -> String:
+	var hash := HashingContext.new()
+	if hash.start(HashingContext.HASH_SHA256)!=OK or hash.update(var_to_bytes(value))!=OK: return ""
+	return hash.finish().hex_encode()
 
 
-func publish_cabinet(part, parent: Node3D) -> void:
-	var height: float = float(part.occupied_size.y)
-	var width: float = float(part.occupied_size.x)
-	var depth: float = float(part.occupied_size.z)
-	add_box(parent, Vector3(width, height, depth), Vector3(0.0, height * 0.5, 0.0), material_for(part.material_id, part), "CabinetBody")
-	add_box(parent, Vector3(width * 0.88, height * 0.39, 0.055), Vector3(0.0, height * 0.59, -depth * 0.53), material_for("timber_board", part), "CabinetDoor")
-	add_box(parent, Vector3(width * 0.92, 0.08, depth * 1.10), Vector3(0.0, height * 0.98, 0.0), material_for("timber_beam", part), "CabinetTop")
-	add_sphere(parent, 0.07, Vector3(width * 0.22, height * 0.58, -depth * 0.58), material_for("brass", part), "CabinetPull")
+func has_pending_static_flush() -> bool:
+	return false
 
 
-func publish_hearth(part, parent: Node3D) -> void:
-	add_box(parent, Vector3(1.68, 1.50, 0.64), Vector3(0.0, 0.75, 0.0), material_for("fired_brick", part), "HearthBody")
-	add_box(parent, Vector3(0.92, 0.78, 0.075), Vector3(0.0, 0.72, -0.36), material_for("mortar", part), "Firebox")
-	add_box(parent, Vector3(0.58, 0.20, 0.055), Vector3(0.0, 0.58, -0.41), material_for("candle_flame", part), "HearthGlow")
-	add_practical_light(parent, Vector3(0.0, 0.74, -0.26), Color(1.0, 0.42, 0.16), 1.65, 6.0)
-	add_box(parent, Vector3(1.98, 0.15, 0.78), Vector3(0.0, 1.52, 0.0), material_for("timber_beam", part), "HearthMantel")
-	add_box(parent, Vector3(0.40, 0.38, 0.45), Vector3(0.0, 1.75, 0.04), material_for("fired_brick", part), "HearthChimney")
+func source_part_publication_epoch(id: String) -> int:
+	return int(_sources.get(id,{}).get("epoch",0))
 
 
-func publish_rug(part, parent: Node3D) -> void:
-	add_box(parent, Vector3(part.occupied_size.x, 0.035, part.occupied_size.z), Vector3(0.0, 0.02, 0.0), material_for(part.material_id, part), "WovenRug")
-	add_box(parent, Vector3(part.occupied_size.x * 0.86, 0.018, part.occupied_size.z * 0.82), Vector3(0.0, 0.048, 0.0), material_for("linen", part), "RugInlay")
+func committed_static_visual_source_identity(id: String) -> Dictionary:
+	var source: Dictionary = _sources.get(id,{})
+	if source.is_empty(): return _pending("furnishing_source_unavailable")
+	if id.is_empty() or String(source.revision).is_empty() or (publication_site_id.is_empty() and source_blueprint_id.is_empty()):
+		return _pending("furnishing_source_identity_missing")
+	var body_value: Variant = source.body.get_ref()
+	var parent_value: Variant = source.parent.get_ref()
+	if not is_instance_valid(body_value) or not is_instance_valid(parent_value):
+		return _pending("furnishing_source_owner_gone")
+	var body := body_value as Node3D
+	var parent := parent_value as Node3D
+	if body == null or parent == null or body.is_queued_for_deletion() \
+			or parent.is_queued_for_deletion() or not body.is_inside_tree() or body.get_parent()!=parent \
+			or body.get_instance_id()!=source.bodyInstanceId or parent.get_instance_id()!=source.parentInstanceId \
+			or body.transform!=source.bodyTransform or parent.global_transform!=source.sourceToWorld \
+			or Binding.encode(body.get_meta("furnishing_part_record",{}))!=source.revision \
+			or int(body.get_meta("section_attachment_publisher_instance_id",0))!=get_instance_id() \
+			or String(body.get_meta("section_attachment_source_revision",""))!=source.revision \
+			or int(body.get_meta("section_attachment_publication_epoch",-1))!=source.epoch:
+		return _pending("furnishing_source_owner_stale")
+	var result := {"status":"ready","sourcePartId":id,"sourceRevision":source.revision,
+		"publicationEpoch":source.epoch,"publisherInstanceId":get_instance_id(),
+		"parentInstanceId":parent.get_instance_id(),"bodyInstanceId":body.get_instance_id(),
+		"siteId":publication_site_id,"sourceBlueprintId":source_blueprint_id,"sourceToWorld":source.sourceToWorld}
+	result.make_read_only()
+	return result
 
 
-func publish_shelf(part, parent: Node3D) -> void:
-	var width: float = float(part.occupied_size.x)
-	var height: float = float(part.occupied_size.y)
-	var depth: float = float(part.occupied_size.z)
-	for x in [-width * 0.40, width * 0.40]:
-		add_box(parent, Vector3(0.11, height, 0.11), Vector3(float(x), height * 0.5, 0.0), material_for("timber_beam", part), "ShelfPost")
-	for y in [0.18, height * 0.52, height * 0.86]:
-		add_box(parent, Vector3(width, 0.09, depth), Vector3(0.0, float(y), 0.0), material_for("timber_board", part), "ShelfBoard")
-	for index in range(4):
-		var book_material := "book_leather" if index % 2 == 0 else "painted_decor"
-		add_box(parent, Vector3(0.10, 0.30 + 0.03 * index, depth * 0.48), Vector3(-width * 0.28 + index * 0.14, height * 0.70, -depth * 0.12), material_for(book_material, part), "ShelfBook")
-	add_cylinder(parent, 0.12, 0.19, Vector3(width * 0.19, height * 0.72, 0.0), material_for("ceramic_glaze", part), "ShelfPot")
+func capture_static_section_transform_artifacts(id: String, revision: String) -> Dictionary:
+	var identity := committed_static_visual_source_identity(id)
+	if identity.get("status")!="ready": return identity
+	if identity.sourceRevision!=revision: return _pending("furnishing_source_revision_stale")
+	var source: Dictionary = _sources[id]
+	for group: Dictionary in source.groups:
+		var resources: Dictionary = group.resourceBindings
+		if String(MeshFingerprint.inspect(resources.mesh).get("contentDigest",""))!=group.meshContentDigest \
+				or String(GeometryAdapter._material_identity(resources.material).get("digest",""))!=group.materialContentDigest:
+			return _pending("furnishing_source_resource_stale")
+	for binding: Dictionary in source.bindings.values():
+		var mount_value: Variant = binding.mount.get_ref()
+		var light_value: Variant = binding.light.get_ref()
+		var body_value: Variant = source.body.get_ref()
+		if not is_instance_valid(mount_value) or not is_instance_valid(light_value) or not is_instance_valid(body_value):
+			return _pending("furnishing_light_owner_gone")
+		var mount := mount_value as Node3D
+		var light := light_value as OmniLight3D
+		var body := body_value as Node3D
+		if mount == null or light == null or body == null \
+				or mount.is_queued_for_deletion() or light.is_queued_for_deletion() \
+				or mount.get_parent()!=body or light.get_parent()!=mount \
+				or mount.transform!=binding.mountLocalTransform or light.transform!=Transform3D.IDENTITY \
+				or light.light_color!=binding.lightColor or light.light_energy!=binding.lightEnergy \
+				or light.omni_range!=binding.lightRange or light.shadow_enabled!=binding.shadowEnabled:
+			return _pending("furnishing_light_source_stale")
+	return {"status":"ready","sourcePartId":id,"sourceRevision":revision,"groups":source.groups,
+		"groupCount":source.groups.size(),"presentationMounts":source.mounts,"presentationBindings":source.bindings,
+		"presentationDigest":_digest(["building-practical-light-presentation/v1",source.mounts])}
 
 
-func publish_chest(part, parent: Node3D) -> void:
-	add_box(parent, Vector3(0.96, 0.52, 0.58), Vector3(0.0, 0.26, 0.0), material_for("timber_board", part), "ChestBody")
-	add_box(parent, Vector3(1.02, 0.16, 0.64), Vector3(0.0, 0.58, 0.0), material_for("timber_beam", part), "ChestLid")
-	add_box(parent, Vector3(0.12, 0.14, 0.05), Vector3(0.0, 0.34, -0.32), material_for("brass", part), "ChestLatch")
-	for x in [-0.33, 0.33]:
-		add_box(parent, Vector3(0.08, 0.62, 0.66), Vector3(float(x), 0.31, 0.0), material_for("brass", part), "ChestBand")
+func capture_committed_static_visual_source(id: String, revision: String) -> Dictionary:
+	var identity := committed_static_visual_source_identity(id)
+	if identity.get("status")!="ready": return identity
+	var capture := capture_static_section_transform_artifacts(id,revision)
+	if capture.get("status")!="ready": return capture
+	if identity!=committed_static_visual_source_identity(id): return _pending("furnishing_source_changed")
+	capture["visualSourceReceipt"] = identity
+	capture.make_read_only()
+	return capture
 
 
-func publish_candle(part, parent: Node3D) -> void:
-	# A candle is one clean wax stem and flame. The old long holder cylinder made
-	# a tabletop candle read as a duplicated lower half rather than a fixture.
-	add_cylinder(parent, 0.078, 0.30, Vector3(0.0, 0.15, 0.0), material_for("candle_wax", part), "CandleWax")
-	add_sphere(parent, 0.075, Vector3(0.0, 0.39, 0.0), material_for("candle_flame", part), "CandleFlame", Vector3(0.62, 1.34, 0.62))
-	add_practical_light(parent, Vector3(0.0, 0.42, 0.0), Color(1.0, 0.56, 0.26), 0.55, 3.0)
-
-
-func add_practical_light(parent: Node3D, position: Vector3, color: Color, energy: float, light_range: float) -> void:
-	var light := OmniLight3D.new()
-	light.position = position
-	light.light_color = color
-	light.light_energy = energy
-	light.omni_range = light_range
-	light.shadow_enabled = false
-	parent.add_child(light)
-
-
-func publish_pot_plant(part, parent: Node3D) -> void:
-	add_cylinder(parent, 0.18, 0.30, Vector3(0.0, 0.15, 0.0), material_for("ceramic_glaze", part), "PlantPot")
-	for angle in [0.0, 2.09, 4.18]:
-		var leaf := MeshInstance3D.new()
-		leaf.name = "PlantLeaf"
-		leaf.mesh = unit_sphere
-		leaf.scale = Vector3(0.16, 0.46, 0.08)
-		leaf.position = Vector3(cos(angle) * 0.12, 0.48, sin(angle) * 0.12)
-		leaf.rotation = Vector3(sin(angle) * 0.36, 0.0, -cos(angle) * 0.44)
-		leaf.material_override = material_for("wool_moss", part)
-		leaf.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		parent.add_child(leaf)
-		visual_piece_count += 1
-
-
-func publish_wall_art(part, parent: Node3D) -> void:
-	# The furnishing record owns the wall-facing yaw and mounts its local +Z
-	# backing face on the declared wall surface. Local -Z remains the readable
-	# painted face inside the room, without adding decor collision.
-	var mount_height := float(part.recipe.get("mountHeight", 1.38))
-	add_box(parent, Vector3(part.occupied_size.x * 1.14, part.occupied_size.y * 1.16, 0.08), Vector3(0.0, mount_height, 0.0), material_for("timber_beam", part), "ArtFrame")
-	add_box(parent, Vector3(part.occupied_size.x, part.occupied_size.y, 0.045), Vector3(0.0, mount_height, -0.06), material_for("painted_decor", part), "ArtPanel")
-
-
-func add_box(parent: Node3D, size: Vector3, position: Vector3, material: Material, node_name: String, rotation := Vector3.ZERO) -> void:
-	var mesh := MeshInstance3D.new()
-	mesh.name = node_name
-	mesh.mesh = unit_box
-	mesh.scale = size
-	mesh.position = position
-	mesh.rotation = rotation
-	mesh.material_override = material
-	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	parent.add_child(mesh)
-	visual_piece_count += 1
-
-
-func add_cylinder(parent: Node3D, radius: float, height: float, position: Vector3, material: Material, node_name: String) -> void:
-	var mesh := MeshInstance3D.new()
-	mesh.name = node_name
-	mesh.mesh = unit_cylinder
-	mesh.scale = Vector3(radius * 2.0, height, radius * 2.0)
-	mesh.position = position
-	mesh.material_override = material
-	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	parent.add_child(mesh)
-	visual_piece_count += 1
-
-
-func add_sphere(parent: Node3D, radius: float, position: Vector3, material: Material, node_name: String, scale_multiplier := Vector3.ONE) -> void:
-	var mesh := MeshInstance3D.new()
-	mesh.name = node_name
-	mesh.mesh = unit_sphere
-	mesh.scale = Vector3(radius * 2.0, radius * 2.0, radius * 2.0) * scale_multiplier
-	mesh.position = position
-	mesh.material_override = material
-	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	parent.add_child(mesh)
-	visual_piece_count += 1
+static func _pending(reason: String) -> Dictionary:
+	return {"status":"pending","reason":reason,"retryable":true}
 
 
 func material_for(material_id: String, part) -> Material:

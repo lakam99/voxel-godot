@@ -36,6 +36,7 @@ class FixtureMain extends Node3D:
 		"roofWood":StandardMaterial3D.new(), "roofStone":StandardMaterial3D.new(),
 		"trimWood":StandardMaterial3D.new(), "trimStone":StandardMaterial3D.new()}
 	var static_item_asset_registry: Object
+	var world_static_section_coordinator: Object
 
 	func _init() -> void:
 		block_root = self
@@ -64,6 +65,33 @@ class FixtureMain extends Node3D:
 		return {"size":Vector3.ONE * CELL * 0.96, "offset":Vector3.ZERO}
 
 
+class FixtureReceiptAuthority extends RefCounted:
+	var current_receipts: Dictionary = {}
+
+	func install(section_key: Vector3i, receipt: Dictionary) -> void:
+		current_receipts[section_key] = receipt
+
+	func installed_section_receipt_is_current(section_key: Vector3i,
+			receipt: Dictionary) -> bool:
+		return current_receipts.get(section_key, {}) == receipt
+
+
+class FixtureLeaseCoordinator extends CoordinatorScript:
+	var stale_receipts: Dictionary = {}
+	var fail_next_release := false
+
+	func _cancel_pending_production_candidate(section_key: Vector3i) -> Dictionary:
+		if fail_next_release:
+			fail_next_release = false
+			return {"status":"rollback_failed", "sectionKey":section_key}
+		return super._cancel_pending_production_candidate(section_key)
+
+	func installed_section_receipt_is_current(section_key: Vector3i,
+			receipt: Dictionary) -> bool:
+		return not stale_receipts.has(section_key) \
+			and _production_candidate_receipts.get(section_key, {}) == receipt
+
+
 class FixtureStructure extends RefCounted:
 	var main: Object
 	var ordinary_visual_sources: Dictionary = {}
@@ -87,6 +115,10 @@ class FixtureStructure extends RefCounted:
 	func _ordinary_visual_block_key(source_id: String, cell: Vector3i,
 			block_type: String) -> String:
 		return "%s|%d,%d,%d|%s" % [source_id, cell.x, cell.y, cell.z, block_type]
+
+	func generated_visual_block_is_removed(source_id: String, cell: Vector3i,
+			block_type: String) -> bool:
+		return removed_generated_structure_blocks.has(_ordinary_visual_block_key(source_id, cell, block_type))
 
 	func _ordinary_visible_renderable(root_node: Node) -> Node3D:
 		if root_node is MeshInstance3D and (root_node as MeshInstance3D).mesh != null:
@@ -297,26 +329,51 @@ func run() -> void:
 	var registered: Dictionary = roster.register_provider(ProviderScript.PROVIDER_ID,
 		provider, "capture_static_section_sources")
 	var roster_result: Dictionary = roster.capture_sections([Vector3i.ZERO])
+	var roster_member_identity := ""
+	for identity_key_value: Variant in roster_result.get("sourceIdentities", {}):
+		var identity: Dictionary = roster_result.sourceIdentities[identity_key_value]
+		if String(identity.get("sourceId", "")) == member_id \
+				and String(identity.get("sourcePartId", "")) == member_id:
+			roster_member_identity = String(identity_key_value)
 	var contribution_result: Dictionary = provider.capture_static_section_contribution(
 		roster_result, Vector3i.ZERO)
 	var contribution: Dictionary = contribution_result.get("contribution", {})
+	var contribution_inputs: Array = contribution.get("inputs", [])
+	var first_contribution_source := String(contribution_inputs[0].get("sourcePartId", "")) \
+		if not contribution_inputs.is_empty() else ""
 	check("provider_satisfies_exact_static_section_roster_contract",
 		roster_bound.get("status") == "ready" and registered.get("status") == "ready"
 		and roster_result.get("status") == "complete"
-		and roster_result.expectedContributorsBySection.get(Vector3i.ZERO, []).has(member_id),
-		roster_result)
+		and not roster_member_identity.is_empty()
+		and roster_result.expectedContributorsBySection.get(Vector3i.ZERO, []).has(
+			roster_member_identity),
+		{"status":roster_result.get("status", ""),
+			"providerIds":roster_result.get("providerIds", []),
+			"expectedContributors":roster_result.get("expectedContributorsBySection", {}).get(
+				Vector3i.ZERO, []), "memberId":member_id,
+			"rosterMemberIdentity":roster_member_identity,
+			"sourceRevisions":roster_result.get("sourceRevisions", {})})
 	check("provider_returns_same_sealed_geometry_for_cross_domain_assembly",
 		contribution_result.get("status") == "ready" and contribution.is_read_only()
 		and contribution.get("providerId") == ProviderScript.PROVIDER_ID
-		and contribution.get("authoritySourceRevisions", {}).get(member_id, "") \
-			== String(roster_result.sourceRevisions.get(member_id, ""))
+		and contribution.get("authoritySourceRevisions", {}).get(roster_member_identity, "") \
+			== String(roster_result.sourceRevisions.get(roster_member_identity, ""))
 		and contribution.get("inputs", []).size() == 2
 		and contribution.get("inputs", [])[0].get("sourcePartId", "") == member_id
 		and contribution.get("compatibilityByKey", {}).size() == 1
 		and contribution.get("resourceBindings", {}).size() == 1,
 		{"status":contribution_result.get("status", ""),
 			"reason":contribution_result.get("reason", ""),
-			"inputCount":contribution.get("inputs", []).size()})
+			"providerId":contribution.get("providerId", ""),
+			"sealed":contribution.is_read_only(),
+			"authorityRevision":contribution.get("authoritySourceRevisions", {}),
+			"expectedAuthorityRevision":roster_result.get("sourceRevisions", {}).get(
+				roster_member_identity, ""),
+			"inputCount":contribution.get("inputs", []).size(),
+			"firstInputSource":first_contribution_source,
+			"expectedMemberId":member_id,
+			"compatibilityCount":contribution.get("compatibilityByKey", {}).size(),
+			"resourceCount":contribution.get("resourceBindings", {}).size()})
 	var first_coverage := String(section_row.get("coverageRevision", ""))
 	var rejected_receipt := {}
 	rejected_receipt.make_read_only()
@@ -431,7 +488,7 @@ func run() -> void:
 			"before":cache_before_resource_change,
 			"afterChange":cache_after_resource_change,
 			"afterRebuild":cache_after_rebuild})
-	var boundary_cell := Vector3i(16, 0, 3)
+	var boundary_cell := Vector3i(16, 8, 3)
 	var boundary_body := _make_body(world, source_id, boundary_cell, "stoneBlock")
 	boundary_body.position = Vector3(boundary_cell) * world.CELL
 	world.add_child(boundary_body)
@@ -455,12 +512,37 @@ func run() -> void:
 	var boundary_overlaps_west := boundary_world_bounds.intersects(west_bounds)
 	var west_members: Array = west_row.get("sourcePartIds", [])
 	var east_members: Array = east_row.get("sourcePartIds", [])
-	check("boundary_spanning_geometry_has_one_center_owned_section_member",
+	var west_prepared: Dictionary = boundary_sections.get("preparedSections", {}).get(
+		Vector3i.ZERO, {})
+	var east_prepared: Dictionary = boundary_sections.get("preparedSections", {}).get(
+		Vector3i(1, 0, 0), {})
+	var boundary_identity := ProviderScript._source_part_identity_key(
+		boundary_part_id, boundary_part_id)
+	var west_support_ranges: Array = west_prepared.get(
+		"supportRangesBySource", {}).get(boundary_identity, [])
+	var center_draw_inputs: Array = east_prepared.get("inputs", [])
+	check("boundary_geometry_has_support_member_and_one_center_owned_draw",
 		boundary_sections.get("status") == "complete" and boundary_overlaps_west
-		and not west_members.has(boundary_part_id) and east_members.has(boundary_part_id),
+		and west_members.has(boundary_part_id) and east_members.has(boundary_part_id)
+		and not _prepared_inputs_contain_source_part(west_prepared, boundary_part_id)
+		and center_draw_inputs.size() == 1
+		and west_support_ranges.size() == 1
+		and west_support_ranges[0].get("supportSectionKey") == Vector3i.ZERO
+		and west_support_ranges[0].get("geometryOwnerSection") == Vector3i(1, 0, 0)
+		and center_draw_inputs[0].get("sourcePartId") == boundary_part_id,
 		{"status":boundary_sections.get("status", ""),
 			"overlapsWestSection":boundary_overlaps_west,
-			"westMembers":west_members, "eastMembers":east_members})
+			"westMembers":west_members, "eastMembers":east_members,
+			"westGeometryInputCount":west_prepared.get("inputs", []).size(),
+			"westSupportRanges":west_support_ranges,
+			"centerDrawInputCount":center_draw_inputs.size(),
+			"westPreparedMemberIds":west_prepared.get("memberIds", []),
+			"eastPreparedMemberIds":east_prepared.get("memberIds", []),
+			"westPreparedInputCount":west_prepared.get("inputs", []).size(),
+			"eastPreparedInputCount":east_prepared.get("inputs", []).size(),
+			"westSupportOwnerSections":west_support_ranges,
+			"eastSupportSectionKeys":east_prepared.get(
+				"supportRangesBySource", {}).get(boundary_identity, [])})
 	check("overlapping_sections_share_one_resumable_membership_census",
 		int(overlap_stats_after.get("buildCount", 0))
 			== int(overlap_stats_before.get("buildCount", 0)) + 1
@@ -474,24 +556,145 @@ func run() -> void:
 			"overlapReusesAfter":overlap_stats_after.get("overlapReuseCount", 0),
 			"memberRowsBefore":overlap_stats_before.get("memberRowsBuilt", 0),
 			"memberRowsAfter":overlap_stats_after.get("memberRowsBuilt", 0)})
+	var receipt_authority := FixtureReceiptAuthority.new()
+	world.world_static_section_coordinator = receipt_authority
+	var east_receipt := _installed_receipt(Vector3i(1, 0, 0))
+	receipt_authority.install(Vector3i(1, 0, 0), east_receipt)
 	var boundary_ack := provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(east_row.get("coverageRevision", "")),
-		_installed_receipt(Vector3i(1, 0, 0)))
+		east_receipt)
+	var one_receipt_keeps_boundary_visible: bool = boundary_ack.get("status") == "pending" \
+		and boundary_mesh.visible \
+		and not boundary_ack.get("visualClosures", []).is_empty()
+	var west_receipt := _installed_receipt(Vector3i.ZERO)
+	receipt_authority.install(Vector3i.ZERO, west_receipt)
+	var west_ack := provider.acknowledge_section_install(Vector3i.ZERO,
+		String(west_row.get("coverageRevision", "")), west_receipt)
+	var pending_closures: Array = boundary_ack.get("visualClosures", [])
+	var pending_closure: Dictionary = pending_closures[0] \
+		if not pending_closures.is_empty() else {}
+	check("all_current_section_receipts_close_cross_section_visual_retirement",
+		west_ack.get("status") == "acknowledged" and not boundary_mesh.visible,
+		{"status":west_ack.get("status", ""),
+			"reason":west_ack.get("reason", ""),
+			"visible":boundary_mesh.visible,
+			"retiredVisualCount":west_ack.get("retiredVisualCount", 0)})
+	check("one_live_section_receipt_cannot_retire_cross_section_visual",
+		one_receipt_keeps_boundary_visible,
+		{"status":boundary_ack.get("status", ""),
+			"reason":boundary_ack.get("reason", ""),
+			"visibleAfterFirstReceipt":one_receipt_keeps_boundary_visible,
+			"requiredSections":pending_closure.get("requiredSections", []),
+			"waitingSections":pending_closure.get("waitingSections", [])})
+	var release_supported := provider.has_method("release_section_install")
+	check("ordinary_provider_exposes_exact_release_lifecycle", release_supported, {})
+	if release_supported:
+		var gameplay_owner: Node = boundary_mesh.get_parent()
+		var owner_children_before := gameplay_owner.get_child_count()
+		var rebound: Dictionary = provider.configure("seed:replacement-world", system, world)
+		check("bound_provider_rejects_cross_world_reuse_without_changing_claim",
+			rebound.get("status") == "failed"
+			and provider._installed_members_by_section.has("0,0,0"), rebound)
+		var distinct_visual := MeshInstance3D.new()
+		distinct_visual.mesh = boundary_mesh.mesh
+		distinct_visual.visible = false
+		distinct_visual.set_meta("ordinary_structure_section_owned", true)
+		world.add_child(distinct_visual)
+		distinct_visual.global_transform = boundary_mesh.global_transform
+		var invalid_release: Dictionary = provider.call("release_section_install",
+			Vector3i.ZERO, String(west_row.coverageRevision), {})
+		var wrong_coverage: Dictionary = provider.call("release_section_install",
+			Vector3i.ZERO, "wrong-coverage", west_receipt)
+		check("invalid_or_wrong_coverage_release_preserves_current_claim",
+			invalid_release.get("status") == "pending"
+			and wrong_coverage.get("status") == "acknowledged"
+			and provider._installed_members_by_section.has("0,0,0")
+			and not boundary_mesh.visible, invalid_release)
+		var replacement_receipt := west_receipt.duplicate(true)
+		replacement_receipt["generation"] = 2
+		replacement_receipt.make_read_only()
+		receipt_authority.install(Vector3i.ZERO, replacement_receipt)
+		provider.acknowledge_section_install(Vector3i.ZERO,
+			String(west_row.coverageRevision), replacement_receipt)
+		var foreign_owner_receipt := replacement_receipt.duplicate(true)
+		foreign_owner_receipt["chunkInstanceId"] = 987654
+		foreign_owner_receipt.make_read_only()
+		var foreign_release: Dictionary = provider.call("release_section_install",
+			Vector3i.ZERO, String(west_row.coverageRevision), foreign_owner_receipt)
+		check("different_renderer_owner_cannot_release_identical_geometry_claim",
+			foreign_release.get("status") == "acknowledged" and not boundary_mesh.visible
+			and provider._installed_members_by_section.has("0,0,0"), foreign_release)
+		var delayed: Dictionary = provider.call("release_section_install", Vector3i.ZERO,
+			String(west_row.coverageRevision), west_receipt)
+		check("delayed_old_release_preserves_replacement_and_hidden_visual",
+			delayed.get("status") == "acknowledged" and not boundary_mesh.visible
+			and provider._installed_members_by_section.has("0,0,0"), delayed)
+		receipt_authority.current_receipts.erase(Vector3i.ZERO)
+		var released: Dictionary = provider.call("release_section_install", Vector3i.ZERO,
+			String(west_row.coverageRevision), replacement_receipt)
+		check("support_section_release_restores_crossing_visual_without_freeing_owner",
+			released.get("status") == "acknowledged" and boundary_mesh.visible
+			and boundary_mesh.get_parent() == gameplay_owner
+			and gameplay_owner.get_child_count() == owner_children_before
+			and not provider._installed_members_by_section.has("0,0,0"), released)
+		check("release_does_not_unhide_distinct_same_geometry_visual",
+			boundary_mesh.visible and not distinct_visual.visible
+			and distinct_visual.get_parent() == world, released)
+		distinct_visual.free()
+		receipt_authority.install(Vector3i.ZERO, replacement_receipt)
+		var replay: Dictionary = provider.acknowledge_section_install(Vector3i.ZERO,
+			String(west_row.coverageRevision), replacement_receipt)
+		check("released_section_replay_closes_retirement_again",
+			replay.get("status") == "acknowledged" and not boundary_mesh.visible, replay)
+		receipt_authority.current_receipts.erase(Vector3i(1, 0, 0))
+		var owner_release: Dictionary = provider.call("release_section_install",
+			Vector3i(1, 0, 0), String(east_row.coverageRevision), east_receipt)
+		receipt_authority.current_receipts.erase(Vector3i.ZERO)
+		provider.call("release_section_install", Vector3i.ZERO,
+			String(west_row.coverageRevision), replacement_receipt)
+		var duplicate_release: Dictionary = provider.call("release_section_install",
+			Vector3i.ZERO, String(west_row.coverageRevision), replacement_receipt)
+		check("last_release_drops_crossing_closure_and_duplicate_release_is_idempotent",
+			owner_release.get("status") == "acknowledged" and boundary_mesh.visible
+			and duplicate_release.get("status") == "acknowledged"
+			and not provider._visual_retirement_closures.has(str(boundary_mesh.get_instance_id()))
+			and not provider._visual_closure_keys_by_section.has("1,0,0"), duplicate_release)
+		receipt_authority.install(Vector3i(1, 0, 0), east_receipt)
+		provider.acknowledge_section_install(Vector3i(1, 0, 0),
+			String(east_row.coverageRevision), east_receipt)
+		# Restore the original fixture token before the unchanged tombstone cases.
+		receipt_authority.install(Vector3i.ZERO, west_receipt)
+		provider.acknowledge_section_install(Vector3i.ZERO,
+			String(west_row.coverageRevision), west_receipt)
 	var hidden_boundary_sections := _capture_sections_until_settled(provider,
 		"seed:ordinary-provider", [Vector3i.ZERO, Vector3i(1, 0, 0)])
 	var hidden_sections: Dictionary = hidden_boundary_sections.get("sections", {})
+	var hidden_prepared: Dictionary = hidden_boundary_sections.get("preparedSections", {})
 	check("retired_boundary_visual_replays_from_actual_mesh_support",
-		boundary_ack.get("status") == "acknowledged"
+		west_ack.get("status") == "acknowledged"
 		and not boundary_mesh.visible
 		and hidden_boundary_sections.get("status") == "complete"
-		and not hidden_sections.get(Vector3i.ZERO, {}).get(
+		and hidden_sections.get(Vector3i.ZERO, {}).get(
 			"sourcePartIds", []).has(boundary_part_id)
 		and hidden_sections.get(Vector3i(1, 0, 0), {}).get(
-			"sourcePartIds", []).has(boundary_part_id),
+			"sourcePartIds", []).has(boundary_part_id)
+		and not _prepared_inputs_contain_source_part(
+			hidden_prepared.get(Vector3i.ZERO, {}), boundary_part_id)
+		and hidden_prepared.get(Vector3i(1, 0, 0), {}).get("inputs", []).size() == 1,
 		{"status":hidden_boundary_sections.get("status", ""),
 			"reason":hidden_boundary_sections.get("reason", ""),
+			"westAckStatus":west_ack.get("status", ""),
 			"westMembers":hidden_sections.get(Vector3i.ZERO, {}).get("sourcePartIds", []),
-			"eastMembers":hidden_sections.get(Vector3i(1, 0, 0), {}).get("sourcePartIds", [])})
+			"eastMembers":hidden_sections.get(Vector3i(1, 0, 0), {}).get("sourcePartIds", []),
+			"westPreparedMemberIds":hidden_prepared.get(Vector3i.ZERO, {}).get("memberIds", []),
+			"eastPreparedMemberIds":hidden_prepared.get(Vector3i(1, 0, 0), {}).get("memberIds", []),
+			"westPreparedInputCount":hidden_prepared.get(Vector3i.ZERO, {}).get(
+				"inputs", []).size(),
+			"eastPreparedInputCount":hidden_prepared.get(Vector3i(1, 0, 0), {}).get(
+				"inputs", []).size(),
+			"westSupportOwnerSections":west_support_ranges,
+			"eastSupportSectionKeys":hidden_prepared.get(Vector3i(1, 0, 0), {}).get(
+				"supportRangesBySource", {}).get(boundary_identity, [])})
 	var boundary_removed_key := system._ordinary_visual_block_key(source_id,
 		boundary_cell, "stoneBlock")
 	system.removed_generated_structure_blocks[boundary_removed_key] = true
@@ -503,12 +706,15 @@ func run() -> void:
 	var tombstone_stats_after: Dictionary = provider.membership_census_stats()
 	var west_tombstones: Array = boundary_removal.get("removalsBySection", {}).get(Vector3i.ZERO, [])
 	var east_tombstones: Array = boundary_removal.get("removalsBySection", {}).get(Vector3i(1, 0, 0), [])
-	check("single_center_owned_boundary_source_removes_in_its_one_section_only",
-		boundary_ack.get("status") == "acknowledged"
+	check("boundary_support_and_center_members_retire_with_section_tombstones",
+		west_ack.get("status") == "acknowledged"
 		and boundary_removal.get("status") == "complete"
-		and west_tombstones.is_empty() and east_tombstones.size() == 1
+		and west_tombstones.size() == 1 and east_tombstones.size() == 1
+		and String(west_tombstones[0].get("sourceId", "")) == boundary_part_id
 		and String(east_tombstones[0].get("sourceId", "")) == boundary_part_id
+		and String(west_tombstones[0].get("sourcePartId", "")) == boundary_part_id
 		and String(east_tombstones[0].get("sourcePartId", "")) == boundary_part_id
+		and String(west_tombstones[0].get("authoritySourceId", "")) == source_id
 		and String(east_tombstones[0].get("authoritySourceId", "")) == source_id,
 		{"westTombstones":west_tombstones, "eastTombstones":east_tombstones})
 	check("tombstone_revision_rebuilds_shared_membership_census",
@@ -522,9 +728,18 @@ func run() -> void:
 			"memberRowsAfter":tombstone_stats_after.get("memberRowsBuilt", 0),
 			"tombstones":east_tombstones.size()})
 	var boundary_empty_row: Dictionary = boundary_removal.get("sections", {}).get(Vector3i(1, 0, 0), {})
-	provider.acknowledge_section_install(Vector3i(1, 0, 0),
+	var boundary_west_empty_row: Dictionary = boundary_removal.get("sections", {}).get(Vector3i.ZERO, {})
+	var west_removal_ack := provider.acknowledge_section_install(Vector3i.ZERO,
+		String(boundary_west_empty_row.get("coverageRevision", "")),
+		_installed_receipt(Vector3i.ZERO))
+	var east_removal_ack := provider.acknowledge_section_install(Vector3i(1, 0, 0),
 		String(boundary_empty_row.get("coverageRevision", "")),
 		_installed_receipt(Vector3i(1, 0, 0)))
+	check("both_support_and_geometry_owner_tombstones_require_live_receipts",
+		west_removal_ack.get("status") == "acknowledged"
+		and east_removal_ack.get("status") == "acknowledged",
+		{"west":west_removal_ack.get("status", ""),
+			"east":east_removal_ack.get("status", "")})
 	var out_of_bounds_options := roof_options.duplicate()
 	out_of_bounds_options["world_x"] = float(cell.x) * world.CELL + world.CELL * 1.1
 	var out_of_bounds_position := Vector3(out_of_bounds_options.world_x,
@@ -696,6 +911,7 @@ func run() -> void:
 			"geometryStats":final_geometry_stats})
 	await _run_coordinator_throughput_integration()
 	await _run_opaque_family_provider_receipt_integration()
+	_run_ordinary_geometry_owner_support_lease_contract()
 
 	var passed := true
 	for row: Dictionary in checks:
@@ -722,6 +938,123 @@ func _capture_until_settled(provider: Object, world_id: String,
 		result = provider.capture_static_section_sources(world_id, [section])
 		if result.get("status") != "pending": return result
 	return result
+
+
+func _prepared_inputs_contain_source_part(prepared: Dictionary,
+		source_part_id: String) -> bool:
+	for input_value: Variant in prepared.get("inputs", []):
+		if input_value is Dictionary \
+				and String(input_value.get("sourcePartId", "")) == source_part_id:
+			return true
+	return false
+
+
+func _run_ordinary_geometry_owner_support_lease_contract() -> void:
+	var coordinator = FixtureLeaseCoordinator.new()
+	var owner_section := Vector3i(1, 0, 1)
+	var support_a := Vector3i.ZERO
+	var support_b := Vector3i(1, 0, 0)
+	var owner_cell: Vector2i = Grid.chunk_key_for_section(owner_section)
+	var source_id := "ordinary-structure:test-building"
+	var source_revision := "ordinary-revision-7"
+	var member_id := "ordinary:test-building:segment:roof"
+	var receipt_owner := {"generation":17, "sectionKey":owner_section}
+	var world_bounds := AABB(Vector3(20, 1, 20), Vector3(4, 2, 4))
+	var mesh_digest := "ab".repeat(32)
+	var geometry_range := {"sourceId":source_id, "sourcePartId":source_id,
+		"sourceRevision":source_revision, "sourceSegmentId":member_id, "sourceInstance":0,
+		"geometryOwnerSection":owner_section, "worldBounds":world_bounds,
+		"meshContentDigest":mesh_digest}
+	var owner_manifest := {"sourceId":source_id, "sourcePartId":source_id,
+		"sourceRevision":source_revision, "geometrySourceRanges":[geometry_range]}
+	var old_owner_candidate := {"generation":17,
+		"drawCount":1, "candidate":{"snapshot":{"manifest":[owner_manifest]}}}
+	coordinator._production_candidates_by_section[owner_section] = old_owner_candidate
+	coordinator._production_candidate_receipts[owner_section] = receipt_owner
+	coordinator._committed_candidates[owner_section] = {"generation":17,
+		"packetDigest":"old-valid-render"}
+	var support_rows: Dictionary = {}
+	for support_section: Vector3i in [support_a, support_b]:
+		support_rows[support_section] = {
+			"ownershipPolicy":"ordinary_center_geometry_owner/aabb_support_sections_v1",
+			"supportSectionKey":support_section, "geometryOwnerSection":owner_section,
+			"memberId":member_id, "sourceSegmentId":member_id,
+			"sourceRevision":source_revision, "sourceId":source_id, "sourcePartId":source_id,
+			"sourceInstance":0, "worldBounds":world_bounds, "meshContentDigest":mesh_digest}
+	for support_section: Vector3i in [support_a, support_b]:
+		var receipt := {"generation":23, "sectionKey":support_section}
+		var manifest_row := {"sourceId":source_id, "sourceRevision":source_revision,
+			"supportRanges":[support_rows[support_section]]}
+		coordinator._visible_section_demands[support_section] = {
+			"stage":"installed", "supportDemands":{}}
+		coordinator._production_candidates_by_section[support_section] = {
+			"generation":23, "candidate":{"snapshot":{"manifest":[manifest_row]}}}
+		coordinator._production_candidate_receipts[support_section] = receipt
+	var first := coordinator.reconcile_ordinary_geometry_support_owner_demands()
+	var owner_state: Dictionary = coordinator._visible_section_demands.get(owner_section, {})
+	var initial_support_count: int = owner_state.get("supportDemands", {}).size()
+	var initial_draw_count: int = int(old_owner_candidate.get("drawCount", 0))
+	var old_candidate_retained: bool = coordinator._production_candidates_by_section.get(
+		owner_section, {}) == old_owner_candidate \
+		and coordinator._committed_candidates.get(owner_section, {}).get("packetDigest", "") \
+			== "old-valid-render"
+	var withdrawn := coordinator.withdraw_visible_section_demand(owner_section)
+	var still_resident: bool = coordinator._visible_section_demands.has(owner_section) \
+		and coordinator._production_candidates_by_section.has(owner_section)
+	check("ordinary_support_sections_share_one_retained_geometry_owner_draw",
+		first.get("status") == "ready" and first.get("ownerCells", {}).has(owner_cell)
+		and initial_support_count == 2 and initial_draw_count == 1
+		and old_candidate_retained and withdrawn.get("status") == "retained_by_support_lease"
+		and withdrawn.get("supportDemandCount") == 2 and still_resident,
+		{"status":first.get("status", ""), "ownerCell":owner_cell,
+			"supportDemandCount":initial_support_count, "drawCount":initial_draw_count,
+			"withdrawStatus":withdrawn.get("status", ""),
+			"oldRenderRetained":old_candidate_retained})
+	for field: String in ["sourceSegmentId", "sourceInstance", "meshContentDigest", "worldBounds", "sourceRevision"]:
+		var stale_support: Dictionary = support_rows[support_a].duplicate(false)
+		match field:
+			"sourceInstance": stale_support[field] = 99
+			"worldBounds": stale_support[field] = AABB(Vector3.ZERO, Vector3.ONE)
+			_: stale_support[field] = "wrong-value"
+		check("installed_owner_geometry_rejects_wrong_" + field,
+			not CoordinatorScript._static_geometry_support_matches_proof(stale_support, geometry_range),
+			{"field":field})
+	owner_manifest["geometrySourceRanges"] = []
+	var missing_owner_geometry := coordinator.reconcile_ordinary_geometry_support_owner_demands()
+	check("current_native_receipt_without_matching_owner_geometry_stays_pending",
+		missing_owner_geometry.get("status") == "pending"
+		and missing_owner_geometry.get("waitingOwnerSections", {}).has(owner_section)
+		and missing_owner_geometry.get("ownerCells", {}).has(owner_cell), missing_owner_geometry)
+	owner_manifest["geometrySourceRanges"] = [geometry_range]
+	coordinator.stale_receipts[support_a] = true
+	var after_stale := coordinator.reconcile_ordinary_geometry_support_owner_demands()
+	owner_state = coordinator._visible_section_demands.get(owner_section, {})
+	var count_after_stale: int = owner_state.get("supportDemands", {}).size()
+	check("stale_support_receipt_releases_only_its_ordinary_owner_lease",
+		after_stale.get("ownerCells", {}).has(owner_cell) and count_after_stale == 1
+		and coordinator._production_candidates_by_section.has(owner_section),
+		{"ownerCells":after_stale.get("ownerCells", {}).keys(),
+			"remainingLeaseCount":count_after_stale,
+			"oldRenderRetained":coordinator._production_candidates_by_section.has(owner_section)})
+	coordinator._visible_section_demands.erase(support_b)
+	coordinator._production_candidate_receipts.erase(support_b)
+	coordinator.fail_next_release = true
+	var failed_release := coordinator.reconcile_ordinary_geometry_support_owner_demands()
+	check("failed_support_release_retains_retry_and_owner_residency",
+		failed_release.get("status") == "pending"
+		and failed_release.get("ownerCells", {}).has(owner_cell)
+		and coordinator._ordinary_geometry_owner_support_demands.size() == 1
+		and coordinator._visible_section_demands.get(owner_section, {}).get("supportDemands", {}).size() == 1,
+		failed_release)
+	var after_last_support_unload := coordinator.reconcile_ordinary_geometry_support_owner_demands()
+	check("owner_renderer_demand_releases_after_last_support_unloads",
+		after_last_support_unload.get("ownerCells", {}).is_empty()
+		and not coordinator._visible_section_demands.has(owner_section)
+		and coordinator._production_candidates_by_section.has(owner_section),
+		{"ownerCells":after_last_support_unload.get("ownerCells", {}).keys(),
+			"ownerDemandRetained":coordinator._visible_section_demands.has(owner_section),
+			"oldRenderRetainedUntilOwnerRetirement":coordinator._production_candidates_by_section.has(
+				owner_section)})
 
 
 func _capture_sections_until_settled(provider: Object, world_id: String,
@@ -1097,7 +1430,17 @@ func check(name: String, passed: bool, details: Dictionary) -> void:
 	for key in ["assetRegistryReady", "families", "expectedSourceCount",
 		"expectedMemberCount", "allOldVisualsVisibleBeforeAck",
 		"liveCollisionCount", "allReplacementVisualsRetired",
-		"allGameplayOwnersRetained", "collisionCount", "expectedCollisionCount"]:
+		"allGameplayOwnersRetained", "collisionCount", "expectedCollisionCount",
+		"visible", "retiredVisualCount", "requiredSections", "waitingSections",
+		"providerIds", "expectedContributors", "memberId", "rosterMemberIdentity",
+		"sourceRevisions",
+		"overlapsWestSection", "westMembers", "eastMembers",
+		"westGeometryInputCount", "westSupportRanges", "centerDrawInputCount",
+		"westPreparedMemberIds", "eastPreparedMemberIds",
+		"westPreparedInputCount", "eastPreparedInputCount",
+		"westSupportOwnerSections", "eastSupportSectionKeys",
+		"sealed", "authorityRevision", "expectedAuthorityRevision", "inputCount",
+		"firstInputSource", "expectedMemberId", "compatibilityCount", "resourceCount"]:
 		if details.has(key): evidence[key] = details[key]
 	for key in ["targetCandidateCount", "targetProgressHistory", "advancedSections",
 			"geometryJobRestartCount", "geometryJobInvalidationCount",

@@ -8,6 +8,10 @@ const FurnitureNavigation = preload("res://scripts/buildings/FurnishingNavigatio
 const NavigationTiles = preload("res://scripts/buildings/BuildingNavigationTilePreparation.gd")
 const PublicationGroups = preload("res://scripts/buildings/BuildingPublicationGroups.gd")
 const SiteManifest = preload("res://scripts/buildings/BuildingSiteManifestBuilder.gd")
+const MasonryGeometry = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const WindowVisualRecipe = preload("res://scripts/buildings/BuildingWindowVisualRecipe.gd")
+const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const FurnishingRecipe = preload("res://scripts/buildings/FurnishingVisualRecipe.gd")
 const NAV_TILE_CELLS := preload("res://scripts/buildings/layout/BuildingLayoutConstants.gd").NAV_TILE_CELL_SIZE
 const CELL := 1.35
 const OWNER_SIZE := CELL * 32.0
@@ -69,12 +73,17 @@ static func compile_description(blueprint, plan, source_binding: Dictionary, wor
 		if part.collision_enabled and part.kind!="door":
 			packet.solid_records.append(Navigation._static_collision_fact(blueprint.id,part,transform,bounds))
 		if not packet._add_part("building:" + part.id, part.id, "building", bounds, transform.origin, dependencies, bool(part.recipe.get("physicalRoot", false))): return null
+		if part.kind in ["wall", "foundation"] and Materials.is_masonry_material(part.material_id) and bool(part.recipe.get("visual", true)):
+			packet.parts["building:" + part.id]["visualSupportBounds"] = transform * MasonryGeometry.visual_support_bounds(part)
+		elif part.kind == "window":
+			packet.parts["building:" + part.id]["visualSupportBounds"] = transform * WindowVisualRecipe.visual_support_bounds(part.size)
 	for part in plan.parts:
 		if not _continue(continuation, "publication_spatial_furniture"): return null
 		var transform := Transform3D(Basis.from_euler(part.rotation), world_origin + part.position)
 		var size: Vector3 = part.occupied_size
 		var bounds := transform * AABB(Vector3(-size.x * 0.5, 0, -size.z * 0.5), size)
 		if not packet._add_part("furnishing:" + part.id, part.id, "furnishing", bounds, transform.origin, [], false): return null
+		packet.parts["furnishing:" + part.id]["visualSupportBounds"] = transform * FurnishingRecipe.build(part).visualSupportBounds
 	if not _continue(continuation, "publication_navigation_manifest"): return null
 	packet.navigation = Navigation.build(blueprint, Transform3D(Basis.IDENTITY, world_origin))
 	if not _continue(continuation, "publication_navigation_furnishing"): return null

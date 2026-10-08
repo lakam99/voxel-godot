@@ -12,6 +12,7 @@ cli(async () => {
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
     'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderSectionGrid.gd',
+    'scripts/world/StaticSectionPresentationMembers.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd',
     'scripts/terrain/VoxelTerrainRuntime.gd.uid',
     'scripts/buildings/BuildingSpatialDependencies.gd',

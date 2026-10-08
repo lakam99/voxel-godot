@@ -15,6 +15,9 @@ cli(async () => {
     'scripts/world/StaticInstanceAttributeBuffer.gd',
     'scripts/world/StaticRenderMeshFingerprint.gd',
     'scripts/StructureSystem.gd',
+    'scripts/world/CitadelSiteField.gd',
+    'scripts/world/CitadelTerrainAdmission.gd',
+    'scripts/world/StandaloneStructureCandidate.gd',
     'scripts/world/OrdinaryStructureBlockVisualRecipe.gd',
     'scripts/visual/StaticItemAssetRegistry.gd',
     'assets/generated/static/static-item-manifest.json',
@@ -27,7 +30,7 @@ cli(async () => {
     'tools/run-godot-scene-watchdog.mjs'
   ], {
     schema: 'ordinary-section-geometry-adapter-launch/v1',
-    evidenceLevel: 'synthetic_producer_value_and_partition_contract',
+    evidenceLevel: 'synthetic_producer_value_partition_and_local_structure_dependency_contract',
     headed: false,
     timeoutSeconds: 90
   });

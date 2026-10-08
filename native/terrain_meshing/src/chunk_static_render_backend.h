@@ -95,6 +95,7 @@ protected:
 	static void _bind_methods();
 
 public:
+	static Dictionary tree_impostor_descriptor(const Dictionary &p_recipe);
 	Dictionary publish_tree_impostor(StaticBody3D *p_body,
 		const Dictionary &p_request, const Dictionary &p_recipe,
 		const Ref<Mesh> &p_branch_mesh, const Ref<Mesh> &p_crown_mesh,

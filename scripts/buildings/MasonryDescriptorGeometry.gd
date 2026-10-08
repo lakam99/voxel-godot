@@ -7,6 +7,46 @@ const Wall = preload("res://scripts/buildings/MasonryWallGeometry.gd")
 const Cobble = preload("res://scripts/buildings/SettledCobbleGeometry.gd")
 const MONUMENTAL_MASONRY_INSTANCE_BUDGET := 2400
 
+static func source_dimensions(part) -> Dictionary:
+	var size: Vector3 = part.size
+	var monumental := String(part.id).begins_with("castle_")
+	var rubble := String(part.material_id) == "stone_foundation" and not monumental
+	var length := 1.18 if monumental else (0.88 if rubble else 0.68)
+	var height := 0.52 if monumental else (0.38 if rubble else 0.285)
+	if monumental:
+		var estimated := 2.0 * (size.x + size.z) * size.y / maxf(length * height, 0.001)
+		if estimated > float(MONUMENTAL_MASONRY_INSTANCE_BUDGET):
+			var scale := sqrt(estimated / float(MONUMENTAL_MASONRY_INSTANCE_BUDGET))
+			length *= scale
+			height *= scale
+	return {"length":length, "height":height,
+		"joint":0.018 if monumental else (0.030 if rubble else 0.022),
+		"depth":0.105 if monumental else (0.11 if rubble else 0.075)}
+
+## Constant-work support for the complete descriptor family, including every
+## repair/noise outcome. Physical part bounds remain a separate authority.
+static func visual_support_bounds(part) -> AABB:
+	var size: Vector3 = part.size
+	var dimensions := source_dimensions(part)
+	var monumental: bool = dimensions.height > 0.40 # Same FaceCursor choice.
+	var max_length: float = dimensions.length * (1.42 if monumental else 1.16)
+	var max_height := maxf(0.04, minf(size.y, dimensions.height * (1.18 if monumental else 1.14)))
+	# scaled rotation can add either dimension on the along/course axes.
+	var rotation_extra := 0.5 * maxf(max_length, max_height) * sin(deg_to_rad(1.15) * 0.5)
+	var along_extra: float = (0.005 if monumental else 0.009) + dimensions.length * 0.04 + rotation_extra
+	# Depth noise, replacement and repair multipliers from FaceCursor; its
+	# center is outside the nominal face by 0.18 depths plus displacement.
+	var max_depth: float = dimensions.depth * (1.14 if monumental else 1.18) * 1.14 * 1.06 * 1.02
+	var face_extra := max_depth * 0.68 + (0.016 if monumental else 0.013)
+	var horizontal := maxf(along_extra, face_extra)
+	# The last partial course can be smaller than the 0.04m brick minimum.
+	var vertical := (0.001 if monumental else 0.006) + 0.02 + rotation_extra
+	var padding := Vector3(horizontal, vertical, horizontal)
+	var bounds := AABB(-size * 0.5 - padding, size + padding * 2.0)
+	if String(part.kind) == "foundation" and not String(part.recipe.get("topSurfaceMaterial", "")).is_empty():
+		bounds = bounds.merge(AABB(Vector3(-size.x * 0.5, size.y * 0.5, -size.z * 0.5), Vector3(size.x, 0.028, size.z)))
+	return bounds
+
 static func begin_source(part, history, source_blueprint_id: String) -> Cursor:
 	return Cursor.new(part, history, source_blueprint_id)
 
@@ -350,17 +390,11 @@ class Cursor extends RefCounted:
 				var material_id := String(_input.material_id)
 				var is_monumental_geometry := String(_input.id).begins_with("castle_")
 				var uses_aged_castle_stone := is_monumental_geometry and material_id == "stone_foundation"
-				var is_rubble_foundation := material_id == "stone_foundation" and not is_monumental_geometry
-				_unit_length = 1.18 if is_monumental_geometry else (0.88 if is_rubble_foundation else 0.68)
-				_unit_height = 0.52 if is_monumental_geometry else (0.38 if is_rubble_foundation else 0.285)
-				if is_monumental_geometry:
-					var estimated_instances := 2.0 * (size.x + size.z) * size.y / maxf(_unit_length * _unit_height, 0.001)
-					if estimated_instances > float(MONUMENTAL_MASONRY_INSTANCE_BUDGET):
-						var density_scale := sqrt(estimated_instances / float(MONUMENTAL_MASONRY_INSTANCE_BUDGET))
-						_unit_length *= density_scale
-						_unit_height *= density_scale
-				_joint_width = 0.018 if is_monumental_geometry else (0.030 if is_rubble_foundation else 0.022)
-				_face_depth = 0.105 if is_monumental_geometry else (0.11 if is_rubble_foundation else 0.075)
+				var dimensions: Dictionary = load("res://scripts/buildings/MasonryDescriptorGeometry.gd").source_dimensions(_input)
+				_unit_length = dimensions.length
+				_unit_height = dimensions.height
+				_joint_width = dimensions.joint
+				_face_depth = dimensions.depth
 				_mortar_size = Wall.bed_size(size)
 				_masonry_phase = float(posmod(String(_input.id).hash(), 1009)) / 1009.0
 				var started := Time.get_ticks_usec()

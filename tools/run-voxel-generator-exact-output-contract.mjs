@@ -39,6 +39,13 @@ const passed = processSummary.functionalExitCode === 0
   && report.schema === 'voxel-generator-exact-output-contract/v1'
   && report.complete === true && report.passed === true
   && Array.isArray(report.blocks) && report.blocks.length === 9
+  && report.authoritativeSectionSnapshot?.passed === true
+  && report.authoritativeSectionSnapshot?.channelPayloadsImmutable === true
+  && report.authoritativeSectionSnapshot?.cancellationDuringActiveGeneration === true
+  && report.authoritativeSectionSnapshot?.activeCancelledWorkerJoined === true
+  && report.authoritativeSectionSnapshot?.activeCancelledResultNotSealedOrAdmitted === true
+  && report.authoritativeSectionSnapshot?.sceneBlockOverlayWinsSameCell === true
+  && report.authoritativeSectionSnapshot?.durableEditRevealedWhenSceneOverlayClears === true
   && report.blocks.every(block => block.passed && block.voxels === 4096 && block.savedEditVoxels === 2);
 const receipt = {
   schema: 'voxel-generator-exact-output-receipt/v1',
@@ -55,6 +62,7 @@ const receipt = {
   blocks: report.blocks.map(block => ({ seed: block.seed, block: block.block,
     mismatchCount: block.mismatchCount, workerUsec: block.workerUsec,
     referenceUsec: block.referenceUsec })),
+  authoritativeSectionSnapshot: report.authoritativeSectionSnapshot,
 };
 const receiptPath = path.join(outputDirectory, 'receipt.json');
 await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });

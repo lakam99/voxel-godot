@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sourceFiles } from './building-special-sources.mjs';
 import { structuralRunnerSources, validatePhaseASourceBindings } from './building-source-bindings.mjs';
-import { options, choice, integer, context, prepare, launchRecord, stable, phaseRun, read, sha, uid, demand, assertReport, assertWatchdog, assertNoGodot, engineErrors, inside, resolveExecutablePair } from './building-runner.mjs';
+import { options, choice, integer, context, prepare, launchRecord, stable, phaseRun, read, sha, uid, git, demand, assertReport, assertWatchdog, assertNoGodot, engineErrors, inside, resolveExecutablePair } from './building-runner.mjs';
 
 export const defaultStages = { entry: 'physical_validation_started', resolve: 'physical_resolve_schema', grid: 'physical_grid_cells', support_resolution: 'physical_resolve_support', validation: 'physical_validation_part', frame: 'physical_frame_part', final: 'physical_validation_completed' };
 const common = { outputdirectory: '', godotexe: '', projectpath: '' };
@@ -157,11 +157,16 @@ export async function runSpecial(name, argv, runOwnedProcess) {
   if (script) { files.push(script.slice(6)); args = ['--headless', '--script', script]; }
   const exclusive = ['citadel-structural-composer-two-phase-contract', 'citadel-visual-preservation'].includes(name);
   if (exclusive) assertNoGodot();
+  if (name === 'citadel-main-menu-diagnostic')
+    files.push('project.godot', 'scripts/testing/AutomatedTestOverlay.gd', 'tools/lib/headed-test-evidence.mjs', 'tools/lib/building-runner.mjs');
   prepare(c, isolate, save);
   if (name === 'citadel-main-menu-diagnostic') fs.mkdirSync(at('screenshots'));
   const before = launchRecord(c, files, { ...metadata, timeoutSeconds: timeout, phase: o.phase, mode: o.mode });
   if (name === 'building-contract') await phaseRun(c, { args: [...args, '--check-only'], env, timeout, prefix: 'parse-', logPolicy }, runOwnedProcess);
-  const w = await phaseRun(c, { args, env, timeout, membership, logPolicy, live: name === 'citadel-main-menu-diagnostic', ...(name === 'citadel-structural-composer-two-phase-contract' ? { logExtension: 'txt', summaryName: 'watchdog-summary.json' } : {}) }, runOwnedProcess);
+  const headed = name === 'citadel-main-menu-diagnostic';
+  const w = await phaseRun(c, { args, env, timeout, membership, logPolicy, live: headed,
+    ...(headed ? { headedTest: { runnerId: name, sourceIdentity: { branch: git(c.project, 'branch', '--show-current').toString().trim(), head: git(c.project, 'rev-parse', 'HEAD').toString().trim(), sourceSha256: before } } } : {}),
+    ...(name === 'citadel-structural-composer-two-phase-contract' ? { logExtension: 'txt', summaryName: 'watchdog-summary.json' } : {}) }, runOwnedProcess);
   stable(c.project, before);
   if (exclusive) assertNoGodot();
   if (executableBefore) stable(c.project, executableBefore);

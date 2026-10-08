@@ -12,12 +12,154 @@ const Partitioner := preload("res://scripts/world/ChunkStaticRenderSectionInstan
 const Attributes := preload("res://scripts/world/StaticInstanceAttributeBuffer.gd")
 const SnapshotBuilder := preload("res://scripts/world/PreparedStaticSectionSnapshotBuilder.gd")
 const MeshFingerprint := preload("res://scripts/world/StaticRenderMeshFingerprint.gd")
+const MaterialFingerprint := preload("res://scripts/world/StaticRenderMaterialFingerprint.gd")
+const OwnerCompletion := preload("res://scripts/world/StaticGeometryOwnerCompletion.gd")
+const SectionSnapshot := preload("res://scripts/world/ChunkStaticRenderSectionSnapshot.gd")
 const RemovedProps := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 const BranchShader := preload("res://resources/visual/procedural_tree_branch.gdshader")
 const FoliageShader := preload("res://resources/visual/procedural_tree_foliage.gdshader")
 
 const SCHEMA := "tree-section-value-adapter/v1"
 const PIPELINE_REVISION := "procedural-tree-runtime-visual/v1"
+
+
+## Adapt an admitted finite source without rewriting the compiler artifact.
+## This is MAIN capture: weak owner fields never enter the returned value inputs.
+## The caller binds the alias and census revision to its current admitted job.
+static func capture_compiled_contributor(captured: Dictionary, source_id: String,
+		source_revision: String, section_key: Vector3i) -> Dictionary:
+	if captured.get("status") != "ready" or not captured.is_read_only() \
+			or source_id.is_empty() or source_revision.is_empty():
+		return _pending("tree_compiled_contributor_identity_missing")
+	var producer_id := String(captured.get("producerSourceId", ""))
+	var compiled_value: Variant = captured.get("compiledRecord")
+	var manifest_value: Variant = captured.get("sourceManifest")
+	if producer_id.is_empty() or not compiled_value is Dictionary \
+			or not compiled_value.is_read_only() or not manifest_value is Dictionary \
+			or not manifest_value.is_read_only():
+		return _pending("tree_compiled_contributor_unsealed")
+	var compiled: Dictionary = compiled_value
+	var manifest: Dictionary = manifest_value
+	var artifact: Dictionary = compiled.get("compiled", {})
+	var compiler_revision := String(manifest.get("sourceRevision", ""))
+	if not artifact.is_read_only() or manifest.get("sourceId") != producer_id \
+			or compiler_revision.is_empty() or compiler_revision != captured.get("compiledSourceRevision"):
+		return _pending("tree_compiled_contributor_source_mismatch")
+	var resources: Dictionary = artifact.get("resourceBindings", {})
+	var inputs: Array[Dictionary] = []
+	var complete_members: Array[Dictionary] = []
+	var supports: Array[Dictionary] = []
+	var compatibility_by_key: Dictionary = {}
+	var resource_bindings: Dictionary = {}
+	var seen_members: Dictionary = {}
+	var ownership_by_member: Dictionary = {}
+	for ownership: Variant in manifest.get("geometryOwnership", []):
+		if not ownership is Dictionary or not ownership.is_read_only():
+			return _pending("tree_compiled_geometry_ownership_unsealed")
+		var member_id := String(ownership.get("memberId", ""))
+		if member_id.is_empty() or ownership_by_member.has(member_id):
+			return _pending("tree_compiled_geometry_ownership_ambiguous")
+		ownership_by_member[member_id] = ownership
+	for batch_value: Variant in artifact.get("batches", []):
+		if not batch_value is Dictionary or not batch_value.is_read_only():
+			return _pending("tree_compiled_contributor_batch_unsealed")
+		var batch: Dictionary = batch_value
+		var owner_section: Variant = batch.get("sectionKey")
+		var compatibility: Variant = batch.get("compatibilityKey")
+		var batch_key := String(batch.get("batchKey", ""))
+		if not owner_section is Vector3i or not compatibility is Dictionary \
+				or not compatibility.is_read_only() or batch_key.is_empty() \
+				or compatibility.get("batchKey") != batch_key:
+			return _pending("tree_compiled_contributor_batch_invalid")
+		var mesh: Variant = resources.get(String(batch.get("meshKey", "")))
+		var material: Variant = resources.get(String(batch.get("materialKey", "")))
+		if not is_instance_valid(mesh) or not mesh is Mesh \
+				or not is_instance_valid(material) or not material is Material \
+				or MeshFingerprint.inspect(mesh).get("contentDigest", "") != compatibility.get("meshContentDigest") \
+				or _material_digest(material) != compatibility.get("materialDigest", compatibility.get("materialContentDigest")):
+			return _pending("tree_compiled_contributor_resource_stale")
+		var source_to_world := Transform3D(Basis.IDENTITY, Grid.origin_for_key(owner_section))
+		for contributor_key: Variant in batch.get("contributors", {}):
+			var contributor: Variant = batch.contributors[contributor_key]
+			if not contributor is Dictionary or not contributor.is_read_only():
+				return _pending("tree_compiled_contributor_member_unsealed")
+			if contributor.get("sourceId") != producer_id: continue
+			var producer_part := String(contributor.get("sourcePartId", ""))
+			var expected_key := "section-part:" + var_to_bytes([producer_id, producer_part]).hex_encode()
+			var attributes: Variant = contributor.get("instanceAttributes")
+			var count := int(contributor.get("instanceCount", 0))
+			if producer_part.is_empty() or contributor_key != expected_key \
+					or seen_members.has(producer_part) or not ownership_by_member.has(producer_part) \
+					or contributor.get("sourceRevision") != compiler_revision \
+					or not attributes is Array or not attributes.is_read_only() \
+					or count != 1 \
+					or attributes.size() != Attributes.FLOATS_PER_INSTANCE:
+				return _pending("tree_compiled_contributor_member_identity_invalid")
+			var typed_attributes: Array[float] = []
+			for component: Variant in attributes:
+				if not component is float or not is_finite(component):
+					return _pending("tree_compiled_contributor_attribute_invalid")
+				typed_attributes.append(component)
+			typed_attributes.make_read_only()
+			attributes = typed_attributes
+			seen_members[producer_part] = true
+			var ownership: Dictionary = ownership_by_member[producer_part]
+			if ownership.get("geometryOwnerSectionKey") != owner_section:
+				return _pending("tree_compiled_contributor_owner_mismatch")
+			var segment_id := "building-tree-member:" + var_to_bytes([
+				source_id, producer_id, producer_part, compiler_revision, owner_section, batch_key]).hex_encode().sha256_text()
+			var member := OwnerCompletion.capture_member(source_id, source_id,
+				source_revision, segment_id, 0, source_to_world,
+				compatibility.get("meshLocalBounds", AABB()), attributes, 0, compatibility)
+			if member.is_empty() or member.geometryOwnerSection != owner_section:
+				return _pending("tree_compiled_contributor_geometry_member_invalid")
+			complete_members.append(member)
+			if owner_section == section_key:
+				if compatibility_by_key.has(batch_key) and compatibility_by_key[batch_key] != compatibility:
+					return _pending("tree_compiled_contributor_batch_conflict")
+				compatibility_by_key[batch_key] = compatibility
+				var bindings := {"mesh":mesh, "material":material,
+					"materialDigest":_material_digest(material)}
+				bindings.make_read_only()
+				resource_bindings[batch_key] = bindings
+				var input := {"instanceAttributeLayout":Attributes.LAYOUT_SCHEMA,
+					"sourceId":source_id, "sourcePartId":source_id, "sourceRevision":source_revision,
+					"ownerCell":batch.get("ownerCell"), "sourceToWorld":source_to_world,
+					"meshLocalBounds":compatibility.get("meshLocalBounds", AABB()),
+					"batchKey":batch_key, "segmentId":segment_id, "buffer":attributes,
+					"instanceCount":count, "compatibility":compatibility}
+				input.make_read_only()
+				inputs.append(input)
+			elif section_key in ownership.get("supportSectionKeys", []):
+				var bounds: Variant = ownership.get("conservativeWorldBounds")
+				if not bounds is AABB or not _valid_bounds(bounds):
+					return _pending("tree_compiled_contributor_support_invalid")
+				var dependencies: Array[Vector2i] = SectionSnapshot._stream_chunk_keys_intersecting_bounds(bounds).duplicate()
+				var owner_chunk := Grid.chunk_key_for_section(owner_section)
+				if owner_chunk not in dependencies: dependencies.append(owner_chunk)
+				dependencies.make_read_only()
+				var support := {"sourceId":source_id, "sourcePartId":source_id,
+					"sourceRevision":source_revision, "memberId":segment_id + ":0",
+					"propId":String(captured.get("propId", "")), "sourceSegmentId":segment_id,
+					"sourceInstance":0, "ownerCell":batch.get("ownerCell"),
+					"sourceOwnerChunk":owner_chunk, "geometryOwnerSection":owner_section,
+					"supportSectionKey":section_key, "worldBounds":bounds,
+					"streamChunkDependencies":dependencies,
+					"ownershipPolicy":"center_geometry_owner/aabb_support_sections_v1",
+					"meshContentDigest":String(compatibility.get("meshContentDigest", ""))}
+				support.make_read_only()
+				supports.append(support)
+	if seen_members.size() != ownership_by_member.size() or seen_members.is_empty():
+		return _pending("tree_compiled_contributor_roster_incomplete")
+	inputs.make_read_only()
+	complete_members.make_read_only()
+	supports.make_read_only()
+	compatibility_by_key.make_read_only()
+	resource_bindings.make_read_only()
+	return {"status":"ready", "inputs":inputs, "geometryOwnerMembers":complete_members,
+		"supportRanges":supports, "compatibilityByKey":compatibility_by_key,
+		"resourceBindings":resource_bindings, "producerSourceId":producer_id,
+		"compiledSourceRevision":compiler_revision}
 
 
 ## Hash the queue-owned raw member values and the mutable resources they refer
@@ -154,25 +296,13 @@ static func _capture_tree_record(queue: Object, main: Object, world_id: String,
 			"schema":SCHEMA, "worldId":world_id, "sourceId":source_id,
 			"sourcePartId":source_id, "sourceRevision":_tombstone_revision(
 				world_id, source_id, prop_id), "propId":prop_id}
-	var body_state := String(body.get_meta("tree_visual_state", ""))
-	var body_source := String(body.get_meta("visual_source", ""))
 	var prepared_transform: Variant = queue_record.get("bodyGlobalTransform", null)
-	var section_owned := bool(queue_record.get("sectionOwned", false))
-	var published_visual_valid := body_state == "published" \
-		and body_source == "procedural_tree_recipe"
-	var section_visual_valid := body_state == "section_owned" \
-		and body_source == "chunk_owned_static_section" \
-		and (section_owned or not require_published)
-	var accepted_visual_valid := published_visual_valid or section_visual_valid
 	var prepared_for_current_body := prepared_transform is Transform3D \
 		and (prepared_transform as Transform3D).is_equal_approx(body.global_transform)
-	var prepared_state_valid := accepted_visual_valid \
-		or body_state == "section_candidate_pending"
 	if not body.is_inside_tree() or body.is_queued_for_deletion() \
 			or bool(body.get_meta("tree_publication_cancelled", false)) \
-			or (require_published and not published_visual_valid and not section_visual_valid) \
-			or (not require_published and (not prepared_state_valid \
-				or not prepared_for_current_body)):
+			or not prepared_for_current_body \
+			or int(queue_record.get("bodyInstanceId", 0)) != body.get_instance_id():
 		return _pending("tree_body_not_currently_publishable", {"sourceId":source_id})
 	if queue_record.is_empty():
 		return _pending("tree_queue_prepared_record_missing" if not require_published \
@@ -188,8 +318,8 @@ static func _capture_tree_record(queue: Object, main: Object, world_id: String,
 	if tier.is_empty() or tier != String(request.get("renderLodTier", "")) \
 			or not recipe_lod is Dictionary or tier != String(recipe_lod.get("tier", "")):
 		return _pending("tree_queue_recipe_lod_disagrees", {"sourceId":source_id})
-	if String(request.get("treeId", "")) != prop_id \
-			or String(request.get("worldSeed", "")) != seed \
+	if String(queue_record.get("propId", "")) != prop_id \
+			or String(queue_record.get("worldSeed", "")) != seed \
 			or not request.get("treeWorldPosition") is Vector3 \
 			or not (request.get("treeWorldPosition") as Vector3).is_equal_approx(body.global_position):
 		return _pending("tree_queue_request_identity_stale", {"sourceId":source_id})
@@ -494,69 +624,9 @@ static func _supported_opaque_layer(material: Material, role: String) -> String:
 
 
 static func _material_digest(material: Material) -> String:
-	if material is ShaderMaterial:
-		var shader_material := material as ShaderMaterial
-		var shader := shader_material.shader
-		if shader == null or shader.code.is_empty(): return ""
-		var uniforms: Array = []
-		for uniform_value: Variant in shader.get_shader_uniform_list():
-			if not uniform_value is Dictionary: return ""
-			var name := String(uniform_value.get("name", ""))
-			if name.begins_with("global_"): continue
-			var parameter: Variant = shader_material.get_shader_parameter(name)
-			var canonical_parameter: Variant = parameter
-			if parameter is Texture2D:
-				var texture_digest := _texture_digest(parameter as Texture2D)
-				if texture_digest.is_empty(): return ""
-				canonical_parameter = ["texture2d", texture_digest]
-			elif not _digest_value_supported(parameter):
-				return ""
-			uniforms.append([name, canonical_parameter])
-		uniforms.sort_custom(func(a: Array, b: Array) -> bool: return String(a[0]) < String(b[0]))
-		return Marshalls.raw_to_base64(var_to_bytes([shader.code, uniforms])).sha256_text()
-	if material is BaseMaterial3D:
-		var values: Array = []
-		for property_value: Variant in material.get_property_list():
-			if not property_value is Dictionary: return ""
-			var property_name := String(property_value.get("name", ""))
-			if property_name.is_empty() or property_name.begins_with("resource_") \
-					or property_name in ["script", "resource_local_to_scene", "resource_name"]:
-				continue
-			var value: Variant = material.get(property_name)
-			var canonical_value: Variant = value
-			if value is Texture2D:
-				var texture_digest := _texture_digest(value as Texture2D)
-				if texture_digest.is_empty(): return ""
-				canonical_value = ["texture2d", texture_digest]
-			elif value is Resource or value is Object or value is Callable \
-					or not _digest_value_supported(value):
-				return ""
-			values.append([property_name, canonical_value])
-		values.sort_custom(func(a: Array, b: Array) -> bool: return String(a[0]) < String(b[0]))
-		return Marshalls.raw_to_base64(var_to_bytes([material.get_class(), values])).sha256_text()
-	return ""
-
-
-static func _digest_value_supported(value: Variant) -> bool:
-	return value == null or value is bool or value is int or value is float \
-		or value is String or value is Color or value is Vector2 or value is Vector3 \
-		or value is Vector4 or value is Vector2i or value is Vector3i \
-		or value is Rect2 or value is Quaternion or value is Basis \
-		or value is Transform3D or value is AABB
-
-
-static func _texture_digest(texture: Texture2D) -> String:
-	if not is_instance_valid(texture): return ""
-	var image := texture.get_image()
-	if image == null or image.is_empty(): return ""
-	var context := HashingContext.new()
-	if context.start(HashingContext.HASH_SHA256) != OK:
-		return ""
-	var identity := var_to_bytes([texture.get_class(), image.get_width(),
-		image.get_height(), image.get_format(), image.has_mipmaps()])
-	if context.update(identity) != OK or context.update(image.get_data()) != OK:
-		return ""
-	return context.finish().hex_encode()
+	var fingerprint: Dictionary = MaterialFingerprint.inspect(material)
+	return String(fingerprint.get("contentDigest", "")) \
+		if String(fingerprint.get("status", "")) == "ready" else ""
 
 
 static func _tombstone_revision(world_id: String, source_id: String, prop_id: String) -> String:

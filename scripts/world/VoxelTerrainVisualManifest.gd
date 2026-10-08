@@ -4,6 +4,7 @@ class_name VoxelTerrainVisualManifest
 ## Incrementally describes the native terrain mesh blocks intersecting the
 ## configured 3D viewer sphere. Empty blocks count only after is_area_meshed.
 const NATIVE_BLOCK_CELLS := 16
+const StaticSectionGrid := preload("res://scripts/world/StaticRenderSectionGrid.gd")
 
 var _runtime_ref: WeakRef
 var _readiness: Object
@@ -338,6 +339,45 @@ func revisit_block(block_position: Vector3i) -> bool:
 		_completed_blocks.erase(block_position)
 	if not _revisit_blocks.has(block_position): _revisit_blocks.append(block_position)
 	return true
+
+
+## Immutable section-key projection of the exact native mesh-block sphere
+## admitted by begin(). The controller uses this for per-section static-owner
+## leases; it must not rebuild its own radius or vertical-bound calculation.
+func required_section_keys() -> Dictionary:
+	var runtime: Object = _runtime_ref.get_ref() if _runtime_ref != null else null
+	if not _active or not is_instance_valid(runtime):
+		return {"status":"pending", "reason":"native_terrain_visual_manifest_not_started",
+			"retryable":true}
+	if String(runtime.call("visible_mesh_source_identity")) != _source_identity \
+			or String(runtime.call("visible_mesh_world_revision")) != _source_world_revision \
+			or _source_world_revision != _world_revision:
+		return {"status":"pending", "reason":"native_terrain_source_revision_changed",
+			"retryable":true}
+	var seen: Dictionary = {}
+	var section_keys: Array[Vector3i] = []
+	for block: Vector3i in _blocks:
+		var origin_cell := block * NATIVE_BLOCK_CELLS
+		var section_key: Vector3i = StaticSectionGrid.key_for_cell(origin_cell)
+		if seen.has(section_key):
+			continue
+		seen[section_key] = true
+		section_keys.append(section_key)
+	section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+			if a.x != b.x: return a.x < b.x
+			if a.y != b.y: return a.y < b.y
+			return a.z < b.z)
+	if section_keys.is_empty():
+		return {"status":"pending", "reason":"native_terrain_mesh_source_set_empty",
+			"retryable":true}
+	section_keys.make_read_only()
+	var snapshot := {"status":"ready", "schema":"voxel-terrain-required-section-set/v1",
+		"requestId":_request_id, "seed":_seed, "worldRevision":_world_revision,
+		"viewRevision":_view_revision, "centerCells":_center_cells,
+		"radiusCells":_radius_cells, "sourceIdentity":_source_identity,
+		"terrainSourceRevision":_source_world_revision, "sectionKeys":section_keys}
+	snapshot.make_read_only()
+	return snapshot
 
 
 func _required_blocks(runtime: Object, center: Vector3, radius: float) -> Array[Vector3i]:

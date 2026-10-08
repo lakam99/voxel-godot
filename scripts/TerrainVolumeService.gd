@@ -37,6 +37,8 @@ var durable_delta_section_snapshots := {}
 var durable_delta_dirty_sections := {}
 var durable_delta_section_revisions := {}
 var scene_block_cells := {}
+var scene_overlay_section_revisions := {}
+var scene_overlay_section_column_revisions := {}
 var mesh_edited_column_counts := {}
 var mesh_edited_cells_by_section := {}
 var surface_projection_edited_column_counts := {}
@@ -75,6 +77,8 @@ func reset() -> void:
 	durable_delta_dirty_sections.clear()
 	durable_delta_section_revisions.clear()
 	scene_block_cells.clear()
+	scene_overlay_section_revisions.clear()
+	scene_overlay_section_column_revisions.clear()
 	mesh_edited_column_counts.clear()
 	mesh_edited_cells_by_section.clear()
 	surface_projection_edited_column_counts.clear()
@@ -343,39 +347,15 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 	max_y: int,
 	terrain_step_cells := 1
 ) -> Dictionary:
-	var safe_chunk_size := maxi(1, int(chunk_size))
-	var from_y := mini(int(min_y), int(max_y))
-	var to_y := maxi(int(min_y), int(max_y))
-	var requested_from_y := from_y
-	var requested_to_y := to_y
-	var generation = active_generator()
-	if generation != null and generation.has_method("generated_fluid_cell_y_bounds"):
-		var generated_bounds_value = generation.call("generated_fluid_cell_y_bounds")
-		if generated_bounds_value is Dictionary:
-			var generated_bounds: Dictionary = generated_bounds_value
-			var generated_from_y := maxi(from_y, int(generated_bounds.get("minY", from_y)))
-			var generated_to_y := mini(to_y, int(generated_bounds.get("maxY", to_y)))
-			if generated_to_y >= generated_from_y:
-				from_y = generated_from_y
-				to_y = generated_to_y
-	var edit_min_x := int(start_x) - 1
-	var edit_max_x := int(start_x) + safe_chunk_size
-	var edit_min_z := int(start_z) - 1
-	var edit_max_z := int(start_z) + safe_chunk_size
-	for cell_value in edited_cells.keys():
-		var edited_cell: Vector3i = cell_value
-		if edited_cell.x < edit_min_x or edited_cell.x > edit_max_x or edited_cell.z < edit_min_z or edited_cell.z > edit_max_z:
-			continue
-		var edited_state: Dictionary = edited_cells[edited_cell] if edited_cells[edited_cell] is Dictionary else {}
-		if bool(edited_state.get("solid", false)) or fluid_type_id(String(edited_state.get("fluid", ""))) == FLUID_TYPE_NONE:
-			continue
-		if edited_cell.y >= requested_from_y and edited_cell.y <= requested_to_y:
-			from_y = mini(from_y, edited_cell.y)
-			to_y = maxi(to_y, edited_cell.y)
-	var min_cell := Vector3i(int(start_x) - 1, from_y - 1, int(start_z) - 1)
-	var max_cell := Vector3i(int(start_x) + safe_chunk_size, to_y + 1, int(start_z) + safe_chunk_size)
-	var payload_size := max_cell - min_cell + Vector3i.ONE
-	var payload_cell_count := payload_size.x * payload_size.y * payload_size.z
+	var bounds := exact_fluid_payload_bounds(start_x, start_z, chunk_size, min_y, max_y)
+	if bounds.get("status") != "ready":
+		return {}
+	var safe_chunk_size := int(bounds.chunkSize)
+	var from_y := int(bounds.minY)
+	var to_y := int(bounds.maxY)
+	var min_cell: Vector3i = bounds.minCell
+	var max_cell: Vector3i = bounds.maxCell
+	var payload_size: Vector3i = bounds.payloadSize
 	return {
 		"schemaVersion": 1,
 		"terrainStepCells": maxi(1, int(terrain_step_cells)),
@@ -411,6 +391,50 @@ func begin_exact_fluid_payload_for_meshing_chunk(
 		"cancelled": false,
 		"stale": false
 	}
+
+
+## The exact-fluid producer owns its query footprint. Consumers can ask this
+## same authority for the canonical clipped/edit-expanded bounds instead of
+## accepting bounds supplied by a proof as their own expected extent.
+func exact_fluid_payload_bounds(start_x: int, start_z: int, chunk_size: int,
+		min_y: int, max_y: int) -> Dictionary:
+	var safe_chunk_size := maxi(1, int(chunk_size))
+	var generation = active_generator()
+	var from_y := mini(int(min_y), int(max_y))
+	var to_y := maxi(int(min_y), int(max_y))
+	var requested_from_y := from_y
+	var requested_to_y := to_y
+	if generation != null and generation.has_method("generated_fluid_cell_y_bounds"):
+		var generated_bounds_value = generation.call("generated_fluid_cell_y_bounds")
+		if generated_bounds_value is Dictionary:
+			var generated_bounds: Dictionary = generated_bounds_value
+			var generated_from_y := maxi(from_y, int(generated_bounds.get("minY", from_y)))
+			var generated_to_y := mini(to_y, int(generated_bounds.get("maxY", to_y)))
+			if generated_to_y >= generated_from_y:
+				from_y = generated_from_y
+				to_y = generated_to_y
+	var edit_min_x := int(start_x) - 1
+	var edit_max_x := int(start_x) + safe_chunk_size
+	var edit_min_z := int(start_z) - 1
+	var edit_max_z := int(start_z) + safe_chunk_size
+	for cell_value in edited_cells.keys():
+		var edited_cell: Vector3i = cell_value
+		if edited_cell.x < edit_min_x or edited_cell.x > edit_max_x or edited_cell.z < edit_min_z or edited_cell.z > edit_max_z:
+			continue
+		var edited_state: Dictionary = edited_cells[edited_cell] if edited_cells[edited_cell] is Dictionary else {}
+		if bool(edited_state.get("solid", false)) or fluid_type_id(String(edited_state.get("fluid", ""))) == FLUID_TYPE_NONE:
+			continue
+		if edited_cell.y >= requested_from_y and edited_cell.y <= requested_to_y:
+			from_y = mini(from_y, edited_cell.y)
+			to_y = maxi(to_y, edited_cell.y)
+	var min_cell := Vector3i(int(start_x) - 1, from_y - 1, int(start_z) - 1)
+	var max_cell := Vector3i(int(start_x) + safe_chunk_size, to_y + 1, int(start_z) + safe_chunk_size)
+	var payload_size := max_cell - min_cell + Vector3i.ONE
+	var bounds := {"status":"ready", "chunkSize":safe_chunk_size,
+		"minY":from_y, "maxY":to_y, "minCell":min_cell,
+		"maxCell":max_cell, "payloadSize":payload_size}
+	bounds.make_read_only()
+	return bounds
 
 func cancel_exact_fluid_payload_state(state: Dictionary) -> Dictionary:
 	state["cancelled"] = true
@@ -545,6 +569,10 @@ func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 	var revision_entries := []
 	var signature_parts := PackedStringArray()
 	var section_keys: Array = state.get("sectionKeys", []) if state.get("sectionKeys", []) is Array else []
+	section_keys.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.x != b.x: return a.x < b.x
+		if a.y != b.y: return a.y < b.y
+		return a.z < b.z)
 	for key_value in section_keys:
 		var section_key: Vector3i = key_value
 		var key_text := "%d,%d,%d" % [section_key.x, section_key.y, section_key.z]
@@ -553,6 +581,12 @@ func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 		signature_parts.append("%s:%d" % [key_text, section_revision])
 	var volume_revision := int(state.get("volumeRevision", revision))
 	var snapshot_fluid_revision := int(state.get("fluidRevision", fluid_revision))
+	var min_cell: Vector3i = state.get("minCell", Vector3i.ZERO)
+	var max_cell: Vector3i = state.get("maxCell", Vector3i.ZERO)
+	var capture_identity := ["exact-fluid-capture/v2", volume_revision,
+		snapshot_fluid_revision, min_cell, max_cell, signature_parts]
+	var capture_signature := "exact-fluid-v2:%s" % Marshalls.raw_to_base64(
+		var_to_bytes(capture_identity)).sha256_text()
 	var cells := {}
 	if has_fluid:
 		cells = {
@@ -579,7 +613,7 @@ func finalized_exact_fluid_payload_from_state(state: Dictionary) -> Dictionary:
 		"revision": volume_revision,
 		"fluidRevision": snapshot_fluid_revision,
 		"sectionRevisions": revision_entries,
-		"signature": "exact-fluid-v1:%d:%d:%s" % [volume_revision, snapshot_fluid_revision, ";".join(signature_parts)],
+		"signature": capture_signature,
 		"hasFluid": has_fluid,
 		"fluidCellCount": int(state.get("fluidCellCount", 0)),
 		"solidCellCount": int(state.get("solidCellCount", 0)),
@@ -1024,6 +1058,7 @@ func set_scene_block_overlay(cell: Vector3i, state: Dictionary, reason := "") ->
 	normalized["editReason"] = String(reason)
 	scene_block_cells[cell] = normalized
 	revision += 1
+	advance_scene_overlay_section_revision(section_key_for_cell(cell))
 	return normalized.duplicate(true)
 
 func clear_scene_block_overlay(cell: Vector3i) -> bool:
@@ -1031,7 +1066,16 @@ func clear_scene_block_overlay(cell: Vector3i) -> bool:
 		return false
 	scene_block_cells.erase(cell)
 	revision += 1
+	advance_scene_overlay_section_revision(section_key_for_cell(cell))
 	return true
+
+
+func advance_scene_overlay_section_revision(section_key: Vector3i) -> void:
+	scene_overlay_section_revisions[section_key] = int(
+		scene_overlay_section_revisions.get(section_key, 0)) + 1
+	var column_key := Vector2i(section_key.x, section_key.z)
+	scene_overlay_section_column_revisions[column_key] = int(
+		scene_overlay_section_column_revisions.get(column_key, 0)) + 1
 
 func set_cell_state(cell: Vector3i, state: Dictionary, reason := "", rebuild_sky_light := true) -> Dictionary:
 	var previous_fluid_state := get_cell_state(cell)
@@ -2438,6 +2482,24 @@ func chunk_revision(chunk_key: Vector2i, chunk_size: int) -> int:
 	var end_z := start_z + chunk_size
 	return max_section_column_revision(section_column_revisions, start_x, start_z, end_x, end_z)
 
+## Bind scan cursors to every mutable source read by the floor predicate while
+## keeping unrelated XZ columns from restarting completed work.
+func exposed_underground_floor_scan_source_revision(chunk_key: Vector2i,
+		chunk_size: int) -> String:
+	var size := maxi(1, int(chunk_size))
+	var start_x := chunk_key.x * size
+	var start_z := chunk_key.y * size
+	var end_x := start_x + size
+	var end_z := start_z + size
+	var terrain_source := max_section_column_revision(section_column_revisions,
+		start_x, start_z, end_x, end_z)
+	var overlay_source := max_section_column_revision(scene_overlay_section_column_revisions,
+		start_x, start_z, end_x, end_z)
+	var fluid_source := max_section_column_revision(fluid_section_column_revisions,
+		start_x, start_z, end_x, end_z)
+	return "underground-floor-scan-v2:%d:%d:%d" % [terrain_source,
+		overlay_source, fluid_source]
+
 func fluid_chunk_revision_with_halo(chunk_key: Vector2i, chunk_size: int) -> int:
 	var size := maxi(1, int(chunk_size))
 	var start_x := chunk_key.x * size - 1
@@ -3011,8 +3073,12 @@ func begin_exposed_underground_floor_scan(chunk_key: Vector2i, chunk_size := SEC
 		"columnIndex": 0,
 		"scanY": 0,
 		"columnStarted": false,
+		"columnSamplesValid": false,
+		"columnAirState": {},
+		"columnHeadState": {},
+		"columnFloorState": {},
 		"complete": false,
-		"revision": chunk_revision(chunk_key, size)
+		"revision": exposed_underground_floor_scan_source_revision(chunk_key, size)
 	}
 
 func generated_underground_floor_source_proven_empty(chunk_key: Vector2i,
@@ -3064,8 +3130,8 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 		}
 	var chunk_key: Vector2i = state.get("chunkKey", Vector2i.ZERO)
 	var size := maxi(1, int(state.get("chunkSize", SECTION_SIZE)))
-	var source_revision := chunk_revision(chunk_key, size)
-	var restarted := int(state.get("revision", source_revision)) != source_revision
+	var source_revision := exposed_underground_floor_scan_source_revision(chunk_key, size)
+	var restarted := String(state.get("revision", source_revision)) != source_revision
 	if restarted:
 		state = begin_exposed_underground_floor_scan(chunk_key, size)
 	if int(state.get("columnIndex", 0)) == 0 \
@@ -3098,21 +3164,43 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 			var surface_y := reference_surface_y_for_cell(Vector3i(cell_x, 0, cell_z))
 			y = mini(world_top_cell_y(), floori(surface_y / cell_size()) + 1)
 			column_started = true
+			state["columnHeadState"] = get_cell_state(Vector3i(cell_x, y + 1, cell_z))
+			state["columnAirState"] = get_cell_state(Vector3i(cell_x, y, cell_z))
+			state["columnFloorState"] = get_cell_state(Vector3i(cell_x, y - 1, cell_z))
+			state["columnSamplesValid"] = true
+		elif not bool(state.get("columnSamplesValid", false)):
+			# Accept older/incomplete scan cursors by sampling the current y triplet.
+			# No cells below this cursor have been examined yet.
+			state["columnHeadState"] = get_cell_state(Vector3i(cell_x, y + 1, cell_z))
+			state["columnAirState"] = get_cell_state(Vector3i(cell_x, y, cell_z))
+			state["columnFloorState"] = get_cell_state(Vector3i(cell_x, y - 1, cell_z))
+			state["columnSamplesValid"] = true
 		var finished_column := false
 		while y > bottom_y and processed < maxi(1, int(sample_budget)):
 			if processed > 0 and float(time_budget_ms) > 0.0 and float(Time.get_ticks_usec() - start_usec) / 1000.0 >= float(time_budget_ms):
 				break
-			var air_cell := Vector3i(cell_x, y, cell_z)
 			processed += 1
-			if underground_air_floor_cell_is_spawnable(air_cell):
-				new_candidates.append(air_cell + Vector3i(0, -1, 0))
+			if underground_air_floor_cell_states_are_spawnable(
+				state.get("columnAirState", {}), state.get("columnHeadState", {}),
+				state.get("columnFloorState", {})):
+				new_candidates.append(Vector3i(cell_x, y - 1, cell_z))
 				finished_column = true
 				break
+			if y - 1 <= bottom_y:
+				y = bottom_y
+				break
+			state["columnHeadState"] = state.get("columnAirState", {})
+			state["columnAirState"] = state.get("columnFloorState", {})
 			y -= 1
+			state["columnFloorState"] = get_cell_state(Vector3i(cell_x, y - 1, cell_z))
 		if finished_column or y <= bottom_y:
 			column_index += 1
 			y = 0
 			column_started = false
+			state["columnSamplesValid"] = false
+			state["columnHeadState"] = {}
+			state["columnAirState"] = {}
+			state["columnFloorState"] = {}
 		else:
 			break
 	var complete := column_index >= total_columns
@@ -3131,16 +3219,21 @@ func advance_exposed_underground_floor_scan(state_value, sample_budget := 128, t
 
 func underground_air_floor_cell_is_spawnable(air_cell: Vector3i) -> bool:
 	var air_state := get_cell_state(air_cell)
+	var head_state := get_cell_state(air_cell + Vector3i(0, 1, 0))
+	var floor_state := get_cell_state(air_cell + Vector3i(0, -1, 0))
+	return underground_air_floor_cell_states_are_spawnable(air_state,
+		head_state, floor_state)
+
+func underground_air_floor_cell_states_are_spawnable(air_state: Dictionary,
+		head_state: Dictionary, floor_state: Dictionary) -> bool:
 	if bool(air_state.get("solid", true)):
 		return false
 	if String(air_state.get("biome", "")) != UNDERGROUND_AIR_BIOME:
 		return false
 	if String(air_state.get("fluid", "")) != "":
 		return false
-	var head_state := get_cell_state(air_cell + Vector3i(0, 1, 0))
 	if bool(head_state.get("solid", false)):
 		return false
-	var floor_state := get_cell_state(air_cell + Vector3i(0, -1, 0))
 	if not bool(floor_state.get("solid", false)):
 		return false
 	var material := String(floor_state.get("material", ""))

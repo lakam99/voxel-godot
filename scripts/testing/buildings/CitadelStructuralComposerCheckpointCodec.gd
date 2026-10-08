@@ -24,6 +24,7 @@ const MAX_EXACT_JSON_INTEGER := 9007199254740991
 const RUNNER_SOURCE_PATHS := [
 	"res://tools/run-citadel-structural-composer-two-phase-contract.mjs",
 	"res://tools/lib/building-runner.mjs",
+	"res://tools/lib/headed-test-evidence.mjs",
 	"res://tools/lib/building-special.mjs",
 	"res://tools/lib/building-special-sources.mjs",
 	"res://tools/lib/building-source-bindings.mjs",

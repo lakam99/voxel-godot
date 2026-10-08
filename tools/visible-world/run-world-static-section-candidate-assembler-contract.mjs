@@ -1,12 +1,15 @@
 import path from 'node:path';
-import { cli, options, context, prepare, launchRecord, phaseRun, read, demand } from '../lib/building-runner.mjs';
+import { cli, options, context, prepare, launchRecord, phaseRun, read, demand, stable } from '../lib/building-runner.mjs';
 
 cli(async () => {
   const o = options(process.argv.slice(2), { outputdirectory: '', godotexe: '', projectpath: '' });
   const c = context(o, 'whole-section-candidate-assembler-');
   prepare(c, 'userdata', false);
-  launchRecord(c, [
+  const sourceSha256 = launchRecord(c, [
     'scripts/world/WorldStaticSectionCandidateAssembler.gd',
+    'scripts/world/WorldStaticSectionCoordinator.gd',
+    'scripts/world/StaticSectionSourceRoster.gd',
+    'scripts/world/StaticGeometryOwnerCompletion.gd',
     'scripts/world/ChunkStaticRenderSectionInstancePartitioner.gd',
     'scripts/world/ChunkStaticRenderSectionSnapshot.gd',
     'scripts/world/PreparedStaticSectionSnapshotBuilder.gd',
@@ -29,6 +32,7 @@ cli(async () => {
     timeout: 90,
     logPolicy: { emptyStderr: false }
   });
+  stable(c.project, sourceSha256);
   const report = read(path.join(c.run, 'report.json'));
   demand(report.schema === 'world-static-section-candidate-assembler-contract/v1' && report.passed === true,
     'Whole-section candidate assembler contract failed.');

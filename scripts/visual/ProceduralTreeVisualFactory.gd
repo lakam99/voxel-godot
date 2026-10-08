@@ -995,6 +995,48 @@ func finish_runtime_foliage_build_values(build_state: Dictionary, recipe: Dictio
 	values.make_read_only()
 	return values
 
+## The native legacy slot and section compilation share this exact immutable
+## descriptor. Its transforms do not depend on viewer position or build order.
+static func runtime_impostor_descriptor(recipe: Dictionary) -> Dictionary:
+	if not ClassDB.class_exists("ChunkStaticRenderBackend"):
+		return {"status":"failed", "reason":"native_impostor_descriptor_unavailable"}
+	return ClassDB.class_call_static("ChunkStaticRenderBackend", "tree_impostor_descriptor", recipe)
+
+## Planar geometry needs a positive spatial support volume for section ownership;
+## this changes only bounds, never the shared QuadMesh vertices or its material.
+const IMPOSTOR_BOUNDS_POLICY := "tree-impostor-planar-support/v1"
+const IMPOSTOR_PLANAR_HALF_SUPPORT := 0.001
+static func runtime_impostor_mesh_support(mesh: Mesh) -> AABB:
+	var bounds := mesh.get_aabb()
+	for axis in 3:
+		if bounds.size[axis] == 0.0:
+			bounds.position[axis] -= IMPOSTOR_PLANAR_HALF_SUPPORT
+			bounds.size[axis] = IMPOSTOR_PLANAR_HALF_SUPPORT * 2.0
+	return bounds
+
+func runtime_impostor_role_values(recipe: Dictionary, biome: String, role: String) -> Dictionary:
+	var descriptor := runtime_impostor_descriptor(recipe)
+	if descriptor.get("status") != "ready" or role not in ["bole", "foliage"]: return {}
+	ensure_shared_geometry()
+	var architecture := String(recipe.get("architecture", "broadleaf"))
+	var transforms: Array = descriptor.transforms.slice(0, 1) if role == "bole" else descriptor.transforms.slice(1, 3)
+	var mesh: Mesh = branch_mesh if role == "bole" else impostor_crown_mesh
+	var material: Material = branch_material(architecture, biome) if role == "bole" else foliage_material(architecture, biome)
+	var values := {"mesh":mesh, "material":material, "renderPolicy":recipe_render_policy_values(recipe, 20.0, 1.0),
+		"geometryBoundsPolicy":IMPOSTOR_BOUNDS_POLICY, "meshSupportBounds":runtime_impostor_mesh_support(mesh)}
+	var buffer := PackedFloat32Array()
+	for transform: Transform3D in transforms:
+		buffer.append_array(preload("res://scripts/world/StaticInstanceAttributeBuffer.gd").encode(transform, Color(0, 0, 0, 0)))
+	values["nativeInstanceValues"] = buffer
+	if role == "foliage":
+		var multi := MultiMesh.new()
+		multi.transform_format = MultiMesh.TRANSFORM_3D
+		multi.mesh = mesh
+		multi.instance_count = transforms.size()
+		values["multiMesh"] = multi
+	values.make_read_only()
+	return values
+
 func instantiate_runtime_impostor(recipe: Dictionary, biome: String) -> Node3D:
 	# The impostor is only selected beyond the far LOD boundary.  It retains a
 	# readable trunk/crown silhouette while avoiding all branch graph and
@@ -1007,25 +1049,22 @@ func instantiate_runtime_impostor(recipe: Dictionary, biome: String) -> Node3D:
 		root.set_meta("tree_headless_visual_proxy", true)
 		return root
 	ensure_shared_geometry()
-	var height := maxf(2.0, float(recipe.get("height", 8.0)))
-	var radius := maxf(1.0, float(recipe.get("canopyRadius", 3.0)))
+	var descriptor := runtime_impostor_descriptor(recipe)
+	if descriptor.get("status") != "ready": root.free(); return null
 	var architecture := String(recipe.get("architecture", "broadleaf"))
 	var trunk := MeshInstance3D.new()
 	trunk.name = "ImpostorTrunk"
 	trunk.mesh = branch_mesh
 	trunk.material_override = branch_material(architecture, biome)
-	trunk.position.y = height * 0.27
-	trunk.scale = Vector3(maxf(0.10, float(recipe.get("trunkRadius", 0.25))), height * 0.54, maxf(0.10, float(recipe.get("trunkRadius", 0.25))))
+	trunk.transform = descriptor.transforms[0]
 	apply_recipe_render_policy(trunk, recipe, 20.0, 1.0)
 	root.add_child(trunk)
-	for rotation in [0.0, PI * 0.5]:
+	for index in [1, 2]:
 		var crown := MeshInstance3D.new()
 		crown.name = "ImpostorCrown"
 		crown.mesh = impostor_crown_mesh
 		crown.material_override = foliage_material(architecture, biome)
-		crown.position.y = height * 0.68
-		crown.rotation.y = rotation
-		crown.scale = Vector3(radius * 2.0, maxf(radius * 1.25, height * 0.46), 1.0)
+		crown.transform = descriptor.transforms[index]
 		apply_recipe_render_policy(crown, recipe, 20.0, 1.0)
 		root.add_child(crown)
 	return root
